@@ -4,6 +4,12 @@ import type { Position } from "./position";
 // exception identity (e.g. dbml-parser's CroakException) subclass it, so
 // `instanceof` checks keep working on both sides.
 export class ParseError extends Error {
+  /**
+   * Token count at the point of failure, stamped by ctx.croak(). Errors built
+   * by hand don't carry it, and farthest-failure selection leaves them alone.
+   */
+  consumed?: number;
+
   constructor(
     public msg: string,
     public start: Position,

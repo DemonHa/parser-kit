@@ -360,9 +360,10 @@ export function delimited<T, TT extends string>(
   close: TokenMatch<TT>,
   separator: TokenMatch<TT>,
   item: Rule<T, TT>,
-  opts: { interleaved?: boolean } = {},
+  opts: { interleaved?: boolean; recover?: boolean } = {},
 ): Rule<T[], TT> {
   const interleaved = opts.interleaved ?? false;
+  const recover = opts.recover ?? false;
 
   return makeRule<T[], TT>({
     parse: (ctx) => {
@@ -397,7 +398,33 @@ export function delimited<T, TT extends string>(
         }
 
         if (interleaved && !firstItem) eatMatch(ctx, separator, true);
-        items.push(item.parse(ctx));
+        try {
+          items.push(item.parse(ctx));
+        } catch (error) {
+          if (!recover || !(error instanceof ParseError) || !ctx.report(error)) throw error;
+          // Skip to this list's own next separator or close, counting nested
+          // open/close pairs so an inner list's delimiters don't end the skip.
+          // The loop consumes every token that isn't a depth-0 separator or
+          // close, and the resumed outer loop consumes those — so recovery
+          // always makes progress. The failed item is omitted (partial list).
+          let depth = 0;
+          while (true) {
+            const tok = ctx.peek();
+            if (tok === null) break;
+            if (matchesToken(tok, open)) {
+              depth++;
+            } else if (matchesToken(tok, close)) {
+              if (depth === 0) break;
+              depth--;
+            } else if (depth === 0 && matchesToken(tok, separator)) {
+              break;
+            }
+            ctx.next();
+          }
+          firstItem = false;
+          if (!interleaved && matchesToken(ctx.peek(), separator)) skipSoftSeparator();
+          continue;
+        }
         if (!interleaved) skipSoftSeparator();
 
         firstItem = false;

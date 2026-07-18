@@ -212,6 +212,49 @@ describe("delimited()", () => {
   });
 });
 
+describe("delimited() — recover", () => {
+  const num = token("num").map((node) => Number(node.value));
+  const list = delimited(match("punc", "("), match("punc", ")"), match("punc", ","), num, {
+    interleaved: true,
+    recover: true,
+  });
+  const listGrammar = defineGrammar({ lexer: toyLexer, root: list });
+
+  it("skips a bad item to the next separator and keeps the siblings", () => {
+    const { ast, errors } = listGrammar.diagnose("(1, oops, 3)");
+    expect(ast).toEqual([1, 3]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.msg).toBe('Expected a number but found "oops"');
+  });
+
+  it("counts nested open/close pairs while skipping", () => {
+    const { ast, errors } = listGrammar.diagnose("(1, oops (2, 3), 4)");
+    expect(ast).toEqual([1, 4]);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("stops on the closing delimiter without consuming it", () => {
+    const wrapped = defineGrammar({ lexer: toyLexer, root: seq(field("list", list), field("tail", num)) });
+    const { ast, errors } = wrapped.diagnose("(1, oops) 9");
+    expect(ast.list).toEqual([1]);
+    expect(ast.tail).toBe(9);
+    expect(errors.map((error) => error.msg)).toEqual(['Expected a number but found "oops"']);
+  });
+
+  it("rethrows in strict mode", () => {
+    expect(() => listGrammar.parse("(1, oops, 3)")).toThrow('Expected a number but found "oops"');
+  });
+
+  it("recovers in separator-terminated bodies too", () => {
+    const body = delimited(match("punc", "{"), match("punc", "}"), match("punc", "\n"), num, { recover: true });
+    const bodyGrammar = defineGrammar({ lexer: toyLexer, root: body });
+    const { ast, errors } = bodyGrammar.diagnose("{\n1\noops stuff\n2\n}");
+    expect(ast).toEqual([1, 2]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.msg).toBe('Expected a number but found "oops"');
+  });
+});
+
 describe("sepBy()", () => {
   it("parses a bare separated list", () => {
     const rule = sepBy(token("var"), match("punc", "."));

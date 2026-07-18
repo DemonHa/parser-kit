@@ -76,7 +76,7 @@ Dispatch order: readers (in listed order) → keywords/identifier → punctuatio
 | `oneOf(r1, r2, ...)` | LL(1) alternation dispatched on `first()` sets. Value-specific branches beat type-only branches; overlapping committed branches are a definition-time error |
 | `attempt(rule)` | Opts a `oneOf`/`optional` branch into full backtracking (token ring buffer rollback) for shared prefixes — `(a, b) => a` vs `(a + b)` |
 | `optional(rule)` / `optional(rule, { default })` | First-set-gated optionality — no backtracking unless the rule is `attempt`-wrapped |
-| `delimited(open, close, sep, item, { interleaved? })` | Bracketed list. `interleaved: true` = comma-style; `false` = separator-terminated lines where runs of separators and trivia collapse (blank lines, comment lines) |
+| `delimited(open, close, sep, item, { interleaved?, recover? })` | Bracketed list. `interleaved: true` = comma-style; `false` = separator-terminated lines where runs of separators and trivia collapse (blank lines, comment lines). `recover: true`: in `diagnose()` a failed item is recorded and skipped to the list's own next separator or close (nested open/close pairs counted), keeping the sibling items — strict `parse()` still throws |
 | `sepBy(item, sep)` | Bare separated list, no brackets |
 | `repeat(rule, { until? })` | Zero-or-more until EOF or an `until` match; participates in error recovery |
 | `lazy(() => rule)` | Forward references / recursion |
@@ -86,7 +86,7 @@ Dispatch order: readers (in listed order) → keywords/identifier → punctuatio
 | `identifierLike(type, { exclude })` | Any `type` token whose value is not in `exclude` — the "identifier that isn't a reserved word" position. Type-only first set, so it loses to every `word()`/`phrase()` branch in `oneOf` |
 | `bindTokens<TT>()` | Returns `token`/`match`/`word`/`phrase` pre-bound to your token union so call sites don't repeat the generic |
 
-`ParseContext` (what `custom()` sees) offers `peek/next/eof/is/eat`, `parse(rule)`, `tryParse(rule)` (snapshot + rollback), `position()`, `croak(msg)`, plus engine surface: `spanFrom(start)`, `skipTrivia()`, `label(type)`.
+`ParseContext` (what `custom()` sees) offers `peek/next/eof/is/eat`, `peekAhead(n)` (arbitrary lookahead; `peekAhead(0) === peek()`; raw tokens, no trivia skipping), `parse(rule)`, `tryParse(rule)` (snapshot + rollback), `position()`, `croak(msg)`, plus engine surface: `spanFrom(start)`, `skipTrivia()`, `label(type)`, `recover(error)` (record + resync), `report(error)` (record only), `farthestError()`, `consumed()`.
 
 ## Expressions: `pratt()`
 
@@ -139,6 +139,8 @@ Every grammar exposes:
 - `parse(text)` — throws the first `ParseError`.
 - `diagnose(text)` — error recovery: skips to the next sync point, collects every diagnostic (lexer errors included), returns `{ ast, errors }`.
 - `parseValue(rule, text)` — run any sub-rule standalone against fresh input (tests, tooling).
+
+**Farthest-failure error reporting** — `defineGrammar({ ..., errorReporting: { preferFarthest: true } })` reports the failure that consumed the most tokens instead of the one that happened to propagate, so a deep failure inside a discarded `attempt()` branch beats the shallow "wrong branch" message. Standard PEG tradeoff: the reported error may point into an abandoned attempt — usually the better message, and the flag is off by default so existing grammars' messages are byte-identical.
 
 ## The JS-lite example
 

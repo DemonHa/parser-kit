@@ -60,6 +60,11 @@ export interface SyncPoint<TT extends string = string> extends TokenMatch<TT> {
 // Safe façade over the token stream — what rules and custom() parsers see.
 export interface ParseContext<TT extends string = string> {
   peek(): Token<TT> | null;
+  /**
+   * Look `n` tokens past the cursor without consuming; peekAhead(0) === peek().
+   * Raw tokens — no trivia skipping (SQL lookahead wants exact tokens).
+   */
+  peekAhead(n: number): Token<TT> | null;
   next(): Token<TT> | null;
   eof(): boolean;
   is(type: TT, value?: string | readonly string[]): boolean;
@@ -84,6 +89,16 @@ export interface ParseContext<TT extends string = string> {
    * Returns false when no error collector is installed (strict parse mode).
    */
   recover(error: ParseError): boolean;
+  /**
+   * Record-only sibling of recover(): pushes the error to the collector and
+   * leaves resynchronization to the caller. False in strict parse mode.
+   */
+  report(error: ParseError): boolean;
+  /**
+   * Deepest croak() seen so far — survives tryParse rollback, cleared each
+   * time an error is recorded. Fuels the preferFarthest error-reporting mode.
+   */
+  farthestError(): ParseError | null;
   /** Number of tokens consumed so far — used for progress guarantees. */
   consumed(): number;
 }
@@ -93,13 +108,15 @@ export interface ContextConfig<TT extends string = string> {
   trivia?: readonly TokenMatch<TT>[];
   sync?: readonly SyncPoint<TT>[];
   errors?: ParseError[];
+  /** Substitute the farthest croak for shallower errors as they are recorded. */
+  preferFarthest?: boolean;
 }
 
 export function createParseContext<TT extends string>(
   stream: TokenStream<TT>,
   config: ContextConfig<TT> = {},
 ): ParseContext<TT> {
-  const { labels, trivia = [], sync = [], errors } = config;
+  const { labels, trivia = [], sync = [], errors, preferFarthest = false } = config;
 
   // Ring buffer of tokens already pulled off the stream. Only grows while a
   // tryParse snapshot is active; compacted back to empty once none is.
@@ -109,16 +126,35 @@ export function createParseContext<TT extends string>(
   let last: Position | null = null;
   let count = 0;
 
+  // High-water mark of croak() failures, by tokens consumed. Deliberately not
+  // part of the tryParse snapshot: surviving backtracking is the point.
+  let farthest: ParseError | null = null;
+
   const peek = (): Token<TT> | null => {
     const buffered = buffer[bufferPos];
     if (buffered !== undefined) return buffered;
     return stream.peek();
   };
 
+  const peekAhead = (n: number): Token<TT> | null => {
+    // Fill the ring buffer ahead of the cursor, independent of snapshots;
+    // next() drains it back down and resets it once fully replayed.
+    while (buffer.length - bufferPos <= n) {
+      const token = stream.next();
+      if (token === null) break;
+      buffer.push(token);
+    }
+    return buffer[bufferPos + n] ?? null;
+  };
+
   const next = (): Token<TT> | null => {
     let token = buffer[bufferPos];
     if (token !== undefined) {
       bufferPos++;
+      if (snapshots.length === 0 && bufferPos === buffer.length) {
+        buffer = [];
+        bufferPos = 0;
+      }
     } else {
       token = stream.next() ?? undefined;
       if (token !== undefined && snapshots.length > 0) {
@@ -159,11 +195,30 @@ export function createParseContext<TT extends string>(
   const croak = (msg: string, start?: Position, end?: Position): never => {
     const token = peek();
     const fallback = token ? token.position : { start: stream.position(), end: stream.position() };
-    throw new ParseError(msg, start ?? fallback.start, end ?? fallback.end);
+    const error = new ParseError(msg, start ?? fallback.start, end ?? fallback.end);
+    error.consumed = count;
+    // Strictly greater, so the first error at the farthest depth wins: a
+    // describe() relabel croaks at the same count as the error it replaces,
+    // and ties go to whichever error is actually thrown.
+    if (farthest === null || count > farthest.consumed!) farthest = error;
+    throw error;
+  };
+
+  // Recording path shared by recover() and report(). With preferFarthest, a
+  // strictly deeper croak from a discarded backtracking branch replaces the
+  // shallower error actually thrown; hand-built errors (no consumed stamp)
+  // are recorded as-is. The high-water mark is cleared either way so a stale
+  // deep failure can't shadow errors from whatever parses next.
+  const record = (error: ParseError) => {
+    const deeper =
+      preferFarthest && farthest !== null && error.consumed !== undefined && farthest.consumed! > error.consumed;
+    errors!.push(deeper ? farthest! : error);
+    farthest = null;
   };
 
   const ctx: ParseContext<TT> = {
     peek,
+    peekAhead,
     next,
     eof,
     is,
@@ -204,7 +259,7 @@ export function createParseContext<TT extends string>(
     },
     recover: (error) => {
       if (!errors) return false;
-      errors.push(error);
+      record(error);
       // Skip ahead to the next sync point so parsing can resume. Lexer errors
       // hit while skipping are collected too.
       while (true) {
@@ -229,6 +284,12 @@ export function createParseContext<TT extends string>(
         next();
       }
     },
+    report: (error) => {
+      if (!errors) return false;
+      record(error);
+      return true;
+    },
+    farthestError: () => farthest,
     consumed: () => count,
   };
 

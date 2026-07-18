@@ -78,6 +78,14 @@ export interface Grammar<Out, TT extends string = string> {
 interface GrammarCommon<TT extends string> {
   lexer: Lexer<TT>;
   trivia?: { between: readonly TokenMatch<TT>[] };
+  /**
+   * preferFarthest: report the croak that consumed the most tokens instead of
+   * the one that happened to propagate — standard PEG farthest-failure. The
+   * substituted error may point into an abandoned backtracking branch; that
+   * is usually the better message, and the flag scopes the risk (off = every
+   * message byte-identical to today).
+   */
+  errorReporting?: { preferFarthest?: boolean };
 }
 
 export interface RootGrammarDef<R extends Rule<unknown, TT>, TT extends string> extends GrammarCommon<TT> {
@@ -155,10 +163,23 @@ export function defineGrammar<TT extends string>(
     sync = def.recovery?.sync ?? [];
   }
 
+  const preferFarthest = def.errorReporting?.preferFarthest ?? false;
+
   const run = (text: string, errors?: ParseError[]) => {
     const stream = def.lexer.tokenize(createInputStream(text));
-    const ctx = createParseContext(stream, { labels: def.lexer.labels, trivia, sync, errors });
-    const ast = root.parse(ctx);
+    const ctx = createParseContext(stream, { labels: def.lexer.labels, trivia, sync, errors, preferFarthest });
+    let ast: unknown;
+    try {
+      ast = root.parse(ctx);
+    } catch (error) {
+      // Strict-mode farthest-failure selection; diagnose applies the same
+      // substitution inside the context as each error is recorded.
+      if (preferFarthest && error instanceof ParseError && error.consumed !== undefined) {
+        const farthest = ctx.farthestError();
+        if (farthest !== null && farthest.consumed! > error.consumed) throw farthest;
+      }
+      throw error;
+    }
     ctx.skipTrivia();
     if (!ctx.eof()) {
       const error = new ParseError(

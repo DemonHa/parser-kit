@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bindTokens, field, optional, seq } from "./combinators";
+import { attempt, bindTokens, field, oneOf, optional, repeat, seq, skip } from "./combinators";
 import { ParseError } from "./error";
 import { defineExpression, defineGrammar } from "./grammar";
 import { defineLexer, readers } from "./lexer";
@@ -91,6 +91,53 @@ describe("defineGrammar() — expressions form", () => {
     const { ast, errors } = mini.diagnose("item ,\nitem pear");
     expect(stripSpans(ast.program)).toEqual([{ type: "item", name: "pear" }]);
     expect(errors[0]!.msg).toBe('Expected an identifier but found ","');
+  });
+});
+
+describe("defineGrammar() — errorReporting.preferFarthest", () => {
+  const farLexer = defineLexer({
+    punctuation: { type: "punc", tokens: [":", ","], display: "a symbol" },
+    identifier: { type: "far", start: /[a-z_]/i, part: /[a-z0-9_]/i, display: "an identifier" },
+    readers: [readers.number("num", { display: "a number" })],
+  });
+  type FarTT = "punc" | "far" | "num";
+  const t = bindTokens<FarTT>().token;
+
+  // On `foo : bar` the attempted branch consumes two tokens before failing on
+  // `bar`; the committed branch fails on `:` after one. The thrown error is
+  // the shallow one — farthest selection swaps in the deeper, better message.
+  const stmt = oneOf(
+    attempt(seq(skip(t("far")), skip(t("punc", { values: [":"] })), field("value", t("num")))),
+    seq(skip(t("far")), field("value", t("far"))),
+  );
+  const strict = defineGrammar({ lexer: farLexer, root: repeat(stmt) });
+  const farthest = defineGrammar({
+    lexer: farLexer,
+    root: repeat(stmt),
+    errorReporting: { preferFarthest: true },
+  });
+
+  it("off (default): reports the error the parse actually threw", () => {
+    expect(() => strict.parse("foo : bar")).toThrow('Expected an identifier but found ":"');
+  });
+
+  it("on: reports the deepest failure from a discarded backtracking branch", () => {
+    expect(() => farthest.parse("foo : bar")).toThrow('Expected a number but found "bar"');
+  });
+
+  it("on: diagnose() records the substituted error too", () => {
+    const { errors } = farthest.diagnose("foo : bar");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.msg).toBe('Expected a number but found "bar"');
+  });
+
+  it("on: a describe() relabel at the same depth still wins the tie", () => {
+    const labeled = defineGrammar({
+      lexer: farLexer,
+      root: seq(skip(t("far")), field("value", t("num").describe("a count"))),
+      errorReporting: { preferFarthest: true },
+    });
+    expect(() => labeled.parse("foo bar")).toThrow('Expected a count but found "bar"');
   });
 });
 
