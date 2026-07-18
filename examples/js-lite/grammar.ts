@@ -92,7 +92,6 @@ const arrowFn = seq(
 const atom = oneOf(attempt(arrowFn), parenExpr, numberLit, stringLit, boolLit, nullLit, arrayLit, identExpr);
 
 const argsList = delimited(P("("), P(")"), P(","), expression, { interleaved: true });
-const ternaryTail = seq(field("consequent", expression), skip(punc(":")), field("alternate", expression));
 
 const binary = (ops: string[], bp: number) => ({
   ops,
@@ -123,14 +122,16 @@ const expressionRule = pratt<Expr, JsTokenType>({
       ops: ["?"],
       bp: 3,
       type: "punc",
-      parse: (ctx, left): Expr => {
+      parse: (ctx, left, h): Expr => {
         ctx.next(); // "?"
-        const tail = ctx.parse(ternaryTail);
+        const consequent = h.parseRhs(0);
+        ctx.parse(punc(":"));
+        const alternate = h.parseRhs(0);
         return {
           kind: "cond",
           test: left,
-          consequent: tail.consequent,
-          alternate: tail.alternate,
+          consequent,
+          alternate,
           span: { start: left.span.start, end: ctx.lastEnd() },
         };
       },

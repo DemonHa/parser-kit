@@ -98,14 +98,20 @@ const expression: Rule<Expr, TT> = pratt<Expr, TT>({   // recursive rules need o
   prefix: [{ ops: ["!", "-"], bp: 14, type: "punc", map: (op, operand, span) => ... }],
   infix: [
     { ops: ["="], bp: 2, assoc: "right", type: "punc", map: ... },
-    { ops: ["?"], bp: 3, type: "punc", parse: (ctx, left) => ... },   // custom tail (ternary)
+    { ops: ["?"], bp: 3, type: "punc", parse: (ctx, left, h) => ... },   // custom tail (ternary)
+    { ops: ["<", ">"], bp: 9, type: "punc", assoc: "nonassoc", map: ... },
     { ops: ["+", "-"], bp: 11, type: "punc", map: ... },
+    { match: word("ident", "between"), bp: 7, parse: (ctx, left, h) => ... },  // multi-word operator
   ],
-  postfix: [{ match: punc("("), bp: 17, parse: (ctx, left) => ... }], // call/member/index
+  postfix: [{ match: punc("("), bp: 17, parse: (ctx, left, h) => ... }], // call/member/index
 });
 ```
 
-Higher `bp` binds tighter; left-associative operators re-enter at `bp + 1`, right-associative at `bp`.
+Higher `bp` binds tighter; left-associative operators re-enter at `bp + 1`, right-associative at `bp`. `nonassoc` re-enters at `bp + 1` and croaks (`Operator "<" is non-associative`) when another operator of the same group follows — `a < b < c` errors, `(a < b) < c` parses; put all same-precedence comparisons in one group so mixed chains are caught too.
+
+Custom `parse` callbacks get `h: PrattHelpers` with `h.parseRhs(minBp)` — re-enter precedence climbing for an operand instead of recursing through the whole rule at bp 0. That's how BETWEEN consumes its bounds above `AND`'s own bp: `parse: (ctx, left, h) => { ctx.next(); const lo = h.parseRhs(8); ctx.parse(word("ident", "and")); const hi = h.parseRhs(8); ... }`.
+
+The `match` infix form dispatches on a rule's first set instead of literal op values — the hook for multi-word operators built from `word()`/`phrase()`. Groups are tried in declaration order, first match wins: operators sharing a leading token (`NOT LIKE` / `NOT BETWEEN` / `NOT IN`) must be one group dispatching internally. Case-insensitive keyword operators need no pratt feature — with a folding lexer, `{ ops: ["and"], type: "ident" }` is already exact.
 
 ## Grammars: `defineExpression` / `defineGrammar`
 
@@ -141,7 +147,7 @@ Every grammar exposes:
 ## Design notes & current limits
 
 - **Stringify/printing**: rules carry optional `print`/`inverse` hooks so derivation is possible later; nothing consumes them yet (v1 keeps hand-written stringify on the consumer side).
-- **Tokenization is context-free**: readers dispatch on the current character only. Languages needing lexer/parser interplay (JS regex-vs-division, template literals) are on the roadmap, as are richer readers (string escapes, dollar quotes, nested comments) and `pratt` extensions for SQL-style multi-word operators.
+- **Tokenization is context-free**: readers dispatch on the current character only. Languages needing lexer/parser interplay (JS regex-vs-division, template literals) are on the roadmap.
 - **`oneOf` validation** runs at definition time when possible; branches behind `lazy()` forward references are validated on first parse instead.
 - Type inference happens at construction (zod's trick) — no deep recursive conditional types. Recursive rules need exactly one explicit `Rule<T, TT>` annotation, same limitation as `z.lazy`.
 
