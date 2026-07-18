@@ -11,6 +11,7 @@ import {
   oneOf,
   optional,
   type ParseContext,
+  type Position,
   type PrattHelpers,
   pratt,
   type Rule,
@@ -28,12 +29,14 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // OFFSET / UNION-INTERSECT-EXCEPT) and INSERT / UPDATE / DELETE with
 // RETURNING — over the scalar expression sublanguage that DEFAULT / CHECK /
 // index / WHERE clauses share. It is the end-to-end test for the PG-grade kit
-// features: escaped/dollar strings, PG numbers, the operator reader, the
-// fold-and-match keyword strategy, match-based and non-associative pratt
-// operators, mutual expr↔query recursion via lazy(), and farthest-failure /
-// nested recovery.
+// features: escaped/dollar strings, PG numbers, bind parameters, the operator
+// reader, the fold-and-match keyword strategy, match-based and non-associative
+// pratt operators, mutual expr↔query recursion via lazy(), and farthest-failure
+// / nested recovery. The expression sublanguage also covers the PG special forms
+// — CAST / EXTRACT / SUBSTRING / POSITION / TRIM, ARRAY[…] / ROW(…), array
+// subscripts & slices, INTERVAL literals, and COLLATE / AT TIME ZONE postfixes.
 //
-// Out of scope (v1): window functions / OVER, ANY / ALL, LATERAL, WITH before
+// Out of scope (v1): window functions / OVER, LATERAL, WITH before
 // INSERT/UPDATE/DELETE, VALUES as a standalone statement, FETCH, and
 // table-function FROM items. Aggregates parse as ordinary function calls.
 
@@ -77,7 +80,33 @@ export type Expr =
   | { kind: "subquery"; query: Query; span: Span }
   | { kind: "exists"; query: Query; negated: boolean; span: Span }
   // A distinct kind from `in` so `x IN (1,2,3)` keeps its list-valued shape.
-  | { kind: "inSubquery"; expr: Expr; query: Query; negated: boolean; span: Span };
+  | { kind: "inSubquery"; expr: Expr; query: Query; negated: boolean; span: Span }
+  // --- Phase 2: expression special forms ---
+  // A positional / named bind parameter (`$1`, `$name`); `name` is the text after
+  // the `$` ("1", "name"). Lexed as a dedicated `param` token.
+  | { kind: "param"; name: string; span: Span }
+  // `ARRAY[…]` constructor. `elements` may be empty (`ARRAY[]`).
+  | { kind: "array"; elements: Expr[]; span: Span }
+  // `ROW(…)` explicit row constructor.
+  | { kind: "row"; items: Expr[]; span: Span }
+  // Array subscript / slice postfix: `a[i]` (no `upper` key) or `a[lo:hi]`
+  // (`upper` present, either bound possibly null for `a[:hi]` / `a[lo:]`).
+  | { kind: "subscript"; base: Expr; index: Expr | null; upper?: Expr | null; span: Span }
+  // `INTERVAL 'literal' [field]` — `fields` is the trailing unit spec (e.g.
+  // "day", "hour to minute"), absent when only the literal is given.
+  | { kind: "interval"; value: string; fields?: string; span: Span }
+  // `EXTRACT(field FROM source)` — `field` is the unit keyword/string.
+  | { kind: "extract"; field: string; source: Expr; span: Span }
+  // `SUBSTRING(value FROM from FOR for_)`; either keyword tail may be null.
+  | { kind: "substring"; value: Expr; from: Expr | null; for_: Expr | null; span: Span }
+  // `POSITION(substring IN string)`.
+  | { kind: "position"; substring: Expr; string: Expr; span: Span }
+  // `TRIM([LEADING|TRAILING|BOTH] [characters] FROM source)`.
+  | { kind: "trim"; side: "leading" | "trailing" | "both" | null; characters: Expr | null; source: Expr; span: Span }
+  // `x COLLATE collation` — `collation` is the (possibly qualified) collation name.
+  | { kind: "collate"; expr: Expr; collation: string[]; span: Span }
+  // `x AT TIME ZONE zone`.
+  | { kind: "atTimeZone"; expr: Expr; zone: Expr; span: Span };
 
 export type ColConstraint =
   | { kind: "notNull"; span: Span }
@@ -359,6 +388,12 @@ function many<T>(rule: Rule<T, SqlTokenType>): Rule<T[], SqlTokenType> {
 // --- expressions ---
 
 const expression: Rule<Expr, SqlTokenType> = lazy(() => expressionRule);
+// A "b-expression": the same operator sublanguage minus the loose forms
+// (comparison / IS / IN / LIKE / BETWEEN / AND / OR). PG uses it for operands
+// whose end is marked by a keyword that also lexes as an operator — here, the
+// `IN` inside `POSITION(sub IN str)`, which would otherwise be swallowed by the
+// `in` postfix. Stops before any operator below the arithmetic/concat tier.
+const bExpression: Rule<Expr, SqlTokenType> = lazy(() => bExprRule);
 // The expr↔query cycle: exactly one Rule<Query> annotation, resolved lazily —
 // the same one-boundary rule js-lite's expr/statement cycle follows. Declared
 // here because the expression atom (scalar subquery, EXISTS, IN (SELECT …))
@@ -391,13 +426,127 @@ const parenExpr = seq(skip(punc("(")), field("e", expression), skip(punc(")"))).
 // A function argument: `*` (for `count(*)`) or an ordinary expression.
 const functionArg = oneOf(bareStar, expression);
 
+// --- special call syntaxes ---
+// A handful of PG functions take keyword-separated arguments rather than a plain
+// comma list. Their callee names are unreserved, so they are dispatched inside
+// columnRef's call branch (below) once the `(` is consumed; each helper is
+// entered positioned just past that `(` and consumes through the closing `)`.
+// The trailing field of INTERVAL (`day`, `hour to minute`, …) is restricted to
+// these unit words so it never swallows a following clause keyword like `from`.
+const INTERVAL_FIELDS: ReadonlySet<string> = new Set(["year", "month", "day", "hour", "minute", "second", "to"]);
+
+const expectClose = (ctx: ParseContext<SqlTokenType>): void => {
+  if (!ctx.is("punc", ")")) ctx.croak(`Expected ")" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // ")"
+};
+
+// EXTRACT(field FROM source). `field` is a unit keyword (an ident) or a string.
+function parseExtract(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const field = ctx.is("string") ? ctx.next()!.value : ctx.parse(nameWord);
+  ctx.parse(kw("from"));
+  const source = ctx.parse(expression);
+  expectClose(ctx);
+  return { kind: "extract", field, source, span: ctx.spanFrom(start) };
+}
+
+// POSITION(substring IN string). The first operand is a b-expression so the `IN`
+// separator is not consumed by the `in` postfix operator.
+function parsePosition(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const substring = ctx.parse(bExpression);
+  ctx.parse(kw("in"));
+  const string = ctx.parse(expression);
+  expectClose(ctx);
+  return { kind: "position", substring, string, span: ctx.spanFrom(start) };
+}
+
+// TRIM([LEADING|TRAILING|BOTH] [characters] FROM source), or the short TRIM(x).
+function parseTrim(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const side = ctx.is("ident", ["leading", "trailing", "both"])
+    ? (ctx.next()!.value as "leading" | "trailing" | "both")
+    : null;
+  let characters: Expr | null = null;
+  let source: Expr;
+  if (ctx.eat("ident", "from") !== null) {
+    source = ctx.parse(expression); // e.g. TRIM(BOTH FROM x)
+  } else {
+    const first = ctx.parse(expression);
+    if (ctx.eat("ident", "from") !== null) {
+      characters = first; // TRIM([side] chars FROM source)
+      source = ctx.parse(expression);
+    } else {
+      source = first; // TRIM(x)
+    }
+  }
+  expectClose(ctx);
+  return { kind: "trim", side, characters, source, span: ctx.spanFrom(start) };
+}
+
+// ROW(a, b, …) — an explicit row constructor (may be empty).
+function parseRow(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const items: Expr[] = [];
+  if (!ctx.is("punc", ")")) {
+    items.push(ctx.parse(expression));
+    while (ctx.is("punc", ",")) {
+      ctx.next(); // ","
+      items.push(ctx.parse(expression));
+    }
+  }
+  expectClose(ctx);
+  return { kind: "row", items, span: ctx.spanFrom(start) };
+}
+
+// SUBSTRING(value FROM from FOR for_) — or the ordinary comma form
+// SUBSTRING(x, y, z), which falls through to a plain call node.
+function parseSubstring(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const value = ctx.parse(expression);
+  if (ctx.is("ident", "from") || ctx.is("ident", "for")) {
+    const from = ctx.eat("ident", "from") !== null ? ctx.parse(expression) : null;
+    const for_ = ctx.eat("ident", "for") !== null ? ctx.parse(expression) : null;
+    expectClose(ctx);
+    return { kind: "substring", value, from, for_, span: ctx.spanFrom(start) };
+  }
+  const args: Expr[] = [value];
+  while (ctx.is("punc", ",")) {
+    ctx.next(); // ","
+    args.push(ctx.parse(functionArg));
+  }
+  expectClose(ctx);
+  return { kind: "call", name: "substring", args, span: ctx.spanFrom(start) };
+}
+
+const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Position) => Expr> = {
+  extract: parseExtract,
+  position: parsePosition,
+  trim: parseTrim,
+  row: parseRow,
+  substring: parseSubstring,
+};
+
 // A dotted name, optionally a trailing `.*` (→ star) or a `(args)` call. One
 // custom rule (no attempt): walk the `name (. name)*` chain, then dispatch on
 // whether `.*` / `(` follows. Subsumes the old nameOrCall — `s.t.c`, `foo(a,b)`,
-// `now()`, and now `t.*`, `count(*)`, `count(distinct x)`.
+// `now()`, and now `t.*`, `count(*)`, `count(distinct x)`. Also the entry point
+// for `INTERVAL 'literal' [field]` (an unreserved word that leads a literal) and
+// the keyword-argument functions in SPECIAL_CALLS.
 const columnRef = custom<Expr, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
+    // INTERVAL 'literal' [field] — only when a string literal follows; otherwise
+    // `interval` is an ordinary (unreserved) name and falls through below.
+    if (ctx.is("ident", "interval") && ctx.peekAhead(1)?.type === "string") {
+      ctx.next(); // interval
+      const value = ctx.next()!.value; // the string literal
+      const units: string[] = [];
+      while (ctx.peek()?.type === "ident" && INTERVAL_FIELDS.has(ctx.peek()!.value)) {
+        units.push(ctx.next()!.value);
+      }
+      return {
+        kind: "interval",
+        value,
+        ...(units.length > 0 && { fields: units.join(" ") }),
+        span: ctx.spanFrom(start),
+      };
+    }
     const parts: string[] = [ctx.parse(nameWord)];
     while (ctx.is("punc", ".")) {
       ctx.next(); // "."
@@ -409,6 +558,10 @@ const columnRef = custom<Expr, SqlTokenType>(
     }
     if (ctx.is("punc", "(")) {
       ctx.next(); // "("
+      // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW / SUBSTRING)
+      // owns the rest of the call; a plain name falls through to a normal call.
+      const special = parts.length === 1 ? SPECIAL_CALLS[parts[0]!] : undefined;
+      if (special !== undefined) return special(ctx, start);
       // PG allows a leading DISTINCT in an aggregate call; accepted but not
       // recorded (the call AST is intentionally unchanged from the DDL era).
       ctx.eat("ident", "distinct");
@@ -466,7 +619,43 @@ const parenOrSubquery = custom<Expr, SqlTokenType>(
   { expected: '"("', first: [{ type: "punc", value: "(" }] },
 );
 
-const atom = oneOf(numberLit, stringLit, boolLit, nullLit, caseExpr, existsExpr, parenOrSubquery, columnRef);
+// A positional / named bind parameter (`$1`, `$name`) — a dedicated token.
+const paramLit = token("param").map((node, span): Expr => ({ kind: "param", name: node.value, span }));
+
+// CAST(expr AS type) — the function-call spelling of the `::` cast, producing the
+// same `cast` node. `cast` is reserved, so it can only reach here (never a name).
+const castExpr = seq(
+  skip(kw("cast")),
+  skip(punc("(")),
+  field("expr", expression),
+  skip(kw("as")),
+  field(
+    "type",
+    lazy(() => typeRef),
+  ),
+  skip(punc(")")),
+).map(({ expr, type }, span): Expr => ({ kind: "cast", expr, type, span }));
+
+// ARRAY[…] constructor. `array` is reserved, so this atom owns the keyword; the
+// element list may be empty (`ARRAY[]`).
+const arrayExpr = seq(
+  skip(kw("array")),
+  field("elements", delimited(P("["), P("]"), P(","), expression, { interleaved: true })),
+).map(({ elements }, span): Expr => ({ kind: "array", elements, span }));
+
+const atom = oneOf(
+  numberLit,
+  stringLit,
+  boolLit,
+  nullLit,
+  paramLit,
+  caseExpr,
+  existsExpr,
+  castExpr,
+  arrayExpr,
+  parenOrSubquery,
+  columnRef,
+);
 
 // --- data types ---
 // A type name with optional `(args)` (varchar(10), numeric(10,2)) and an array
@@ -537,10 +726,86 @@ const inTail = (ctx: ParseContext<SqlTokenType>, left: Expr, negated: boolean): 
 const escapeTail = (ctx: ParseContext<SqlTokenType>, h: PrattHelpers<Expr>): Expr | undefined =>
   ctx.eat("ident", "escape") !== null ? h.parseRhs(11) : undefined;
 
+// --- shared pratt groups (reused by the full expression rule and the b-expr) ---
+const unaryMinusPrefix = {
+  ops: ["-"],
+  type: "op" as const,
+  bp: 16,
+  map: (op: string, operand: Expr, span: Span): Expr => ({ kind: "unary", op, operand, span }),
+};
+
+// The tight arithmetic / concat / JSON-and-regex tier (bp ≥ 12) — everything
+// above the comparison/logical forms. Shared verbatim with the b-expression.
+const arithInfix = [
+  binary(["*", "/"], 14),
+  binary(["+", "-"], 13),
+  binary(["||"], 12),
+  binary(["@>"], 12),
+  // JSON/JSONB access & containment (`-> ->> #> #>> #-`, existence `? ?| ?&`,
+  // `<@`), POSIX regex (`~ !~ ~* !~*`) and full-text match (`@@`). All lex as
+  // single `op` tokens already; they share the bp-12 "other operators" tier
+  // with `||`/`@>` and are left-associative, so `a -> 'k' ->> 'j'` nests left.
+  binary(["->", "->>", "#>", "#>>", "#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@@"], 12),
+];
+
+// `::` cast and `[…]` subscript bind tightest (bp 18). Both are shared with the
+// b-expression so `POSITION(a[1]::text IN b)` parses its first operand fully.
+const castPostfix = {
+  match: punc("::"),
+  bp: 18,
+  parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
+    ctx.next(); // "::"
+    const type = ctx.parse(typeRef);
+    return { kind: "cast", expr: left, type, span: closeSpan(left, ctx.lastEnd()) };
+  },
+};
+
+// `a[i]` element access and `a[lo:hi]` slice. A `:` marks a slice; either bound
+// may be omitted (`a[:hi]`, `a[lo:]`). The non-slice form omits the `upper` key.
+const subscriptPostfix = {
+  match: punc("["),
+  bp: 18,
+  parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
+    ctx.next(); // "["
+    const hasIndex = !ctx.is("punc", ":") && !ctx.is("punc", "]");
+    const index = hasIndex ? ctx.parse(expression) : null;
+    let upper: Expr | null | undefined;
+    if (ctx.is("punc", ":")) {
+      ctx.next(); // ":"
+      upper = ctx.is("punc", "]") ? null : ctx.parse(expression);
+    }
+    if (!ctx.is("punc", "]")) ctx.croak(`Expected "]" but found ${describeFound(ctx.peek())}`);
+    ctx.next(); // "]"
+    return upper === undefined
+      ? { kind: "subscript", base: left, index, span: closeSpan(left, ctx.lastEnd()) }
+      : { kind: "subscript", base: left, index, upper, span: closeSpan(left, ctx.lastEnd()) };
+  },
+};
+
+// `x COLLATE collation` and `x AT TIME ZONE zone` — postfixes near the cast tier.
+const collatePostfix = {
+  match: kw("collate"),
+  bp: 18,
+  parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
+    ctx.parse(kw("collate"));
+    const collation = ctx.parse(qualName);
+    return { kind: "collate", expr: left, collation, span: closeSpan(left, ctx.lastEnd()) };
+  },
+};
+const atTimeZonePostfix = {
+  match: kw("at"),
+  bp: 18,
+  parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
+    ctx.parse(kwseq("at", "time", "zone"));
+    const zone = h.parseRhs(18);
+    return { kind: "atTimeZone", expr: left, zone, span: closeSpan(left, ctx.lastEnd()) };
+  },
+};
+
 const expressionRule = pratt<Expr, SqlTokenType>({
   atom,
   prefix: [
-    { ops: ["-"], type: "op", bp: 16, map: (op, operand, span): Expr => ({ kind: "unary", op, operand, span }) },
+    unaryMinusPrefix,
     {
       ops: ["not"],
       type: "ident",
@@ -554,15 +819,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
     },
   ],
   infix: [
-    binary(["*", "/"], 14),
-    binary(["+", "-"], 13),
-    binary(["||"], 12),
-    binary(["@>"], 12),
-    // JSON/JSONB access & containment (`-> ->> #> #>> #-`, existence `? ?| ?&`,
-    // `<@`), POSIX regex (`~ !~ ~* !~*`) and full-text match (`@@`). All lex as
-    // single `op` tokens already; they share the bp-12 "other operators" tier
-    // with `||`/`@>` and are left-associative, so `a -> 'k' ->> 'j'` nests left.
-    binary(["->", "->>", "#>", "#>>", "#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@@"], 12),
+    ...arithInfix,
     {
       // LIKE / ILIKE / SIMILAR TO. RHS at bp 11 keeps it out of the looser
       // comparison level; an optional `ESCAPE x` tail follows the pattern.
@@ -684,15 +941,10 @@ const expressionRule = pratt<Expr, SqlTokenType>({
     kwBinary("or", 2),
   ],
   postfix: [
-    {
-      match: punc("::"),
-      bp: 18,
-      parse: (ctx, left): Expr => {
-        ctx.next(); // "::"
-        const type = ctx.parse(typeRef);
-        return { kind: "cast", expr: left, type, span: closeSpan(left, ctx.lastEnd()) };
-      },
-    },
+    castPostfix,
+    subscriptPostfix,
+    collatePostfix,
+    atTimeZonePostfix,
     {
       match: kw("is"),
       bp: 8,
@@ -725,6 +977,17 @@ const expressionRule = pratt<Expr, SqlTokenType>({
       },
     },
   ],
+});
+
+// The b-expression: the tight sublanguage (arithmetic / concat / JSON / cast /
+// subscript) with none of the comparison, IS, IN, LIKE, BETWEEN or logical
+// forms — see `bExpression` above. Used for the first operand of POSITION so its
+// `IN` separator is left for the special-call parser instead of the `in` postfix.
+const bExprRule = pratt<Expr, SqlTokenType>({
+  atom,
+  prefix: [unaryMinusPrefix],
+  infix: arithInfix,
+  postfix: [castPostfix, subscriptPostfix],
 });
 
 // --- constraints ---

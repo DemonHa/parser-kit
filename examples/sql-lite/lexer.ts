@@ -7,7 +7,7 @@ import { defineLexer, readers } from "../../src/index";
 // and the operator reader coexists with the punctuation trie by partitioning the
 // character space — `::`/`:`/`,`/`(`/`)`/`[`/`]`/`;`/`.` stay trie-lexed while
 // `||`/`@>`/`<=`/… are read as operators.
-export type SqlTokenType = "ident" | "qident" | "string" | "number" | "op" | "punc" | "comment";
+export type SqlTokenType = "ident" | "qident" | "string" | "number" | "op" | "punc" | "comment" | "param";
 
 export const sqlLexer = defineLexer({
   identifier: {
@@ -43,6 +43,31 @@ export const sqlLexer = defineLexer({
     // Quoted identifiers: case-preserved (no fold), doubled `""` is one quote.
     readers.string("qident", { quote: '"', escape: { doubling: true }, display: "a quoted identifier" }),
     readers.dollarString("string"),
+    // Positional / named parameters (`$1`, `$name`). Must follow the dollar-string
+    // reader: `$tag$…$tag$` is claimed there first, and only a `$` that is *not* a
+    // dollar-string opener (no `$` closes the tag) falls through to here. `$` is
+    // neither an operator char nor an identifier start, so nothing else competes.
+    readers.custom("param", {
+      startsWith: "$",
+      display: "a parameter",
+      read: (stream) => {
+        stream.snapshot();
+        stream.next(); // opening `$`
+        let name = "";
+        if (/[0-9]/.test(stream.peek())) {
+          while (/[0-9]/.test(stream.peek())) name += stream.next();
+        } else if (/[A-Za-z_]/.test(stream.peek())) {
+          while (/[A-Za-z0-9_]/.test(stream.peek())) name += stream.next();
+        }
+        // A bare `$` (no digits/name) isn't a parameter — restore and fall through
+        // so the lexer reports it as an unexpected character, matching PG.
+        if (name === "") {
+          stream.reload();
+          return null;
+        }
+        return name;
+      },
+    }),
     // Comment readers must precede the operator reader: `stopAt` then guarantees
     // an operator scan never swallows a comment start (`@--x` → `@`, then `--x`).
     readers.lineComment("comment", "--", { display: "a comment" }),

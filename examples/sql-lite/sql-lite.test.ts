@@ -425,6 +425,171 @@ describe("SQL-lite expression operators", () => {
   });
 });
 
+// --- expression special forms (Phase 2) ---
+
+describe("SQL-lite expression special forms", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+
+  it("lexes positional / named parameters as a dedicated token, distinct from dollar strings", () => {
+    expect(lex("$1 $foo $bar123")).toEqual([
+      { type: "param", value: "1" },
+      { type: "param", value: "foo" },
+      { type: "param", value: "bar123" },
+    ]);
+    // A `$tag$…$tag$` dollar string is still a string — the param reader falls
+    // through to nothing there because the dollar-string reader claims it first.
+    expect(lex("$t$raw$t$")).toEqual([{ type: "string", value: "raw" }]);
+  });
+
+  it("parses parameters in expression position", () => {
+    expect(colExpr("$1")).toEqual({ kind: "param", name: "1" });
+    expect((firstStmt("SELECT 1 FROM t WHERE a = $1;") as any).where).toEqual(
+      bin("=", name("a"), { kind: "param", name: "1" }),
+    );
+  });
+
+  it("parses CAST(expr AS type) into the same node as the :: cast", () => {
+    expect(colExpr("CAST(x AS int)")).toEqual({
+      kind: "cast",
+      expr: name("x"),
+      type: { name: "int", args: [], array: false },
+    });
+    expect(colExpr("CAST(n AS numeric(10, 2))")).toMatchObject({
+      kind: "cast",
+      type: { name: "numeric", args: [10, 2] },
+    });
+  });
+
+  it("parses ARRAY[…] constructors, including the empty one", () => {
+    expect(colExpr("ARRAY[1, 2, 3]")).toEqual({ kind: "array", elements: [num(1), num(2), num(3)] });
+    expect(colExpr("ARRAY[]")).toEqual({ kind: "array", elements: [] });
+  });
+
+  it("parses ROW(…) constructors", () => {
+    expect(colExpr("ROW(1, 'a', b)")).toEqual({ kind: "row", items: [num(1), str("a"), name("b")] });
+    expect(colExpr("ROW()")).toEqual({ kind: "row", items: [] });
+  });
+
+  it("parses [i] subscripts and [lo:hi] slices as postfixes", () => {
+    expect(colExpr("a[1]")).toEqual({ kind: "subscript", base: name("a"), index: num(1) });
+    // A slice carries `upper`; a bare subscript omits the key.
+    expect(colExpr("a[1:3]")).toEqual({ kind: "subscript", base: name("a"), index: num(1), upper: num(3) });
+    expect(colExpr("a[:3]")).toEqual({ kind: "subscript", base: name("a"), index: null, upper: num(3) });
+    expect(colExpr("a[1:]")).toEqual({ kind: "subscript", base: name("a"), index: num(1), upper: null });
+    // Subscript binds tighter than the `::` cast and chains left.
+    expect(colExpr("m['k']['j']")).toEqual({
+      kind: "subscript",
+      base: { kind: "subscript", base: name("m"), index: str("k") },
+      index: str("j"),
+    });
+    expect(colExpr("a[1]::int")).toEqual({
+      kind: "cast",
+      expr: { kind: "subscript", base: name("a"), index: num(1) },
+      type: { name: "int", args: [], array: false },
+    });
+  });
+
+  it("parses INTERVAL literals with an optional field spec, and interval-as-name", () => {
+    expect(colExpr("INTERVAL '1 day'")).toEqual({ kind: "interval", value: "1 day" });
+    expect(colExpr("INTERVAL '1' DAY")).toEqual({ kind: "interval", value: "1", fields: "day" });
+    expect(colExpr("INTERVAL '1:00' HOUR TO MINUTE")).toEqual({
+      kind: "interval",
+      value: "1:00",
+      fields: "hour to minute",
+    });
+    // `interval` is unreserved: without a string literal it is an ordinary name,
+    // and the field scan never swallows a following clause keyword like FROM.
+    expect(colExpr("interval")).toEqual(name("interval"));
+    expect((firstStmt("SELECT INTERVAL '1 day' FROM t;") as any).columns[0].expr).toEqual({
+      kind: "interval",
+      value: "1 day",
+    });
+  });
+
+  it("parses EXTRACT(field FROM source)", () => {
+    expect(colExpr("EXTRACT(year FROM ts)")).toEqual({ kind: "extract", field: "year", source: name("ts") });
+    expect(colExpr("EXTRACT(month FROM now())")).toMatchObject({ kind: "extract", field: "month" });
+  });
+
+  it("parses SUBSTRING in both the FROM/FOR and the comma form", () => {
+    expect(colExpr("SUBSTRING(s FROM 1 FOR 3)")).toEqual({
+      kind: "substring",
+      value: name("s"),
+      from: num(1),
+      for_: num(3),
+    });
+    expect(colExpr("SUBSTRING(s FROM 2)")).toEqual({
+      kind: "substring",
+      value: name("s"),
+      from: num(2),
+      for_: null,
+    });
+    // The ordinary comma form falls through to a plain call node.
+    expect(colExpr("SUBSTRING(s, 1, 3)")).toEqual({
+      kind: "call",
+      name: "substring",
+      args: [name("s"), num(1), num(3)],
+    });
+  });
+
+  it("parses POSITION(substring IN string), reading the first operand as a b-expression", () => {
+    expect(colExpr("POSITION(sub IN str)")).toEqual({
+      kind: "position",
+      substring: name("sub"),
+      string: name("str"),
+    });
+    // The `IN` separator is not consumed by the `in` postfix: the first operand
+    // still parses tight operators like `::` and `||`.
+    expect(colExpr("POSITION('a'::text IN str)")).toEqual({
+      kind: "position",
+      substring: { kind: "cast", expr: str("a"), type: { name: "text", args: [], array: false } },
+      string: name("str"),
+    });
+  });
+
+  it("parses TRIM with an optional side, characters, and FROM source", () => {
+    expect(colExpr("TRIM(BOTH ' ' FROM s)")).toEqual({
+      kind: "trim",
+      side: "both",
+      characters: str(" "),
+      source: name("s"),
+    });
+    expect(colExpr("TRIM(LEADING FROM s)")).toEqual({
+      kind: "trim",
+      side: "leading",
+      characters: null,
+      source: name("s"),
+    });
+    expect(colExpr("TRIM('x' FROM s)")).toEqual({
+      kind: "trim",
+      side: null,
+      characters: str("x"),
+      source: name("s"),
+    });
+    expect(colExpr("TRIM(s)")).toEqual({ kind: "trim", side: null, characters: null, source: name("s") });
+  });
+
+  it("parses COLLATE and AT TIME ZONE postfixes", () => {
+    expect(colExpr('name COLLATE "en_US"')).toEqual({
+      kind: "collate",
+      expr: name("name"),
+      collation: ["en_US"],
+    });
+    expect(colExpr("ts AT TIME ZONE 'utc'")).toEqual({
+      kind: "atTimeZone",
+      expr: name("ts"),
+      zone: str("utc"),
+    });
+  });
+
+  it("reports a helpful error when a special form is malformed", () => {
+    // POSITION requires its IN separator.
+    expect(() => sqlLite.parse("SELECT POSITION(a b) FROM t;")).toThrow(/Expected .*"in"/i);
+    // A bare `$` is not a parameter and has no reader — a lex-level error.
+    expect(() => sqlLite.parse("SELECT $ FROM t;")).toThrow(ParseError);
+  });
+});
+
 // --- robustness ---
 
 describe("SQL-lite robustness", () => {
