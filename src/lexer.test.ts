@@ -289,3 +289,139 @@ describe("readers.dollarString (A3)", () => {
     });
   });
 });
+
+describe("readers.number extensions (A4)", () => {
+  const num = defineLexer({
+    identifier: { type: "ident", start: /[A-Za-z_]/, part: /[A-Za-z0-9_]/ },
+    punctuation: { type: "punc", tokens: ["."] },
+    readers: [
+      readers.number("num", {
+        exponent: true,
+        leadingDot: true,
+        radix: { hex: true, octal: true, binary: true },
+        separators: true,
+      }),
+    ],
+  });
+
+  it("reads scientific notation", () => {
+    expect(lex(num, "1e5 1.5e-3 2E+10")).toEqual(["num:1e5", "num:1.5e-3", "num:2E+10"]);
+  });
+
+  it("backtracks a bare exponent, leaving the marker for the identifier scanner", () => {
+    expect(lex(num, "1e")).toEqual(["num:1", "ident:e"]);
+  });
+
+  it("reads a leading-dot number but keeps `.` punctuation between identifiers", () => {
+    expect(lex(num, ".5")).toEqual(["num:.5"]);
+    expect(lex(num, "1.5")).toEqual(["num:1.5"]);
+    expect(lex(num, "a.b")).toEqual(["ident:a", "punc:.", "ident:b"]);
+  });
+
+  it("reads hex, octal and binary literals", () => {
+    expect(lex(num, "0x1F 0o17 0b1010")).toEqual(["num:0x1F", "num:0o17", "num:0b1010"]);
+  });
+
+  it("backtracks a bare radix marker to `0`", () => {
+    expect(lex(num, "0x")).toEqual(["num:0", "ident:x"]);
+    expect(lex(num, "0xG")).toEqual(["num:0", "ident:xG"]);
+  });
+
+  it("strips digit separators from the value", () => {
+    expect(lex(num, "1_000_000")).toEqual(["num:1000000"]);
+    expect(lex(num, "1_000.5")).toEqual(["num:1000.5"]);
+    expect(lex(num, "0x1_F")).toEqual(["num:0x1F"]);
+  });
+
+  it("leaves a leading, trailing or doubled separator for the next token", () => {
+    expect(lex(num, "1_")).toEqual(["num:1", "ident:_"]);
+    expect(lex(num, "1__0")).toEqual(["num:1", "ident:__0"]);
+  });
+
+  it("produces values that `Number()` decodes", () => {
+    const value = (text: string) => num.tokenize(createInputStream(text)).next()!.value;
+    expect(Number(value("1_000_000"))).toBe(1000000);
+    expect(Number(value("0x1F"))).toBe(31);
+    expect(Number(value("0o17"))).toBe(15);
+    expect(Number(value("0b1010"))).toBe(10);
+    expect(Number(value("1.5e-3"))).toBe(0.0015);
+  });
+
+  it("spans the raw text including stripped separators", () => {
+    const stream = num.tokenize(createInputStream("1_000"));
+    expect(stream.next()).toMatchObject({
+      value: "1000",
+      position: { start: { row: 1, col: 0 }, end: { row: 1, col: 5 } },
+    });
+  });
+
+  it("stays byte-identical to the plain reader without extensions", () => {
+    const plain = defineLexer({
+      identifier: { type: "ident", start: /[A-Za-z_]/, part: /[A-Za-z0-9_]/ },
+      punctuation: { type: "punc", tokens: ["."] },
+      readers: [readers.number("num", { signs: ["-"] })],
+    });
+    expect(lex(plain, "12 1.5 -3")).toEqual(["num:12", "num:1.5", "num:-3"]);
+    expect(lex(plain, "1.foo")).toEqual(["num:1", "punc:.", "ident:foo"]);
+    // No exponent/separator/radix support unless opted in.
+    expect(lex(plain, "1e5")).toEqual(["num:1", "ident:e5"]);
+    expect(lex(plain, "1_000")).toEqual(["num:1", "ident:_000"]);
+  });
+});
+
+describe("readers.operator (A5)", () => {
+  // `::`/`:` stay in the punctuation trie (no operator char overlaps them); comment
+  // readers precede the operator reader so `stopAt` can partition cleanly.
+  const pg = defineLexer({
+    identifier: { type: "ident", start: /[A-Za-z_]/, part: /[A-Za-z0-9_]/ },
+    punctuation: { type: "punc", tokens: ["::", ":", ",", "(", ")", ";", "."] },
+    readers: [
+      readers.lineComment("comment", "--"),
+      readers.blockComment("comment", "/*", "*/"),
+      readers.operator("op"),
+      readers.number("num"),
+    ],
+  });
+
+  it("reads multi-character operators greedily", () => {
+    expect(lex(pg, "a || b")).toEqual(["ident:a", "op:||", "ident:b"]);
+    expect(lex(pg, "x @> y")).toEqual(["ident:x", "op:@>", "ident:y"]);
+    expect(lex(pg, "a <= b")).toEqual(["ident:a", "op:<=", "ident:b"]);
+  });
+
+  it("coexists with the punctuation trie by partitioning the character space", () => {
+    expect(lex(pg, "a::b")).toEqual(["ident:a", "punc:::", "ident:b"]);
+    expect(lex(pg, "1::float8")).toEqual(["num:1", "punc:::", "ident:float8"]);
+    expect(lex(pg, "a::int || b")).toEqual(["ident:a", "punc:::", "ident:int", "op:||", "ident:b"]);
+  });
+
+  it("stops before a `--` comment start mid-run", () => {
+    expect(lex(pg, "a@--x")).toEqual(["ident:a", "op:@", "comment:x"]);
+  });
+
+  it("stops before a `/*` comment start mid-run", () => {
+    expect(lex(pg, "a@/* c */b")).toEqual(["ident:a", "op:@", "comment: c ", "ident:b"]);
+  });
+
+  it("trims a trailing + or - unless the operator contains a strong char", () => {
+    expect(lex(pg, "=-")).toEqual(["op:=", "op:-"]);
+    expect(lex(pg, "*+")).toEqual(["op:*", "op:+"]);
+    expect(lex(pg, "@-")).toEqual(["op:@-"]);
+    expect(lex(pg, "~+")).toEqual(["op:~+"]);
+    expect(lex(pg, "<->")).toEqual(["op:<->"]);
+    expect(lex(pg, "+")).toEqual(["op:+"]);
+  });
+
+  it("splits `a=-1` into `=` then `-` per the trailing-trim rule", () => {
+    expect(lex(pg, "a=-1")).toEqual(["ident:a", "op:=", "op:-", "num:1"]);
+  });
+
+  it("records operator spans", () => {
+    const stream = pg.tokenize(createInputStream("@>"));
+    expect(stream.next()).toMatchObject({
+      type: "op",
+      value: "@>",
+      position: { start: { row: 1, col: 0 }, end: { row: 1, col: 2 } },
+    });
+  });
+});

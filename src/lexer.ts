@@ -228,17 +228,93 @@ export function defineLexer<const TT extends string>(def: LexerDef<TT>): Lexer<T
 // --- Built-in reader library ---
 
 const isDigit = (char: string) => char >= "0" && char <= "9";
+const isHexDigit = (char: string) => /[0-9a-fA-F]/.test(char);
+const isOctalDigit = (char: string) => char >= "0" && char <= "7";
+const isBinaryDigit = (char: string) => char === "0" || char === "1";
 
 const number = <TT extends string>(
   type: TT,
-  opts: { signs?: readonly string[]; decimal?: boolean; display?: string } = {},
+  opts: {
+    signs?: readonly string[];
+    decimal?: boolean;
+    /** Scientific notation: `1e5`, `1.5e-3`, `2E+10`. Never on radix forms. */
+    exponent?: boolean;
+    /** A `.` with no integer part starts a number: `.5` (guarded so `a.b` doesn't). */
+    leadingDot?: boolean;
+    /** `0x…`/`0o…`/`0b…` integer literals (PG16). `Number(value)` decodes them. */
+    radix?: { hex?: boolean; octal?: boolean; binary?: boolean };
+    /** `_` between digits (PG16); stripped from `value` so `Number(value)` works. */
+    separators?: boolean;
+    display?: string;
+  } = {},
 ): Reader<TT> => {
-  const { signs = [], decimal = true, display } = opts;
+  const { signs = [], decimal = true, exponent = false, leadingDot = false, radix, separators = false, display } = opts;
+
+  // Read a run of digits (per `isDigitChar`), allowing `_` separators between two
+  // digits when enabled. Separators are dropped from the returned run (raw text
+  // stays in the span); a leading/trailing/doubled `_` is never consumed, so `1_`
+  // yields `1` and leaves `_` for the next token. Every `_` lookahead is a
+  // self-contained snapshot/reload, so this never nests inside a caller's snapshot
+  // (callers only reload when the run came back empty, i.e. when no `_` was seen).
+  const readDigitRun = (stream: InputStream, isDigitChar: (c: string) => boolean): string => {
+    if (!isDigitChar(stream.peek())) return "";
+    let out = stream.next();
+    while (!stream.eof()) {
+      const char = stream.peek();
+      if (isDigitChar(char)) {
+        out += stream.next();
+      } else if (separators && char === "_") {
+        stream.snapshot();
+        stream.next(); // provisional separator
+        if (isDigitChar(stream.peek())) continue; // valid: drop `_`, read the digit next
+        stream.reload(); // trailing/doubled `_` — leave it for the next token
+        break;
+      } else {
+        break;
+      }
+    }
+    return out;
+  };
+
+  // At a leading `0`: try `0x`/`0o`/`0b`. A bare marker (`0x` with no hex digit)
+  // backtracks to just `0`, leaving the marker char for the identifier scanner.
+  const readRadix = (stream: InputStream, sign: string): string | null => {
+    stream.snapshot();
+    const zero = stream.next(); // "0"
+    const marker = stream.peek();
+    const digitsFor =
+      radix!.hex && (marker === "x" || marker === "X")
+        ? isHexDigit
+        : radix!.octal && (marker === "o" || marker === "O")
+          ? isOctalDigit
+          : radix!.binary && (marker === "b" || marker === "B")
+            ? isBinaryDigit
+            : null;
+
+    if (digitsFor === null) {
+      stream.reload(); // `0` not followed by an enabled marker
+      return null;
+    }
+    stream.next(); // marker
+    const digits = readDigitRun(stream, digitsFor);
+    if (digits) return sign + zero + marker + digits;
+    stream.reload(); // bare `0x`/`0o`/`0b`
+    return null;
+  };
+
   return {
     type,
     display,
     startsWith: (char, stream) => {
       if (isDigit(char)) return true;
+      if (leadingDot && char === ".") {
+        // `.` only begins a number when a digit follows (`.5`, not `a.b`).
+        stream.snapshot();
+        stream.next();
+        const ok = isDigit(stream.peek());
+        stream.reload();
+        return ok;
+      }
       if (!signs.includes(char)) return false;
       // A sign only begins a number when a digit follows (`-3`, not `a - b`).
       stream.snapshot();
@@ -249,16 +325,40 @@ const number = <TT extends string>(
     },
     read: (stream) => {
       const sign = signs.includes(stream.peek()) ? stream.next() : "";
-      let value = sign + readWhile(stream, isDigit);
+
+      if (radix && stream.peek() === "0") {
+        const radixValue = readRadix(stream, sign);
+        if (radixValue !== null) return { value: radixValue };
+        // Otherwise `0` is an ordinary decimal digit — fall through.
+      }
+
+      const intPart = readDigitRun(stream, isDigit);
+      let value = sign + intPart;
+      let hasMantissa = intPart.length > 0;
 
       // A decimal point only continues the number when digits follow it, so a
       // trailing `.` (e.g. a schema separator) is left for the next token.
       if (decimal && stream.peek() === ".") {
         stream.snapshot();
         const dot = stream.next();
-        const fraction = readWhile(stream, isDigit);
+        const fraction = readDigitRun(stream, isDigit);
         if (fraction) {
           value += dot + fraction;
+          hasMantissa = true;
+        } else {
+          stream.reload();
+        }
+      }
+
+      // `1e5`, `1.5e-3`. A bare `1e` backtracks, leaving `e…` for the identifier
+      // scanner; the exponent never attaches without a preceding mantissa.
+      if (exponent && hasMantissa && (stream.peek() === "e" || stream.peek() === "E")) {
+        stream.snapshot();
+        const e = stream.next();
+        const expSign = stream.peek() === "+" || stream.peek() === "-" ? stream.next() : "";
+        const expDigits = readDigitRun(stream, isDigit);
+        if (expDigits) {
+          value += e + expSign + expDigits;
         } else {
           stream.reload();
         }
@@ -527,6 +627,64 @@ const dollarString = <TT extends string>(type: TT, opts: { display?: string } = 
   };
 };
 
+// PG-style multi-character operators (`||`, `@>`, `<->`, …). Coexists with the
+// punctuation trie by partitioning the character space: operator `chars` and the
+// punctuation token characters must not overlap, so `::`/`:`/`,`/`(`/`)`/`;`/`.`
+// stay trie-lexed while operators are read here. Comment readers (`--`, `/*`) must
+// precede this reader in the array; `stopAt` then guarantees a scan never swallows
+// a comment start mid-run (`@--x` reads `@`, then the comment reader takes `--x`).
+const operator = <TT extends string>(
+  type: TT,
+  opts: {
+    chars?: string;
+    /** Sequences the scan must never cross (comment starts). Default `["--", "/*"]`. */
+    stopAt?: readonly string[];
+    /** PG's rule: trim a trailing `+`/`-` unless the operator contains a "strong" char. */
+    noTrailing?: { chars: string; unless: string };
+    display?: string;
+  } = {},
+): Reader<TT> => {
+  const chars = opts.chars ?? "+-*/<>=~!@#%^&|`?";
+  const stopAt = opts.stopAt ?? ["--", "/*"];
+  const noTrailing = opts.noTrailing ?? { chars: "+-", unless: "~!@#%^&|`?" };
+  const isOpChar = (char: string) => char !== "" && chars.includes(char);
+
+  return {
+    type,
+    display: opts.display,
+    startsWith: (char) => isOpChar(char),
+    read: (stream) => {
+      // Scan every operator char, then restore — the final length (after cutting
+      // at a comment start and trimming) is re-consumed for real, so a single
+      // snapshot/reload keeps the span exact without per-char bookkeeping.
+      stream.snapshot();
+      let raw = "";
+      while (isOpChar(stream.peek())) raw += stream.next();
+      stream.reload();
+
+      // Cut before the earliest comment start so `@--x` → `@` and `@/*` → `@`.
+      let cut = raw.length;
+      for (const seq of stopAt) {
+        const idx = raw.indexOf(seq);
+        if (idx !== -1 && idx < cut) cut = idx;
+      }
+      let value = raw.slice(0, cut);
+
+      // Trim trailing `+`/`-` (PG lets `a=-1` lex as `=` then `-1`), unless the
+      // operator contains a char that makes a trailing sign significant (`@-`).
+      if (![...value].some((char) => noTrailing.unless.includes(char))) {
+        while (value.length > 1 && noTrailing.chars.includes(value[value.length - 1]!)) {
+          value = value.slice(0, -1);
+        }
+      }
+
+      if (value.length === 0) return null; // e.g. a bare comment start — fall through
+      for (const _ of value) stream.next();
+      return { value };
+    },
+  };
+};
+
 const custom = <TT extends string>(
   type: TT,
   opts: {
@@ -548,4 +706,4 @@ const custom = <TT extends string>(
   };
 };
 
-export const readers = { number, string, dollarString, lineComment, blockComment, custom };
+export const readers = { number, string, dollarString, lineComment, blockComment, operator, custom };
