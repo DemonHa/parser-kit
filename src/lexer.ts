@@ -1,8 +1,8 @@
 import type { TypeLabels } from "./describe";
 import type { InputStream } from "./input-stream";
 import type { Position } from "./position";
-import type { Token, TokenStream } from "./token";
-import { createTree, extractTokenByTree } from "./trie";
+import { matchesToken, type Token, type TokenMatch, type TokenStream } from "./token";
+import { createTree, extractTokenByTree, type Trie } from "./trie";
 
 // A character class: a set of characters, a regex, or a predicate.
 export type CharClass = string | RegExp | ((char: string) => boolean);
@@ -24,14 +24,45 @@ export interface ReaderResult<TT extends string = string> {
   end?: Position;
 }
 
+// Lexer-side context readers may consult: the last significant token produced
+// and the mode stack's top. It is a pure function of the tokens already emitted,
+// which is what keeps buffer replay sound — parse branching can never change it.
+export interface LexContext<TT extends string = string> {
+  /** Last non-trivia token produced; null at the start of input. */
+  lastToken: Token<TT> | null;
+  /** The mode `lastToken` was lexed in. */
+  lastMode: string;
+  /** Current mode (top of the stack); the root mode is "default". */
+  mode: string;
+}
+
 export interface Reader<TT extends string = string> {
   type: TT;
   display?: string;
-  startsWith: (char: string, stream: InputStream) => boolean;
-  read: (stream: InputStream) => ReaderResult<TT> | null;
+  // `ctx` is deliberately untyped over the lexer's vocabulary: a reader only
+  // knows its own token type, so the tokens it sees in `lastToken` are typed
+  // by whichever lexer it is plugged into.
+  startsWith: (char: string, stream: InputStream, ctx: LexContext) => boolean;
+  read: (stream: InputStream, ctx: LexContext) => ReaderResult<TT> | null;
 }
 
-export interface LexerDef<TT extends string = string> {
+// A mode-change rule, evaluated after each token is produced (at lexing time,
+// inside peek — sound because the relevant boundary is once-only lexing, not
+// consumption). The first matching transition wins.
+export interface ModeTransition<TT extends string = string> {
+  /** Fires when the token just produced matches this pattern. */
+  on: TokenMatch<TT>;
+  /** Only fires when this mode was current while the token was lexed. */
+  inMode?: string;
+  /** Extra guard; `ctx.lastToken` is the token BEFORE the matched one. */
+  when?: (ctx: LexContext<TT>) => boolean;
+  /** Pop on the root mode is a no-op (a stray `}` is the parser's error). */
+  action: "push" | "pop";
+  /** Target mode; required for push. */
+  mode?: string;
+}
+
+export interface ModeDef<TT extends string = string> {
   keywords?: {
     type: TT;
     /** Multi-word entries (["not", "null"]) match across whitespace via a trie. */
@@ -58,8 +89,19 @@ export interface LexerDef<TT extends string = string> {
   };
   /** Tried first, in order, dispatched on the current character. */
   readers?: readonly Reader<TT>[];
-  /** Skipped between tokens. Defaults to space/tab — NOT newline. */
+  /** Skipped between tokens. Defaults to space/tab — NOT newline. `""` disables skipping. */
   whitespace?: CharClass;
+}
+
+// The top-level def doubles as the root mode ("default"). A mode-free def
+// compiles to a one-entry stack — behaviorally identical to before.
+export interface LexerDef<TT extends string = string> extends ModeDef<TT> {
+  /** Alternate lexing modes (own readers/punctuation/whitespace), by name. */
+  modes?: Record<string, ModeDef<TT>>;
+  /** Token-driven mode changes; evaluated after each token, first match wins. */
+  transitions?: readonly ModeTransition<TT>[];
+  /** Token types excluded from `LexContext.lastToken` tracking (comments). */
+  trivia?: readonly TT[];
 }
 
 export interface Lexer<TT extends string = string> {
@@ -91,63 +133,112 @@ const consumeSeq = (input: InputStream, seq: string): boolean => {
   return true;
 };
 
-export function defineLexer<const TT extends string>(def: LexerDef<TT>): Lexer<TT> {
-  const { keywords, punctuation, identifier, readers = [] } = def;
+// A mode's definition with its derived tables, built once at define time.
+interface CompiledMode<TT extends string> {
+  keywords: ModeDef<TT>["keywords"];
+  punctuation: ModeDef<TT>["punctuation"];
+  identifier: ModeDef<TT>["identifier"];
+  readers: readonly Reader<TT>[];
+  isWhitespace: (char: string) => boolean;
+  isIdStart: (char: string) => boolean;
+  isIdPart: (char: string) => boolean;
+  foldIdentifier: (word: string) => string;
+  caseInsensitive: boolean;
+  keywordsTree: Trie | null;
+  punctuationTree: Trie | null;
+}
 
-  if (keywords && !identifier) {
-    throw new Error("defineLexer: `keywords` requires an `identifier` definition to scan words with");
+export function defineLexer<const TT extends string>(def: LexerDef<TT>): Lexer<TT> {
+  const compileMode = (mode: ModeDef<TT>): CompiledMode<TT> => {
+    const { keywords, punctuation, identifier, readers = [] } = mode;
+
+    if (keywords && !identifier) {
+      throw new Error("defineLexer: `keywords` requires an `identifier` definition to scan words with");
+    }
+
+    const caseInsensitive = keywords?.caseInsensitive ?? false;
+    return {
+      keywords,
+      punctuation,
+      identifier,
+      readers,
+      isWhitespace: charClassToPredicate(mode.whitespace ?? " \t"),
+      isIdStart: identifier ? charClassToPredicate(identifier.start) : () => false,
+      isIdPart: identifier ? charClassToPredicate(identifier.part) : () => false,
+      foldIdentifier:
+        identifier?.fold === "lower"
+          ? (word: string) => word.toLowerCase()
+          : identifier?.fold === "upper"
+            ? (word: string) => word.toUpperCase()
+            : (word: string) => word,
+      caseInsensitive,
+      keywordsTree: keywords
+        ? createTree(
+            keywords.words.map((entry) => {
+              const words = typeof entry === "string" ? [entry] : entry;
+              return words.map((word) => (caseInsensitive ? word.toLowerCase() : word));
+            }),
+          )
+        : null,
+      punctuationTree: punctuation ? createTree(punctuation.tokens) : null,
+    };
+  };
+
+  // The top-level def is the root mode; a mode-free def compiles to this
+  // one-entry table and behaves exactly as before.
+  const modes: Record<string, CompiledMode<TT>> = { default: compileMode(def) };
+  for (const [name, mode] of Object.entries(def.modes ?? {})) {
+    modes[name] = compileMode(mode);
   }
 
-  const isWhitespace = charClassToPredicate(def.whitespace ?? " \t");
-  const isIdStart = identifier ? charClassToPredicate(identifier.start) : () => false;
-  const isIdPart = identifier ? charClassToPredicate(identifier.part) : () => false;
-  const foldIdentifier =
-    identifier?.fold === "lower"
-      ? (word: string) => word.toLowerCase()
-      : identifier?.fold === "upper"
-        ? (word: string) => word.toUpperCase()
-        : (word: string) => word;
+  const transitions = def.transitions ?? [];
+  for (const transition of transitions) {
+    if (transition.action === "push" && transition.mode === undefined) {
+      throw new Error("defineLexer: a push transition requires a target `mode`");
+    }
+    for (const name of [transition.mode, transition.inMode]) {
+      if (name !== undefined && !(name in modes)) {
+        throw new Error(`defineLexer: transition references unknown mode "${name}"`);
+      }
+    }
+  }
 
-  const caseInsensitive = keywords?.caseInsensitive ?? false;
-  const keywordsTree = keywords
-    ? createTree(
-        keywords.words.map((entry) => {
-          const words = typeof entry === "string" ? [entry] : entry;
-          return words.map((word) => (caseInsensitive ? word.toLowerCase() : word));
-        }),
-      )
-    : null;
-  const punctuationTree = punctuation ? createTree(punctuation.tokens) : null;
+  const triviaTypes = new Set<TT>(def.trivia ?? []);
 
   const labels: TypeLabels = {};
-  if (keywords?.display) labels[keywords.type] = keywords.display;
-  if (punctuation?.display) labels[punctuation.type] = punctuation.display;
-  if (identifier?.display) labels[identifier.type] = identifier.display;
-  for (const reader of readers) {
-    if (reader.display && !(reader.type in labels)) labels[reader.type] = reader.display;
+  for (const mode of Object.values(modes)) {
+    const { keywords, punctuation, identifier, readers } = mode;
+    if (keywords?.display && !(keywords.type in labels)) labels[keywords.type] = keywords.display;
+    if (punctuation?.display && !(punctuation.type in labels)) labels[punctuation.type] = punctuation.display;
+    if (identifier?.display && !(identifier.type in labels)) labels[identifier.type] = identifier.display;
+    for (const reader of readers) {
+      if (reader.display && !(reader.type in labels)) labels[reader.type] = reader.display;
+    }
   }
 
   const tokenize = (input: InputStream): TokenStream<TT> => {
     let current: Token<TT> | null = null;
+    const modeStack: string[] = ["default"];
+    const lexCtx: LexContext<TT> = { lastToken: null, lastMode: "default", mode: "default" };
 
-    const readIdentifier = (): Token<TT> => {
+    const readIdentifier = (mode: CompiledMode<TT>): Token<TT> => {
       const startPosition = input.position();
 
-      if (keywordsTree) {
+      if (mode.keywordsTree) {
         const keyword = extractTokenByTree(
-          keywordsTree,
+          mode.keywordsTree,
           input.snapshot,
           input.reload,
           () => {
-            const word = readWhile(input, isIdPart);
-            return caseInsensitive ? word.toLowerCase() : word;
+            const word = readWhile(input, mode.isIdPart);
+            return mode.caseInsensitive ? word.toLowerCase() : word;
           },
-          () => readWhile(input, isWhitespace),
+          () => readWhile(input, mode.isWhitespace),
           " ",
         );
         if (keyword !== null) {
           return {
-            type: keywords!.type,
+            type: mode.keywords!.type,
             value: keyword,
             position: { start: startPosition, end: input.position() },
           };
@@ -155,36 +246,37 @@ export function defineLexer<const TT extends string>(def: LexerDef<TT>): Lexer<T
       }
 
       return {
-        type: identifier!.type,
-        value: foldIdentifier(readWhile(input, isIdPart)),
+        type: mode.identifier!.type,
+        value: mode.foldIdentifier(readWhile(input, mode.isIdPart)),
         position: { start: startPosition, end: input.position() },
       };
     };
 
-    const readPunctuation = (): Token<TT> | null => {
+    const readPunctuation = (mode: CompiledMode<TT>): Token<TT> | null => {
       const startPosition = input.position();
-      const value = extractTokenByTree(punctuationTree!, input.snapshot, input.reload, input.next, () => {
+      const value = extractTokenByTree(mode.punctuationTree!, input.snapshot, input.reload, input.next, () => {
         return;
       });
       if (value === null) return null;
       return {
-        type: punctuation!.type,
+        type: mode.punctuation!.type,
         value,
         position: { start: startPosition, end: input.position() },
       };
     };
 
     const readNext = (): Token<TT> | null => {
-      readWhile(input, isWhitespace);
+      const mode = modes[lexCtx.mode]!;
+      readWhile(input, mode.isWhitespace);
       if (input.eof()) {
         return null;
       }
       const char = input.peek();
 
-      for (const reader of readers) {
-        if (!reader.startsWith(char, input)) continue;
+      for (const reader of mode.readers) {
+        if (!reader.startsWith(char, input, lexCtx)) continue;
         const startPosition = input.position();
-        const result = reader.read(input);
+        const result = reader.read(input, lexCtx);
         if (result === null) continue;
         return {
           type: result.type ?? reader.type,
@@ -196,12 +288,12 @@ export function defineLexer<const TT extends string>(def: LexerDef<TT>): Lexer<T
         };
       }
 
-      if (identifier && isIdStart(char)) {
-        return readIdentifier();
+      if (mode.identifier && mode.isIdStart(char)) {
+        return readIdentifier(mode);
       }
 
-      if (punctuationTree) {
-        const token = readPunctuation();
+      if (mode.punctuationTree) {
+        const token = readPunctuation(mode);
         if (token) return token;
       }
 
@@ -211,14 +303,41 @@ export function defineLexer<const TT extends string>(def: LexerDef<TT>): Lexer<T
       input.croak(`Unexpected character "${char}"`, startPosition, endPosition);
     };
 
+    // Transitions and lastToken tracking fire here — at lexing time, inside
+    // peek. Sound because each character position is lexed at most once
+    // (rollback replays stored tokens) and lexer context is a pure function
+    // of the tokens already produced; the parser has no API to mutate it.
+    const produce = (): Token<TT> | null => {
+      const token = readNext();
+      if (token === null) return null;
+      const lexedIn = lexCtx.mode;
+      for (const transition of transitions) {
+        if (transition.inMode !== undefined && transition.inMode !== lexedIn) continue;
+        if (!matchesToken(token, transition.on)) continue;
+        if (transition.when && !transition.when(lexCtx)) continue;
+        if (transition.action === "push") {
+          modeStack.push(transition.mode!);
+        } else if (modeStack.length > 1) {
+          modeStack.pop();
+        }
+        lexCtx.mode = modeStack[modeStack.length - 1]!;
+        break;
+      }
+      if (!triviaTypes.has(token.type)) {
+        lexCtx.lastToken = token;
+        lexCtx.lastMode = lexedIn;
+      }
+      return token;
+    };
+
     const next = () => {
       const token = current;
       current = null;
-      return token ?? readNext();
+      return token ?? produce();
     };
 
     const peek = () => {
-      return current || (current = readNext());
+      return current || (current = produce());
     };
 
     const eof = () => {
@@ -697,11 +816,144 @@ const operator = <TT extends string>(
   };
 };
 
+// True when `seq` appears next, without consuming it. Uses the single snapshot
+// slot, so it must not run inside a caller's pending snapshot.
+const peeksSeq = (input: InputStream, seq: string): boolean => {
+  input.snapshot();
+  for (const char of seq) {
+    if (input.peek() !== char) {
+      input.reload();
+      return false;
+    }
+    input.next();
+  }
+  input.reload();
+  return true;
+};
+
+// Word-valued tokens after which `/` still begins a regex in JS: keyword heads
+// of statements/expressions. Value-like keywords (`this`, `true`, `false`,
+// `null`, `super`) end an expression and take division instead, so they are
+// deliberately absent.
+const REGEX_AFTER_WORDS = new Set([
+  "return",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "new",
+  "delete",
+  "void",
+  "throw",
+  "case",
+  "do",
+  "else",
+  "yield",
+  "await",
+]);
+
+// The default JS division-vs-regex predicate. It classifies `lastToken` by
+// value shape (the kit doesn't know which token type is "an identifier"):
+// word-shaped values are identifiers/keywords, digit-led values are numbers,
+// `)`/`]` close expressions, and a backtick is a template tail (the opening
+// backtick is never consulted — template mode has no regex reader). String
+// tokens carry their decoded content, so word- or digit-shaped content
+// classifies correctly and exotic content is the author's cue to override.
+const defaultRegexAllowedAfter = (ctx: LexContext): boolean => {
+  const last = ctx.lastToken;
+  if (last === null) return true;
+  const value = last.value;
+  if (/^[A-Za-z_$]/.test(value)) return REGEX_AFTER_WORDS.has(value);
+  if (value === ")" || value === "]" || value === "`") return false;
+  if (/^\.?[0-9]/.test(value)) return false;
+  return true;
+};
+
+// JS regular-expression literals, dispatched on the previous significant token
+// (division never follows `=`/`(`/keywords; regex never follows an expression).
+// Must come after the `//`//* comment readers in the array so comments win.
+// `value` is the full raw literal including delimiters and flags.
+const regex = <TT extends string>(
+  type: TT,
+  opts: { allowedAfter?: (ctx: LexContext) => boolean; display?: string } = {},
+): Reader<TT> => {
+  const allowedAfter = opts.allowedAfter ?? defaultRegexAllowedAfter;
+  const isFlag = (char: string) => /[a-z]/i.test(char);
+
+  return {
+    type,
+    display: opts.display,
+    startsWith: (char, _stream, ctx) => char === "/" && allowedAfter(ctx),
+    read: (stream) => {
+      const startPosition = stream.position();
+      const croakUnterminated = (): never =>
+        stream.croak("Unterminated regular expression", startPosition, stream.position());
+
+      let value = stream.next(); // opening `/`
+      let inClass = false;
+      while (true) {
+        if (stream.eof() || stream.peek() === "\n" || stream.peek() === "\r") croakUnterminated();
+        const char = stream.next();
+        value += char;
+        if (char === "\\") {
+          if (stream.eof() || stream.peek() === "\n" || stream.peek() === "\r") croakUnterminated();
+          value += stream.next();
+        } else if (char === "[") {
+          inClass = true;
+        } else if (char === "]") {
+          inClass = false;
+        } else if (char === "/" && !inClass) {
+          break;
+        }
+      }
+      return { value: value + readWhile(stream, isFlag) };
+    },
+  };
+};
+
+// A run of template-literal text, up to (not including) the closing delimiter
+// or the interpolation opener — both left for the mode's punctuation, which is
+// what drives the mode transitions (Acorn's shape). Returns null on a delimiter
+// so no empty chunks are emitted; a lone `$` is content. `value` is raw: an
+// escape keeps its backslash, it only shields the next char from delimiter
+// matching (cooked values are an AST concern — `map` on the chunk token).
+const templateChunk = <TT extends string>(
+  type: TT,
+  opts: { exit?: string; enter?: string; escape?: string; display?: string } = {},
+): Reader<TT> => {
+  const exit = opts.exit ?? "`";
+  const enter = opts.enter ?? "${";
+  const escapeChar = opts.escape ?? "\\";
+
+  return {
+    type,
+    display: opts.display,
+    startsWith: () => true, // read() decides — null on a delimiter falls through
+    read: (stream) => {
+      const startPosition = stream.position();
+      let value = "";
+      while (!stream.eof()) {
+        const char = stream.peek();
+        if (char === exit[0] && peeksSeq(stream, exit)) break;
+        if (char === enter[0] && peeksSeq(stream, enter)) break;
+        value += stream.next();
+        if (char === escapeChar && !stream.eof()) value += stream.next();
+      }
+      if (stream.eof()) {
+        // Consume-to-EOF happened above, so recovery keeps its progress.
+        stream.croak("Unterminated template", startPosition, stream.position());
+      }
+      if (value === "") return null;
+      return { value };
+    },
+  };
+};
+
 const custom = <TT extends string>(
   type: TT,
   opts: {
     startsWith: CharClass;
-    read: (stream: InputStream) => ReaderResult<TT> | string | null;
+    read: (stream: InputStream, ctx: LexContext) => ReaderResult<TT> | string | null;
     display?: string;
   },
 ): Reader<TT> => {
@@ -710,12 +962,22 @@ const custom = <TT extends string>(
     type,
     display: opts.display,
     startsWith: (char) => starts(char),
-    read: (stream) => {
-      const result = opts.read(stream);
+    read: (stream, ctx) => {
+      const result = opts.read(stream, ctx);
       if (result === null) return null;
       return typeof result === "string" ? { value: result } : result;
     },
   };
 };
 
-export const readers = { number, string, dollarString, lineComment, blockComment, operator, custom };
+export const readers = {
+  number,
+  string,
+  dollarString,
+  lineComment,
+  blockComment,
+  operator,
+  regex,
+  templateChunk,
+  custom,
+};

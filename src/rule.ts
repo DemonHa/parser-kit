@@ -85,6 +85,13 @@ export interface ParseContext<TT extends string = string> {
   /** Skip any trivia tokens at the cursor. */
   skipTrivia(): void;
   /**
+   * True when a line break separates the previous significant token from the
+   * next one (skips trivia first, then compares rows — so a multi-line block
+   * comment counts, per the ECMAScript ASI predicate). False at the start of
+   * input and at EOF; EOF-as-terminator is the ASI rule's own case.
+   */
+  newlineBefore(): boolean;
+  /**
    * Recovery hook: records the error and skips ahead to the next sync point.
    * Returns false when no error collector is installed (strict parse mode).
    */
@@ -122,9 +129,14 @@ export function createParseContext<TT extends string>(
   // tryParse snapshot is active; compacted back to empty once none is.
   let buffer: Token<TT>[] = [];
   let bufferPos = 0;
-  const snapshots: { pos: number; last: Position | null; count: number }[] = [];
+  const snapshots: { pos: number; last: Position | null; count: number; lastSig: Position | null }[] = [];
   let last: Position | null = null;
   let count = 0;
+  // End of the last non-trivia token — the newlineBefore() anchor. Restored by
+  // tryParse (replay through next() rebuilds it identically token by token).
+  let lastSig: Position | null = null;
+
+  const isTriviaToken = (token: Token<TT>) => trivia.some((match) => matchesToken(token, match));
 
   // High-water mark of croak() failures, by tokens consumed. Deliberately not
   // part of the tryParse snapshot: surviving backtracking is the point.
@@ -165,6 +177,7 @@ export function createParseContext<TT extends string>(
     if (token !== undefined) {
       last = token.position.end;
       count++;
+      if (!isTriviaToken(token)) lastSig = token.position.end;
     }
     return token ?? null;
   };
@@ -225,7 +238,7 @@ export function createParseContext<TT extends string>(
     eat: (type, value) => (is(type, value) ? next() : null),
     parse: (rule) => rule.parse(ctx),
     tryParse: (rule) => {
-      snapshots.push({ pos: bufferPos, last, count });
+      snapshots.push({ pos: bufferPos, last, count, lastSig });
       try {
         const value = rule.parse(ctx);
         snapshots.pop();
@@ -237,6 +250,7 @@ export function createParseContext<TT extends string>(
           bufferPos = snapshot.pos;
           last = snapshot.last;
           count = snapshot.count;
+          lastSig = snapshot.lastSig;
           compact();
           return null;
         }
@@ -249,13 +263,18 @@ export function createParseContext<TT extends string>(
     lastEnd,
     spanFrom: (start) => ({ start, end: lastEnd() }),
     label: (type) => describeType(type, labels),
-    isTrivia: (token) => trivia.some((match) => matchesToken(token, match)),
+    isTrivia: isTriviaToken,
     skipTrivia: () => {
       let token = peek();
       while (token !== null && ctx.isTrivia(token)) {
         next();
         token = peek();
       }
+    },
+    newlineBefore: () => {
+      ctx.skipTrivia();
+      const token = peek();
+      return token !== null && lastSig !== null && token.position.start.row > lastSig.row;
     },
     recover: (error) => {
       if (!errors) return false;

@@ -3,6 +3,7 @@ import { ParseError } from "./error";
 import { createInputStream } from "./input-stream";
 import { defineLexer, readers } from "./lexer";
 import { type ContextConfig, createParseContext, makeRule } from "./rule";
+import type { Token } from "./token";
 
 const lexer = defineLexer({
   punctuation: { type: "punc", tokens: ["(", ")", ","], display: "a symbol" },
@@ -137,5 +138,112 @@ describe("report()", () => {
     ctx.tryParse(deepFailure);
     ctx.report(new ParseError("hand-built", ctx.position(), ctx.position()));
     expect(errors[0]!.msg).toBe("hand-built");
+  });
+});
+
+describe("newlineBefore()", () => {
+  const nlLexer = defineLexer({
+    punctuation: { type: "punc", tokens: [";"] },
+    identifier: { type: "var", start: /[a-z]/i, part: /[a-z0-9]/i },
+    readers: [readers.blockComment("comment", "/*", "*/")],
+    whitespace: " \t\n",
+  });
+  type NlTT = "punc" | "var" | "comment";
+  const nlContext = (text: string) =>
+    createParseContext<NlTT>(nlLexer.tokenize(createInputStream(text)), { trivia: [{ type: "comment" }] });
+
+  it("is false at the start of input and at EOF", () => {
+    const ctx = nlContext("a");
+    expect(ctx.newlineBefore()).toBe(false);
+    ctx.next();
+    expect(ctx.newlineBefore()).toBe(false);
+  });
+
+  it("compares rows across the gap", () => {
+    const sameLine = nlContext("a b");
+    sameLine.next();
+    expect(sameLine.newlineBefore()).toBe(false);
+
+    const broken = nlContext("a\nb");
+    broken.next();
+    expect(broken.newlineBefore()).toBe(true);
+  });
+
+  it("counts a line break inside a multi-line comment (ECMAScript ASI)", () => {
+    const ctx = nlContext("a /*\n*/ b");
+    ctx.next();
+    expect(ctx.newlineBefore()).toBe(true);
+    // The trivia was skipped as part of the check.
+    expect(ctx.peek()?.value).toBe("b");
+  });
+
+  it("ignores a same-line comment", () => {
+    const ctx = nlContext("a /* c */ b");
+    ctx.next();
+    expect(ctx.newlineBefore()).toBe(false);
+  });
+
+  it("is restored by tryParse rollback", () => {
+    const consumeTwoAndFail = makeRule<null, NlTT>({
+      parse: (ctx) => {
+        ctx.next();
+        ctx.next();
+        return ctx.croak("doom");
+      },
+      first: () => [],
+      expected: () => "doom",
+    });
+    const ctx = nlContext("a\nb c");
+    ctx.next();
+    expect(ctx.tryParse(consumeTwoAndFail)).toBeNull();
+    expect(ctx.newlineBefore()).toBe(true);
+  });
+});
+
+describe("backtracking across a mode change", () => {
+  // A template-mode lexer: rollback must replay the exact same token sequence
+  // even though the lexer switched modes partway through the buffered run.
+  const tmplLexer = defineLexer({
+    punctuation: { type: "punc", tokens: ["=", "`"] },
+    identifier: { type: "var", start: /[a-z]/i, part: /[a-z0-9]/i },
+    modes: {
+      template: {
+        punctuation: { type: "punc", tokens: ["`", "${"] },
+        readers: [readers.templateChunk("chunk")],
+        whitespace: "",
+      },
+    },
+    transitions: [
+      { on: { type: "punc", value: "`" }, inMode: "default", action: "push", mode: "template" },
+      { on: { type: "punc", value: "`" }, inMode: "template", action: "pop" },
+    ],
+  });
+  type TmplTT = "punc" | "var" | "chunk";
+
+  it("replays identical tokens after rollback", () => {
+    const text = "x = `ab` y";
+    const drain = (ctx: ReturnType<typeof createParseContext<TmplTT>>) => {
+      const out = [];
+      let token: Token<TmplTT> | null;
+      while ((token = ctx.next()) !== null) {
+        out.push(token);
+      }
+      return out;
+    };
+    const straight = drain(createParseContext<TmplTT>(tmplLexer.tokenize(createInputStream(text))));
+
+    const consumeTwoAndFail = makeRule<null, TmplTT>({
+      parse: (ctx) => {
+        ctx.next();
+        ctx.next();
+        return ctx.croak("doom");
+      },
+      first: () => [],
+      expected: () => "doom",
+    });
+    const ctx = createParseContext<TmplTT>(tmplLexer.tokenize(createInputStream(text)));
+    ctx.peekAhead(4); // lex through the mode change before any consumption
+    expect(ctx.tryParse(consumeTwoAndFail)).toBeNull();
+    expect(drain(ctx)).toEqual(straight);
   });
 });

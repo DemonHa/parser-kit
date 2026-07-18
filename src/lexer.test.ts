@@ -468,3 +468,210 @@ describe("identifier case folding (B)", () => {
     expect(lex(withKeywords, "NOT NULL other")).toEqual(["kw:not null", "ident:OTHER"]);
   });
 });
+
+// The JS-shaped setup PR 6 exists for: `/` is division punctuation, a comment
+// prefix and a regex opener (reader order + prev-token context decide), and
+// backticks flip the lexer into a template mode via the transition table.
+const js = defineLexer({
+  keywords: { type: "kw", words: ["return", "this", "typeof", "if"], display: "a keyword" },
+  punctuation: { type: "punc", tokens: ["(", ")", "[", "]", "{", "}", "=", "+", ",", ";", ":", "/", "`"] },
+  identifier: { type: "ident", start: /[A-Za-z_$]/, part: /[A-Za-z0-9_$]/ },
+  readers: [
+    readers.number("num"),
+    readers.lineComment("comment", "//"),
+    readers.blockComment("comment", "/*", "*/"),
+    readers.regex("regex"),
+  ],
+  whitespace: /[ \t\r\n]/,
+  trivia: ["comment"],
+  modes: {
+    template: {
+      punctuation: { type: "punc", tokens: ["`", "${"] },
+      readers: [readers.templateChunk("chunk")],
+      whitespace: "",
+    },
+  },
+  transitions: [
+    { on: { type: "punc", value: "`" }, inMode: "default", action: "push", mode: "template" },
+    { on: { type: "punc", value: "`" }, inMode: "template", action: "pop" },
+    { on: { type: "punc", value: "${" }, inMode: "template", action: "push", mode: "default" },
+    { on: { type: "punc", value: "{" }, inMode: "default", action: "push", mode: "default" },
+    { on: { type: "punc", value: "}" }, inMode: "default", action: "pop" },
+  ],
+});
+
+describe("readers.regex (PR 6)", () => {
+  it("reads a regex at the start of input", () => {
+    expect(lex(js, "/x/")).toEqual(["regex:/x/"]);
+  });
+
+  it("reads a regex after an operator, with flags", () => {
+    expect(lex(js, "x = /ab+/g")).toEqual(["ident:x", "punc:=", "regex:/ab+/g"]);
+  });
+
+  it("lexes division after an identifier, number, `)` and `]`", () => {
+    expect(lex(js, "a / b")).toEqual(["ident:a", "punc:/", "ident:b"]);
+    expect(lex(js, "1 / 2")).toEqual(["num:1", "punc:/", "num:2"]);
+    expect(lex(js, "(a) / 2")).toEqual(["punc:(", "ident:a", "punc:)", "punc:/", "num:2"]);
+    expect(lex(js, "a[0] / 2")).toEqual(["ident:a", "punc:[", "num:0", "punc:]", "punc:/", "num:2"]);
+  });
+
+  it("allows a regex after statement keywords but not value-like ones", () => {
+    expect(lex(js, "return /x/")).toEqual(["kw:return", "regex:/x/"]);
+    expect(lex(js, "typeof /x/")).toEqual(["kw:typeof", "regex:/x/"]);
+    expect(lex(js, "this / 2")).toEqual(["kw:this", "punc:/", "num:2"]);
+  });
+
+  it("skips trivia when tracking the previous token", () => {
+    expect(lex(js, "x = /* c */ /re/")).toEqual(["ident:x", "punc:=", "comment: c ", "regex:/re/"]);
+  });
+
+  it("keeps `//` and `/*` as comments, not regexes", () => {
+    expect(lex(js, "= // re\nx")).toEqual(["punc:=", "comment: re", "ident:x"]);
+  });
+
+  it("reads `/` inside a character class and escaped slashes", () => {
+    expect(lex(js, "= /[/]/")).toEqual(["punc:=", "regex:/[/]/"]);
+    expect(lex(js, "= /\\//")).toEqual(["punc:=", "regex:/\\//"]);
+  });
+
+  it("croaks on an unterminated regex", () => {
+    expect(() => lex(js, "x = /ab")).toThrow(ParseError);
+    expect(() => lex(js, "x = /ab\nc/")).toThrow(/Unterminated regular expression/);
+  });
+});
+
+describe("template modes (PR 6)", () => {
+  it("lexes a template with an interpolation (Acorn token shape)", () => {
+    expect(lex(js, "`a${b}c`")).toEqual(["punc:`", "chunk:a", "punc:${", "ident:b", "punc:}", "chunk:c", "punc:`"]);
+  });
+
+  it("emits no empty chunks", () => {
+    expect(lex(js, "``")).toEqual(["punc:`", "punc:`"]);
+    expect(lex(js, "`${x}`")).toEqual(["punc:`", "punc:${", "ident:x", "punc:}", "punc:`"]);
+  });
+
+  it("counts braces so an object literal doesn't end the interpolation", () => {
+    expect(lex(js, "`a${ {x: 1} }b`")).toEqual([
+      "punc:`",
+      "chunk:a",
+      "punc:${",
+      "punc:{",
+      "ident:x",
+      "punc::",
+      "num:1",
+      "punc:}",
+      "punc:}",
+      "chunk:b",
+      "punc:`",
+    ]);
+  });
+
+  it("nests templates off the mode stack", () => {
+    expect(lex(js, "`a${`x${y}z`}b`")).toEqual([
+      "punc:`",
+      "chunk:a",
+      "punc:${",
+      "punc:`",
+      "chunk:x",
+      "punc:${",
+      "ident:y",
+      "punc:}",
+      "chunk:z",
+      "punc:`",
+      "punc:}",
+      "chunk:b",
+      "punc:`",
+    ]);
+  });
+
+  it("treats a lone `$` and newlines as chunk content", () => {
+    expect(lex(js, "`a$b`")).toEqual(["punc:`", "chunk:a$b", "punc:`"]);
+    expect(lex(js, "`a\nb`")).toEqual(["punc:`", "chunk:a\nb", "punc:`"]);
+  });
+
+  it("keeps an escaped delimiter in the chunk, backslash included (raw value)", () => {
+    expect(lex(js, "`a\\`b`")).toEqual(["punc:`", "chunk:a\\`b", "punc:`"]);
+    expect(lex(js, "`a\\${b`")).toEqual(["punc:`", "chunk:a\\${b", "punc:`"]);
+  });
+
+  it("croaks on an unterminated template after consuming to EOF", () => {
+    expect(() => lex(js, "`abc")).toThrow(ParseError);
+    expect(() => lex(js, "`abc")).toThrow(/Unterminated template/);
+  });
+
+  it("treats pop on the root mode as a no-op (stray `}` is the parser's error)", () => {
+    expect(lex(js, "a } b")).toEqual(["ident:a", "punc:}", "ident:b"]);
+  });
+
+  it("merges labels across modes", () => {
+    const labeled = defineLexer({
+      punctuation: { type: "punc", tokens: ["`"], display: "a symbol" },
+      modes: {
+        template: {
+          punctuation: { type: "punc", tokens: ["`"] },
+          readers: [readers.templateChunk("chunk", { display: "template text" })],
+          whitespace: "",
+        },
+      },
+      transitions: [
+        { on: { type: "punc", value: "`" }, inMode: "default", action: "push", mode: "template" },
+        { on: { type: "punc", value: "`" }, inMode: "template", action: "pop" },
+      ],
+    });
+    expect(labeled.labels).toEqual({ punc: "a symbol", chunk: "template text" });
+  });
+});
+
+describe("mode transitions (PR 6)", () => {
+  it("supports `when` guards and exposes `lastMode` (the Acorn `)` case)", () => {
+    // `(` after `if` pushes a statement-paren mode aliasing default; a custom
+    // `allowedAfter` then tells `if (a) /re/` (regex) from `(a) / 2` (division).
+    const tables = {
+      keywords: { type: "kw", words: ["if"] },
+      punctuation: { type: "punc", tokens: ["(", ")", "/", "="] },
+      identifier: { type: "ident", start: /[A-Za-z_]/, part: /[A-Za-z0-9_]/ },
+    } as const;
+    const regexReader = readers.regex("regex", {
+      allowedAfter: (ctx) =>
+        ctx.lastToken === null ||
+        ctx.lastToken.value === "=" ||
+        (ctx.lastToken.value === ")" && ctx.lastMode === "stmtParen"),
+    });
+    const acornish = defineLexer({
+      ...tables,
+      readers: [readers.number("num"), regexReader],
+      modes: { stmtParen: { ...tables, readers: [readers.number("num"), regexReader] } },
+      transitions: [
+        {
+          on: { type: "punc", value: "(" },
+          inMode: "default",
+          when: (ctx) => ctx.lastToken?.value === "if",
+          action: "push",
+          mode: "stmtParen",
+        },
+        { on: { type: "punc", value: ")" }, inMode: "stmtParen", action: "pop" },
+      ],
+    });
+    expect(lex(acornish, "if (a) /re/")).toEqual(["kw:if", "punc:(", "ident:a", "punc:)", "regex:/re/"]);
+    expect(lex(acornish, "(a) / 2")).toEqual(["punc:(", "ident:a", "punc:)", "punc:/", "num:2"]);
+  });
+
+  it("rejects a push transition without a target mode", () => {
+    expect(() =>
+      defineLexer({
+        punctuation: { type: "punc", tokens: ["`"] },
+        transitions: [{ on: { type: "punc", value: "`" }, action: "push" }],
+      }),
+    ).toThrow(/push transition requires a target `mode`/);
+  });
+
+  it("rejects transitions referencing unknown modes", () => {
+    expect(() =>
+      defineLexer({
+        punctuation: { type: "punc", tokens: ["`"] },
+        transitions: [{ on: { type: "punc", value: "`" }, action: "push", mode: "nope" }],
+      }),
+    ).toThrow(/unknown mode "nope"/);
+  });
+});
