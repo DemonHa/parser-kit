@@ -11,6 +11,7 @@ import {
   oneOf,
   optional,
   type ParseContext,
+  type PrattHelpers,
   pratt,
   type Rule,
   repeat,
@@ -53,9 +54,19 @@ export type Expr =
   | { kind: "binary"; op: string; left: Expr; right: Expr; span: Span }
   | { kind: "cast"; expr: Expr; type: ColType; span: Span }
   | { kind: "is"; expr: Expr; negated: boolean; span: Span }
-  | { kind: "like"; expr: Expr; pattern: Expr; negated: boolean; ci: boolean; span: Span }
+  // `IS [NOT] DISTINCT FROM x` and `IS [NOT] TRUE/FALSE/UNKNOWN` — companions to
+  // the plain `is` node (IS [NOT] NULL), each carrying its own negation flag.
+  | { kind: "isDistinct"; expr: Expr; from: Expr; negated: boolean; span: Span }
+  | { kind: "isTest"; expr: Expr; test: "true" | "false" | "unknown"; negated: boolean; span: Span }
+  // `escape` is present only when an `ESCAPE x` tail follows (LIKE / ILIKE).
+  | { kind: "like"; expr: Expr; pattern: Expr; negated: boolean; ci: boolean; escape?: Expr; span: Span }
+  // `x [NOT] SIMILAR TO pattern [ESCAPE x]` — a POSIX-ish sibling of LIKE.
+  | { kind: "similarTo"; expr: Expr; pattern: Expr; negated: boolean; escape?: Expr; span: Span }
   | { kind: "between"; expr: Expr; lo: Expr; hi: Expr; negated: boolean; span: Span }
   | { kind: "in"; expr: Expr; list: Expr[]; negated: boolean; span: Span }
+  // `x <cmp> ANY|ALL|SOME (array|subquery)` — a comparison whose RHS is
+  // quantified. `right` is a scalar subquery or a parenthesised array expr.
+  | { kind: "anyAll"; op: string; quantifier: "any" | "all" | "some"; left: Expr; right: Expr; span: Span }
   // --- DML expression additions (all pure-additive; existing nodes untouched) ---
   // `*` and `t.*` — used in select lists and `count(*)`. `table` is the dotted
   // qualifier for `t.*` / `s.t.*`, null for a bare `*`.
@@ -519,6 +530,13 @@ const inTail = (ctx: ParseContext<SqlTokenType>, left: Expr, negated: boolean): 
   return { kind: "in", expr: left, list, negated, span: closeSpan(left, ctx.lastEnd()) };
 };
 
+// The optional `ESCAPE x` tail shared by LIKE / ILIKE / SIMILAR TO. Returns the
+// escape expression, or undefined when no ESCAPE follows (so the node omits the
+// key entirely). Bound at bp 11 like the pattern itself, above the loose logical
+// operators. `escape` is unreserved, matched by value.
+const escapeTail = (ctx: ParseContext<SqlTokenType>, h: PrattHelpers<Expr>): Expr | undefined =>
+  ctx.eat("ident", "escape") !== null ? h.parseRhs(11) : undefined;
+
 const expressionRule = pratt<Expr, SqlTokenType>({
   atom,
   prefix: [
@@ -540,19 +558,40 @@ const expressionRule = pratt<Expr, SqlTokenType>({
     binary(["+", "-"], 13),
     binary(["||"], 12),
     binary(["@>"], 12),
+    // JSON/JSONB access & containment (`-> ->> #> #>> #-`, existence `? ?| ?&`,
+    // `<@`), POSIX regex (`~ !~ ~* !~*`) and full-text match (`@@`). All lex as
+    // single `op` tokens already; they share the bp-12 "other operators" tier
+    // with `||`/`@>` and are left-associative, so `a -> 'k' ->> 'j'` nests left.
+    binary(["->", "->>", "#>", "#>>", "#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@@"], 12),
     {
-      // LIKE / ILIKE. RHS at bp 11 keeps it out of the looser comparison level.
-      match: token("ident", { values: ["like", "ilike"] }),
+      // LIKE / ILIKE / SIMILAR TO. RHS at bp 11 keeps it out of the looser
+      // comparison level; an optional `ESCAPE x` tail follows the pattern.
+      match: token("ident", { values: ["like", "ilike", "similar"] }),
       bp: 10,
       parse: (ctx, left, h): Expr => {
         const op = ctx.next()!.value;
+        if (op === "similar") {
+          ctx.parse(kw("to"));
+          const pattern = h.parseRhs(11);
+          const esc = escapeTail(ctx, h);
+          return {
+            kind: "similarTo",
+            expr: left,
+            pattern,
+            negated: false,
+            ...(esc !== undefined && { escape: esc }),
+            span: closeSpan(left, ctx.lastEnd()),
+          };
+        }
         const pattern = h.parseRhs(11);
+        const esc = escapeTail(ctx, h);
         return {
           kind: "like",
           expr: left,
           pattern,
           negated: false,
           ci: op === "ilike",
+          ...(esc !== undefined && { escape: esc }),
           span: closeSpan(left, ctx.lastEnd()),
         };
       },
@@ -581,12 +620,27 @@ const expressionRule = pratt<Expr, SqlTokenType>({
         if (ctx.is("ident", ["like", "ilike"])) {
           const op = ctx.next()!.value;
           const pattern = h.parseRhs(11);
+          const esc = escapeTail(ctx, h);
           return {
             kind: "like",
             expr: left,
             pattern,
             negated: true,
             ci: op === "ilike",
+            ...(esc !== undefined && { escape: esc }),
+            span: closeSpan(left, ctx.lastEnd()),
+          };
+        }
+        if (ctx.is("ident", "similar")) {
+          ctx.parse(kwseq("similar", "to"));
+          const pattern = h.parseRhs(11);
+          const esc = escapeTail(ctx, h);
+          return {
+            kind: "similarTo",
+            expr: left,
+            pattern,
+            negated: true,
+            ...(esc !== undefined && { escape: esc }),
             span: closeSpan(left, ctx.lastEnd()),
           };
         }
@@ -602,13 +656,30 @@ const expressionRule = pratt<Expr, SqlTokenType>({
           return inTail(ctx, left, true);
         }
         return ctx.croak(
-          `Expected "like", "ilike", "between" or "in" after "not" but found ${describeFound(ctx.peek())}`,
+          `Expected "like", "ilike", "similar", "between" or "in" after "not" but found ${describeFound(ctx.peek())}`,
         );
       },
     },
     // Same-precedence comparisons in one nonassoc group: `a < b < c` errors,
-    // `(a < b) < c` parses.
-    binary(["<", ">", "<=", ">=", "=", "<>", "!="], 9, "nonassoc"),
+    // `(a < b) < c` parses. A custom parse so the RHS can be quantified with
+    // ANY / ALL / SOME (`x = ANY (array|subquery)`); otherwise it builds the
+    // ordinary binary node with a bp-10 RHS (nonassoc = bp + 1).
+    {
+      ops: ["<", ">", "<=", ">=", "=", "<>", "!="],
+      bp: 9,
+      type: "op",
+      assoc: "nonassoc",
+      parse: (ctx, left, h): Expr => {
+        const op = ctx.next()!.value;
+        if (ctx.is("ident", ["any", "all", "some"])) {
+          const quantifier = ctx.next()!.value as "any" | "all" | "some";
+          const right = ctx.parse(parenOrSubquery);
+          return { kind: "anyAll", op, quantifier, left, right, span: closeSpan(left, ctx.lastEnd()) };
+        }
+        const right = h.parseRhs(10);
+        return { kind: "binary", op, left, right, span: closeSpan(left, ctx.lastEnd()) };
+      },
+    },
     kwBinary("and", 4),
     kwBinary("or", 2),
   ],
@@ -625,9 +696,22 @@ const expressionRule = pratt<Expr, SqlTokenType>({
     {
       match: kw("is"),
       bp: 8,
-      parse: (ctx, left): Expr => {
+      parse: (ctx, left, h): Expr => {
         ctx.parse(kw("is"));
         const negated = ctx.eat("ident", "not") !== null;
+        // IS [NOT] DISTINCT FROM x — the RHS binds like a comparison operand
+        // (bp 9), so it stops before AND / OR but past tighter operators.
+        if (ctx.is("ident", "distinct")) {
+          ctx.parse(kwseq("distinct", "from"));
+          const from = h.parseRhs(9);
+          return { kind: "isDistinct", expr: left, from, negated, span: closeSpan(left, ctx.lastEnd()) };
+        }
+        // IS [NOT] TRUE / FALSE / UNKNOWN.
+        if (ctx.is("ident", ["true", "false", "unknown"])) {
+          const test = ctx.next()!.value as "true" | "false" | "unknown";
+          return { kind: "isTest", expr: left, test, negated, span: closeSpan(left, ctx.lastEnd()) };
+        }
+        // IS [NOT] NULL.
         ctx.parse(kw("null"));
         return { kind: "is", expr: left, negated, span: closeSpan(left, ctx.lastEnd()) };
       },

@@ -324,6 +324,107 @@ describe("SQL-lite expressions", () => {
   });
 });
 
+// --- expression operators (Phase 1) ---
+
+describe("SQL-lite expression operators", () => {
+  it("lexes JSON / regex / full-text operators as single op tokens", () => {
+    const toks = lex("~* !~* #- ->> #>> ?| ?& <@ @@ -> #>");
+    expect(toks.every((t) => t.type === "op")).toBe(true);
+    expect(toks.map((t) => t.value)).toEqual(["~*", "!~*", "#-", "->>", "#>>", "?|", "?&", "<@", "@@", "->", "#>"]);
+  });
+
+  it("parses JSON / regex / full-text operators at the bp-12 tier", () => {
+    expect(exprOf("data -> 'k'")).toEqual(bin("->", name("data"), str("k")));
+    // Chained JSON accessors nest left-associatively.
+    expect(exprOf("a -> 'k' ->> 'j'")).toEqual(bin("->>", bin("->", name("a"), str("k")), str("j")));
+    expect(exprOf("meta #- '{x}'")).toEqual(bin("#-", name("meta"), str("{x}")));
+    expect(exprOf("col ~ 'a.*'")).toEqual(bin("~", name("col"), str("a.*")));
+    expect(exprOf("col !~* 'a'")).toEqual(bin("!~*", name("col"), str("a")));
+    expect(exprOf("doc @@ 'query'")).toEqual(bin("@@", name("doc"), str("query")));
+    expect(exprOf("tags ?& other")).toEqual(bin("?&", name("tags"), name("other")));
+    // bp-12 binds tighter than a comparison (bp 9): (a -> 'k') = 'v'.
+    expect(exprOf("a -> 'k' = 'v'")).toEqual(bin("=", bin("->", name("a"), str("k")), str("v")));
+  });
+
+  it("parses IS [NOT] DISTINCT FROM and IS [NOT] TRUE/FALSE/UNKNOWN", () => {
+    expect(exprOf("a IS DISTINCT FROM b")).toEqual({
+      kind: "isDistinct",
+      expr: name("a"),
+      from: name("b"),
+      negated: false,
+    });
+    expect(exprOf("a IS NOT DISTINCT FROM b")).toMatchObject({ kind: "isDistinct", negated: true });
+    expect(exprOf("a IS TRUE")).toEqual({ kind: "isTest", expr: name("a"), test: "true", negated: false });
+    expect(exprOf("a IS NOT FALSE")).toEqual({ kind: "isTest", expr: name("a"), test: "false", negated: true });
+    expect(exprOf("a IS UNKNOWN")).toEqual({ kind: "isTest", expr: name("a"), test: "unknown", negated: false });
+    // The plain IS [NOT] NULL node is untouched.
+    expect(exprOf("a IS NULL")).toEqual({ kind: "is", expr: name("a"), negated: false });
+    // IS binds tighter than AND: (a IS DISTINCT FROM b) AND c.
+    expect(exprOf("a IS DISTINCT FROM b AND c")).toEqual(
+      bin("and", { kind: "isDistinct", expr: name("a"), from: name("b"), negated: false }, name("c")),
+    );
+  });
+
+  it("parses LIKE ... ESCAPE and [NOT] SIMILAR TO", () => {
+    expect(exprOf("name LIKE 'a%' ESCAPE '!'")).toEqual({
+      kind: "like",
+      expr: name("name"),
+      pattern: str("a%"),
+      negated: false,
+      ci: false,
+      escape: str("!"),
+    });
+    // No ESCAPE → the key is absent (existing LIKE shape is preserved).
+    expect(exprOf("name LIKE 'a%'")).toEqual({
+      kind: "like",
+      expr: name("name"),
+      pattern: str("a%"),
+      negated: false,
+      ci: false,
+    });
+    expect(exprOf("name SIMILAR TO 'a%'")).toEqual({
+      kind: "similarTo",
+      expr: name("name"),
+      pattern: str("a%"),
+      negated: false,
+    });
+    expect(exprOf("name NOT SIMILAR TO 'a%' ESCAPE '/'")).toEqual({
+      kind: "similarTo",
+      expr: name("name"),
+      pattern: str("a%"),
+      negated: true,
+      escape: str("/"),
+    });
+  });
+
+  it("parses <cmp> ANY / ALL / SOME over an array or subquery", () => {
+    expect(exprOf("x = ANY (arr)")).toEqual({
+      kind: "anyAll",
+      op: "=",
+      quantifier: "any",
+      left: name("x"),
+      right: name("arr"),
+    });
+    expect(exprOf("x < ALL (arr)")).toMatchObject({ kind: "anyAll", op: "<", quantifier: "all" });
+    expect(exprOf("x = SOME (arr)")).toMatchObject({ kind: "anyAll", quantifier: "some" });
+    // A subquery RHS produces the scalar-subquery node.
+    const w = (firstStmt("SELECT 1 FROM t WHERE x = ANY (SELECT id FROM u);") as any).where;
+    expect(w).toEqual({
+      kind: "anyAll",
+      op: "=",
+      quantifier: "any",
+      left: name("x"),
+      right: { kind: "subquery", query: sel({ columns: [col(name("id"))], from: [tableFrom(["u"])] }) },
+    });
+  });
+
+  it("reports the NOT dispatcher's extended keyword set", () => {
+    expect(() => sqlLite.parse("CREATE TABLE t (c int CHECK (a NOT frobnicate b));")).toThrow(
+      /Expected "like", "ilike", "similar", "between" or "in"/,
+    );
+  });
+});
+
 // --- robustness ---
 
 describe("SQL-lite robustness", () => {
