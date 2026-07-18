@@ -42,6 +42,7 @@ const sel = (over: Record<string, unknown>) => ({
   where: null,
   groupBy: null,
   having: null,
+  window: null,
   orderBy: null,
   limit: null,
   offset: null,
@@ -587,6 +588,143 @@ describe("SQL-lite expression special forms", () => {
     expect(() => sqlLite.parse("SELECT POSITION(a b) FROM t;")).toThrow(/Expected .*"in"/i);
     // A bare `$` is not a parameter and has no reader — a lex-level error.
     expect(() => sqlLite.parse("SELECT $ FROM t;")).toThrow(ParseError);
+  });
+});
+
+// --- window functions (Phase 3) ---
+
+describe("SQL-lite window functions", () => {
+  const winExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+  const order = (expr: unknown, dir: string | null = null, nulls: string | null = null) => ({ expr, dir, nulls });
+
+  it("parses an empty OVER () and a partition/order spec", () => {
+    expect(winExpr("rank() OVER ()")).toEqual({
+      kind: "window",
+      fn: call("rank"),
+      name: null,
+      partitionBy: null,
+      orderBy: null,
+      frame: null,
+    });
+    expect(winExpr("row_number() OVER (PARTITION BY dept ORDER BY salary DESC)")).toEqual({
+      kind: "window",
+      fn: call("row_number"),
+      name: null,
+      partitionBy: [name("dept")],
+      orderBy: [order(name("salary"), "desc")],
+      frame: null,
+    });
+  });
+
+  it("parses BETWEEN and single-bound frame clauses", () => {
+    expect(winExpr("sum(x) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)")).toEqual({
+      kind: "window",
+      fn: call("sum", [name("x")]),
+      name: null,
+      partitionBy: null,
+      orderBy: [order(name("id"))],
+      frame: { mode: "rows", start: { kind: "unboundedPreceding" }, end: { kind: "currentRow" } },
+    });
+    // Single-bound shorthand: `end` is null; `offset PRECEDING/FOLLOWING` carries an expr.
+    expect(winExpr("sum(x) OVER (RANGE 1 PRECEDING)")).toMatchObject({
+      frame: { mode: "range", start: { kind: "preceding", offset: num(1) }, end: null },
+    });
+    expect(winExpr("sum(x) OVER (GROUPS BETWEEN CURRENT ROW AND 2 FOLLOWING)")).toMatchObject({
+      frame: {
+        mode: "groups",
+        start: { kind: "currentRow" },
+        end: { kind: "following", offset: num(2) },
+      },
+    });
+  });
+
+  it("parses a bare `OVER name` reference and an inline base-window name", () => {
+    expect(winExpr("rank() OVER w")).toEqual({
+      kind: "window",
+      fn: call("rank"),
+      name: "w",
+      partitionBy: null,
+      orderBy: null,
+      frame: null,
+    });
+    // A leading name inside the parens is the referenced base window.
+    expect(winExpr("rank() OVER (w ORDER BY x)")).toEqual({
+      kind: "window",
+      fn: call("rank"),
+      name: "w",
+      partitionBy: null,
+      orderBy: [order(name("x"))],
+      frame: null,
+    });
+  });
+
+  it("parses FILTER (WHERE …) and WITHIN GROUP (ORDER BY …)", () => {
+    expect(winExpr("count(*) FILTER (WHERE x > 0)")).toEqual({
+      kind: "aggFilter",
+      fn: call("count", [star()]),
+      where: bin(">", name("x"), num(0)),
+    });
+    expect(winExpr("percentile_cont(0.5) WITHIN GROUP (ORDER BY x)")).toEqual({
+      kind: "withinGroup",
+      fn: call("percentile_cont", [num(0.5)]),
+      orderBy: [order(name("x"))],
+    });
+  });
+
+  it("nests WITHIN GROUP inside FILTER inside OVER when combined", () => {
+    expect(winExpr("count(*) FILTER (WHERE active) OVER (PARTITION BY y)")).toEqual({
+      kind: "window",
+      fn: { kind: "aggFilter", fn: call("count", [star()]), where: name("active") },
+      name: null,
+      partitionBy: [name("y")],
+      orderBy: null,
+      frame: null,
+    });
+  });
+
+  it("parses a SELECT-level WINDOW clause and an `OVER w` reference to it", () => {
+    expect(firstStmt("SELECT rank() OVER w AS r FROM t WINDOW w AS (PARTITION BY a ORDER BY b);")).toEqual(
+      sel({
+        columns: [
+          col(
+            {
+              kind: "window",
+              fn: { kind: "call", name: "rank", args: [] },
+              name: "w",
+              partitionBy: null,
+              orderBy: null,
+              frame: null,
+            },
+            "r",
+          ),
+        ],
+        from: [tableFrom(["t"])],
+        window: [
+          {
+            name: "w",
+            spec: { name: null, partitionBy: [name("a")], orderBy: [order(name("b"))], frame: null },
+          },
+        ],
+      }),
+    );
+  });
+
+  it("keeps the window keywords unreserved as names and aliases", () => {
+    // `over`, `filter`, `partition` are ordinary unreserved names here.
+    expect((firstStmt("SELECT over, filter, partition FROM t;") as any).columns).toEqual([
+      col(name("over")),
+      col(name("filter")),
+      col(name("partition")),
+    ]);
+    // `filter` not followed by `(` is an alias, not a modifier.
+    expect((firstStmt("SELECT count(*) filter FROM t;") as any).columns).toEqual([
+      col(call("count", [star()]), "filter"),
+    ]);
+  });
+
+  it("reports a helpful error on a malformed frame bound", () => {
+    expect(() => sqlLite.parse("SELECT sum(x) OVER (ORDER BY id ROWS UNBOUNDED) FROM t;")).toThrow(/following/);
   });
 });
 

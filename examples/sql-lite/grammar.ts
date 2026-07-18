@@ -34,11 +34,13 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // pratt operators, mutual expr↔query recursion via lazy(), and farthest-failure
 // / nested recovery. The expression sublanguage also covers the PG special forms
 // — CAST / EXTRACT / SUBSTRING / POSITION / TRIM, ARRAY[…] / ROW(…), array
-// subscripts & slices, INTERVAL literals, and COLLATE / AT TIME ZONE postfixes.
+// subscripts & slices, INTERVAL literals, and COLLATE / AT TIME ZONE postfixes —
+// plus window functions: `fn(…) [WITHIN GROUP (ORDER BY …)] [FILTER (WHERE …)]
+// [OVER (…) | OVER name]`, with named windows via a `WINDOW w AS (…)` clause.
 //
-// Out of scope (v1): window functions / OVER, LATERAL, WITH before
-// INSERT/UPDATE/DELETE, VALUES as a standalone statement, FETCH, and
-// table-function FROM items. Aggregates parse as ordinary function calls.
+// Out of scope (v1): LATERAL, WITH before INSERT/UPDATE/DELETE, VALUES as a
+// standalone statement, FETCH, and table-function FROM items. Ordinary
+// aggregates (no OVER/FILTER/WITHIN GROUP) still parse as plain function calls.
 
 // --- AST ---
 // Recursive nodes (Expr) are declared by hand, exactly as js-lite does; the
@@ -106,7 +108,55 @@ export type Expr =
   // `x COLLATE collation` — `collation` is the (possibly qualified) collation name.
   | { kind: "collate"; expr: Expr; collation: string[]; span: Span }
   // `x AT TIME ZONE zone`.
-  | { kind: "atTimeZone"; expr: Expr; zone: Expr; span: Span };
+  | { kind: "atTimeZone"; expr: Expr; zone: Expr; span: Span }
+  // --- Phase 3: window functions & aggregate modifiers ---
+  // `fn(…) OVER (…)` / `fn(…) OVER name`. The spec is inlined onto the node (the
+  // plan's flat shape): `name` is the referenced base window (a bare `OVER w`, or
+  // a leading name inside the parens), null when the window is fully inline.
+  | {
+      kind: "window";
+      fn: Expr;
+      name: string | null;
+      partitionBy: Expr[] | null;
+      orderBy: OrderItem[] | null;
+      frame: WindowFrame | null;
+      span: Span;
+    }
+  // `fn(…) FILTER (WHERE predicate)` — an aggregate's filter clause. Wraps the
+  // underlying call so `count(*) FILTER (…) OVER (…)` nests filter inside window.
+  | { kind: "aggFilter"; fn: Expr; where: Expr; span: Span }
+  // `fn(…) WITHIN GROUP (ORDER BY …)` — an ordered-set / hypothetical-set aggregate.
+  | { kind: "withinGroup"; fn: Expr; orderBy: OrderItem[]; span: Span };
+
+// One bound of a window frame (`ROWS/RANGE/GROUPS` extent). `preceding` /
+// `following` carry the offset expression; the others are nullary.
+export type WindowFrameBound =
+  | { kind: "unboundedPreceding" }
+  | { kind: "preceding"; offset: Expr }
+  | { kind: "currentRow" }
+  | { kind: "following"; offset: Expr }
+  | { kind: "unboundedFollowing" };
+
+// A frame clause: a mode plus one bound, or a `BETWEEN start AND end` pair
+// (`end` null for the single-bound `ROWS start` shorthand).
+export type WindowFrame = {
+  mode: "rows" | "range" | "groups";
+  start: WindowFrameBound;
+  end: WindowFrameBound | null;
+};
+
+// A window specification, shared by inline `OVER (…)`, bare `OVER name`, and the
+// `WINDOW w AS (…)` clause. `name` is the optional referenced base window; the
+// rest are the inline additions (all null when only a base name is given).
+export type WindowSpec = {
+  name: string | null;
+  partitionBy: Expr[] | null;
+  orderBy: OrderItem[] | null;
+  frame: WindowFrame | null;
+};
+
+// A `WINDOW name AS (spec)` entry from a SELECT's WINDOW clause.
+export type NamedWindow = { name: string; spec: WindowSpec };
 
 export type ColConstraint =
   | { kind: "notNull"; span: Span }
@@ -187,6 +237,8 @@ export type SelectStmt = {
   where: Expr | null;
   groupBy: Expr[] | null;
   having: Expr | null;
+  // Named windows from a `WINDOW w AS (…)` clause (after HAVING, before ORDER BY).
+  window: NamedWindow[] | null;
   orderBy: OrderItem[] | null;
   limit: Expr | null;
   offset: Expr | null;
@@ -522,6 +574,120 @@ const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Pos
   substring: parseSubstring,
 };
 
+// --- window functions ---
+// `fn(…)` may carry, in order, `WITHIN GROUP (ORDER BY …)`, `FILTER (WHERE …)`,
+// and `OVER (…)` / `OVER name`. These are attached in columnRef's call branch (so
+// the keywords stay unreserved and are only recognised right after a call's `)`),
+// each nesting around the previous. The frame / partition / order pieces reuse
+// the DML clause rules declared further down — safe because these helpers only
+// run at parse time, long after those consts are initialised.
+
+// The words that lead a window clause inside `OVER (…)`; a leading token that is
+// none of them (and not `)`) is the referenced base-window name.
+const WINDOW_CLAUSE_LEADS: ReadonlySet<string> = new Set(["partition", "order", "rows", "range", "groups"]);
+
+// One frame bound: UNBOUNDED PRECEDING/FOLLOWING, CURRENT ROW, or `offset
+// PRECEDING/FOLLOWING`. The offset is a full expression; `preceding`/`following`
+// are unreserved and stop it (they are not operators), so no bp juggling.
+function parseFrameBound(ctx: ParseContext<SqlTokenType>): WindowFrameBound {
+  if (ctx.eat("ident", "unbounded") !== null) {
+    if (ctx.eat("ident", "preceding") !== null) return { kind: "unboundedPreceding" };
+    ctx.parse(kw("following"));
+    return { kind: "unboundedFollowing" };
+  }
+  if (ctx.is("ident", "current")) {
+    ctx.parse(kwseq("current", "row"));
+    return { kind: "currentRow" };
+  }
+  const offset = ctx.parse(expression);
+  if (ctx.eat("ident", "preceding") !== null) return { kind: "preceding", offset };
+  ctx.parse(kw("following"));
+  return { kind: "following", offset };
+}
+
+// `{ROWS|RANGE|GROUPS} bound` or `… BETWEEN start AND end`. Entered positioned on
+// the mode word.
+function parseFrame(ctx: ParseContext<SqlTokenType>): WindowFrame {
+  const mode = ctx.next()!.value as "rows" | "range" | "groups";
+  if (ctx.eat("ident", "between") !== null) {
+    const start = parseFrameBound(ctx);
+    ctx.parse(kw("and"));
+    const end = parseFrameBound(ctx);
+    return { mode, start, end };
+  }
+  return { mode, start: parseFrameBound(ctx), end: null };
+}
+
+// A window specification: a bare `name` reference, or a parenthesised inline spec
+// (which may itself open with a base-window name). Shared by `OVER …` and the
+// `WINDOW w AS (…)` clause, so it is a Rule (combinator call sites use it too).
+const overSpecRule = custom<WindowSpec, SqlTokenType>(
+  (ctx) => {
+    if (!ctx.is("punc", "(")) {
+      const name = ctx.parse(nameWord); // OVER name
+      return { name, partitionBy: null, orderBy: null, frame: null };
+    }
+    ctx.next(); // "("
+    let name: string | null = null;
+    const head = ctx.peek();
+    if (head !== null && (head.type === "qident" || (head.type === "ident" && !WINDOW_CLAUSE_LEADS.has(head.value)))) {
+      name = ctx.parse(nameWord);
+    }
+    let partitionBy: Expr[] | null = null;
+    if (ctx.is("ident", "partition")) {
+      ctx.parse(kwseq("partition", "by"));
+      partitionBy = ctx.parse(sepBy(expression, P(",")));
+    }
+    const orderBy = ctx.is("ident", "order") ? ctx.parse(orderByClause) : null;
+    const frame = ctx.is("ident", ["rows", "range", "groups"]) ? parseFrame(ctx) : null;
+    expectClose(ctx);
+    return { name, partitionBy, orderBy, frame };
+  },
+  {
+    expected: "a window specification",
+    first: [{ type: "punc", value: "(" }, { type: "ident" }, { type: "qident" }],
+  },
+);
+
+// Attach any trailing WITHIN GROUP / FILTER / OVER modifiers to a freshly-parsed
+// call node. Each is optional and guarded by a peek so the unreserved lead words
+// (`within`, `filter`, `over`) still work as plain aliases / names when they are
+// not actually starting a modifier (`count(*) filter` reads `filter` as an alias).
+function applyCallModifiers(ctx: ParseContext<SqlTokenType>, fn: Expr, start: Position): Expr {
+  let result = fn;
+  if (ctx.is("ident", "within") && ctx.peekAhead(1)?.value === "group") {
+    ctx.parse(kwseq("within", "group"));
+    if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+    ctx.next(); // "("
+    const orderBy = ctx.parse(orderByClause);
+    expectClose(ctx);
+    result = { kind: "withinGroup", fn: result, orderBy, span: ctx.spanFrom(start) };
+  }
+  const filterNext = ctx.peekAhead(1);
+  if (ctx.is("ident", "filter") && filterNext?.type === "punc" && filterNext.value === "(") {
+    ctx.next(); // filter
+    ctx.next(); // "("
+    ctx.parse(kw("where"));
+    const where = ctx.parse(expression);
+    expectClose(ctx);
+    result = { kind: "aggFilter", fn: result, where, span: ctx.spanFrom(start) };
+  }
+  if (ctx.is("ident", "over")) {
+    const after = ctx.peekAhead(1);
+    const startsSpec =
+      after !== null &&
+      ((after.type === "punc" && after.value === "(") ||
+        after.type === "qident" ||
+        (after.type === "ident" && !RESERVED.has(after.value)));
+    if (startsSpec) {
+      ctx.next(); // over
+      const spec = ctx.parse(overSpecRule);
+      result = { kind: "window", fn: result, ...spec, span: ctx.spanFrom(start) };
+    }
+  }
+  return result;
+}
+
 // A dotted name, optionally a trailing `.*` (→ star) or a `(args)` call. One
 // custom rule (no attempt): walk the `name (. name)*` chain, then dispatch on
 // whether `.*` / `(` follows. Subsumes the old nameOrCall — `s.t.c`, `foo(a,b)`,
@@ -575,7 +741,9 @@ const columnRef = custom<Expr, SqlTokenType>(
       }
       if (!ctx.is("punc", ")")) ctx.croak(`Expected ")" but found ${describeFound(ctx.peek())}`);
       ctx.next(); // ")"
-      return { kind: "call", name: parts.join("."), args, span: ctx.spanFrom(start) };
+      const call: Expr = { kind: "call", name: parts.join("."), args, span: ctx.spanFrom(start) };
+      // Trailing WITHIN GROUP / FILTER / OVER window modifiers, if any.
+      return applyCallModifiers(ctx, call, start);
     }
     return { kind: "name", parts, span: ctx.spanFrom(start) };
   },
@@ -1245,6 +1413,13 @@ const whereClause = seq(skip(kw("where")), field("e", expression)).map((s) => s.
 const groupByClause = seq(skip(kwseq("group", "by")), field("exprs", sepBy(expression, P(",")))).map((s) => s.exprs);
 const havingClause = seq(skip(kw("having")), field("e", expression)).map((s) => s.e);
 
+// `WINDOW w AS (spec), … ` — named window definitions. `overSpecRule` (declared
+// with the window helpers above) parses each `(…)` body.
+const namedWindowDef = seq(field("name", nameWord), skip(kw("as")), field("spec", overSpecRule)).map(
+  ({ name, spec }): NamedWindow => ({ name, spec }),
+);
+const windowClause = seq(skip(kw("window")), field("defs", sepBy(namedWindowDef, P(",")))).map((s) => s.defs);
+
 const orderItem = seq(
   field("expr", expression),
   field("dir", optional(oneOf(kw("asc"), kw("desc")).map((n) => n.value as "asc" | "desc"))),
@@ -1387,10 +1562,14 @@ const selectCore = seq(
   field("where", optional(whereClause)),
   field("groupBy", optional(groupByClause)),
   field("having", optional(havingClause)),
+  field("window", optional(windowClause)),
   field("orderBy", optional(orderByClause)),
   field("limitOffset", limitOffset),
 ).map(
-  ({ distinct, columns, from, where, groupBy, having, orderBy, limitOffset: lo }, span): SelectStmt => ({
+  (
+    { distinct, columns, from, where, groupBy, having, window: windowDefs, orderBy, limitOffset: lo },
+    span,
+  ): SelectStmt => ({
     kind: "select",
     with_: null,
     recursive: false,
@@ -1400,6 +1579,7 @@ const selectCore = seq(
     where: where ?? null,
     groupBy: groupBy ?? null,
     having: having ?? null,
+    window: windowDefs ?? null,
     orderBy: orderBy ?? null,
     limit: lo.limit,
     offset: lo.offset,
