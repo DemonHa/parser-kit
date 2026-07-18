@@ -1,4 +1,4 @@
-import { describeType, quoteList, type TypeLabels } from "./describe";
+import { describeType, quoteList, renderLiteral, type TypeLabels } from "./describe";
 import { ParseError } from "./error";
 import type { Span } from "./position";
 import {
@@ -63,7 +63,82 @@ export function bindTokens<TT extends string>() {
       <Ty extends TT>(type: Ty, opts: { display: string }): Rule<TokenNode<Ty>, TT>;
     },
     match: (type: TT, value?: string): TokenMatch<TT> => ({ type, value }),
+    word: <Ty extends TT, const V extends string>(type: Ty, text: V, opts?: { display?: string }) =>
+      word<TT, Ty, V>(type, text, opts),
+    phrase: <Ty extends TT>(type: Ty, ...words: readonly [string, ...string[]]) => phrase<TT, Ty>(type, ...words),
+    identifierLike: <Ty extends TT>(
+      type: Ty,
+      opts: { exclude: ReadonlySet<string> | readonly string[]; display?: string },
+    ) => identifierLike<TT, Ty>(type, opts),
   };
+}
+
+// --- word() / phrase() / identifierLike() ---
+
+// The keyword strategy for folding lexers (PG, JS contextual keywords):
+// keywords are never their own token type — everything lexes as an identifier,
+// the lexer folds case, and keywords are matched here by exact value. Unreserved
+// keywords stay usable as names because nothing was ever taken away.
+
+// One keyword: an identifier-typed token matched by its (folded) value.
+export function word<TT extends string, Ty extends TT, const V extends string>(
+  type: Ty,
+  text: V,
+  opts: { display?: string } = {},
+): Rule<TokenNode<Ty, V>, TT> {
+  return token<TT, Ty, V>(type, { values: [text], display: opts.display ?? renderLiteral(text) });
+}
+
+// A run of keywords ("primary key", "not null") as one node: value is the
+// joined words, the span covers the whole run. Dispatches on the first word.
+export function phrase<TT extends string, Ty extends TT>(
+  type: Ty,
+  ...words: readonly [string, ...string[]]
+): Rule<TokenNode<Ty>, TT> {
+  const wordRules = words.map((text) => word<TT, Ty, string>(type, text));
+  const joined = words.join(" ");
+  const expected = () => renderLiteral(joined);
+
+  return makeRule<TokenNode<Ty>, TT>({
+    parse: (ctx) => {
+      const start = ctx.position();
+      // A miss on the leading word reports the whole phrase; a miss deeper in
+      // keeps the more precise per-word message (describe() semantics).
+      if (!matchesFirst(ctx.peek(), wordRules[0]!.first())) {
+        return croakExpected(ctx, expected());
+      }
+      for (const rule of wordRules) rule.parse(ctx);
+      return { type, value: joined, span: ctx.spanFrom(start) };
+    },
+    first: () => [{ type, value: words[0] }],
+    expected,
+  });
+}
+
+// Any token of `type` whose value is not in `exclude` — the "identifier that
+// isn't a reserved word" position. Reserved-word tiers are grammar data, not
+// lexer config, so contextual positions can still accept them via word().
+export function identifierLike<TT extends string, Ty extends TT>(
+  type: Ty,
+  opts: { exclude: ReadonlySet<string> | readonly string[]; display?: string },
+): Rule<TokenNode<Ty>, TT> {
+  const exclude: ReadonlySet<string> = opts.exclude instanceof Set ? opts.exclude : new Set(opts.exclude);
+  const expected = (labels?: TypeLabels) => opts.display ?? describeType(type, labels);
+
+  return makeRule<TokenNode<Ty>, TT>({
+    parse: (ctx) => {
+      const found = ctx.peek();
+      if (found && found.type === type && !exclude.has(found.value)) {
+        ctx.next();
+        return { type, value: found.value, span: { ...found.position } };
+      }
+      return croakExpected(ctx, expected(contextLabels(ctx)));
+    },
+    // Type-only, so every word()/phrase() branch beats this one under oneOf's
+    // value-specific-first dispatch (and two of these in one oneOf collide).
+    first: () => [{ type }],
+    expected,
+  });
 }
 
 // --- seq() / field() / skip() ---

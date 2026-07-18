@@ -5,9 +5,11 @@ export {
   delimited,
   type FieldRule,
   field,
+  identifierLike,
   lazy,
   oneOf,
   optional,
+  phrase,
   repeat,
   type SkipRule,
   sepBy,
@@ -15,6 +17,7 @@ export {
   skip,
   type TokenNode,
   token,
+  word,
 } from "./combinators";
 export { describeFound, describeType, quoteList, renderLiteral, type TypeLabels } from "./describe";
 export { ParseError } from "./error";

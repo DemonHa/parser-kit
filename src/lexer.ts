@@ -49,6 +49,12 @@ export interface LexerDef<TT extends string = string> {
     start: CharClass;
     part: CharClass;
     display?: string;
+    /**
+     * Case-fold `token.value` (PG folds unquoted identifiers to lowercase).
+     * After folding, grammar-side keyword matching is exact-value matching;
+     * the raw text stays recoverable via the span.
+     */
+    fold?: "lower" | "upper";
   };
   /** Tried first, in order, dispatched on the current character. */
   readers?: readonly Reader<TT>[];
@@ -95,6 +101,12 @@ export function defineLexer<const TT extends string>(def: LexerDef<TT>): Lexer<T
   const isWhitespace = charClassToPredicate(def.whitespace ?? " \t");
   const isIdStart = identifier ? charClassToPredicate(identifier.start) : () => false;
   const isIdPart = identifier ? charClassToPredicate(identifier.part) : () => false;
+  const foldIdentifier =
+    identifier?.fold === "lower"
+      ? (word: string) => word.toLowerCase()
+      : identifier?.fold === "upper"
+        ? (word: string) => word.toUpperCase()
+        : (word: string) => word;
 
   const caseInsensitive = keywords?.caseInsensitive ?? false;
   const keywordsTree = keywords
@@ -144,7 +156,7 @@ export function defineLexer<const TT extends string>(def: LexerDef<TT>): Lexer<T
 
       return {
         type: identifier!.type,
-        value: readWhile(input, isIdPart),
+        value: foldIdentifier(readWhile(input, isIdPart)),
         position: { start: startPosition, end: input.position() },
       };
     };

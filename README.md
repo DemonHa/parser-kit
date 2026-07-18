@@ -51,6 +51,8 @@ const lexer = defineLexer({
   },
   punctuation: { type: "punc", tokens: ["{", "}", ":", "\n", "<", "<>"], display: "a symbol" },
   identifier: { type: "var", start: /[a-z_]/i, part: /[a-z0-9_]/i, display: "an identifier" },
+  // identifier also takes fold: "lower" | "upper" — token.value is case-folded (PG's
+  // unquoted-identifier rule); with a folding lexer, match keywords by value via word()/phrase()
   readers: [
     readers.number("num", { signs: ["-"] }),               // -3, 1.5; sign only when a digit follows
     readers.string("str", { quote: "'", block: { fence: "'''", type: "mstr" } }),  // block strings dedent
@@ -79,7 +81,10 @@ Dispatch order: readers (in listed order) → keywords/identifier → punctuatio
 | `repeat(rule, { until? })` | Zero-or-more until EOF or an `until` match; participates in error recovery |
 | `lazy(() => rule)` | Forward references / recursion |
 | `custom(parseFn, { expected, first })` | Escape hatch: a hand-written parser over `ParseContext` that still composes, dispatches, and reports errors like any rule |
-| `bindTokens<TT>()` | Returns `token`/`match` pre-bound to your token union so call sites don't repeat the generic |
+| `word(type, text)` | One keyword by exact value on an identifier-typed token (`word("ident", "select")`) — the keyword strategy for folding lexers: keywords never get their own token type |
+| `phrase(type, ...words)` | A keyword run (`phrase("ident", "primary", "key")`) as one node: value joined with spaces, span covering the run, dispatched on the first word |
+| `identifierLike(type, { exclude })` | Any `type` token whose value is not in `exclude` — the "identifier that isn't a reserved word" position. Type-only first set, so it loses to every `word()`/`phrase()` branch in `oneOf` |
+| `bindTokens<TT>()` | Returns `token`/`match`/`word`/`phrase` pre-bound to your token union so call sites don't repeat the generic |
 
 `ParseContext` (what `custom()` sees) offers `peek/next/eof/is/eat`, `parse(rule)`, `tryParse(rule)` (snapshot + rollback), `position()`, `croak(msg)`, plus engine surface: `spanFrom(start)`, `skipTrivia()`, `label(type)`.
 

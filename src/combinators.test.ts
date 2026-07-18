@@ -41,7 +41,7 @@ const toyLexer = defineLexer({
 
 type ToyTT = "kw" | "punc" | "var" | "num" | "str" | "comment";
 
-const { token, match } = bindTokens<ToyTT>();
+const { token, match, word, phrase, identifierLike } = bindTokens<ToyTT>();
 const punc = (value: string) => token("punc", { values: [value] });
 
 // parseValue runs any rule standalone with the toy lexer, comments as trivia.
@@ -305,5 +305,118 @@ describe("ParseError", () => {
     expect(error.msg).toBe("boom");
     expect(error.start).toEqual({ row: 2, col: 3 });
     expect(error.end).toEqual({ row: 2, col: 5 });
+  });
+});
+
+describe("word() / phrase()", () => {
+  it("matches an identifier token by exact value", () => {
+    expect(parseWith(word("var", "select"), "select")).toEqual({
+      type: "var",
+      value: "select",
+      span: { start: { row: 1, col: 0 }, end: { row: 1, col: 6 } },
+    });
+  });
+
+  it("croaks with the quoted word", () => {
+    expect(() => parseWith(word("var", "select"), "foo")).toThrow('Expected "select" but found "foo"');
+  });
+
+  it("takes a display override", () => {
+    expect(() => parseWith(word("var", "select", { display: "a query" }), "foo")).toThrow(
+      'Expected a query but found "foo"',
+    );
+  });
+
+  it("joins a keyword run into one node spanning the whole run", () => {
+    expect(parseWith(phrase("var", "primary", "key"), "primary   key")).toEqual({
+      type: "var",
+      value: "primary key",
+      span: { start: { row: 1, col: 0 }, end: { row: 1, col: 13 } },
+    });
+  });
+
+  it("dispatches on the first word only", () => {
+    expect(phrase("var", "primary", "key").first()).toEqual([{ type: "var", value: "primary" }]);
+    expect(phrase("var", "primary", "key").expected()).toBe('"primary key"');
+  });
+
+  it("reports the whole phrase when the leading word is missing", () => {
+    expect(() => parseWith(phrase("var", "primary", "key"), "foo")).toThrow('Expected "primary key" but found "foo"');
+  });
+
+  it("reports the specific word on a mid-phrase miss", () => {
+    expect(() => parseWith(phrase("var", "primary", "key"), "primary foo")).toThrow('Expected "key" but found "foo"');
+  });
+});
+
+describe("identifierLike()", () => {
+  const RESERVED = ["select", "from"];
+
+  it("consumes any non-excluded token of the type", () => {
+    expect(stripSpans(parseWith(identifierLike("var", { exclude: RESERVED }), "foo"))).toEqual({
+      type: "var",
+      value: "foo",
+    });
+  });
+
+  it("rejects excluded values using the lexer's label", () => {
+    expect(() => parseWith(identifierLike("var", { exclude: RESERVED }), "select")).toThrow(
+      'Expected an identifier but found "select"',
+    );
+  });
+
+  it("accepts a Set and a display override", () => {
+    const rule = identifierLike("var", { exclude: new Set(RESERVED), display: "a column name" });
+    expect(parseWith(rule, "foo").value).toBe("foo");
+    expect(() => parseWith(rule, "from")).toThrow('Expected a column name but found "from"');
+  });
+
+  it("loses to word()/phrase() branches under oneOf dispatch without colliding", () => {
+    const rule = oneOf(
+      word("var", "select").map(() => "keyword"),
+      phrase("var", "primary", "key").map(() => "constraint"),
+      identifierLike("var", { exclude: RESERVED }).map((node) => `name:${node.value}`),
+    );
+    expect(parseWith(rule, "select")).toBe("keyword");
+    expect(parseWith(rule, "primary key")).toBe("constraint");
+    expect(parseWith(rule, "foo")).toBe("name:foo");
+  });
+
+  it("collides with another identifierLike in the same oneOf", () => {
+    expect(() => oneOf(identifierLike("var", { exclude: ["a"] }), identifierLike("var", { exclude: ["b"] }))).toThrow(
+      /overlapping first sets/,
+    );
+  });
+});
+
+describe("keyword strategy end-to-end (folding lexer)", () => {
+  // The PG shape: everything lexes as a folded identifier, keywords are matched
+  // by value in the grammar, quoted identifiers keep their case.
+  const pgLexer = defineLexer({
+    identifier: { type: "ident", start: /[A-Za-z_]/, part: /[A-Za-z0-9_]/, fold: "lower", display: "an identifier" },
+    punctuation: { type: "punc", tokens: ["(", ")", ",", ";"] },
+    readers: [readers.string("qident", { quote: '"', escape: { doubling: true } })],
+  });
+  type PgTT = "ident" | "punc" | "qident";
+  const pgT = bindTokens<PgTT>();
+  const pg = defineGrammar({ lexer: pgLexer, root: pgT.token("ident") });
+  const parsePg = <T>(rule: Rule<T, PgTT>, text: string): T => pg.parseValue(rule, text);
+
+  const name = oneOf(pgT.identifierLike("ident", { exclude: ["select", "table"] }), pgT.token("qident"));
+  const createTable = seq(skip(pgT.phrase("ident", "create", "table")), field("name", name));
+
+  it("matches folded keywords case-insensitively by value", () => {
+    expect(stripSpans(parsePg(createTable, "CREATE TABLE users"))).toEqual({
+      name: { type: "ident", value: "users" },
+    });
+  });
+
+  it("lets reserved words in as quoted identifiers only", () => {
+    expect(stripSpans(parsePg(createTable, 'create table "Select"'))).toEqual({
+      name: { type: "qident", value: "Select" },
+    });
+    // oneOf commits to the identifierLike branch on the type match, so the
+    // branch's own exclusion message propagates.
+    expect(() => parsePg(createTable, "create table select")).toThrow('Expected an identifier but found "select"');
   });
 });

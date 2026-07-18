@@ -425,3 +425,46 @@ describe("readers.operator (A5)", () => {
     });
   });
 });
+
+describe("identifier case folding (B)", () => {
+  // The PG setup: unquoted identifiers fold to lowercase, quoted identifiers
+  // come from a string reader and keep their case.
+  const pg = defineLexer({
+    identifier: { type: "ident", start: /[A-Za-z_]/, part: /[A-Za-z0-9_$]/, fold: "lower" },
+    punctuation: { type: "punc", tokens: ["(", ")", ",", ";"] },
+    readers: [readers.string("qident", { quote: '"', escape: { doubling: true } })],
+  });
+
+  it("folds unquoted identifiers to lowercase", () => {
+    expect(lex(pg, "SELECT Foo bar")).toEqual(["ident:select", "ident:foo", "ident:bar"]);
+  });
+
+  it("supports upper folding", () => {
+    const upper = defineLexer({
+      identifier: { type: "ident", start: /[A-Za-z_]/, part: /[A-Za-z0-9_]/, fold: "upper" },
+    });
+    expect(lex(upper, "select")).toEqual(["ident:SELECT"]);
+  });
+
+  it("preserves case in quoted identifiers, with doubling", () => {
+    expect(lex(pg, '"MyTable"')).toEqual(["qident:MyTable"]);
+    expect(lex(pg, '"a""b"')).toEqual(['qident:a"b']);
+  });
+
+  it("keeps the raw text recoverable via the span", () => {
+    const stream = pg.tokenize(createInputStream("SELECT"));
+    expect(stream.next()).toMatchObject({
+      value: "select",
+      position: { start: { row: 1, col: 0 }, end: { row: 1, col: 6 } },
+    });
+  });
+
+  it("leaves the keyword trie untouched by folding", () => {
+    const withKeywords = defineLexer({
+      keywords: { type: "kw", words: [["not", "null"]], caseInsensitive: true },
+      identifier: { type: "ident", start: /[A-Za-z_]/, part: /[A-Za-z0-9_]/, fold: "upper" },
+    });
+    // The trie keeps its own lowercase form; only plain identifiers fold.
+    expect(lex(withKeywords, "NOT NULL other")).toEqual(["kw:not null", "ident:OTHER"]);
+  });
+});
