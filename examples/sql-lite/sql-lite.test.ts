@@ -29,6 +29,25 @@ const name = (...parts: string[]) => ({ kind: "name", parts });
 const num = (value: number) => ({ kind: "number", value });
 const str = (value: string) => ({ kind: "string", value });
 const bin = (op: string, left: unknown, right: unknown) => ({ kind: "binary", op, left, right });
+const star = (table: string[] | null = null) => ({ kind: "star", table });
+const col = (expr: unknown, alias: string | null = null) => ({ expr, alias });
+// A fully-defaulted SELECT node; spread overrides in for the fields under test.
+const sel = (over: Record<string, unknown>) => ({
+  kind: "select",
+  with_: null,
+  recursive: false,
+  distinct: false,
+  columns: [],
+  from: null,
+  where: null,
+  groupBy: null,
+  having: null,
+  orderBy: null,
+  limit: null,
+  offset: null,
+  ...over,
+});
+const tableFrom = (name: string[], alias: string | null = null) => ({ kind: "table", name, alias });
 
 // --- lexer ---
 
@@ -358,5 +377,304 @@ describe("SQL-lite robustness", () => {
       "alterTable",
       "comment",
     ]);
+  });
+});
+
+// --- SELECT ---
+
+describe("SQL-lite SELECT", () => {
+  it("parses SELECT * FROM with a table alias", () => {
+    expect(firstStmt("SELECT * FROM users u;")).toEqual(
+      sel({ columns: [col(star())], from: [tableFrom(["users"], "u")] }),
+    );
+  });
+
+  it("parses a column list with [AS] aliases", () => {
+    expect(firstStmt("SELECT id, name AS n, u.age full_age FROM users u;")).toEqual(
+      sel({
+        columns: [col(name("id")), col(name("name"), "n"), col(name("u", "age"), "full_age")],
+        from: [tableFrom(["users"], "u")],
+      }),
+    );
+  });
+
+  it("does not swallow a following clause keyword as an alias", () => {
+    // `from`/`where` are reserved, so the alias detector stops before them.
+    expect(firstStmt("SELECT a FROM t WHERE a;")).toEqual(
+      sel({ columns: [col(name("a"))], from: [tableFrom(["t"])], where: name("a") }),
+    );
+  });
+
+  it("parses every trailing clause", () => {
+    expect(
+      firstStmt(
+        "SELECT id FROM users WHERE age >= 18 GROUP BY id HAVING count(*) > 1 " +
+          "ORDER BY id DESC NULLS LAST, name ASC LIMIT 10 OFFSET 5;",
+      ),
+    ).toEqual(
+      sel({
+        columns: [col(name("id"))],
+        from: [tableFrom(["users"])],
+        where: bin(">=", name("age"), num(18)),
+        groupBy: [name("id")],
+        having: bin(">", { kind: "call", name: "count", args: [star()] }, num(1)),
+        orderBy: [
+          { expr: name("id"), dir: "desc", nulls: "last" },
+          { expr: name("name"), dir: "asc", nulls: null },
+        ],
+        limit: num(10),
+        offset: num(5),
+      }),
+    );
+  });
+
+  it("accepts OFFSET before LIMIT and LIMIT ALL", () => {
+    expect(firstStmt("SELECT 1 OFFSET 5 LIMIT 10;")).toMatchObject({ limit: num(10), offset: num(5) });
+    expect(firstStmt("SELECT 1 LIMIT ALL;")).toMatchObject({ limit: null });
+  });
+
+  it("parses DISTINCT and DISTINCT ON (...)", () => {
+    expect(firstStmt("SELECT DISTINCT a FROM t;")).toMatchObject({ distinct: true });
+    expect(firstStmt("SELECT DISTINCT ON (a, b) a FROM t;")).toMatchObject({ distinct: [name("a"), name("b")] });
+  });
+
+  it("parses * / t.* / count(*) / count(distinct x)", () => {
+    const cols = (src: string) => (firstStmt(src) as any).columns;
+    expect(cols("SELECT t.* FROM t;")).toEqual([col(star(["t"]))]);
+    expect(cols("SELECT count(*) FROM t;")).toEqual([col({ kind: "call", name: "count", args: [star()] })]);
+    // DISTINCT inside an aggregate is accepted; the call AST stays unchanged.
+    expect(cols("SELECT count(distinct x) FROM t;")).toEqual([col({ kind: "call", name: "count", args: [name("x")] })]);
+  });
+});
+
+// --- joins & subqueries ---
+
+describe("SQL-lite joins & subqueries", () => {
+  const from = (src: string) => (firstStmt(src) as any).from;
+
+  it("parses INNER JOIN ... ON", () => {
+    expect(from("SELECT 1 FROM users u JOIN teams t ON u.team_id = t.id;")).toEqual([
+      {
+        kind: "join",
+        joinType: "inner",
+        left: tableFrom(["users"], "u"),
+        right: tableFrom(["teams"], "t"),
+        on: bin("=", name("u", "team_id"), name("t", "id")),
+        using: null,
+      },
+    ]);
+  });
+
+  it("parses LEFT JOIN ... USING and CROSS JOIN (left-assoc chain)", () => {
+    expect(from("SELECT 1 FROM a LEFT JOIN b USING (id) CROSS JOIN c;")).toEqual([
+      {
+        kind: "join",
+        joinType: "cross",
+        left: {
+          kind: "join",
+          joinType: "left",
+          left: tableFrom(["a"]),
+          right: tableFrom(["b"]),
+          on: null,
+          using: ["id"],
+        },
+        right: tableFrom(["c"]),
+        on: null,
+        using: null,
+      },
+    ]);
+  });
+
+  it("parses a comma-separated FROM and a subquery FROM item", () => {
+    expect(from("SELECT 1 FROM a, b;")).toEqual([tableFrom(["a"]), tableFrom(["b"])]);
+    expect(from("SELECT 1 FROM (SELECT 1) sub;")).toEqual([
+      { kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "sub" },
+    ]);
+  });
+
+  it("parses a scalar subquery, EXISTS / NOT EXISTS, and IN / NOT IN (SELECT ...)", () => {
+    const where = (src: string) => (firstStmt(`SELECT 1 FROM t WHERE ${src};`) as any).where;
+    expect((firstStmt("SELECT (SELECT max(x) FROM u) m FROM t;") as any).columns).toEqual([
+      col(
+        {
+          kind: "subquery",
+          query: sel({ columns: [col({ kind: "call", name: "max", args: [name("x")] })], from: [tableFrom(["u"])] }),
+        },
+        "m",
+      ),
+    ]);
+    expect(where("EXISTS (SELECT 1)")).toEqual({
+      kind: "exists",
+      query: sel({ columns: [col(num(1))] }),
+      negated: false,
+    });
+    expect(where("NOT EXISTS (SELECT 1)")).toMatchObject({ kind: "exists", negated: true });
+    expect(where("id IN (SELECT id FROM u)")).toEqual({
+      kind: "inSubquery",
+      expr: name("id"),
+      query: sel({ columns: [col(name("id"))], from: [tableFrom(["u"])] }),
+      negated: false,
+    });
+    expect(where("id NOT IN (SELECT id FROM u)")).toMatchObject({ kind: "inSubquery", negated: true });
+    // The list-valued IN is unaffected by the subquery branch.
+    expect(where("id IN (1, 2, 3)")).toEqual({
+      kind: "in",
+      expr: name("id"),
+      list: [num(1), num(2), num(3)],
+      negated: false,
+    });
+  });
+});
+
+// --- CASE ---
+
+describe("SQL-lite CASE", () => {
+  const caseOf = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+
+  it("parses a searched CASE with ELSE", () => {
+    expect(caseOf("CASE WHEN a THEN 1 WHEN b THEN 2 ELSE 3 END")).toEqual({
+      kind: "case",
+      operand: null,
+      whens: [
+        { when: name("a"), then_: num(1) },
+        { when: name("b"), then_: num(2) },
+      ],
+      else_: num(3),
+    });
+  });
+
+  it("parses a simple CASE with an operand and no ELSE", () => {
+    expect(caseOf("CASE x WHEN 1 THEN 'a' END")).toEqual({
+      kind: "case",
+      operand: name("x"),
+      whens: [{ when: num(1), then_: str("a") }],
+      else_: null,
+    });
+  });
+});
+
+// --- set-ops & CTEs ---
+
+describe("SQL-lite set-ops & CTEs", () => {
+  it("parses left-associative UNION / EXCEPT ALL", () => {
+    expect(firstStmt("SELECT a FROM t UNION SELECT a FROM u EXCEPT ALL SELECT a FROM v;")).toEqual({
+      kind: "setOp",
+      op: "exceptAll",
+      left: {
+        kind: "setOp",
+        op: "union",
+        left: sel({ columns: [col(name("a"))], from: [tableFrom(["t"])] }),
+        right: sel({ columns: [col(name("a"))], from: [tableFrom(["u"])] }),
+      },
+      right: sel({ columns: [col(name("a"))], from: [tableFrom(["v"])] }),
+    });
+  });
+
+  it("parses parenthesised set-op terms", () => {
+    expect(firstStmt("(SELECT 1) UNION (SELECT 2);")).toMatchObject({ kind: "setOp", op: "union" });
+  });
+
+  it("attaches a WITH prefix to the leading SELECT", () => {
+    expect(firstStmt("WITH cte AS (SELECT 1 AS x) SELECT x FROM cte;")).toEqual(
+      sel({
+        with_: [{ name: "cte", columns: null, query: sel({ columns: [col(num(1), "x")] }) }],
+        columns: [col(name("x"))],
+        from: [tableFrom(["cte"])],
+      }),
+    );
+    expect(firstStmt("WITH RECURSIVE r (n) AS (SELECT 1) SELECT * FROM r;")).toMatchObject({
+      recursive: true,
+      with_: [{ name: "r", columns: ["n"] }],
+    });
+  });
+});
+
+// --- INSERT / UPDATE / DELETE ---
+
+describe("SQL-lite INSERT / UPDATE / DELETE", () => {
+  it("parses INSERT ... VALUES with a column list and RETURNING *", () => {
+    expect(firstStmt("INSERT INTO t (a, b) VALUES (1, 2), (3, 4) RETURNING *;")).toEqual({
+      kind: "insert",
+      table: ["t"],
+      columns: ["a", "b"],
+      source: {
+        kind: "values",
+        rows: [
+          [num(1), num(2)],
+          [num(3), num(4)],
+        ],
+      },
+      onConflict: null,
+      returning: [col(star())],
+    });
+  });
+
+  it("parses INSERT ... SELECT (parenthesised query source too)", () => {
+    expect(firstStmt("INSERT INTO t SELECT * FROM u;")).toMatchObject({
+      kind: "insert",
+      columns: null,
+      source: { kind: "select", query: sel({ columns: [col(star())], from: [tableFrom(["u"])] }) },
+    });
+    // A leading `(` that opens a query, not a column list.
+    expect(firstStmt("INSERT INTO t (SELECT 1);")).toMatchObject({
+      kind: "insert",
+      columns: null,
+      source: { kind: "select", query: sel({ columns: [col(num(1))] }) },
+    });
+  });
+
+  it("parses ON CONFLICT DO NOTHING and DO UPDATE SET ... WHERE", () => {
+    expect((firstStmt("INSERT INTO t (a) VALUES (1) ON CONFLICT (a) DO NOTHING;") as any).onConflict).toEqual({
+      target: ["a"],
+      action: { kind: "nothing" },
+    });
+    expect(
+      (firstStmt("INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;") as any).onConflict,
+    ).toEqual({
+      target: null,
+      action: { kind: "update", set: [{ column: "a", value: num(2) }], where: bin(">", name("t", "a"), num(0)) },
+    });
+  });
+
+  it("parses UPDATE ... SET ... FROM ... WHERE ... RETURNING", () => {
+    expect(firstStmt("UPDATE t AS x SET a = 1, b = 2 FROM u WHERE x.id = u.id RETURNING a;")).toEqual({
+      kind: "update",
+      table: ["t"],
+      alias: "x",
+      set: [
+        { column: "a", value: num(1) },
+        { column: "b", value: num(2) },
+      ],
+      from: [tableFrom(["u"])],
+      where: bin("=", name("x", "id"), name("u", "id")),
+      returning: [col(name("a"))],
+    });
+  });
+
+  it("parses DELETE ... USING ... WHERE ... RETURNING", () => {
+    expect(firstStmt("DELETE FROM t x USING u WHERE x.id = u.id RETURNING *;")).toEqual({
+      kind: "delete",
+      table: ["t"],
+      alias: "x",
+      using: [tableFrom(["u"])],
+      where: bin("=", name("x", "id"), name("u", "id")),
+      returning: [col(star())],
+    });
+  });
+});
+
+// --- DML robustness ---
+
+describe("SQL-lite DML robustness", () => {
+  it("throws a descriptive error on a FROM with no table", () => {
+    expect(() => sqlLite.parse("SELECT * FROM;")).toThrow(ParseError);
+  });
+
+  it("recovers at the statement terminator and keeps later statements", () => {
+    const { ast, errors } = sqlLite.diagnose("SELECT * FRUM t;\nSELECT 1;");
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    const stmts = stripSpans(ast) as any[];
+    // The malformed first statement is dropped; the following one survives.
+    expect(stmts[stmts.length - 1]).toMatchObject({ kind: "select", columns: [col(num(1))] });
   });
 });

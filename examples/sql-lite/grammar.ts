@@ -10,6 +10,7 @@ import {
   matchesFirst,
   oneOf,
   optional,
+  type ParseContext,
   pratt,
   type Rule,
   repeat,
@@ -21,11 +22,19 @@ import {
 import { type SqlTokenType, sqlLexer } from "./lexer";
 
 // SQL-lite parses a slice of PostgreSQL DDL — CREATE TABLE / INDEX / TYPE,
-// ALTER TABLE, DROP TABLE, COMMENT ON — plus the scalar expression sublanguage
-// that DEFAULT / CHECK / index / WHERE clauses need. It is the end-to-end test
-// for the PG-grade kit features: escaped/dollar strings, PG numbers, the
-// operator reader, the fold-and-match keyword strategy, match-based and
-// non-associative pratt operators, and farthest-failure / nested recovery.
+// ALTER TABLE, DROP TABLE, COMMENT ON — plus a DML core — SELECT (with
+// WITH / DISTINCT / joins / WHERE / GROUP BY / HAVING / ORDER BY / LIMIT /
+// OFFSET / UNION-INTERSECT-EXCEPT) and INSERT / UPDATE / DELETE with
+// RETURNING — over the scalar expression sublanguage that DEFAULT / CHECK /
+// index / WHERE clauses share. It is the end-to-end test for the PG-grade kit
+// features: escaped/dollar strings, PG numbers, the operator reader, the
+// fold-and-match keyword strategy, match-based and non-associative pratt
+// operators, mutual expr↔query recursion via lazy(), and farthest-failure /
+// nested recovery.
+//
+// Out of scope (v1): window functions / OVER, ANY / ALL, LATERAL, WITH before
+// INSERT/UPDATE/DELETE, VALUES as a standalone statement, FETCH, and
+// table-function FROM items. Aggregates parse as ordinary function calls.
 
 // --- AST ---
 // Recursive nodes (Expr) are declared by hand, exactly as js-lite does; the
@@ -46,7 +55,18 @@ export type Expr =
   | { kind: "is"; expr: Expr; negated: boolean; span: Span }
   | { kind: "like"; expr: Expr; pattern: Expr; negated: boolean; ci: boolean; span: Span }
   | { kind: "between"; expr: Expr; lo: Expr; hi: Expr; negated: boolean; span: Span }
-  | { kind: "in"; expr: Expr; list: Expr[]; negated: boolean; span: Span };
+  | { kind: "in"; expr: Expr; list: Expr[]; negated: boolean; span: Span }
+  // --- DML expression additions (all pure-additive; existing nodes untouched) ---
+  // `*` and `t.*` — used in select lists and `count(*)`. `table` is the dotted
+  // qualifier for `t.*` / `s.t.*`, null for a bare `*`.
+  | { kind: "star"; table: string[] | null; span: Span }
+  // `then_` (not `then`) so the node is never mistaken for a thenable.
+  | { kind: "case"; operand: Expr | null; whens: { when: Expr; then_: Expr }[]; else_: Expr | null; span: Span }
+  // A scalar subquery `(SELECT …)` in expression position.
+  | { kind: "subquery"; query: Query; span: Span }
+  | { kind: "exists"; query: Query; negated: boolean; span: Span }
+  // A distinct kind from `in` so `x IN (1,2,3)` keeps its list-valued shape.
+  | { kind: "inSubquery"; expr: Expr; query: Query; negated: boolean; span: Span };
 
 export type ColConstraint =
   | { kind: "notNull"; span: Span }
@@ -103,7 +123,92 @@ export type Stmt =
   | { kind: "createType"; name: string[]; values: string[]; span: Span }
   | { kind: "alterTable"; name: string[]; action: AlterAction; span: Span }
   | { kind: "dropTable"; ifExists: boolean; names: string[][]; span: Span }
-  | { kind: "comment"; objectType: string; name: string[]; comment: string | null; span: Span };
+  | { kind: "comment"; objectType: string; name: string[]; comment: string | null; span: Span }
+  // A top-level query or DML statement is a statement too.
+  | Query
+  | Insert
+  | Update
+  | Delete;
+
+// --- DML AST (the `{ kind }` idiom, mutually recursive with Expr via lazy) ---
+
+export type SetOpKind = "union" | "unionAll" | "intersect" | "intersectAll" | "except" | "exceptAll";
+
+export type Query = SelectStmt | { kind: "setOp"; op: SetOpKind; left: Query; right: Query; span: Span };
+
+export type SelectStmt = {
+  kind: "select";
+  with_: Cte[] | null;
+  recursive: boolean;
+  // `false` = no DISTINCT, `true` = DISTINCT, `Expr[]` = DISTINCT ON (…).
+  distinct: boolean | Expr[];
+  columns: SelectItem[];
+  from: FromItem[] | null;
+  where: Expr | null;
+  groupBy: Expr[] | null;
+  having: Expr | null;
+  orderBy: OrderItem[] | null;
+  limit: Expr | null;
+  offset: Expr | null;
+  span: Span;
+};
+
+// `expr` may be a `star` node (`*`, `t.*`).
+export type SelectItem = { expr: Expr; alias: string | null };
+
+export type FromItemJoinType = "inner" | "left" | "right" | "full" | "cross";
+
+export type FromItem =
+  | { kind: "table"; name: string[]; alias: string | null }
+  | { kind: "subquery"; query: Query; alias: string | null }
+  | {
+      kind: "join";
+      joinType: FromItemJoinType;
+      left: FromItem;
+      right: FromItem;
+      on: Expr | null;
+      using: string[] | null;
+    };
+
+export type OrderItem = { expr: Expr; dir: "asc" | "desc" | null; nulls: "first" | "last" | null };
+
+export type Cte = { name: string; columns: string[] | null; query: Query };
+
+export type OnConflict = {
+  target: string[] | null;
+  action: { kind: "nothing" } | { kind: "update"; set: { column: string; value: Expr }[]; where: Expr | null };
+};
+
+export type Insert = {
+  kind: "insert";
+  table: string[];
+  columns: string[] | null;
+  source: { kind: "values"; rows: Expr[][] } | { kind: "select"; query: Query };
+  onConflict: OnConflict | null;
+  returning: SelectItem[] | null;
+  span: Span;
+};
+
+export type Update = {
+  kind: "update";
+  table: string[];
+  alias: string | null;
+  set: { column: string; value: Expr }[];
+  from: FromItem[] | null;
+  where: Expr | null;
+  returning: SelectItem[] | null;
+  span: Span;
+};
+
+export type Delete = {
+  kind: "delete";
+  table: string[];
+  alias: string | null;
+  using: FromItem[] | null;
+  where: Expr | null;
+  returning: SelectItem[] | null;
+  span: Span;
+};
 
 // --- reserved words (grammar data, not lexer config) ---
 // PG's reserved set: these may not be a bare column/table/type name — only via a
@@ -189,6 +294,21 @@ const RESERVED: ReadonlySet<string> = new Set([
   "where",
   "window",
   "with",
+  // DML clause / join lead-words. These must be reserved so `[AS] alias`
+  // detection stops at them (else `FROM t JOIN u` reads `join` as t's alias,
+  // `UPDATE t SET …` reads `set` as t's alias) and set-op / clause dispatch
+  // stays LL(1). `from/where/group/order/having/limit/offset/on/using/union/
+  // intersect/except/distinct/into/returning/when/then/else/end/case` are
+  // already reserved above.
+  "cross",
+  "full",
+  "inner",
+  "join",
+  "left",
+  "natural",
+  "right",
+  "set",
+  "values",
 ]);
 
 // --- token sugar ---
@@ -228,8 +348,26 @@ function many<T>(rule: Rule<T, SqlTokenType>): Rule<T[], SqlTokenType> {
 // --- expressions ---
 
 const expression: Rule<Expr, SqlTokenType> = lazy(() => expressionRule);
-const argList = delimited(P("("), P(")"), P(","), expression, { interleaved: true });
+// The expr↔query cycle: exactly one Rule<Query> annotation, resolved lazily —
+// the same one-boundary rule js-lite's expr/statement cycle follows. Declared
+// here because the expression atom (scalar subquery, EXISTS, IN (SELECT …))
+// reaches into it.
+const query: Rule<Query, SqlTokenType> = lazy(() => queryRule);
 const exprList = delimited(P("("), P(")"), P(","), expression, { interleaved: true });
+
+// `*` lexes as an operator token; introduced only in select-list / function-arg
+// positions, so the pratt `*` multiply is untouched.
+const bareStar = token("op", { values: ["*"] }).map((_node, span): Expr => ({ kind: "star", table: null, span }));
+
+// `(` opens both `(expr)` and `(SELECT …)`; they share the first token, so the
+// atom peeks one token past it — a `select`/`with` there means a subquery. No
+// attempt() cost. (`peekAhead` gives raw tokens, which is what we want here.)
+const startsQuery = (ctx: ParseContext<SqlTokenType>): boolean => {
+  const after = ctx.peekAhead(1);
+  return after !== null && after.type === "ident" && (after.value === "select" || after.value === "with");
+};
+const isSubqueryParen = (ctx: ParseContext<SqlTokenType>): boolean => ctx.is("punc", "(") && startsQuery(ctx);
+const parenQuery = seq(skip(punc("(")), field("q", query), skip(punc(")"))).map((s) => s.q);
 
 const numberLit = token("number").map((node, span): Expr => ({ kind: "number", value: Number(node.value), span }));
 const stringLit = token("string").map((node, span): Expr => ({ kind: "string", value: node.value, span }));
@@ -239,15 +377,85 @@ const boolLit = token("ident", { values: ["true", "false"] }).map(
 const nullLit = kw("null").map((_node, span): Expr => ({ kind: "null", span }));
 const parenExpr = seq(skip(punc("(")), field("e", expression), skip(punc(")"))).map((s) => s.e);
 
-// A qualified name, optionally applied as a call. One rule (no attempt needed):
-// `count(*)`-style stars are out of scope, so `foo(a, b)` is a call and `s.t.c`
-// a plain reference, dispatched by whether a `(` follows.
-const nameOrCall = seq(field("parts", qualName), field("args", optional(argList))).map(
-  ({ parts, args }, span): Expr =>
-    args === null ? { kind: "name", parts, span } : { kind: "call", name: parts.join("."), args, span },
+// A function argument: `*` (for `count(*)`) or an ordinary expression.
+const functionArg = oneOf(bareStar, expression);
+
+// A dotted name, optionally a trailing `.*` (→ star) or a `(args)` call. One
+// custom rule (no attempt): walk the `name (. name)*` chain, then dispatch on
+// whether `.*` / `(` follows. Subsumes the old nameOrCall — `s.t.c`, `foo(a,b)`,
+// `now()`, and now `t.*`, `count(*)`, `count(distinct x)`.
+const columnRef = custom<Expr, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const parts: string[] = [ctx.parse(nameWord)];
+    while (ctx.is("punc", ".")) {
+      ctx.next(); // "."
+      if (ctx.is("op", "*")) {
+        ctx.next(); // "*"
+        return { kind: "star", table: parts, span: ctx.spanFrom(start) };
+      }
+      parts.push(ctx.parse(nameWord));
+    }
+    if (ctx.is("punc", "(")) {
+      ctx.next(); // "("
+      // PG allows a leading DISTINCT in an aggregate call; accepted but not
+      // recorded (the call AST is intentionally unchanged from the DDL era).
+      ctx.eat("ident", "distinct");
+      const args: Expr[] = [];
+      if (!ctx.is("punc", ")")) {
+        args.push(ctx.parse(functionArg));
+        while (ctx.is("punc", ",")) {
+          ctx.next(); // ","
+          args.push(ctx.parse(functionArg));
+        }
+      }
+      if (!ctx.is("punc", ")")) ctx.croak(`Expected ")" but found ${describeFound(ctx.peek())}`);
+      ctx.next(); // ")"
+      return { kind: "call", name: parts.join("."), args, span: ctx.spanFrom(start) };
+    }
+    return { kind: "name", parts, span: ctx.spanFrom(start) };
+  },
+  { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
 );
 
-const atom = oneOf(numberLit, stringLit, boolLit, nullLit, parenExpr, nameOrCall);
+// CASE [operand] (WHEN e THEN e)+ [ELSE e] END. Written as custom() because the
+// optional operand shares the `ident` first set with WHEN — a plain
+// optional(expression) would fire on `when` and croak inside nameWord.
+const caseExpr = custom<Expr, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("case"));
+    const operand = ctx.is("ident", "when") ? null : ctx.parse(expression);
+    const whens: { when: Expr; then_: Expr }[] = [];
+    do {
+      ctx.parse(kw("when"));
+      const when = ctx.parse(expression);
+      ctx.parse(kw("then"));
+      const then_ = ctx.parse(expression);
+      whens.push({ when, then_ });
+    } while (ctx.is("ident", "when"));
+    const else_ = ctx.eat("ident", "else") !== null ? ctx.parse(expression) : null;
+    ctx.parse(kw("end"));
+    return { kind: "case", operand, whens, else_, span: ctx.spanFrom(start) };
+  },
+  { expected: '"case"', first: [{ type: "ident", value: "case" }] },
+);
+
+// EXISTS (query). Negation (NOT EXISTS) is folded in by the `not` prefix below,
+// so this atom only builds the positive form.
+const existsExpr = seq(skip(kw("exists")), field("query", parenQuery)).map(
+  ({ query: q }, span): Expr => ({ kind: "exists", query: q, negated: false, span }),
+);
+
+// `(` dispatches on the token past it: a scalar subquery vs a parenthesised
+// expression. The alterAction custom rule (below) is the peekAhead template.
+const subqueryExpr = parenQuery.map((q, span): Expr => ({ kind: "subquery", query: q, span }));
+const parenOrSubquery = custom<Expr, SqlTokenType>(
+  (ctx) => (isSubqueryParen(ctx) ? ctx.parse(subqueryExpr) : ctx.parse(parenExpr)),
+  { expected: '"("', first: [{ type: "punc", value: "(" }] },
+);
+
+const atom = oneOf(numberLit, stringLit, boolLit, nullLit, caseExpr, existsExpr, parenOrSubquery, columnRef);
 
 // --- data types ---
 // A type name with optional `(args)` (varchar(10), numeric(10,2)) and an array
@@ -300,6 +508,17 @@ const kwBinary = (op: string, bp: number) => ({
 
 const closeSpan = (left: Expr, end: Span["end"]): Span => ({ start: left.span.start, end });
 
+// `IN (…)` tail, shared by the postfix `in` and the `not in` branch: a
+// `(SELECT …)` builds an inSubquery node, anything else the list-valued `in`.
+const inTail = (ctx: ParseContext<SqlTokenType>, left: Expr, negated: boolean): Expr => {
+  if (isSubqueryParen(ctx)) {
+    const q = ctx.parse(parenQuery);
+    return { kind: "inSubquery", expr: left, query: q, negated, span: closeSpan(left, ctx.lastEnd()) };
+  }
+  const list = ctx.parse(exprList);
+  return { kind: "in", expr: left, list, negated, span: closeSpan(left, ctx.lastEnd()) };
+};
+
 const expressionRule = pratt<Expr, SqlTokenType>({
   atom,
   prefix: [
@@ -308,7 +527,12 @@ const expressionRule = pratt<Expr, SqlTokenType>({
       ops: ["not"],
       type: "ident",
       bp: 6,
-      map: (_op, operand, span): Expr => ({ kind: "unary", op: "not", operand, span }),
+      // `NOT EXISTS (…)` folds into the exists node's `negated` flag rather than
+      // wrapping it — mirroring how NOT IN / NOT LIKE carry their own negation.
+      map: (_op, operand, span): Expr =>
+        operand.kind === "exists"
+          ? { kind: "exists", query: operand.query, negated: !operand.negated, span }
+          : { kind: "unary", op: "not", operand, span },
     },
   ],
   infix: [
@@ -375,8 +599,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
         }
         if (ctx.is("ident", "in")) {
           ctx.next();
-          const list = ctx.parse(exprList);
-          return { kind: "in", expr: left, list, negated: true, span: closeSpan(left, ctx.lastEnd()) };
+          return inTail(ctx, left, true);
         }
         return ctx.croak(
           `Expected "like", "ilike", "between" or "in" after "not" but found ${describeFound(ctx.peek())}`,
@@ -414,8 +637,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
       bp: 10,
       parse: (ctx, left): Expr => {
         ctx.parse(kw("in"));
-        const list = ctx.parse(exprList);
-        return { kind: "in", expr: left, list, negated: false, span: closeSpan(left, ctx.lastEnd()) };
+        return inTail(ctx, left, false);
       },
     },
   ],
@@ -646,7 +868,384 @@ const commentStmt = seq(
   ),
 ).map(({ objectType, name, comment }, span): Stmt => ({ kind: "comment", objectType, name, comment, span }));
 
-const statementBody = oneOf(createStmt, alterStmt, dropStmt, commentStmt).describe("a statement");
+// --- DML: shared clause pieces ---
+
+// `[AS] alias`. A custom rule rather than optional(seq(...)) because the
+// alias's first set is a bare `ident`, which also matches every following
+// clause keyword — so it checks RESERVED directly and stops at a clause/join
+// word (that is why `set`, `values`, and the join leads are reserved). A
+// quoted identifier is always a name; a bare word only when unreserved.
+const asAlias = custom<string | null, SqlTokenType>(
+  (ctx) => {
+    const hasAs = ctx.eat("ident", "as") !== null;
+    const tok = ctx.peek();
+    const isName = tok !== null && (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value)));
+    if (isName) return ctx.parse(nameWord);
+    if (hasAs) return ctx.croak(`Expected an alias but found ${describeFound(ctx.peek())}`);
+    return null;
+  },
+  { expected: "an alias", first: [{ type: "ident" }, { type: "qident" }] },
+);
+
+const eq = token("op", { values: ["="] });
+const assignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(({ column, value }) => ({
+  column,
+  value,
+}));
+const setAssignments = seq(skip(kw("set")), field("items", sepBy(assignment, P(",")))).map((s) => s.items);
+
+const whereClause = seq(skip(kw("where")), field("e", expression)).map((s) => s.e);
+const groupByClause = seq(skip(kwseq("group", "by")), field("exprs", sepBy(expression, P(",")))).map((s) => s.exprs);
+const havingClause = seq(skip(kw("having")), field("e", expression)).map((s) => s.e);
+
+const orderItem = seq(
+  field("expr", expression),
+  field("dir", optional(oneOf(kw("asc"), kw("desc")).map((n) => n.value as "asc" | "desc"))),
+  field(
+    "nulls",
+    optional(
+      seq(
+        skip(kw("nulls")),
+        field(
+          "n",
+          oneOf(kw("first"), kw("last")).map((n) => n.value as "first" | "last"),
+        ),
+      ).map((s) => s.n),
+    ),
+  ),
+).map(({ expr, dir, nulls }): OrderItem => ({ expr, dir: dir ?? null, nulls: nulls ?? null }));
+const orderByClause = seq(skip(kwseq("order", "by")), field("items", sepBy(orderItem, P(",")))).map((s) => s.items);
+
+// DISTINCT / DISTINCT ON (…) / ALL. Succeeds consuming nothing (→ false) so it
+// can sit as a plain field after SELECT.
+const distinctClause = custom<boolean | Expr[], SqlTokenType>(
+  (ctx) => {
+    if (ctx.eat("ident", "all") !== null) return false;
+    if (ctx.eat("ident", "distinct") !== null) {
+      return ctx.eat("ident", "on") !== null ? ctx.parse(exprList) : true;
+    }
+    return false;
+  },
+  {
+    expected: '"distinct" or "all"',
+    first: [
+      { type: "ident", value: "distinct" },
+      { type: "ident", value: "all" },
+    ],
+  },
+);
+
+// LIMIT / OFFSET, in either order; `LIMIT ALL` is a null limit.
+const limitOffset = custom<{ limit: Expr | null; offset: Expr | null }, SqlTokenType>(
+  (ctx) => {
+    let limit: Expr | null = null;
+    let offset: Expr | null = null;
+    for (let i = 0; i < 2; i++) {
+      if (ctx.eat("ident", "limit") !== null) {
+        limit = ctx.eat("ident", "all") !== null ? null : ctx.parse(expression);
+      } else if (ctx.eat("ident", "offset") !== null) {
+        offset = ctx.parse(expression);
+      } else {
+        break;
+      }
+    }
+    return { limit, offset };
+  },
+  {
+    expected: '"limit" or "offset"',
+    first: [
+      { type: "ident", value: "limit" },
+      { type: "ident", value: "offset" },
+    ],
+  },
+);
+
+const selectItem = oneOf(
+  bareStar.map((expr): SelectItem => ({ expr, alias: null })),
+  seq(field("expr", expression), field("alias", asAlias)).map(({ expr, alias }): SelectItem => ({ expr, alias })),
+);
+const returningClause = seq(skip(kw("returning")), field("items", sepBy(selectItem, P(",")))).map((s) => s.items);
+
+// --- DML: FROM items and joins ---
+
+const tableNameFromItem = seq(field("name", qualName), field("alias", asAlias)).map(
+  ({ name, alias }): FromItem => ({ kind: "table", name, alias }),
+);
+const subqueryFromItem = seq(skip(punc("(")), field("query", query), skip(punc(")")), field("alias", asAlias)).map(
+  ({ query: q, alias }): FromItem => ({ kind: "subquery", query: q, alias }),
+);
+const tableRef = oneOf(subqueryFromItem, tableNameFromItem);
+
+// Reads an optional join lead — `[NATURAL] [INNER|LEFT|RIGHT|FULL [OUTER]|CROSS]
+// JOIN` — consuming the keywords and returning the type, or null (consuming
+// nothing) when no JOIN follows. All lead-words are reserved, so this never
+// collides with a preceding table's alias.
+const readJoin = (ctx: ParseContext<SqlTokenType>): { joinType: FromItemJoinType; natural: boolean } | null => {
+  const lead = ctx.peek();
+  const leads = ["join", "inner", "left", "right", "full", "cross", "natural"];
+  if (lead === null || lead.type !== "ident" || !leads.includes(lead.value)) return null;
+  const natural = ctx.eat("ident", "natural") !== null;
+  let joinType: FromItemJoinType = "inner";
+  if (ctx.eat("ident", "cross") !== null) {
+    joinType = "cross";
+  } else if (ctx.eat("ident", "inner") !== null) {
+    joinType = "inner";
+  } else if (ctx.eat("ident", "left") !== null) {
+    joinType = "left";
+    ctx.eat("ident", "outer");
+  } else if (ctx.eat("ident", "right") !== null) {
+    joinType = "right";
+    ctx.eat("ident", "outer");
+  } else if (ctx.eat("ident", "full") !== null) {
+    joinType = "full";
+    ctx.eat("ident", "outer");
+  }
+  ctx.parse(kw("join"));
+  return { joinType, natural };
+};
+
+// One FROM entry and its left-assoc chain of joins. CROSS / NATURAL joins take
+// no ON/USING; every other join takes an optional `ON expr` or `USING (cols)`.
+const joinTail = custom<FromItem, SqlTokenType>(
+  (ctx) => {
+    let left = ctx.parse(tableRef);
+    while (true) {
+      const join = readJoin(ctx);
+      if (join === null) break;
+      const right = ctx.parse(tableRef);
+      let on: Expr | null = null;
+      let using: string[] | null = null;
+      if (!join.natural && join.joinType !== "cross") {
+        if (ctx.eat("ident", "on") !== null) on = ctx.parse(expression);
+        else if (ctx.eat("ident", "using") !== null) using = ctx.parse(columnList);
+      }
+      left = { kind: "join", joinType: join.joinType, left, right, on, using };
+    }
+    return left;
+  },
+  {
+    expected: "a table reference",
+    first: [{ type: "punc", value: "(" }, { type: "ident" }, { type: "qident" }],
+  },
+);
+const fromClause = sepBy(joinTail, P(","));
+
+// --- SELECT core + set-ops + WITH ---
+
+const selectCore = seq(
+  skip(kw("select")),
+  field("distinct", distinctClause),
+  field("columns", sepBy(selectItem, P(","))),
+  field("from", optional(seq(skip(kw("from")), field("f", fromClause)).map((s) => s.f))),
+  field("where", optional(whereClause)),
+  field("groupBy", optional(groupByClause)),
+  field("having", optional(havingClause)),
+  field("orderBy", optional(orderByClause)),
+  field("limitOffset", limitOffset),
+).map(
+  ({ distinct, columns, from, where, groupBy, having, orderBy, limitOffset: lo }, span): SelectStmt => ({
+    kind: "select",
+    with_: null,
+    recursive: false,
+    distinct,
+    columns,
+    from: from ?? null,
+    where: where ?? null,
+    groupBy: groupBy ?? null,
+    having: having ?? null,
+    orderBy: orderBy ?? null,
+    limit: lo.limit,
+    offset: lo.offset,
+    span,
+  }),
+);
+
+const cte = seq(
+  field("name", nameWord),
+  field("columns", optional(columnList)),
+  skip(kw("as")),
+  skip(punc("(")),
+  field("query", query),
+  skip(punc(")")),
+).map(({ name, columns, query: q }): Cte => ({ name, columns: columns ?? null, query: q }));
+const withPrefix = seq(
+  skip(kw("with")),
+  field(
+    "recursive",
+    optional(kw("recursive")).map((x) => x !== null),
+  ),
+  field("ctes", sepBy(cte, P(","))),
+).map(({ recursive, ctes }) => ({ recursive, ctes }));
+
+// A set-op term: a plain SELECT core or a parenthesised query.
+const selectTerm: Rule<Query, SqlTokenType> = oneOf(
+  selectCore,
+  seq(skip(punc("(")), field("q", query), skip(punc(")"))).map((s) => s.q),
+);
+
+// The set-op layer (left-assoc) over select-terms. Keeping it here — rather than
+// as a separate statement — leaves the `(`-dispatch in exactly one place.
+const setOpQuery = custom<Query, SqlTokenType>(
+  (ctx) => {
+    let left = ctx.parse(selectTerm);
+    while (true) {
+      const t = ctx.peek();
+      if (t === null || t.type !== "ident") break;
+      let op: SetOpKind;
+      if (t.value === "union") {
+        ctx.next();
+        op = ctx.eat("ident", "all") !== null ? "unionAll" : "union";
+      } else if (t.value === "intersect") {
+        ctx.next();
+        op = ctx.eat("ident", "all") !== null ? "intersectAll" : "intersect";
+      } else if (t.value === "except") {
+        ctx.next();
+        op = ctx.eat("ident", "all") !== null ? "exceptAll" : "except";
+      } else {
+        break;
+      }
+      const right = ctx.parse(selectTerm);
+      left = { kind: "setOp", op, left, right, span: { start: left.span.start, end: ctx.lastEnd() } };
+    }
+    return left;
+  },
+  {
+    expected: "a query",
+    first: [
+      { type: "ident", value: "select" },
+      { type: "punc", value: "(" },
+    ],
+  },
+);
+
+// A leading WITH attaches to the leftmost SELECT of the set-op tree.
+const attachWith = (q: Query, w: { recursive: boolean; ctes: Cte[] }): void => {
+  let node: Query = q;
+  while (node.kind === "setOp") node = node.left;
+  node.with_ = w.ctes;
+  node.recursive = w.recursive;
+};
+const queryRule = custom<Query, SqlTokenType>(
+  (ctx) => {
+    const w = ctx.is("ident", "with") ? ctx.parse(withPrefix) : null;
+    const q = ctx.parse(setOpQuery);
+    if (w !== null) attachWith(q, w);
+    return q;
+  },
+  {
+    expected: "a query",
+    first: [
+      { type: "ident", value: "with" },
+      { type: "ident", value: "select" },
+      { type: "punc", value: "(" },
+    ],
+  },
+);
+
+// --- INSERT / UPDATE / DELETE ---
+
+const valuesSource = seq(skip(kw("values")), field("rows", sepBy(exprList, P(",")))).map(({ rows }) => ({
+  kind: "values" as const,
+  rows,
+}));
+const insertSource = oneOf(
+  valuesSource,
+  query.map((q) => ({ kind: "select" as const, query: q })),
+);
+
+const onConflict = seq(
+  skip(kwseq("on", "conflict")),
+  field("target", optional(columnList)),
+  skip(kw("do")),
+  field(
+    "action",
+    oneOf(
+      kw("nothing").map(() => ({ kind: "nothing" as const })),
+      seq(skip(kw("update")), field("set", setAssignments), field("where", optional(whereClause))).map(
+        ({ set, where }) => ({ kind: "update" as const, set, where: where ?? null }),
+      ),
+    ),
+  ),
+).map(({ target, action }): OnConflict => ({ target: target ?? null, action }));
+
+const insertStmt = seq(
+  skip(kw("insert")),
+  skip(kw("into")),
+  field("table", qualName),
+  // A `(` here is a column list unless it opens a parenthesised query source;
+  // attempt() rolls the column-list read back when the `(` is really a SELECT.
+  field("columns", optional(attempt(columnList))),
+  field("source", insertSource),
+  field("onConflict", optional(onConflict)),
+  field("returning", optional(returningClause)),
+).map(
+  ({ table, columns, source, onConflict: oc, returning }, span): Insert => ({
+    kind: "insert",
+    table,
+    columns: columns ?? null,
+    source,
+    onConflict: oc ?? null,
+    returning: returning ?? null,
+    span,
+  }),
+);
+
+const updateStmt = seq(
+  skip(kw("update")),
+  field("table", qualName),
+  field("alias", asAlias),
+  field("set", setAssignments),
+  field("from", optional(seq(skip(kw("from")), field("f", fromClause)).map((s) => s.f))),
+  field("where", optional(whereClause)),
+  field("returning", optional(returningClause)),
+).map(
+  ({ table, alias, set, from, where, returning }, span): Update => ({
+    kind: "update",
+    table,
+    alias,
+    set,
+    from: from ?? null,
+    where: where ?? null,
+    returning: returning ?? null,
+    span,
+  }),
+);
+
+const deleteStmt = seq(
+  skip(kw("delete")),
+  skip(kw("from")),
+  field("table", qualName),
+  field("alias", asAlias),
+  field("using", optional(seq(skip(kw("using")), field("f", fromClause)).map((s) => s.f))),
+  field("where", optional(whereClause)),
+  field("returning", optional(returningClause)),
+).map(
+  ({ table, alias, using, where, returning }, span): Delete => ({
+    kind: "delete",
+    table,
+    alias,
+    using: using ?? null,
+    where: where ?? null,
+    returning: returning ?? null,
+    span,
+  }),
+);
+
+// A top-level query statement (SELECT / WITH / parenthesised set-op).
+const queryStmt = query.map((q): Stmt => q);
+
+// First-sets: create/alter/drop/comment/insert/update/delete each dispatch on
+// their own keyword; queryStmt owns `select`/`with`/`(` — all disjoint.
+const statementBody = oneOf(
+  createStmt,
+  alterStmt,
+  dropStmt,
+  commentStmt,
+  insertStmt,
+  updateStmt,
+  deleteStmt,
+  queryStmt,
+).describe("a statement");
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.
 const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
 
