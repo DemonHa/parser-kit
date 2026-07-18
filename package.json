@@ -1,0 +1,16 @@
+{
+  "name": "@database.io/parser-kit",
+  "version": "1.0.0",
+  "main": "./build/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "types:check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "typescript": "catalog:"
+  },
+  "devDependencies": {
+    "vitest": "catalog:"
+  }
+}
