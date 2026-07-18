@@ -70,6 +70,21 @@ const readWhile = (input: InputStream, predicate: (char: string) => boolean) => 
   return out;
 };
 
+// Consume `seq` if it appears next (leaving the stream advanced past it), else
+// restore the stream and report false. Uses the single snapshot slot, so it must
+// only be called once the reader has committed (no pending outer snapshot).
+const consumeSeq = (input: InputStream, seq: string): boolean => {
+  input.snapshot();
+  for (const char of seq) {
+    if (input.peek() !== char) {
+      input.reload();
+      return false;
+    }
+    input.next();
+  }
+  return true;
+};
+
 export function defineLexer<const TT extends string>(def: LexerDef<TT>): Lexer<TT> {
   const { keywords, punctuation, identifier, readers = [] } = def;
 
@@ -268,6 +283,10 @@ const dedentBlock = (raw: string) => {
   return lines.map((line) => line.slice(indent)).join("\n");
 };
 
+// PG's `backslash: true` set. A map form overrides this wholesale; any character
+// not in the active map passes through unchanged (`E'\q'` decodes to `q`).
+const DEFAULT_BACKSLASH: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" };
+
 const string = <TT extends string>(
   type: TT,
   opts: {
@@ -275,28 +294,31 @@ const string = <TT extends string>(
     display?: string;
     /** Triple-fence form: `'''…'''` becomes its own token type, dedented. */
     block?: { fence: string; type: TT; dedent?: boolean };
+    /** Prefix that must precede the quote (e.g. "E" for `E'…'`); own reader instance. */
+    prefix?: string;
+    /** Whether the prefix matches case-insensitively (PG's `E`/`e`). Default true. */
+    prefixCaseInsensitive?: boolean;
+    escape?: {
+      /** `''` inside `'…'` decodes to one quote in the value. */
+      doubling?: boolean;
+      /** `true` = the `{n,t,r,b,f}` set; a map overrides it. Unknown chars pass through. */
+      backslash?: boolean | Record<string, string>;
+    };
   },
 ): Reader<TT> => {
-  const { quote, block, display } = opts;
+  const { quote, block, display, prefix, escape: escaping } = opts;
+  const prefixCaseInsensitive = opts.prefixCaseInsensitive ?? true;
 
-  // Consume `chars` if they appear next, else restore and report false.
-  const tryConsume = (stream: InputStream, chars: string) => {
-    stream.snapshot();
-    for (const char of chars) {
-      if (stream.peek() !== char) {
-        stream.reload();
-        return false;
-      }
-      stream.next();
-    }
-    return true;
+  const matchesPrefixChar = (char: string): boolean => {
+    const p = prefix![0]!;
+    return prefixCaseInsensitive ? char.toLowerCase() === p.toLowerCase() : char === p;
   };
 
   const readBlock = (stream: InputStream, startPosition: Position): ReaderResult<TT> => {
     const fence = block!.fence;
     let raw = "";
     while (!stream.eof()) {
-      if (stream.peek() === fence[0] && tryConsume(stream, fence)) {
+      if (stream.peek() === fence[0] && consumeSeq(stream, fence)) {
         return {
           type: block!.type,
           value: block!.dedent === false ? raw : dedentBlock(raw),
@@ -309,16 +331,84 @@ const string = <TT extends string>(
     stream.croak("Unterminated multi-line string", startPosition, stream.position());
   };
 
+  // Escape-aware body scan. Decodes into `value`; the raw text stays recoverable
+  // via the span. Only `\` at EOF croaks — running off the end otherwise stays
+  // lenient, matching the plain path below.
+  const readEscaped = (stream: InputStream, startPosition: Position): ReaderResult<TT> => {
+    const doubling = escaping!.doubling ?? false;
+    const backslashMap =
+      escaping!.backslash === true ? DEFAULT_BACKSLASH : escaping!.backslash ? escaping!.backslash : null;
+
+    let value = "";
+    while (!stream.eof()) {
+      const char = stream.peek();
+
+      if (char === quote) {
+        if (doubling) {
+          stream.snapshot();
+          stream.next(); // provisional close
+          if (stream.peek() === quote) {
+            stream.next();
+            value += quote;
+            continue;
+          }
+          stream.reload(); // it was the real terminator
+        }
+        break;
+      }
+
+      if (backslashMap && char === "\\") {
+        stream.next(); // consume backslash
+        if (stream.eof()) {
+          stream.croak("Unterminated string", startPosition, stream.position());
+        }
+        const escaped = stream.next();
+        value += backslashMap[escaped] ?? escaped;
+        continue;
+      }
+
+      value += stream.next();
+    }
+
+    const endPosition = stream.position();
+    stream.next(); // closing quote (or nothing at EOF)
+    return { value, start: startPosition, end: endPosition };
+  };
+
   return {
     type,
     display,
-    startsWith: (char) => char === quote,
+    startsWith: (char) => (prefix ? matchesPrefixChar(char) : char === quote),
     read: (stream) => {
+      // A prefixed reader owns its `startsWith`; if the quote doesn't follow the
+      // prefix, restore and fall through (so `EXPLAIN` stays an identifier).
+      if (prefix) {
+        stream.snapshot();
+        for (const char of prefix) {
+          const matches = prefixCaseInsensitive
+            ? stream.peek().toLowerCase() === char.toLowerCase()
+            : stream.peek() === char;
+          if (!matches) {
+            stream.reload();
+            return null;
+          }
+          stream.next();
+        }
+        if (stream.peek() !== quote) {
+          stream.reload();
+          return null;
+        }
+      }
+
       stream.next(); // opening quote
       const startPosition = stream.position();
 
-      if (block?.fence.startsWith(quote) && tryConsume(stream, block.fence.slice(1))) {
+      if (block?.fence.startsWith(quote) && consumeSeq(stream, block.fence.slice(1))) {
         return readBlock(stream, startPosition);
+      }
+
+      if (escaping) {
+        return readEscaped(stream, startPosition);
       }
 
       const value = readWhile(stream, (char) => char !== quote);
@@ -350,41 +440,92 @@ const blockComment = <TT extends string>(
   type: TT,
   open: string,
   close: string,
-  opts: { display?: string } = {},
+  opts: { display?: string; nested?: boolean } = {},
 ): Reader<TT> => ({
   type,
   display: opts.display,
   startsWith: (char) => char === open[0],
   read: (stream) => {
-    stream.snapshot();
-    for (const char of open) {
-      if (stream.peek() !== char) {
-        stream.reload();
-        return null;
-      }
-      stream.next();
-    }
+    if (!consumeSeq(stream, open)) return null;
 
+    // With `nested`, a depth counter lets `open`/`close` pairs balance; inner
+    // delimiters stay in the value and only the outermost `close` terminates.
+    // `close` is tested before `open` so shared-first-char delimiters are
+    // unambiguous. At-EOF stays lenient (partial value, no croak) either way.
     let value = "";
+    let depth = 1;
     while (!stream.eof()) {
-      if (stream.peek() === close[0]) {
-        stream.snapshot();
-        let matched = true;
-        for (const char of close) {
-          if (stream.peek() !== char) {
-            matched = false;
-            break;
-          }
-          stream.next();
-        }
-        if (matched) return { value };
-        stream.reload();
+      if (stream.peek() === close[0] && consumeSeq(stream, close)) {
+        depth -= 1;
+        if (depth === 0) return { value };
+        value += close;
+        continue;
+      }
+      if (opts.nested && stream.peek() === open[0] && consumeSeq(stream, open)) {
+        depth += 1;
+        value += open;
+        continue;
       }
       value += stream.next();
     }
     return { value };
   },
 });
+
+// PG dollar-quoted strings: `$tag$…$tag$` (tag optional, `$$…$$`). The tag
+// follows identifier rules (letter/`_` start), so `$1` positional params fall
+// through. Content is raw — no decoding — and the exact `$tag$` closer, matched
+// case-sensitively, is the only terminator (so differently-tagged `$…$` nest for
+// free). Unterminated croaks — PG errors here, and swallowing the tail would be a
+// poor diagnostic.
+const isTagStart = (char: string) => /[A-Za-z_]/.test(char);
+const isTagPart = (char: string) => /[A-Za-z0-9_]/.test(char);
+
+const dollarString = <TT extends string>(type: TT, opts: { display?: string } = {}): Reader<TT> => {
+  // Scan the content once the `$tag$` opener is committed; croaks on EOF. Split
+  // out with an explicit return type so the terminal croak is seen as never.
+  const readBody = (stream: InputStream, tag: string): ReaderResult<TT> => {
+    const startPosition = stream.position();
+    const closer = `$${tag}$`;
+    let value = "";
+    while (!stream.eof()) {
+      if (stream.peek() === "$") {
+        const endPosition = stream.position();
+        if (consumeSeq(stream, closer)) {
+          return { value, start: startPosition, end: endPosition };
+        }
+      }
+      value += stream.next();
+    }
+    stream.croak("Unterminated dollar-quoted string", startPosition, stream.position());
+  };
+
+  return {
+    type,
+    display: opts.display,
+    startsWith: (char) => char === "$",
+    read: (stream) => {
+      stream.snapshot();
+      stream.next(); // opening `$`
+
+      let tag = "";
+      if (isTagStart(stream.peek())) {
+        tag += stream.next();
+        while (isTagPart(stream.peek())) tag += stream.next();
+      }
+
+      // The tag must be closed by `$`; otherwise this isn't a dollar string
+      // (`$1`, a bare `$`) — restore and fall through.
+      if (stream.peek() !== "$") {
+        stream.reload();
+        return null;
+      }
+      stream.next(); // closing `$` of the opener
+
+      return readBody(stream, tag);
+    },
+  };
+};
 
 const custom = <TT extends string>(
   type: TT,
@@ -407,4 +548,4 @@ const custom = <TT extends string>(
   };
 };
 
-export const readers = { number, string, lineComment, blockComment, custom };
+export const readers = { number, string, dollarString, lineComment, blockComment, custom };
