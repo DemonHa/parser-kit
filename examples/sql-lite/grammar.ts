@@ -23,8 +23,9 @@ import {
 } from "../../src/index";
 import { type SqlTokenType, sqlLexer } from "./lexer";
 
-// SQL-lite parses a slice of PostgreSQL DDL — CREATE TABLE / INDEX / TYPE,
-// ALTER TABLE, DROP TABLE, COMMENT ON — plus a DML core — SELECT (with
+// SQL-lite parses a slice of PostgreSQL DDL — CREATE TABLE (incl. TABLE AS) /
+// INDEX / TYPE (enum, composite, RANGE) / [MATERIALIZED] VIEW / SEQUENCE / DOMAIN,
+// ALTER TABLE, DROP family, TRUNCATE, COMMENT ON — plus a DML core — SELECT (with
 // WITH / DISTINCT / joins / WHERE / GROUP BY / HAVING / ORDER BY / LIMIT /
 // OFFSET / UNION-INTERSECT-EXCEPT) and INSERT / UPDATE / DELETE with
 // RETURNING — over the scalar expression sublanguage that DEFAULT / CHECK /
@@ -212,6 +213,87 @@ export type AlterAction =
   | { kind: "ownerTo"; owner: string }
   | { kind: "replicaIdentity"; mode: "default" | "full" | "nothing" | "usingIndex"; index: string | null };
 
+// --- Phase 7: more CREATE objects ---
+
+// `CREATE TYPE` in its three body shapes, all sharing the `createType` kind and
+// discriminated by `form`. The enum form keeps its original `values` payload.
+export type CompositeAttr = { name: string; type: ColType };
+// A `name = value` option in a `RANGE` type body (`SUBTYPE = float8`, …). `value`
+// is the raw (possibly qualified) name / type on the right of the `=`.
+export type RangeOption = { name: string; value: string };
+export type CreateType =
+  | { kind: "createType"; form: "enum"; name: string[]; values: string[]; span: Span }
+  | { kind: "createType"; form: "composite"; name: string[]; attributes: CompositeAttr[]; span: Span }
+  | { kind: "createType"; form: "range"; name: string[]; options: RangeOption[]; span: Span };
+
+// A single `CREATE SEQUENCE` option. Numeric operands are full expressions (so a
+// signed `MINVALUE -100` parses); the flag / ownership forms carry their own shape.
+export type SequenceOption =
+  | { kind: "as"; type: ColType }
+  | { kind: "increment"; value: Expr }
+  | { kind: "minValue"; value: Expr | null } // null = NO MINVALUE
+  | { kind: "maxValue"; value: Expr | null } // null = NO MAXVALUE
+  | { kind: "start"; value: Expr }
+  | { kind: "restart"; value: Expr | null } // null = bare RESTART
+  | { kind: "cache"; value: Expr }
+  | { kind: "cycle"; value: boolean } // false = NO CYCLE
+  | { kind: "ownedBy"; owner: string[] | null }; // null = OWNED BY NONE
+
+// A `CREATE DOMAIN` constraint. DEFAULT / COLLATE are never named; NOT NULL /
+// NULL / CHECK may carry an optional `CONSTRAINT name`.
+export type DomainConstraint =
+  | { kind: "notNull"; name: string | null }
+  | { kind: "null"; name: string | null }
+  | { kind: "check"; name: string | null; expr: Expr }
+  | { kind: "default"; expr: Expr }
+  | { kind: "collate"; collation: string[] };
+
+// `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] name [(cols)] AS query
+// [WITH [NO] DATA]`. `withData` is materialized-only (`null` otherwise / when the
+// clause is absent); `ifNotExists` is materialized-only in PG but stored uniformly.
+export type CreateView = {
+  kind: "createView";
+  materialized: boolean;
+  orReplace: boolean;
+  ifNotExists: boolean;
+  name: string[];
+  columns: string[] | null;
+  query: Query;
+  withData: boolean | null;
+  span: Span;
+};
+
+// `CREATE SEQUENCE [IF NOT EXISTS] name option*`.
+export type CreateSequence = {
+  kind: "createSequence";
+  ifNotExists: boolean;
+  name: string[];
+  options: SequenceOption[];
+  span: Span;
+};
+
+// `CREATE DOMAIN name [AS] type constraint*`.
+export type CreateDomain = {
+  kind: "createDomain";
+  name: string[];
+  dataType: ColType;
+  constraints: DomainConstraint[];
+  span: Span;
+};
+
+// `CREATE TABLE [IF NOT EXISTS] name [(cols)] AS query [WITH [NO] DATA]` — the
+// query-backed table. Distinct kind from `createTable` so its `query` payload is
+// unmistakable. `columns` is the optional output-column-name list.
+export type CreateTableAs = {
+  kind: "createTableAs";
+  ifNotExists: boolean;
+  name: string[];
+  columns: string[] | null;
+  query: Query;
+  withData: boolean | null;
+  span: Span;
+};
+
 export type Stmt =
   | { kind: "createTable"; ifNotExists: boolean; name: string[]; items: TableItem[]; span: Span }
   | {
@@ -227,7 +309,11 @@ export type Stmt =
       where: Expr | null;
       span: Span;
     }
-  | { kind: "createType"; name: string[]; values: string[]; span: Span }
+  | CreateType
+  | CreateView
+  | CreateSequence
+  | CreateDomain
+  | CreateTableAs
   | { kind: "alterTable"; name: string[]; action: AlterAction; span: Span }
   // Generalized DROP: `DROP {TABLE|VIEW|INDEX|TYPE|SEQUENCE|SCHEMA}
   // [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `objectType` is the
@@ -1329,17 +1415,69 @@ const tableItem = oneOf(tableConstraint, columnDef);
 
 // --- statements ---
 
-const createTableRest = seq(
-  skip(kw("table")),
-  // attempt() so a typo'd `IF NOT EXIST` backtracks to try a table name rather
-  // than hard-committing — the vector the farthest-failure test exploits.
-  field(
-    "ifNotExists",
-    optional(attempt(kwseq("if", "not", "exists"))).map((x) => x !== null),
-  ),
-  field("name", qualName),
-  field("items", delimited(P("("), P(")"), P(","), tableItem, { interleaved: true, recover: true })),
-).map(({ ifNotExists, name, items }, span): Stmt => ({ kind: "createTable", ifNotExists, name, items, span }));
+// `WITH [NO] DATA` — the trailing materialization flag on CREATE TABLE AS /
+// MATERIALIZED VIEW. Returns true (WITH DATA), false (WITH NO DATA), or null when
+// no clause follows. The preceding query never consumes it (WITH DATA is not a
+// query continuation), so a bare `ctx.is("with")` peek is unambiguous here.
+function parseWithData(ctx: ParseContext<SqlTokenType>): boolean | null {
+  if (!ctx.is("ident", "with")) return null;
+  ctx.next(); // WITH
+  if (ctx.eat("ident", "no") !== null) {
+    ctx.parse(kw("data"));
+    return false;
+  }
+  ctx.parse(kw("data"));
+  return true;
+}
+
+// A CTAS column-name list `(a, b) AS` — bare names, ending in AS. attempt() so a
+// real column-definition list (`(id int, …)`) rolls back to the table-item path.
+const ctasColumns = attempt(seq(field("cols", columnList), skip(kw("as"))).map((s) => s.cols));
+
+// CREATE TABLE — the ordinary `(items)` form or the query-backed `AS query`
+// (CREATE TABLE AS). Custom so the CTAS branches (`name AS …` and `name (cols)
+// AS …`) share the leading IF-NOT-EXISTS / name with the classic form.
+const createTableRest = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("table"));
+    // attempt() so a typo'd `IF NOT EXIST` backtracks to try a table name rather
+    // than hard-committing — the vector the farthest-failure test exploits.
+    const ifNotExists = ctx.parse(optional(attempt(kwseq("if", "not", "exists")))) !== null;
+    const name = ctx.parse(qualName);
+    // `CREATE TABLE name AS query [WITH [NO] DATA]`.
+    if (ctx.eat("ident", "as") !== null) {
+      const q = ctx.parse(query);
+      return {
+        kind: "createTableAs",
+        ifNotExists,
+        name,
+        columns: null,
+        query: q,
+        withData: parseWithData(ctx),
+        span: ctx.spanFrom(start),
+      };
+    }
+    // `CREATE TABLE name (cols) AS query` — the `(cols) AS` prefix backtracks
+    // (via ctasColumns) when the `(` really opens a column-definition list.
+    const cols = ctx.parse(optional(ctasColumns));
+    if (cols !== null) {
+      const q = ctx.parse(query);
+      return {
+        kind: "createTableAs",
+        ifNotExists,
+        name,
+        columns: cols,
+        query: q,
+        withData: parseWithData(ctx),
+        span: ctx.spanFrom(start),
+      };
+    }
+    const items = ctx.parse(delimited(P("("), P(")"), P(","), tableItem, { interleaved: true, recover: true }));
+    return { kind: "createTable", ifNotExists, name, items, span: ctx.spanFrom(start) };
+  },
+  { expected: '"table"', first: [{ type: "ident", value: "table" }] },
+);
 
 const createIndexRest = seq(
   field(
@@ -1383,25 +1521,220 @@ const createIndexRest = seq(
   }),
 );
 
-const createTypeRest = seq(
-  skip(kw("type")),
-  field("name", qualName),
-  skip(kwseq("as", "enum")),
-  field(
-    "values",
-    delimited(
-      P("("),
-      P(")"),
-      P(","),
-      token("string").map((n) => n.value),
-      { interleaved: true },
-    ),
-  ),
-).map(({ name, values }, span): Stmt => ({ kind: "createType", name, values, span }));
+// The three CREATE TYPE bodies share the `AS` lead then branch on the next word.
+const enumValues = delimited(
+  P("("),
+  P(")"),
+  P(","),
+  token("string").map((n) => n.value),
+  { interleaved: true },
+);
+// One `field type` attribute of a composite type.
+const compositeAttr = seq(field("name", nameWord), field("type", typeRef)).map(
+  ({ name, type }): CompositeAttr => ({ name, type }),
+);
+const compositeAttrs = delimited(P("("), P(")"), P(","), compositeAttr, { interleaved: true });
 
-// After CREATE, dispatch on the next word: TABLE, [UNIQUE] INDEX, or TYPE.
-const createStmt = seq(skip(kw("create")), field("body", oneOf(createTableRest, createIndexRest, createTypeRest))).map(
-  ({ body }) => body,
+// `( name = value, … )` — the option list of a RANGE type. Entered on the `(`;
+// each value is a (possibly qualified) name / type on the right of the `=`.
+function parseRangeOptions(ctx: ParseContext<SqlTokenType>): RangeOption[] {
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const options: RangeOption[] = [];
+  do {
+    const name = ctx.parse(nameWord);
+    if (ctx.eat("op", "=") === null) ctx.croak(`Expected "=" but found ${describeFound(ctx.peek())}`);
+    options.push({ name, value: ctx.parse(qualName).join(".") });
+  } while (ctx.eat("punc", ",") !== null);
+  expectClose(ctx);
+  return options;
+}
+
+const createTypeRest = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("type"));
+    const name = ctx.parse(qualName);
+    ctx.parse(kw("as"));
+    if (ctx.eat("ident", "enum") !== null) {
+      return { kind: "createType", form: "enum", name, values: ctx.parse(enumValues), span: ctx.spanFrom(start) };
+    }
+    if (ctx.eat("ident", "range") !== null) {
+      return { kind: "createType", form: "range", name, options: parseRangeOptions(ctx), span: ctx.spanFrom(start) };
+    }
+    // `AS ( field type, … )` — a composite type.
+    return {
+      kind: "createType",
+      form: "composite",
+      name,
+      attributes: ctx.parse(compositeAttrs),
+      span: ctx.spanFrom(start),
+    };
+  },
+  { expected: '"type"', first: [{ type: "ident", value: "type" }] },
+);
+
+// CREATE SEQUENCE options: a repeatable, order-free list. Numeric operands are
+// full expressions (so `MINVALUE -100` / `INCREMENT BY -1` parse); the flag and
+// ownership forms carry their own shape. All option words stay unreserved.
+function parseSequenceOptions(ctx: ParseContext<SqlTokenType>): SequenceOption[] {
+  const options: SequenceOption[] = [];
+  while (true) {
+    if (ctx.eat("ident", "as") !== null) {
+      options.push({ kind: "as", type: ctx.parse(typeRef) });
+    } else if (ctx.eat("ident", "increment") !== null) {
+      ctx.eat("ident", "by"); // optional BY
+      options.push({ kind: "increment", value: ctx.parse(expression) });
+    } else if (ctx.eat("ident", "minvalue") !== null) {
+      options.push({ kind: "minValue", value: ctx.parse(expression) });
+    } else if (ctx.eat("ident", "maxvalue") !== null) {
+      options.push({ kind: "maxValue", value: ctx.parse(expression) });
+    } else if (ctx.eat("ident", "start") !== null) {
+      ctx.eat("ident", "with"); // optional WITH
+      options.push({ kind: "start", value: ctx.parse(expression) });
+    } else if (ctx.eat("ident", "restart") !== null) {
+      // RESTART, RESTART n, or RESTART WITH n. A bare RESTART (no value) is
+      // followed by another option word (an ident) or the end, so only a numeric
+      // start (a number, or a signed `-`/`+`) counts as the restart value —
+      // otherwise `RESTART CACHE 5` would read `CACHE` as an expression.
+      const withKw = ctx.eat("ident", "with") !== null;
+      const hasValue = withKw || ctx.is("number") || ctx.is("op", "-") || ctx.is("op", "+");
+      options.push({ kind: "restart", value: hasValue ? ctx.parse(expression) : null });
+    } else if (ctx.eat("ident", "cache") !== null) {
+      options.push({ kind: "cache", value: ctx.parse(expression) });
+    } else if (ctx.eat("ident", "cycle") !== null) {
+      options.push({ kind: "cycle", value: true });
+    } else if (ctx.is("ident", "no")) {
+      const after = ctx.peekAhead(1)?.value;
+      if (after === "minvalue") {
+        ctx.parse(kwseq("no", "minvalue"));
+        options.push({ kind: "minValue", value: null });
+      } else if (after === "maxvalue") {
+        ctx.parse(kwseq("no", "maxvalue"));
+        options.push({ kind: "maxValue", value: null });
+      } else if (after === "cycle") {
+        ctx.parse(kwseq("no", "cycle"));
+        options.push({ kind: "cycle", value: false });
+      } else {
+        break; // some other NO … — not a sequence option
+      }
+    } else if (ctx.is("ident", "owned")) {
+      ctx.parse(kwseq("owned", "by"));
+      options.push({ kind: "ownedBy", owner: ctx.eat("ident", "none") !== null ? null : ctx.parse(qualName) });
+    } else {
+      break;
+    }
+  }
+  return options;
+}
+
+const createSequenceRest = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("sequence"));
+    const ifNotExists = ctx.parse(optional(attempt(kwseq("if", "not", "exists")))) !== null;
+    const name = ctx.parse(qualName);
+    return { kind: "createSequence", ifNotExists, name, options: parseSequenceOptions(ctx), span: ctx.spanFrom(start) };
+  },
+  { expected: '"sequence"', first: [{ type: "ident", value: "sequence" }] },
+);
+
+// CREATE DOMAIN constraints: DEFAULT / COLLATE (never named) and the optionally
+// `CONSTRAINT name`-prefixed NOT NULL / NULL / CHECK. All words stay unreserved.
+function parseDomainConstraints(ctx: ParseContext<SqlTokenType>): DomainConstraint[] {
+  const constraints: DomainConstraint[] = [];
+  while (true) {
+    let name: string | null = null;
+    if (ctx.eat("ident", "constraint") !== null) name = ctx.parse(nameWord);
+    if (ctx.is("ident", "not")) {
+      ctx.parse(kwseq("not", "null"));
+      constraints.push({ kind: "notNull", name });
+    } else if (ctx.eat("ident", "null") !== null) {
+      constraints.push({ kind: "null", name });
+    } else if (ctx.eat("ident", "check") !== null) {
+      constraints.push({ kind: "check", name, expr: ctx.parse(parenExpr) });
+    } else if (name !== null) {
+      // A `CONSTRAINT name` must be followed by NOT NULL / NULL / CHECK.
+      return ctx.croak(`Expected "not", "null" or "check" but found ${describeFound(ctx.peek())}`);
+    } else if (ctx.eat("ident", "default") !== null) {
+      constraints.push({ kind: "default", expr: ctx.parse(expression) });
+    } else if (ctx.eat("ident", "collate") !== null) {
+      constraints.push({ kind: "collate", collation: ctx.parse(qualName) });
+    } else {
+      break;
+    }
+  }
+  return constraints;
+}
+
+const createDomainRest = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("domain"));
+    const name = ctx.parse(qualName);
+    ctx.eat("ident", "as"); // optional AS
+    const dataType = ctx.parse(typeRef);
+    return {
+      kind: "createDomain",
+      name,
+      dataType,
+      constraints: parseDomainConstraints(ctx),
+      span: ctx.spanFrom(start),
+    };
+  },
+  { expected: '"domain"', first: [{ type: "ident", value: "domain" }] },
+);
+
+// The body of a (MATERIALIZED) VIEW after the VIEW keyword: `[IF NOT EXISTS] name
+// [(cols)] AS query [WITH [NO] DATA]`. The query reuses the shared `query` rule.
+function parseViewBody(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  materialized: boolean,
+  orReplace: boolean,
+): Stmt {
+  const ifNotExists = materialized && ctx.parse(optional(attempt(kwseq("if", "not", "exists")))) !== null;
+  const name = ctx.parse(qualName);
+  const columns = ctx.is("punc", "(") ? ctx.parse(columnList) : null;
+  ctx.parse(kw("as"));
+  const q = ctx.parse(query);
+  const withData = materialized ? parseWithData(ctx) : null;
+  return {
+    kind: "createView",
+    materialized,
+    orReplace,
+    ifNotExists,
+    name,
+    columns,
+    query: q,
+    withData,
+    span: ctx.spanFrom(start),
+  };
+}
+
+// The non-view CREATE targets, dispatched by their leading keyword.
+const createTail = oneOf(createTableRest, createIndexRest, createTypeRest, createSequenceRest, createDomainRest);
+
+// After CREATE: an optional `OR REPLACE`, then a (MATERIALIZED) VIEW — or, with no
+// such prefix, one of the keyword-led targets (TABLE / [UNIQUE] INDEX / TYPE /
+// SEQUENCE / DOMAIN). `OR REPLACE` is only valid before a view here.
+const createStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("create"));
+    const orReplace = ctx.is("ident", "or");
+    if (orReplace) ctx.parse(kwseq("or", "replace"));
+    if (ctx.is("ident", "materialized")) {
+      ctx.parse(kwseq("materialized", "view"));
+      return parseViewBody(ctx, start, true, orReplace);
+    }
+    if (ctx.eat("ident", "view") !== null) return parseViewBody(ctx, start, false, orReplace);
+    if (orReplace) {
+      return ctx.croak(`Expected "view" or "materialized" but found ${describeFound(ctx.peek())}`);
+    }
+    return ctx.parse(createTail);
+  },
+  { expected: '"create"', first: [{ type: "ident", value: "create" }] },
 );
 
 // ALTER's action is dispatched with a one-token peekAhead: `ADD [COLUMN] …` vs

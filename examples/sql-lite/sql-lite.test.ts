@@ -197,6 +197,7 @@ describe("SQL-lite statements", () => {
   it("parses CREATE TYPE ... AS ENUM", () => {
     expect(firstStmt("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');")).toEqual({
       kind: "createType",
+      form: "enum",
       name: ["mood"],
       values: ["sad", "ok", "happy"],
     });
@@ -385,6 +386,158 @@ describe("SQL-lite DROP family & TRUNCATE", () => {
     expect(firstStmt("TRUNCATE public.t CONTINUE IDENTITY;")).toMatchObject({
       names: [["public", "t"]],
       identity: "continue",
+    });
+  });
+});
+
+// --- Phase 7: more CREATE objects ---
+
+describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
+  it("parses a plain view whose body reuses the query rule", () => {
+    expect(firstStmt("CREATE VIEW active AS SELECT id FROM users WHERE active;")).toEqual({
+      kind: "createView",
+      materialized: false,
+      orReplace: false,
+      ifNotExists: false,
+      name: ["active"],
+      columns: null,
+      query: sel({ columns: [col(name("id"))], from: [tableFrom(["users"])], where: name("active") }),
+      withData: null,
+    });
+  });
+
+  it("parses OR REPLACE with an output column list", () => {
+    expect(firstStmt("CREATE OR REPLACE VIEW v (a, b) AS SELECT 1, 2;")).toMatchObject({
+      kind: "createView",
+      materialized: false,
+      orReplace: true,
+      name: ["v"],
+      columns: ["a", "b"],
+      withData: null,
+    });
+  });
+
+  it("parses MATERIALIZED VIEW with IF NOT EXISTS and WITH [NO] DATA", () => {
+    expect(firstStmt("CREATE MATERIALIZED VIEW IF NOT EXISTS mv AS SELECT * FROM t WITH NO DATA;")).toMatchObject({
+      kind: "createView",
+      materialized: true,
+      ifNotExists: true,
+      name: ["mv"],
+      withData: false,
+    });
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv AS SELECT 1 WITH DATA;")).toMatchObject({
+      materialized: true,
+      withData: true,
+    });
+  });
+
+  it("rejects OR REPLACE before a non-view object", () => {
+    expect(() => sqlLite.parse("CREATE OR REPLACE TABLE t (id int);")).toThrow(/Expected "view" or "materialized"/);
+  });
+});
+
+describe("SQL-lite CREATE TABLE AS", () => {
+  it("parses CREATE TABLE AS SELECT", () => {
+    expect(firstStmt("CREATE TABLE snap AS SELECT id, name FROM users;")).toEqual({
+      kind: "createTableAs",
+      ifNotExists: false,
+      name: ["snap"],
+      columns: null,
+      query: sel({ columns: [col(name("id")), col(name("name"))], from: [tableFrom(["users"])] }),
+      withData: null,
+    });
+  });
+
+  it("parses a column list, IF NOT EXISTS and WITH NO DATA", () => {
+    expect(firstStmt("CREATE TABLE IF NOT EXISTS t (a, b) AS SELECT 1, 2 WITH NO DATA;")).toMatchObject({
+      kind: "createTableAs",
+      ifNotExists: true,
+      name: ["t"],
+      columns: ["a", "b"],
+      withData: false,
+    });
+  });
+
+  it("still parses an ordinary CREATE TABLE (the CTAS column list backtracks)", () => {
+    expect(firstStmt("CREATE TABLE t (id int, name text);")).toMatchObject({
+      kind: "createTable",
+      name: ["t"],
+    });
+  });
+});
+
+describe("SQL-lite CREATE TYPE composite / range", () => {
+  it("parses a composite type", () => {
+    expect(firstStmt("CREATE TYPE point AS (x float8, y float8);")).toEqual({
+      kind: "createType",
+      form: "composite",
+      name: ["point"],
+      attributes: [
+        { name: "x", type: { name: "float8", args: [], array: false } },
+        { name: "y", type: { name: "float8", args: [], array: false } },
+      ],
+    });
+  });
+
+  it("parses a range type option list", () => {
+    expect(firstStmt("CREATE TYPE floatrange AS RANGE (SUBTYPE = float8, SUBTYPE_OPCLASS = float8_ops);")).toEqual({
+      kind: "createType",
+      form: "range",
+      name: ["floatrange"],
+      options: [
+        { name: "subtype", value: "float8" },
+        { name: "subtype_opclass", value: "float8_ops" },
+      ],
+    });
+  });
+});
+
+describe("SQL-lite CREATE SEQUENCE", () => {
+  it("parses a sequence with a full option list", () => {
+    const stmt = firstStmt(
+      "CREATE SEQUENCE IF NOT EXISTS s AS bigint INCREMENT BY 2 MINVALUE 1 NO MAXVALUE START WITH 10 CACHE 5 CYCLE OWNED BY t.id;",
+    );
+    expect(stmt).toMatchObject({ kind: "createSequence", ifNotExists: true, name: ["s"] });
+    expect((stmt as any).options).toEqual([
+      { kind: "as", type: { name: "bigint", args: [], array: false } },
+      { kind: "increment", value: num(2) },
+      { kind: "minValue", value: num(1) },
+      { kind: "maxValue", value: null },
+      { kind: "start", value: num(10) },
+      { kind: "cache", value: num(5) },
+      { kind: "cycle", value: true },
+      { kind: "ownedBy", owner: ["t", "id"] },
+    ]);
+  });
+
+  it("parses NO CYCLE, OWNED BY NONE and a signed MINVALUE", () => {
+    const stmt = firstStmt("CREATE SEQUENCE s MINVALUE -100 NO CYCLE OWNED BY NONE;");
+    expect((stmt as any).options).toEqual([
+      { kind: "minValue", value: { kind: "unary", op: "-", operand: num(100) } },
+      { kind: "cycle", value: false },
+      { kind: "ownedBy", owner: null },
+    ]);
+  });
+});
+
+describe("SQL-lite CREATE DOMAIN", () => {
+  it("parses a domain with DEFAULT and a named CHECK", () => {
+    const stmt = firstStmt(
+      "CREATE DOMAIN us_postal AS text NOT NULL DEFAULT '00000' CONSTRAINT fmt CHECK (VALUE ~ '^[0-9]{5}$');",
+    );
+    expect(stmt).toMatchObject({ kind: "createDomain", name: ["us_postal"], dataType: { name: "text" } });
+    expect((stmt as any).constraints).toEqual([
+      { kind: "notNull", name: null },
+      { kind: "default", expr: str("00000") },
+      { kind: "check", name: "fmt", expr: bin("~", name("value"), str("^[0-9]{5}$")) },
+    ]);
+  });
+
+  it("parses a domain without the optional AS", () => {
+    expect(firstStmt("CREATE DOMAIN positive int CHECK (VALUE > 0);")).toMatchObject({
+      kind: "createDomain",
+      name: ["positive"],
+      dataType: { name: "int" },
     });
   });
 });
