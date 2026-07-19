@@ -1145,6 +1145,84 @@ describe("SQL-lite set-ops & CTEs", () => {
   });
 });
 
+// --- data-modifying CTEs (WITH before DML, DML CTE bodies) ---
+
+describe("SQL-lite data-modifying CTEs", () => {
+  it("attaches a WITH prefix to INSERT / UPDATE / DELETE", () => {
+    expect(firstStmt("WITH c AS (SELECT 1 AS x) INSERT INTO t SELECT * FROM c;")).toMatchObject({
+      kind: "insert",
+      recursive: false,
+      with_: [{ name: "c", columns: null, query: sel({ columns: [col(num(1), "x")] }) }],
+      table: ["t"],
+      source: { kind: "select", query: sel({ columns: [col(star())], from: [tableFrom(["c"])] }) },
+    });
+    expect(firstStmt("WITH c AS (SELECT 1) UPDATE t SET a = 1 WHERE a > 0;")).toMatchObject({
+      kind: "update",
+      recursive: false,
+      with_: [{ name: "c", query: sel({ columns: [col(num(1))] }) }],
+      set: [{ column: "a", value: num(1) }],
+    });
+    expect(firstStmt("WITH RECURSIVE c AS (SELECT 1) DELETE FROM t WHERE a > 0;")).toMatchObject({
+      kind: "delete",
+      recursive: true,
+      with_: [{ name: "c" }],
+      table: ["t"],
+    });
+  });
+
+  it("leaves WITH-less DML AST unchanged (no with_ / recursive keys)", () => {
+    // stripSpans → the exact shape the pre-Phase-5 tests asserted; the optional
+    // WITH fields must not surface when no WITH prefix is present.
+    expect(firstStmt("INSERT INTO t (a) VALUES (1);")).toEqual({
+      kind: "insert",
+      table: ["t"],
+      columns: ["a"],
+      source: { kind: "values", rows: [[num(1)]] },
+      onConflict: null,
+      returning: null,
+    });
+  });
+
+  it("parses a data-modifying CTE body (DELETE ... RETURNING)", () => {
+    expect(firstStmt("WITH moved AS (DELETE FROM src WHERE done RETURNING id) SELECT * FROM moved;")).toMatchObject({
+      kind: "select",
+      with_: [
+        {
+          name: "moved",
+          query: {
+            kind: "delete",
+            table: ["src"],
+            where: name("done"),
+            returning: [col(name("id"))],
+          },
+        },
+      ],
+      from: [tableFrom(["moved"])],
+    });
+  });
+
+  it("parses an INSERT ... RETURNING CTE feeding another INSERT", () => {
+    expect(
+      firstStmt("WITH ins AS (INSERT INTO a VALUES (1) RETURNING id) INSERT INTO b SELECT id FROM ins;"),
+    ).toMatchObject({
+      kind: "insert",
+      table: ["b"],
+      with_: [
+        {
+          name: "ins",
+          query: { kind: "insert", table: ["a"], source: { kind: "values", rows: [[num(1)]] } },
+        },
+      ],
+    });
+  });
+
+  it("croaks when a WITH prefix leads a bare VALUES query", () => {
+    expect(() => sqlLite.parse("WITH c AS (SELECT 1) VALUES (1);")).toThrow(
+      /WITH must attach to a SELECT, INSERT, UPDATE or DELETE/,
+    );
+  });
+});
+
 // --- INSERT / UPDATE / DELETE ---
 
 describe("SQL-lite INSERT / UPDATE / DELETE", () => {

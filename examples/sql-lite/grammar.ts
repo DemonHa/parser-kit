@@ -41,11 +41,12 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // The SELECT surface also carries the remaining query clauses: LATERAL /
 // table-function / TABLESAMPLE FROM items, VALUES as a standalone query and
 // table source, FETCH FIRST … ROWS, FOR UPDATE/SHARE locking, and GROUP BY
-// ROLLUP / CUBE / GROUPING SETS.
+// ROLLUP / CUBE / GROUPING SETS. A WITH prefix may lead any DML statement
+// (`WITH … INSERT/UPDATE/DELETE`), and a CTE body may itself be data-modifying
+// (`WITH x AS (DELETE … RETURNING …) …`).
 //
-// Out of scope (v1): WITH before INSERT/UPDATE/DELETE, and column-alias lists on
-// FROM items (`t (a, b)`). Ordinary aggregates (no OVER/FILTER/WITHIN GROUP)
-// still parse as plain function calls.
+// Out of scope (v1): column-alias lists on FROM items (`t (a, b)`). Ordinary
+// aggregates (no OVER/FILTER/WITHIN GROUP) still parse as plain function calls.
 
 // --- AST ---
 // Recursive nodes (Expr) are declared by hand, exactly as js-lite does; the
@@ -310,13 +311,18 @@ export type FromItem =
 
 export type OrderItem = { expr: Expr; dir: "asc" | "desc" | null; nulls: "first" | "last" | null };
 
-export type Cte = { name: string; columns: string[] | null; query: Query };
+// A CTE body is a query or a data-modifying statement (kept in the `query` field
+// for both, so plain `WITH … SELECT` output is unchanged).
+export type Cte = { name: string; columns: string[] | null; query: Query | Insert | Update | Delete };
 
 export type OnConflict = {
   target: string[] | null;
   action: { kind: "nothing" } | { kind: "update"; set: { column: string; value: Expr }[]; where: Expr | null };
 };
 
+// The three DML statements each accept a leading `WITH …` prefix. `with_` /
+// `recursive` are present only when one attaches (like FromItem's optional
+// `lateral`), so WITH-less DML keeps its original AST shape.
 export type Insert = {
   kind: "insert";
   table: string[];
@@ -324,6 +330,8 @@ export type Insert = {
   source: { kind: "values"; rows: Expr[][] } | { kind: "select"; query: Query };
   onConflict: OnConflict | null;
   returning: SelectItem[] | null;
+  with_?: Cte[];
+  recursive?: boolean;
   span: Span;
 };
 
@@ -335,6 +343,8 @@ export type Update = {
   from: FromItem[] | null;
   where: Expr | null;
   returning: SelectItem[] | null;
+  with_?: Cte[];
+  recursive?: boolean;
   span: Span;
 };
 
@@ -345,6 +355,8 @@ export type Delete = {
   using: FromItem[] | null;
   where: Expr | null;
   returning: SelectItem[] | null;
+  with_?: Cte[];
+  recursive?: boolean;
   span: Span;
 };
 
@@ -1798,12 +1810,35 @@ const selectCore = seq(
   }),
 );
 
+// A CTE body is a full query or a data-modifying statement. Dispatch on the
+// leading keyword (INSERT/UPDATE/DELETE take their dedicated rules); anything
+// else — SELECT / VALUES / `(` / a nested WITH — is an ordinary query.
+const cteBody = custom<Query | Insert | Update | Delete, SqlTokenType>(
+  (ctx) => {
+    if (ctx.is("ident", "insert")) return ctx.parse(insertStmt);
+    if (ctx.is("ident", "update")) return ctx.parse(updateStmt);
+    if (ctx.is("ident", "delete")) return ctx.parse(deleteStmt);
+    return ctx.parse(query);
+  },
+  {
+    expected: "a query, INSERT, UPDATE or DELETE",
+    first: [
+      { type: "ident", value: "insert" },
+      { type: "ident", value: "update" },
+      { type: "ident", value: "delete" },
+      { type: "ident", value: "with" },
+      { type: "ident", value: "select" },
+      { type: "ident", value: "values" },
+      { type: "punc", value: "(" },
+    ],
+  },
+);
 const cte = seq(
   field("name", nameWord),
   field("columns", optional(columnList)),
   skip(kw("as")),
   skip(punc("(")),
-  field("query", query),
+  field("query", cteBody),
   skip(punc(")")),
 ).map(({ name, columns, query: q }): Cte => ({ name, columns: columns ?? null, query: q }));
 const withPrefix = seq(
@@ -1814,6 +1849,21 @@ const withPrefix = seq(
   ),
   field("ctes", sepBy(cte, P(","))),
 ).map(({ recursive, ctes }) => ({ recursive, ctes }));
+
+// Attach a parsed WITH prefix to the statement it leads: for a set-op query the
+// CTEs bind to the leftmost SELECT; an INSERT/UPDATE/DELETE takes them directly.
+// A bare VALUES query has nowhere to hang CTEs, so croak rather than drop them.
+const attachWith = (
+  ctx: ParseContext<SqlTokenType>,
+  node: Query | Insert | Update | Delete,
+  w: { recursive: boolean; ctes: Cte[] },
+): void => {
+  let target: Query | Insert | Update | Delete = node;
+  while (target.kind === "setOp") target = target.left;
+  if (target.kind === "values") ctx.croak("WITH must attach to a SELECT, INSERT, UPDATE or DELETE");
+  target.with_ = w.ctes;
+  target.recursive = w.recursive;
+};
 
 // `VALUES (…), (…) [ORDER BY …] [LIMIT/OFFSET …]` as a query — a peer of the
 // SELECT core. Reuses the same row list as INSERT … VALUES plus the shared
@@ -1877,20 +1927,14 @@ const setOpQuery = custom<Query, SqlTokenType>(
   },
 );
 
-// A leading WITH attaches to the leftmost SELECT of the set-op tree. A VALUES
-// query as the target isn't supported (WITH before VALUES is rare), so croak
-// rather than silently drop the CTEs.
+// A leading WITH attaches to the leftmost SELECT of the set-op tree (see
+// attachWith). A VALUES query as the target isn't supported (WITH before VALUES
+// is rare), so croak rather than silently drop the CTEs.
 const queryRule = custom<Query, SqlTokenType>(
   (ctx) => {
     const w = ctx.is("ident", "with") ? ctx.parse(withPrefix) : null;
     const q = ctx.parse(setOpQuery);
-    if (w !== null) {
-      let node: Query = q;
-      while (node.kind === "setOp") node = node.left;
-      if (node.kind !== "select") return ctx.croak("WITH must attach to a SELECT");
-      node.with_ = w.ctes;
-      node.recursive = w.recursive;
-    }
+    if (w !== null) attachWith(ctx, q, w);
     return q;
   },
   {
@@ -2004,21 +2048,39 @@ const deleteStmt = seq(
   }),
 );
 
-// A top-level query statement (SELECT / WITH / parenthesised set-op).
-const queryStmt = query.map((q): Stmt => q);
+// A DML statement, optionally led by a WITH prefix: `[WITH …]
+// SELECT|VALUES|(…)|INSERT|UPDATE|DELETE`. The CTE list can precede any of these,
+// so it must be consumed before dispatch, then attached to the head statement.
+// The no-WITH query path goes straight to setOpQuery (queryRule's own WITH
+// handling would be redundant here).
+const dmlStatement = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const w = ctx.is("ident", "with") ? ctx.parse(withPrefix) : null;
+    let node: Query | Insert | Update | Delete;
+    if (ctx.is("ident", "insert")) node = ctx.parse(insertStmt);
+    else if (ctx.is("ident", "update")) node = ctx.parse(updateStmt);
+    else if (ctx.is("ident", "delete")) node = ctx.parse(deleteStmt);
+    else node = ctx.parse(setOpQuery);
+    if (w !== null) attachWith(ctx, node, w);
+    return node;
+  },
+  {
+    expected: "a statement",
+    first: [
+      { type: "ident", value: "with" },
+      { type: "ident", value: "insert" },
+      { type: "ident", value: "update" },
+      { type: "ident", value: "delete" },
+      { type: "ident", value: "select" },
+      { type: "ident", value: "values" },
+      { type: "punc", value: "(" },
+    ],
+  },
+);
 
-// First-sets: create/alter/drop/comment/insert/update/delete each dispatch on
-// their own keyword; queryStmt owns `select`/`with`/`(` — all disjoint.
-const statementBody = oneOf(
-  createStmt,
-  alterStmt,
-  dropStmt,
-  commentStmt,
-  insertStmt,
-  updateStmt,
-  deleteStmt,
-  queryStmt,
-).describe("a statement");
+// First-sets: create/alter/drop/comment each dispatch on their own keyword;
+// dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
+const statementBody = oneOf(createStmt, alterStmt, dropStmt, commentStmt, dmlStatement).describe("a statement");
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.
 const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
 
