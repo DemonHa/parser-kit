@@ -38,9 +38,14 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // plus window functions: `fn(…) [WITHIN GROUP (ORDER BY …)] [FILTER (WHERE …)]
 // [OVER (…) | OVER name]`, with named windows via a `WINDOW w AS (…)` clause.
 //
-// Out of scope (v1): LATERAL, WITH before INSERT/UPDATE/DELETE, VALUES as a
-// standalone statement, FETCH, and table-function FROM items. Ordinary
-// aggregates (no OVER/FILTER/WITHIN GROUP) still parse as plain function calls.
+// The SELECT surface also carries the remaining query clauses: LATERAL /
+// table-function / TABLESAMPLE FROM items, VALUES as a standalone query and
+// table source, FETCH FIRST … ROWS, FOR UPDATE/SHARE locking, and GROUP BY
+// ROLLUP / CUBE / GROUPING SETS.
+//
+// Out of scope (v1): WITH before INSERT/UPDATE/DELETE, and column-alias lists on
+// FROM items (`t (a, b)`). Ordinary aggregates (no OVER/FILTER/WITHIN GROUP)
+// still parse as plain function calls.
 
 // --- AST ---
 // Recursive nodes (Expr) are declared by hand, exactly as js-lite does; the
@@ -224,7 +229,27 @@ export type Stmt =
 
 export type SetOpKind = "union" | "unionAll" | "intersect" | "intersectAll" | "except" | "exceptAll";
 
-export type Query = SelectStmt | { kind: "setOp"; op: SetOpKind; left: Query; right: Query; span: Span };
+// `VALUES (…), (…)` as a query — usable standalone, as a set-op term, and as a
+// parenthesised FROM source. Carries the same trailing ORDER BY / LIMIT / OFFSET
+// tail a SELECT does (parsed by the shared clause rules).
+export type ValuesQuery = {
+  kind: "values";
+  rows: Expr[][];
+  orderBy: OrderItem[] | null;
+  limit: Expr | null;
+  offset: Expr | null;
+  span: Span;
+};
+
+export type Query = SelectStmt | ValuesQuery | { kind: "setOp"; op: SetOpKind; left: Query; right: Query; span: Span };
+
+// `FOR UPDATE|SHARE|NO KEY UPDATE|KEY SHARE [OF t, …] [NOWAIT|SKIP LOCKED]` — a
+// row-locking clause. A SELECT may carry several (each locks its listed tables).
+export type LockingClause = {
+  strength: "update" | "noKeyUpdate" | "share" | "keyShare";
+  of: string[][];
+  wait: "nowait" | "skipLocked" | null;
+};
 
 export type SelectStmt = {
   kind: "select";
@@ -235,24 +260,45 @@ export type SelectStmt = {
   columns: SelectItem[];
   from: FromItem[] | null;
   where: Expr | null;
-  groupBy: Expr[] | null;
+  // A GROUP BY item is a plain expression or a ROLLUP / CUBE / GROUPING SETS
+  // grouping element (a bare expr keeps its Expr shape, so ungrouped tests hold).
+  groupBy: GroupByItem[] | null;
   having: Expr | null;
   // Named windows from a `WINDOW w AS (…)` clause (after HAVING, before ORDER BY).
   window: NamedWindow[] | null;
   orderBy: OrderItem[] | null;
   limit: Expr | null;
   offset: Expr | null;
+  // Row-locking clauses (`FOR UPDATE …`), after LIMIT/OFFSET; null when absent.
+  locking: LockingClause[] | null;
   span: Span;
 };
+
+// A GROUP BY entry: an ordinary expression, or one of the grouping-set
+// constructs. `args` / `sets` group their operands — each inner `Expr[]` is one
+// grouping (a bare `a` → `[a]`, a parenthesised `(a, b)` → `[a, b]`, `()` → `[]`).
+export type GroupingElement =
+  | { kind: "rollup"; args: Expr[][]; span: Span }
+  | { kind: "cube"; args: Expr[][]; span: Span }
+  | { kind: "groupingSets"; sets: Expr[][]; span: Span };
+export type GroupByItem = Expr | GroupingElement;
 
 // `expr` may be a `star` node (`*`, `t.*`).
 export type SelectItem = { expr: Expr; alias: string | null };
 
 export type FromItemJoinType = "inner" | "left" | "right" | "full" | "cross";
 
+// `TABLESAMPLE method (arg, …) [REPEATABLE (seed)]` on a table FROM item.
+export type TableSample = { method: string; args: Expr[]; repeatable: Expr | null };
+
 export type FromItem =
-  | { kind: "table"; name: string[]; alias: string | null }
-  | { kind: "subquery"; query: Query; alias: string | null }
+  // `tablesample` is present only when a TABLESAMPLE clause follows.
+  | { kind: "table"; name: string[]; alias: string | null; tablesample?: TableSample }
+  // `lateral` is present (and true) only for a `LATERAL (subquery)`.
+  | { kind: "subquery"; query: Query; alias: string | null; lateral?: boolean }
+  // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
+  // is the underlying `call` expression node.
+  | { kind: "function"; call: Expr; alias: string | null; lateral?: boolean }
   | {
       kind: "join";
       joinType: FromItemJoinType;
@@ -400,6 +446,9 @@ const RESERVED: ReadonlySet<string> = new Set([
   "natural",
   "right",
   "set",
+  // `tablesample` must be reserved so a table item's `[AS] alias` detector stops
+  // before it (else `FROM t TABLESAMPLE …` reads `tablesample` as t's alias).
+  "tablesample",
   "values",
 ]);
 
@@ -1410,7 +1459,61 @@ const assignment = seq(field("column", nameWord), skip(eq), field("value", expre
 const setAssignments = seq(skip(kw("set")), field("items", sepBy(assignment, P(",")))).map((s) => s.items);
 
 const whereClause = seq(skip(kw("where")), field("e", expression)).map((s) => s.e);
-const groupByClause = seq(skip(kwseq("group", "by")), field("exprs", sepBy(expression, P(",")))).map((s) => s.exprs);
+
+// One grouping element inside ROLLUP/CUBE/GROUPING SETS: a parenthesised column
+// group `( a, b )` (possibly the empty `()`) or a bare expression (→ `[expr]`).
+function parseGroupingElement(ctx: ParseContext<SqlTokenType>): Expr[] {
+  if (ctx.is("punc", "(")) {
+    ctx.next(); // "("
+    const exprs: Expr[] = [];
+    if (!ctx.is("punc", ")")) {
+      exprs.push(ctx.parse(expression));
+      while (ctx.eat("punc", ",") !== null) exprs.push(ctx.parse(expression));
+    }
+    expectClose(ctx);
+    return exprs;
+  }
+  return [ctx.parse(expression)];
+}
+
+// The parenthesised element list shared by ROLLUP / CUBE / GROUPING SETS:
+// `( element, … )`. Entered positioned on the opening `(`.
+function parseGroupingList(ctx: ParseContext<SqlTokenType>): Expr[][] {
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const elements: Expr[][] = [parseGroupingElement(ctx)];
+  while (ctx.eat("punc", ",") !== null) elements.push(parseGroupingElement(ctx));
+  expectClose(ctx);
+  return elements;
+}
+
+// A GROUP BY item: `ROLLUP (…)`, `CUBE (…)`, `GROUPING SETS (…)`, or a plain
+// expression. The construct keywords stay unreserved — each is recognised only
+// when the tell-tale token follows (`(` for rollup/cube, `sets` for grouping),
+// so `GROUP BY cube` (a column) and `GROUP BY grouping(x)` (a function) still
+// parse as ordinary expressions.
+const groupByItem = custom<GroupByItem, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const head = ctx.peek();
+    if (head?.type === "ident" && (head.value === "rollup" || head.value === "cube")) {
+      const after = ctx.peekAhead(1);
+      if (after?.type === "punc" && after.value === "(") {
+        const kind = head.value as "rollup" | "cube";
+        ctx.next(); // rollup / cube
+        return { kind, args: parseGroupingList(ctx), span: ctx.spanFrom(start) };
+      }
+    }
+    if (head?.type === "ident" && head.value === "grouping" && ctx.peekAhead(1)?.value === "sets") {
+      ctx.parse(kwseq("grouping", "sets"));
+      return { kind: "groupingSets", sets: parseGroupingList(ctx), span: ctx.spanFrom(start) };
+    }
+    return ctx.parse(expression);
+  },
+  { expected: "a grouping element or expression", first: expression.first() },
+);
+
+const groupByClause = seq(skip(kwseq("group", "by")), field("items", sepBy(groupByItem, P(",")))).map((s) => s.items);
 const havingClause = seq(skip(kw("having")), field("e", expression)).map((s) => s.e);
 
 // `WINDOW w AS (spec), … ` — named window definitions. `overSpecRule` (declared
@@ -1457,16 +1560,29 @@ const distinctClause = custom<boolean | Expr[], SqlTokenType>(
   },
 );
 
-// LIMIT / OFFSET, in either order; `LIMIT ALL` is a null limit.
+// LIMIT / OFFSET / FETCH, in any order. `LIMIT ALL` is a null limit; the
+// SQL-standard `FETCH { FIRST | NEXT } [count] { ROW | ROWS } { ONLY | WITH
+// TIES }` sets `limit` to its count (the ROW/ROWS/ONLY/WITH-TIES noise words are
+// consumed and dropped), and `OFFSET n [ROW | ROWS]` accepts the standard
+// trailing row word. `first`/`next`/`row`/`rows`/`only`/`ties` stay unreserved.
 const limitOffset = custom<{ limit: Expr | null; offset: Expr | null }, SqlTokenType>(
   (ctx) => {
     let limit: Expr | null = null;
     let offset: Expr | null = null;
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 3; i++) {
       if (ctx.eat("ident", "limit") !== null) {
         limit = ctx.eat("ident", "all") !== null ? null : ctx.parse(expression);
       } else if (ctx.eat("ident", "offset") !== null) {
         offset = ctx.parse(expression);
+        ctx.eat("ident", ["row", "rows"]); // optional trailing ROW / ROWS
+      } else if (ctx.eat("ident", "fetch") !== null) {
+        ctx.eat("ident", ["first", "next"]); // FIRST | NEXT
+        // The count is optional (`FETCH FIRST ROW ONLY` ≡ 1); when omitted the
+        // next token is the ROW/ROWS word, so only read a count before it.
+        if (!ctx.is("ident", ["row", "rows"])) limit = ctx.parse(expression);
+        ctx.eat("ident", ["row", "rows"]); // ROW | ROWS
+        if (ctx.eat("ident", "with") !== null) ctx.parse(kw("ties"));
+        else ctx.eat("ident", "only"); // ONLY (optional)
       } else {
         break;
       }
@@ -1474,12 +1590,50 @@ const limitOffset = custom<{ limit: Expr | null; offset: Expr | null }, SqlToken
     return { limit, offset };
   },
   {
-    expected: '"limit" or "offset"',
+    expected: '"limit", "offset" or "fetch"',
     first: [
       { type: "ident", value: "limit" },
       { type: "ident", value: "offset" },
+      { type: "ident", value: "fetch" },
     ],
   },
+);
+
+// `FOR { UPDATE | SHARE | NO KEY UPDATE | KEY SHARE } [OF table, …]
+// [NOWAIT | SKIP LOCKED]`, repeatable. `for` is reserved (so it never reads as an
+// alias); the strength / wait words are matched by value.
+const lockingClause = custom<LockingClause[], SqlTokenType>(
+  (ctx) => {
+    const clauses: LockingClause[] = [];
+    do {
+      ctx.parse(kw("for"));
+      let strength: LockingClause["strength"];
+      if (ctx.eat("ident", "update") !== null) {
+        strength = "update";
+      } else if (ctx.eat("ident", "share") !== null) {
+        strength = "share";
+      } else if (ctx.is("ident", "no")) {
+        ctx.parse(kwseq("no", "key", "update"));
+        strength = "noKeyUpdate";
+      } else if (ctx.is("ident", "key")) {
+        ctx.parse(kwseq("key", "share"));
+        strength = "keyShare";
+      } else {
+        return ctx.croak(`Expected "update", "share", "no" or "key" but found ${describeFound(ctx.peek())}`);
+      }
+      const of = ctx.eat("ident", "of") !== null ? ctx.parse(sepBy(qualName, P(","))) : [];
+      let wait: LockingClause["wait"] = null;
+      if (ctx.eat("ident", "nowait") !== null) {
+        wait = "nowait";
+      } else if (ctx.is("ident", "skip")) {
+        ctx.parse(kwseq("skip", "locked"));
+        wait = "skipLocked";
+      }
+      clauses.push({ strength, of, wait });
+    } while (ctx.is("ident", "for"));
+    return clauses;
+  },
+  { expected: '"for"', first: [{ type: "ident", value: "for" }] },
 );
 
 const selectItem = oneOf(
@@ -1490,13 +1644,68 @@ const returningClause = seq(skip(kw("returning")), field("items", sepBy(selectIt
 
 // --- DML: FROM items and joins ---
 
-const tableNameFromItem = seq(field("name", qualName), field("alias", asAlias)).map(
-  ({ name, alias }): FromItem => ({ kind: "table", name, alias }),
+// `TABLESAMPLE method (arg, …) [REPEATABLE (seed)]`. Entered positioned on the
+// `tablesample` word; `method` (system / bernoulli / …) is an unreserved name.
+function parseTableSample(ctx: ParseContext<SqlTokenType>): TableSample {
+  ctx.parse(kw("tablesample"));
+  const method = ctx.parse(nameWord);
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const args: Expr[] = [ctx.parse(expression)];
+  while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(expression));
+  expectClose(ctx);
+  let repeatable: Expr | null = null;
+  if (ctx.eat("ident", "repeatable") !== null) {
+    if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+    ctx.next(); // "("
+    repeatable = ctx.parse(expression);
+    expectClose(ctx);
+  }
+  return { method, args, repeatable };
+}
+
+// A single FROM entry: a (LATERAL) subquery, a (LATERAL) table function, or a
+// table name with an optional TABLESAMPLE. A leading `(` is always a subquery
+// (parenthesised joins are out of scope); after a dotted name, a `(` opens a
+// table-function call. `lateral` is reserved, so a preceding table never eats it
+// as an alias. The `lateral`/`tablesample` keys are omitted when absent so
+// ordinary table/subquery items keep their prior shape.
+const tableRef = custom<FromItem, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const lateral = ctx.eat("ident", "lateral") !== null;
+    if (ctx.is("punc", "(")) {
+      ctx.next(); // "("
+      const q = ctx.parse(query);
+      expectClose(ctx);
+      const alias = ctx.parse(asAlias);
+      return { kind: "subquery", query: q, alias, ...(lateral && { lateral: true }) };
+    }
+    const nameParts = ctx.parse(qualName);
+    if (ctx.is("punc", "(")) {
+      ctx.next(); // "("
+      const args: Expr[] = [];
+      if (!ctx.is("punc", ")")) {
+        args.push(ctx.parse(functionArg));
+        while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(functionArg));
+      }
+      expectClose(ctx);
+      const call: Expr = { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
+      const alias = ctx.parse(asAlias);
+      return { kind: "function", call, alias, ...(lateral && { lateral: true }) };
+    }
+    if (lateral) {
+      return ctx.croak(`Expected a subquery or function after "lateral" but found ${describeFound(ctx.peek())}`);
+    }
+    const alias = ctx.parse(asAlias);
+    const tablesample = ctx.is("ident", "tablesample") ? parseTableSample(ctx) : null;
+    return { kind: "table", name: nameParts, alias, ...(tablesample !== null && { tablesample }) };
+  },
+  {
+    expected: "a table reference",
+    first: [{ type: "punc", value: "(" }, { type: "ident" }, { type: "qident" }],
+  },
 );
-const subqueryFromItem = seq(skip(punc("(")), field("query", query), skip(punc(")")), field("alias", asAlias)).map(
-  ({ query: q, alias }): FromItem => ({ kind: "subquery", query: q, alias }),
-);
-const tableRef = oneOf(subqueryFromItem, tableNameFromItem);
 
 // Reads an optional join lead — `[NATURAL] [INNER|LEFT|RIGHT|FULL [OUTER]|CROSS]
 // JOIN` — consuming the keywords and returning the type, or null (consuming
@@ -1565,9 +1774,10 @@ const selectCore = seq(
   field("window", optional(windowClause)),
   field("orderBy", optional(orderByClause)),
   field("limitOffset", limitOffset),
+  field("locking", optional(lockingClause)),
 ).map(
   (
-    { distinct, columns, from, where, groupBy, having, window: windowDefs, orderBy, limitOffset: lo },
+    { distinct, columns, from, where, groupBy, having, window: windowDefs, orderBy, limitOffset: lo, locking },
     span,
   ): SelectStmt => ({
     kind: "select",
@@ -1583,6 +1793,7 @@ const selectCore = seq(
     orderBy: orderBy ?? null,
     limit: lo.limit,
     offset: lo.offset,
+    locking: locking ?? null,
     span,
   }),
 );
@@ -1604,9 +1815,29 @@ const withPrefix = seq(
   field("ctes", sepBy(cte, P(","))),
 ).map(({ recursive, ctes }) => ({ recursive, ctes }));
 
-// A set-op term: a plain SELECT core or a parenthesised query.
+// `VALUES (…), (…) [ORDER BY …] [LIMIT/OFFSET …]` as a query — a peer of the
+// SELECT core. Reuses the same row list as INSERT … VALUES plus the shared
+// trailing clauses, so it slots straight into a set-op term or a FROM subquery.
+const valuesQuery = seq(
+  skip(kw("values")),
+  field("rows", sepBy(exprList, P(","))),
+  field("orderBy", optional(orderByClause)),
+  field("limitOffset", limitOffset),
+).map(
+  ({ rows, orderBy, limitOffset: lo }, span): ValuesQuery => ({
+    kind: "values",
+    rows,
+    orderBy: orderBy ?? null,
+    limit: lo.limit,
+    offset: lo.offset,
+    span,
+  }),
+);
+
+// A set-op term: a plain SELECT core, a VALUES query, or a parenthesised query.
 const selectTerm: Rule<Query, SqlTokenType> = oneOf(
   selectCore,
+  valuesQuery,
   seq(skip(punc("(")), field("q", query), skip(punc(")"))).map((s) => s.q),
 );
 
@@ -1640,23 +1871,26 @@ const setOpQuery = custom<Query, SqlTokenType>(
     expected: "a query",
     first: [
       { type: "ident", value: "select" },
+      { type: "ident", value: "values" },
       { type: "punc", value: "(" },
     ],
   },
 );
 
-// A leading WITH attaches to the leftmost SELECT of the set-op tree.
-const attachWith = (q: Query, w: { recursive: boolean; ctes: Cte[] }): void => {
-  let node: Query = q;
-  while (node.kind === "setOp") node = node.left;
-  node.with_ = w.ctes;
-  node.recursive = w.recursive;
-};
+// A leading WITH attaches to the leftmost SELECT of the set-op tree. A VALUES
+// query as the target isn't supported (WITH before VALUES is rare), so croak
+// rather than silently drop the CTEs.
 const queryRule = custom<Query, SqlTokenType>(
   (ctx) => {
     const w = ctx.is("ident", "with") ? ctx.parse(withPrefix) : null;
     const q = ctx.parse(setOpQuery);
-    if (w !== null) attachWith(q, w);
+    if (w !== null) {
+      let node: Query = q;
+      while (node.kind === "setOp") node = node.left;
+      if (node.kind !== "select") return ctx.croak("WITH must attach to a SELECT");
+      node.with_ = w.ctes;
+      node.recursive = w.recursive;
+    }
     return q;
   },
   {
@@ -1664,6 +1898,7 @@ const queryRule = custom<Query, SqlTokenType>(
     first: [
       { type: "ident", value: "with" },
       { type: "ident", value: "select" },
+      { type: "ident", value: "values" },
       { type: "punc", value: "(" },
     ],
   },
@@ -1675,9 +1910,20 @@ const valuesSource = seq(skip(kw("values")), field("rows", sepBy(exprList, P(","
   kind: "values" as const,
   rows,
 }));
-const insertSource = oneOf(
-  valuesSource,
-  query.map((q) => ({ kind: "select" as const, query: q })),
+// A dedicated dispatch (not oneOf) because `query` now claims `values` in its
+// first set too — a bare `VALUES …` is the INSERT-local rows source (no ORDER
+// BY / LIMIT tail), everything else (`SELECT …`, `(…)`, `WITH …`) is a query.
+const insertSource = custom<Insert["source"], SqlTokenType>(
+  (ctx) => (ctx.is("ident", "values") ? ctx.parse(valuesSource) : { kind: "select", query: ctx.parse(query) }),
+  {
+    expected: '"values" or a query',
+    first: [
+      { type: "ident", value: "values" },
+      { type: "ident", value: "select" },
+      { type: "ident", value: "with" },
+      { type: "punc", value: "(" },
+    ],
+  },
 );
 
 const onConflict = seq(

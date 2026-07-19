@@ -46,6 +46,7 @@ const sel = (over: Record<string, unknown>) => ({
   orderBy: null,
   limit: null,
   offset: null,
+  locking: null,
   ...over,
 });
 const tableFrom = (name: string[], alias: string | null = null) => ({ kind: "table", name, alias });
@@ -725,6 +726,157 @@ describe("SQL-lite window functions", () => {
 
   it("reports a helpful error on a malformed frame bound", () => {
     expect(() => sqlLite.parse("SELECT sum(x) OVER (ORDER BY id ROWS UNBOUNDED) FROM t;")).toThrow(/following/);
+  });
+});
+
+// --- remaining SELECT clauses (Phase 4) ---
+
+describe("SQL-lite FROM items: LATERAL, table functions, TABLESAMPLE", () => {
+  const from = (src: string) => (firstStmt(src) as any).from;
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+
+  it("parses a table function in FROM and a schema-qualified one", () => {
+    expect(from("SELECT * FROM generate_series(1, 10) g;")).toEqual([
+      { kind: "function", call: call("generate_series", [num(1), num(10)]), alias: "g" },
+    ]);
+    // Dotted callee, no alias, and an empty arg list.
+    expect(from("SELECT * FROM pg_catalog.generate_series(1, 5);")).toEqual([
+      { kind: "function", call: call("pg_catalog.generate_series", [num(1), num(5)]), alias: null },
+    ]);
+  });
+
+  it("parses LATERAL subqueries and LATERAL functions", () => {
+    expect(from("SELECT * FROM a, LATERAL (SELECT 1) b;")).toEqual([
+      tableFrom(["a"]),
+      { kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "b", lateral: true },
+    ]);
+    expect(from("SELECT * FROM a CROSS JOIN LATERAL unnest(a.tags) t;")).toEqual([
+      {
+        kind: "join",
+        joinType: "cross",
+        left: tableFrom(["a"]),
+        right: { kind: "function", call: call("unnest", [name("a", "tags")]), alias: "t", lateral: true },
+        on: null,
+        using: null,
+      },
+    ]);
+  });
+
+  it("parses TABLESAMPLE with and without REPEATABLE", () => {
+    expect(from("SELECT * FROM t TABLESAMPLE SYSTEM (10);")).toEqual([
+      { kind: "table", name: ["t"], alias: null, tablesample: { method: "system", args: [num(10)], repeatable: null } },
+    ]);
+    expect(from("SELECT * FROM t AS x TABLESAMPLE bernoulli (10) REPEATABLE (5);")).toEqual([
+      {
+        kind: "table",
+        name: ["t"],
+        alias: "x",
+        tablesample: { method: "bernoulli", args: [num(10)], repeatable: num(5) },
+      },
+    ]);
+  });
+
+  it("omits lateral/tablesample keys on ordinary items and rejects a bare LATERAL name", () => {
+    // A plain table item is byte-identical to the pre-Phase-4 shape.
+    expect(from("SELECT * FROM t;")).toEqual([{ kind: "table", name: ["t"], alias: null }]);
+    // LATERAL must be followed by a subquery or a function call.
+    expect(() => sqlLite.parse("SELECT * FROM LATERAL t;")).toThrow(/subquery or function/);
+  });
+});
+
+describe("SQL-lite VALUES query", () => {
+  it("parses a standalone VALUES statement", () => {
+    expect(firstStmt("VALUES (1, 2), (3, 4);")).toEqual({
+      kind: "values",
+      rows: [
+        [num(1), num(2)],
+        [num(3), num(4)],
+      ],
+      orderBy: null,
+      limit: null,
+      offset: null,
+    });
+  });
+
+  it("carries an ORDER BY / LIMIT tail and composes in a set-op", () => {
+    expect(firstStmt("VALUES (3), (1), (2) ORDER BY 1 LIMIT 2;")).toMatchObject({
+      kind: "values",
+      orderBy: [{ expr: num(1), dir: null, nulls: null }],
+      limit: num(2),
+    });
+    expect(firstStmt("SELECT 1 UNION VALUES (2);")).toMatchObject({
+      kind: "setOp",
+      op: "union",
+      right: { kind: "values", rows: [[num(2)]] },
+    });
+  });
+
+  it("is usable as a FROM table source", () => {
+    expect((firstStmt("SELECT * FROM (VALUES (1), (2)) t;") as any).from).toEqual([
+      {
+        kind: "subquery",
+        query: { kind: "values", rows: [[num(1)], [num(2)]], orderBy: null, limit: null, offset: null },
+        alias: "t",
+      },
+    ]);
+  });
+});
+
+describe("SQL-lite FETCH / OFFSET row words", () => {
+  it("maps FETCH FIRST … ROWS ONLY onto limit", () => {
+    expect(firstStmt("SELECT 1 FETCH FIRST 10 ROWS ONLY;")).toMatchObject({ limit: num(10), offset: null });
+    // OFFSET … ROWS then FETCH NEXT … ROWS WITH TIES, standard-SQL spelling.
+    expect(firstStmt("SELECT 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;")).toMatchObject({
+      limit: num(3),
+      offset: num(5),
+    });
+  });
+
+  it("accepts FETCH with an omitted count", () => {
+    expect(firstStmt("SELECT 1 FETCH FIRST ROW ONLY;")).toMatchObject({ limit: null });
+  });
+});
+
+describe("SQL-lite FOR UPDATE / SHARE locking", () => {
+  it("parses a single locking clause with OF and a wait policy", () => {
+    expect((firstStmt("SELECT * FROM t FOR UPDATE OF t, u NOWAIT;") as any).locking).toEqual([
+      { strength: "update", of: [["t"], ["u"]], wait: "nowait" },
+    ]);
+  });
+
+  it("parses NO KEY UPDATE / KEY SHARE and stacked clauses", () => {
+    expect((firstStmt("SELECT * FROM t FOR NO KEY UPDATE FOR KEY SHARE SKIP LOCKED;") as any).locking).toEqual([
+      { strength: "noKeyUpdate", of: [], wait: null },
+      { strength: "keyShare", of: [], wait: "skipLocked" },
+    ]);
+    expect((firstStmt("SELECT * FROM t FOR SHARE;") as any).locking).toEqual([
+      { strength: "share", of: [], wait: null },
+    ]);
+  });
+});
+
+describe("SQL-lite GROUP BY ROLLUP / CUBE / GROUPING SETS", () => {
+  const groupBy = (src: string) => (firstStmt(`SELECT a FROM t GROUP BY ${src};`) as any).groupBy;
+
+  it("parses ROLLUP and CUBE, keeping plain exprs as bare expressions", () => {
+    expect(groupBy("ROLLUP (a, b)")).toEqual([{ kind: "rollup", args: [[name("a")], [name("b")]] }]);
+    // A parenthesised column group inside the construct becomes a multi-expr grouping.
+    expect(groupBy("CUBE ((a, b), c), d")).toEqual([
+      { kind: "cube", args: [[name("a"), name("b")], [name("c")]] },
+      name("d"),
+    ]);
+  });
+
+  it("parses GROUPING SETS with an empty grouping", () => {
+    expect(groupBy("GROUPING SETS ((a), (b), ())")).toEqual([
+      { kind: "groupingSets", sets: [[name("a")], [name("b")], []] },
+    ]);
+  });
+
+  it("keeps rollup/cube/grouping unreserved as names and functions", () => {
+    // `cube` with no following `(` is an ordinary column; `grouping(a)` is a call.
+    expect(groupBy("cube")).toEqual([name("cube")]);
+    expect(groupBy("grouping(a)")).toEqual([{ kind: "call", name: "grouping", args: [name("a")] }]);
   });
 });
 
