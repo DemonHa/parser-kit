@@ -294,6 +294,97 @@ export type CreateTableAs = {
   span: Span;
 };
 
+// --- Phase 8: functions / aggregates / triggers ---
+// The routine body (`AS $$…$$` / plpgsql) is kept OPAQUE — the dollar-quoted
+// string lexes as one `string` token and we store its inner text verbatim rather
+// than parsing plpgsql, matching node-sql-parser's practical depth.
+
+// One argument of a function/aggregate signature: `[mode] [name] type [DEFAULT
+// expr]`. `mode` and `name` are null when absent; both are recovered by a small
+// two-token heuristic (a mode word is only a mode when a further name/type word
+// follows it, and a name only precedes the type when two name-ish tokens run
+// together — so bare `integer` / `numeric(10,2)` / a dotted type have no name).
+export type FunctionArg = {
+  mode: "in" | "out" | "inout" | "variadic" | null;
+  name: string | null;
+  type: ColType;
+  defaultValue: Expr | null;
+};
+
+// `RETURNS [SETOF] type` or `RETURNS TABLE (col type, …)`.
+export type FunctionReturns =
+  | { kind: "type"; setof: boolean; type: ColType }
+  | { kind: "table"; columns: CompositeAttr[] };
+
+// A `SET config = value` value: an ordered value list, or `FROM CURRENT`.
+export type FunctionSetValue = { kind: "list"; values: Expr[] } | { kind: "fromCurrent" };
+
+// One characteristic clause of a CREATE FUNCTION. Order-free (parsed by a loop);
+// all option words stay unreserved and are matched by value.
+export type FunctionOption =
+  | { kind: "language"; name: string }
+  | { kind: "as"; parts: string[] } // `AS 'def'` — one part; `AS 'obj', 'sym'` — two
+  | { kind: "volatility"; value: "immutable" | "stable" | "volatile" }
+  | { kind: "leakproof"; value: boolean } // `[NOT] LEAKPROOF`
+  | { kind: "strictness"; value: "strict" | "calledOnNullInput" | "returnsNullOnNullInput" }
+  | { kind: "security"; external: boolean; definer: boolean }
+  | { kind: "parallel"; value: "unsafe" | "restricted" | "safe" }
+  | { kind: "cost"; value: Expr }
+  | { kind: "rows"; value: Expr }
+  | { kind: "window" }
+  | { kind: "set"; parameter: string; value: FunctionSetValue };
+
+// `CREATE [OR REPLACE] FUNCTION name (args) [RETURNS …] option*`.
+export type CreateFunction = {
+  kind: "createFunction";
+  orReplace: boolean;
+  name: string[];
+  args: FunctionArg[];
+  returns: FunctionReturns | null;
+  options: FunctionOption[];
+  span: Span;
+};
+
+// One `NAME [= value]` entry of the aggregate definition list (SFUNC, STYPE,
+// INITCOND, …). `value` is null for a bare flag (HYPOTHETICAL, FINALFUNC_EXTRA);
+// a `type` variant for a type/function-name RHS, a `literal` for a string/number.
+export type AggregateOptionValue = { kind: "type"; type: ColType } | { kind: "literal"; expr: Expr };
+export type AggregateOption = { name: string; value: AggregateOptionValue | null };
+
+// `CREATE [OR REPLACE] AGGREGATE name ( signature ) ( definition )` — or the
+// legacy single-paren form `name ( definition )`. `star` marks a `(*)` signature
+// (e.g. an aggregate that ignores its input like `count(*)`).
+export type CreateAggregate = {
+  kind: "createAggregate";
+  orReplace: boolean;
+  name: string[];
+  star: boolean;
+  args: FunctionArg[];
+  options: AggregateOption[];
+  span: Span;
+};
+
+// One trigger event: INSERT / DELETE / TRUNCATE, or UPDATE with an optional
+// `OF col, …` column list.
+export type TriggerEvent = { event: "insert" | "update" | "delete" | "truncate"; columns: string[] | null };
+
+// `CREATE [OR REPLACE] TRIGGER name {BEFORE|AFTER|INSTEAD OF} event [OR …] ON
+// table [FOR [EACH] {ROW|STATEMENT}] [WHEN (cond)] EXECUTE {FUNCTION|PROCEDURE}
+// fn(args)`. Constraint-trigger extras (DEFERRABLE / REFERENCING / FROM) are out
+// of scope.
+export type CreateTrigger = {
+  kind: "createTrigger";
+  orReplace: boolean;
+  name: string;
+  timing: "before" | "after" | "insteadOf";
+  events: TriggerEvent[];
+  table: string[];
+  forEach: "row" | "statement" | null;
+  when: Expr | null;
+  execute: { routine: "function" | "procedure"; name: string[]; args: Expr[] };
+  span: Span;
+};
+
 export type Stmt =
   | { kind: "createTable"; ifNotExists: boolean; name: string[]; items: TableItem[]; span: Span }
   | {
@@ -314,6 +405,9 @@ export type Stmt =
   | CreateSequence
   | CreateDomain
   | CreateTableAs
+  | CreateFunction
+  | CreateAggregate
+  | CreateTrigger
   | { kind: "alterTable"; name: string[]; action: AlterAction; span: Span }
   // Generalized DROP: `DROP {TABLE|VIEW|INDEX|TYPE|SEQUENCE|SCHEMA}
   // [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `objectType` is the
@@ -1712,12 +1806,318 @@ function parseViewBody(
   };
 }
 
+// --- Phase 8: CREATE FUNCTION / AGGREGATE / TRIGGER ---
+
+// A bare `string` token's inner text — the AS body (`'…'` or a dollar-quoted
+// `$$…$$`, both lexed as one `string`), a LANGUAGE literal, etc. (`stringLit`
+// above yields an Expr node; here we want the raw text.)
+const strValue = token("string").map((n) => n.value);
+
+// The argument-mode words that may lead a function/aggregate argument.
+const ARG_MODES: ReadonlySet<string> = new Set(["in", "out", "inout", "variadic"]);
+
+// One `[mode] [name] type [DEFAULT expr]` argument. See `FunctionArg` for the
+// mode/name recovery heuristic.
+function parseFunctionArg(ctx: ParseContext<SqlTokenType>): FunctionArg {
+  let mode: FunctionArg["mode"] = null;
+  const cur = ctx.peek();
+  if (cur !== null && cur.type === "ident" && ARG_MODES.has(cur.value)) {
+    const after = ctx.peekAhead(1);
+    // A mode word is a mode only when a further name/type word follows; alone
+    // (`(out)`) it is itself the argument's unnamed type.
+    if (after !== null && (after.type === "ident" || after.type === "qident")) {
+      mode = cur.value as FunctionArg["mode"];
+      ctx.next();
+    }
+  }
+  // An argument name precedes the type only when two name-ish tokens run together
+  // (the second one starting the type). `numeric(10,2)` / a dotted type / a bare
+  // `integer` therefore has no leading name.
+  let name: string | null = null;
+  const c2 = ctx.peek();
+  const n2 = ctx.peekAhead(1);
+  if (
+    c2 !== null &&
+    (c2.type === "ident" || c2.type === "qident") &&
+    n2 !== null &&
+    (n2.type === "ident" || n2.type === "qident")
+  ) {
+    name = ctx.parse(nameWord);
+  }
+  const type = ctx.parse(typeRef);
+  let defaultValue: Expr | null = null;
+  if (ctx.eat("ident", "default") !== null || ctx.eat("op", "=") !== null) {
+    defaultValue = ctx.parse(expression);
+  }
+  return { mode, name, type, defaultValue };
+}
+
+const signatureArg = custom<FunctionArg, SqlTokenType>(parseFunctionArg, {
+  expected: "a function argument",
+  first: [{ type: "ident" }, { type: "qident" }],
+});
+
+// The parenthesised argument signature — possibly empty `()`.
+const functionArgs = delimited(P("("), P(")"), P(","), signatureArg, { interleaved: true });
+
+// `RETURNS [SETOF] type` | `RETURNS TABLE (col type, …)`, or null when absent.
+function parseFunctionReturns(ctx: ParseContext<SqlTokenType>): FunctionReturns | null {
+  if (ctx.eat("ident", "returns") === null) return null;
+  if (ctx.eat("ident", "table") !== null) {
+    return { kind: "table", columns: ctx.parse(compositeAttrs) };
+  }
+  const setof = ctx.eat("ident", "setof") !== null;
+  return { kind: "type", setof, type: ctx.parse(typeRef) };
+}
+
+// `[EXTERNAL] SECURITY {DEFINER|INVOKER}` — returns whether it is a definer.
+function parseSecurityKind(ctx: ParseContext<SqlTokenType>): boolean {
+  if (ctx.eat("ident", "definer") !== null) return true;
+  if (ctx.eat("ident", "invoker") !== null) return false;
+  return ctx.croak(`Expected "definer" or "invoker" but found ${describeFound(ctx.peek())}`);
+}
+
+// The order-free characteristic loop of CREATE FUNCTION. Stops at the first token
+// that is not an option lead-word (the trailing `;`). All option words stay
+// unreserved and are matched by value.
+function parseFunctionOptions(ctx: ParseContext<SqlTokenType>): FunctionOption[] {
+  const options: FunctionOption[] = [];
+  while (true) {
+    const tok = ctx.peek();
+    if (tok === null || tok.type !== "ident") break;
+    switch (tok.value) {
+      case "language": {
+        ctx.next();
+        options.push({ kind: "language", name: ctx.is("string") ? ctx.parse(strValue) : ctx.parse(nameWord) });
+        break;
+      }
+      case "as": {
+        ctx.next();
+        const parts = [ctx.parse(strValue)];
+        if (ctx.eat("punc", ",") !== null) parts.push(ctx.parse(strValue));
+        options.push({ kind: "as", parts });
+        break;
+      }
+      case "immutable":
+      case "stable":
+      case "volatile":
+        ctx.next();
+        options.push({ kind: "volatility", value: tok.value });
+        break;
+      case "leakproof":
+        ctx.next();
+        options.push({ kind: "leakproof", value: true });
+        break;
+      case "not":
+        // `NOT LEAKPROOF` — any other NOT is not a function option; stop.
+        if (ctx.peekAhead(1)?.value !== "leakproof") return options;
+        ctx.parse(kwseq("not", "leakproof"));
+        options.push({ kind: "leakproof", value: false });
+        break;
+      case "strict":
+        ctx.next();
+        options.push({ kind: "strictness", value: "strict" });
+        break;
+      case "called":
+        ctx.parse(kwseq("called", "on", "null", "input"));
+        options.push({ kind: "strictness", value: "calledOnNullInput" });
+        break;
+      case "returns":
+        // In the option loop `RETURNS` can only be `RETURNS NULL ON NULL INPUT`
+        // (the return type was consumed before the loop).
+        ctx.parse(kwseq("returns", "null", "on", "null", "input"));
+        options.push({ kind: "strictness", value: "returnsNullOnNullInput" });
+        break;
+      case "external":
+        ctx.parse(kwseq("external", "security"));
+        options.push({ kind: "security", external: true, definer: parseSecurityKind(ctx) });
+        break;
+      case "security":
+        ctx.next();
+        options.push({ kind: "security", external: false, definer: parseSecurityKind(ctx) });
+        break;
+      case "parallel": {
+        ctx.next();
+        const value = ctx.eat("ident", "unsafe")
+          ? "unsafe"
+          : ctx.eat("ident", "restricted")
+            ? "restricted"
+            : ctx.eat("ident", "safe")
+              ? "safe"
+              : ctx.croak(`Expected "unsafe", "restricted" or "safe" but found ${describeFound(ctx.peek())}`);
+        options.push({ kind: "parallel", value });
+        break;
+      }
+      case "cost":
+        ctx.next();
+        options.push({ kind: "cost", value: ctx.parse(expression) });
+        break;
+      case "rows":
+        ctx.next();
+        options.push({ kind: "rows", value: ctx.parse(expression) });
+        break;
+      case "window":
+        ctx.next();
+        options.push({ kind: "window" });
+        break;
+      case "set": {
+        ctx.next();
+        const parameter = ctx.parse(qualName).join(".");
+        if (ctx.eat("ident", "from") !== null) {
+          ctx.parse(kw("current"));
+          options.push({ kind: "set", parameter, value: { kind: "fromCurrent" } });
+        } else {
+          if (ctx.eat("ident", "to") === null && ctx.eat("op", "=") === null) {
+            ctx.croak(`Expected "to" or "=" but found ${describeFound(ctx.peek())}`);
+          }
+          const values = ctx.parse(sepBy(expression, P(",")));
+          options.push({ kind: "set", parameter, value: { kind: "list", values } });
+        }
+        break;
+      }
+      default:
+        return options;
+    }
+  }
+  return options;
+}
+
+// `CREATE [OR REPLACE] FUNCTION` — the `FUNCTION` keyword is consumed by the
+// caller (like `parseViewBody`).
+function parseFunctionBody(ctx: ParseContext<SqlTokenType>, start: Position, orReplace: boolean): Stmt {
+  const name = ctx.parse(qualName);
+  const args = ctx.parse(functionArgs);
+  const returns = parseFunctionReturns(ctx);
+  const options = parseFunctionOptions(ctx);
+  return { kind: "createFunction", orReplace, name, args, returns, options, span: ctx.spanFrom(start) };
+}
+
+// `( NAME [= value] , … )` — the aggregate definition list. `value` is a type/
+// function-name (typeRef) or a literal (string/number), or null for a bare flag.
+function parseAggregateOptions(ctx: ParseContext<SqlTokenType>): AggregateOption[] {
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const options: AggregateOption[] = [];
+  do {
+    const name = ctx.parse(nameWord);
+    let value: AggregateOptionValue | null = null;
+    if (ctx.eat("op", "=") !== null) {
+      value =
+        ctx.is("string") || ctx.is("number")
+          ? { kind: "literal", expr: ctx.parse(expression) }
+          : { kind: "type", type: ctx.parse(typeRef) };
+    }
+    options.push({ name, value });
+  } while (ctx.eat("punc", ",") !== null);
+  expectClose(ctx);
+  return options;
+}
+
+// `CREATE [OR REPLACE] AGGREGATE` — `AGGREGATE` consumed by the caller. The first
+// paren is the argument signature (`(*)`, or a type list) UNLESS it opens the
+// legacy single-paren definition list, detected by an `ident =` right after `(`.
+function parseAggregateBody(ctx: ParseContext<SqlTokenType>, start: Position, orReplace: boolean): Stmt {
+  const name = ctx.parse(qualName);
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  const legacy =
+    ctx.peekAhead(1)?.type === "ident" && ctx.peekAhead(2)?.type === "op" && ctx.peekAhead(2)?.value === "=";
+  if (legacy) {
+    return {
+      kind: "createAggregate",
+      orReplace,
+      name,
+      star: false,
+      args: [],
+      options: parseAggregateOptions(ctx),
+      span: ctx.spanFrom(start),
+    };
+  }
+  let star = false;
+  let args: FunctionArg[] = [];
+  if (ctx.peekAhead(1)?.type === "op" && ctx.peekAhead(1)?.value === "*") {
+    ctx.next(); // "("
+    ctx.next(); // "*"
+    expectClose(ctx);
+    star = true;
+  } else {
+    args = ctx.parse(functionArgs);
+  }
+  return {
+    kind: "createAggregate",
+    orReplace,
+    name,
+    star,
+    args,
+    options: parseAggregateOptions(ctx),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// One trigger event: INSERT / DELETE / TRUNCATE, or UPDATE with an optional
+// `OF col, …` list. Event words stay unreserved and are matched by value.
+function parseTriggerEvent(ctx: ParseContext<SqlTokenType>): TriggerEvent {
+  if (ctx.eat("ident", "insert") !== null) return { event: "insert", columns: null };
+  if (ctx.eat("ident", "delete") !== null) return { event: "delete", columns: null };
+  if (ctx.eat("ident", "truncate") !== null) return { event: "truncate", columns: null };
+  if (ctx.eat("ident", "update") !== null) {
+    const columns = ctx.eat("ident", "of") !== null ? ctx.parse(sepBy(nameWord, P(","))) : null;
+    return { event: "update", columns };
+  }
+  return ctx.croak(`Expected "insert", "update", "delete" or "truncate" but found ${describeFound(ctx.peek())}`);
+}
+
+// `CREATE [OR REPLACE] TRIGGER` — `TRIGGER` consumed by the caller.
+function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orReplace: boolean): Stmt {
+  const name = ctx.parse(nameWord);
+  let timing: CreateTrigger["timing"];
+  if (ctx.eat("ident", "before") !== null) timing = "before";
+  else if (ctx.eat("ident", "after") !== null) timing = "after";
+  else if (ctx.is("ident", "instead")) {
+    ctx.parse(kwseq("instead", "of"));
+    timing = "insteadOf";
+  } else {
+    return ctx.croak(`Expected "before", "after" or "instead" but found ${describeFound(ctx.peek())}`);
+  }
+  const events = [parseTriggerEvent(ctx)];
+  while (ctx.eat("ident", "or") !== null) events.push(parseTriggerEvent(ctx));
+  ctx.parse(kw("on"));
+  const table = ctx.parse(qualName);
+  let forEach: CreateTrigger["forEach"] = null;
+  if (ctx.eat("ident", "for") !== null) {
+    ctx.eat("ident", "each"); // optional EACH
+    if (ctx.eat("ident", "row") !== null) forEach = "row";
+    else if (ctx.eat("ident", "statement") !== null) forEach = "statement";
+    else return ctx.croak(`Expected "row" or "statement" but found ${describeFound(ctx.peek())}`);
+  }
+  const when = ctx.eat("ident", "when") !== null ? ctx.parse(parenExpr) : null;
+  ctx.parse(kw("execute"));
+  let routine: "function" | "procedure";
+  if (ctx.eat("ident", "function") !== null) routine = "function";
+  else if (ctx.eat("ident", "procedure") !== null) routine = "procedure";
+  else return ctx.croak(`Expected "function" or "procedure" but found ${describeFound(ctx.peek())}`);
+  const execName = ctx.parse(qualName);
+  const execArgs = ctx.parse(exprList);
+  return {
+    kind: "createTrigger",
+    orReplace,
+    name,
+    timing,
+    events,
+    table,
+    forEach,
+    when,
+    execute: { routine, name: execName, args: execArgs },
+    span: ctx.spanFrom(start),
+  };
+}
+
 // The non-view CREATE targets, dispatched by their leading keyword.
 const createTail = oneOf(createTableRest, createIndexRest, createTypeRest, createSequenceRest, createDomainRest);
 
-// After CREATE: an optional `OR REPLACE`, then a (MATERIALIZED) VIEW — or, with no
-// such prefix, one of the keyword-led targets (TABLE / [UNIQUE] INDEX / TYPE /
-// SEQUENCE / DOMAIN). `OR REPLACE` is only valid before a view here.
+// After CREATE: an optional `OR REPLACE`, then one of the objects that permit it
+// (VIEW / MATERIALIZED VIEW / FUNCTION / AGGREGATE / TRIGGER) — or, with no such
+// prefix, one of the remaining keyword-led targets (TABLE / [UNIQUE] INDEX / TYPE
+// / SEQUENCE / DOMAIN). `OR REPLACE` before a non-replaceable object croaks.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -1729,8 +2129,13 @@ const createStmt = custom<Stmt, SqlTokenType>(
       return parseViewBody(ctx, start, true, orReplace);
     }
     if (ctx.eat("ident", "view") !== null) return parseViewBody(ctx, start, false, orReplace);
+    if (ctx.eat("ident", "function") !== null) return parseFunctionBody(ctx, start, orReplace);
+    if (ctx.eat("ident", "aggregate") !== null) return parseAggregateBody(ctx, start, orReplace);
+    if (ctx.eat("ident", "trigger") !== null) return parseTriggerBody(ctx, start, orReplace);
     if (orReplace) {
-      return ctx.croak(`Expected "view" or "materialized" but found ${describeFound(ctx.peek())}`);
+      return ctx.croak(
+        `Expected "view", "materialized", "function", "aggregate" or "trigger" but found ${describeFound(ctx.peek())}`,
+      );
     }
     return ctx.parse(createTail);
   },

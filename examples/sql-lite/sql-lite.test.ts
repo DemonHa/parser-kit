@@ -431,8 +431,10 @@ describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
     });
   });
 
-  it("rejects OR REPLACE before a non-view object", () => {
-    expect(() => sqlLite.parse("CREATE OR REPLACE TABLE t (id int);")).toThrow(/Expected "view" or "materialized"/);
+  it("rejects OR REPLACE before a non-replaceable object", () => {
+    expect(() => sqlLite.parse("CREATE OR REPLACE TABLE t (id int);")).toThrow(
+      /Expected "view", "materialized", "function", "aggregate" or "trigger"/,
+    );
   });
 });
 
@@ -539,6 +541,170 @@ describe("SQL-lite CREATE DOMAIN", () => {
       name: ["positive"],
       dataType: { name: "int" },
     });
+  });
+});
+
+// --- Phase 8: functions / aggregates / triggers ---
+
+// A ColType literal (the shape typeRef yields once spans are stripped).
+const ct = (name: string, over: Record<string, unknown> = {}) => ({ name, args: [], array: false, ...over });
+
+describe("SQL-lite CREATE FUNCTION", () => {
+  it("parses OR REPLACE, arg defaults, RETURNS and an opaque dollar body", () => {
+    const stmt = firstStmt(
+      "CREATE OR REPLACE FUNCTION add(a integer, b integer DEFAULT 0) RETURNS integer LANGUAGE sql IMMUTABLE STRICT AS $$SELECT a + b$$;",
+    );
+    expect(stmt).toEqual({
+      kind: "createFunction",
+      orReplace: true,
+      name: ["add"],
+      args: [
+        { mode: null, name: "a", type: ct("integer"), defaultValue: null },
+        { mode: null, name: "b", type: ct("integer"), defaultValue: num(0) },
+      ],
+      returns: { kind: "type", setof: false, type: ct("integer") },
+      options: [
+        { kind: "language", name: "sql" },
+        { kind: "volatility", value: "immutable" },
+        { kind: "strictness", value: "strict" },
+        // The body is one opaque string token — `a + b` is NOT parsed.
+        { kind: "as", parts: ["SELECT a + b"] },
+      ],
+    });
+  });
+
+  it("parses argument modes and an array type", () => {
+    const stmt = firstStmt(
+      "CREATE FUNCTION f(IN x integer, OUT y text, VARIADIC vals integer[]) RETURNS void LANGUAGE plpgsql AS $body$BEGIN END$body$;",
+    );
+    expect((stmt as any).args).toEqual([
+      { mode: "in", name: "x", type: ct("integer"), defaultValue: null },
+      { mode: "out", name: "y", type: ct("text"), defaultValue: null },
+      { mode: "variadic", name: "vals", type: ct("integer", { array: true }), defaultValue: null },
+    ]);
+    expect((stmt as any).options).toEqual([
+      { kind: "language", name: "plpgsql" },
+      { kind: "as", parts: ["BEGIN END"] },
+    ]);
+  });
+
+  it("parses RETURNS TABLE and an unnamed-argument type", () => {
+    const stmt = firstStmt(
+      "CREATE FUNCTION top_users(numeric(10, 2)) RETURNS TABLE(id integer, label text) LANGUAGE sql AS $$SELECT 1$$;",
+    );
+    expect((stmt as any).args).toEqual([
+      { mode: null, name: null, type: ct("numeric", { args: [10, 2] }), defaultValue: null },
+    ]);
+    expect((stmt as any).returns).toEqual({
+      kind: "table",
+      columns: [
+        { name: "id", type: ct("integer") },
+        { name: "label", type: ct("text") },
+      ],
+    });
+  });
+
+  it("parses SECURITY / SET / COST / PARALLEL characteristics", () => {
+    const stmt = firstStmt(
+      "CREATE FUNCTION g() RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public COST 100 PARALLEL SAFE AS $$SELECT 1$$;",
+    );
+    expect((stmt as any).options).toEqual([
+      { kind: "language", name: "sql" },
+      { kind: "security", external: false, definer: true },
+      { kind: "set", parameter: "search_path", value: { kind: "list", values: [name("pg_catalog"), name("public")] } },
+      { kind: "cost", value: num(100) },
+      { kind: "parallel", value: "safe" },
+      { kind: "as", parts: ["SELECT 1"] },
+    ]);
+  });
+
+  it("parses a C-language two-part AS body and RETURNS NULL ON NULL INPUT", () => {
+    const stmt = firstStmt(
+      "CREATE FUNCTION c_fn() RETURNS int LANGUAGE c RETURNS NULL ON NULL INPUT AS 'obj_file', 'link_sym';",
+    );
+    expect((stmt as any).options).toEqual([
+      { kind: "language", name: "c" },
+      { kind: "strictness", value: "returnsNullOnNullInput" },
+      { kind: "as", parts: ["obj_file", "link_sym"] },
+    ]);
+  });
+});
+
+describe("SQL-lite CREATE AGGREGATE", () => {
+  it("parses the modern signature + definition-list form", () => {
+    const stmt = firstStmt("CREATE AGGREGATE sum_agg(numeric) (SFUNC = numeric_add, STYPE = numeric, INITCOND = '0');");
+    expect(stmt).toEqual({
+      kind: "createAggregate",
+      orReplace: false,
+      name: ["sum_agg"],
+      star: false,
+      args: [{ mode: null, name: null, type: ct("numeric"), defaultValue: null }],
+      options: [
+        { name: "sfunc", value: { kind: "type", type: ct("numeric_add") } },
+        { name: "stype", value: { kind: "type", type: ct("numeric") } },
+        { name: "initcond", value: { kind: "literal", expr: str("0") } },
+      ],
+    });
+  });
+
+  it("parses the legacy single-paren form", () => {
+    const stmt = firstStmt("CREATE AGGREGATE avg_legacy (BASETYPE = numeric, SFUNC = avg_acc, STYPE = internal);");
+    expect(stmt).toMatchObject({ kind: "createAggregate", star: false, args: [] });
+    expect((stmt as any).options).toEqual([
+      { name: "basetype", value: { kind: "type", type: ct("numeric") } },
+      { name: "sfunc", value: { kind: "type", type: ct("avg_acc") } },
+      { name: "stype", value: { kind: "type", type: ct("internal") } },
+    ]);
+  });
+
+  it("parses a (*) signature", () => {
+    const stmt = firstStmt("CREATE AGGREGATE my_count(*) (SFUNC = int8inc, STYPE = int8);");
+    expect(stmt).toMatchObject({ kind: "createAggregate", name: ["my_count"], star: true, args: [] });
+  });
+});
+
+describe("SQL-lite CREATE TRIGGER", () => {
+  it("parses timing, OR-joined events, UPDATE OF cols, WHEN and EXECUTE FUNCTION", () => {
+    const stmt = firstStmt(
+      "CREATE TRIGGER audit AFTER INSERT OR UPDATE OF a, b ON accounts FOR EACH ROW WHEN (new.active) EXECUTE FUNCTION log_change(1, 'x');",
+    );
+    expect(stmt).toEqual({
+      kind: "createTrigger",
+      orReplace: false,
+      name: "audit",
+      timing: "after",
+      events: [
+        { event: "insert", columns: null },
+        { event: "update", columns: ["a", "b"] },
+      ],
+      table: ["accounts"],
+      forEach: "row",
+      when: name("new", "active"),
+      execute: { routine: "function", name: ["log_change"], args: [num(1), str("x")] },
+    });
+  });
+
+  it("parses OR REPLACE, INSTEAD OF and EXECUTE PROCEDURE with no args", () => {
+    const stmt = firstStmt(
+      "CREATE OR REPLACE TRIGGER v_ins INSTEAD OF DELETE ON myview FOR EACH ROW EXECUTE PROCEDURE do_delete();",
+    );
+    expect(stmt).toEqual({
+      kind: "createTrigger",
+      orReplace: true,
+      name: "v_ins",
+      timing: "insteadOf",
+      events: [{ event: "delete", columns: null }],
+      table: ["myview"],
+      forEach: "row",
+      when: null,
+      execute: { routine: "procedure", name: ["do_delete"], args: [] },
+    });
+  });
+
+  it("rejects a trigger without a timing keyword", () => {
+    expect(() => sqlLite.parse("CREATE TRIGGER t INSERT ON x EXECUTE FUNCTION f();")).toThrow(
+      /Expected "before", "after" or "instead"/,
+    );
   });
 });
 
