@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    // CJS emit rewrites ESM syntax to require(); verbatimModuleSyntax forbids that.
+    "verbatimModuleSyntax": false,
+    "outDir": "./build/cjs"
+  }
+}
