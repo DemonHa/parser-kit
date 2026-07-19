@@ -177,6 +177,21 @@ describe("SQL-lite statements", () => {
     expect(partial).toMatchObject({ kind: "createIndex", unique: true, name: null });
     expect((partial as any).columns).toEqual([{ kind: "call", name: "lower", args: [name("email")] }]);
     expect((partial as any).where).toEqual(name("active"));
+    // The Phase 6 extras default off / absent on a plain index.
+    expect(plain).toMatchObject({ concurrently: false, ifNotExists: false, include: null });
+  });
+
+  it("parses CREATE INDEX CONCURRENTLY IF NOT EXISTS with INCLUDE", () => {
+    const idx = firstStmt("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx ON users (email) INCLUDE (name, id);");
+    expect(idx).toMatchObject({
+      kind: "createIndex",
+      concurrently: true,
+      ifNotExists: true,
+      name: "idx",
+      table: ["users"],
+      include: ["name", "id"],
+    });
+    expect((idx as any).columns).toEqual([name("email")]);
   });
 
   it("parses CREATE TYPE ... AS ENUM", () => {
@@ -189,9 +204,12 @@ describe("SQL-lite statements", () => {
 
   it("parses DROP TABLE IF EXISTS with several names", () => {
     expect(firstStmt("DROP TABLE IF EXISTS a, public.b;")).toEqual({
-      kind: "dropTable",
+      kind: "drop",
+      objectType: "table",
+      concurrently: false,
       ifExists: true,
       names: [["a"], ["public", "b"]],
+      behavior: null,
     });
   });
 
@@ -249,6 +267,124 @@ describe("SQL-lite ALTER TABLE", () => {
     expect(action("ALTER TABLE t ALTER COLUMN status DROP DEFAULT;")).toEqual({
       kind: "dropDefault",
       column: "status",
+    });
+  });
+});
+
+// --- Phase 6: richer ALTER TABLE actions ---
+
+describe("SQL-lite ALTER TABLE (Phase 6 actions)", () => {
+  const action = (text: string) => (firstStmt(text) as any).action;
+
+  it("sets and drops NOT NULL", () => {
+    expect(action("ALTER TABLE t ALTER COLUMN email SET NOT NULL;")).toEqual({ kind: "setNotNull", column: "email" });
+    expect(action("ALTER TABLE t ALTER email DROP NOT NULL;")).toEqual({ kind: "dropNotNull", column: "email" });
+  });
+
+  it("changes a column type via SET DATA TYPE and the TYPE shorthand", () => {
+    expect(action("ALTER TABLE t ALTER COLUMN n SET DATA TYPE bigint;")).toMatchObject({
+      kind: "setDataType",
+      column: "n",
+      dataType: { name: "bigint" },
+    });
+    expect(action("ALTER TABLE t ALTER n TYPE numeric(10, 2);")).toMatchObject({
+      kind: "setDataType",
+      column: "n",
+      dataType: { name: "numeric", args: [10, 2] },
+    });
+  });
+
+  it("renames a column, a constraint, and the table", () => {
+    expect(action("ALTER TABLE t RENAME COLUMN old TO new;")).toEqual({ kind: "renameColumn", from: "old", to: "new" });
+    expect(action("ALTER TABLE t RENAME legacy TO current;")).toEqual({
+      kind: "renameColumn",
+      from: "legacy",
+      to: "current",
+    });
+    expect(action("ALTER TABLE t RENAME CONSTRAINT pk_old TO pk_new;")).toEqual({
+      kind: "renameConstraint",
+      from: "pk_old",
+      to: "pk_new",
+    });
+    expect(action("ALTER TABLE t RENAME TO t2;")).toEqual({ kind: "renameTable", to: "t2" });
+  });
+
+  it("changes owner and replica identity", () => {
+    expect(action("ALTER TABLE t OWNER TO admin;")).toEqual({ kind: "ownerTo", owner: "admin" });
+    expect(action("ALTER TABLE t REPLICA IDENTITY FULL;")).toEqual({
+      kind: "replicaIdentity",
+      mode: "full",
+      index: null,
+    });
+    expect(action("ALTER TABLE t REPLICA IDENTITY USING INDEX t_pkey;")).toEqual({
+      kind: "replicaIdentity",
+      mode: "usingIndex",
+      index: "t_pkey",
+    });
+    expect(action("ALTER TABLE t REPLICA IDENTITY DEFAULT;")).toMatchObject({
+      kind: "replicaIdentity",
+      mode: "default",
+    });
+  });
+
+  it("rejects an unknown ALTER TABLE action", () => {
+    expect(() => sqlLite.parse("ALTER TABLE t frobnicate;")).toThrow(
+      /Expected "add", "drop", "alter", "rename", "owner" or "replica"/,
+    );
+  });
+});
+
+// --- Phase 6: DROP family & TRUNCATE ---
+
+describe("SQL-lite DROP family & TRUNCATE", () => {
+  it("drops non-table objects with CASCADE / RESTRICT", () => {
+    expect(firstStmt("DROP VIEW v;")).toEqual({
+      kind: "drop",
+      objectType: "view",
+      concurrently: false,
+      ifExists: false,
+      names: [["v"]],
+      behavior: null,
+    });
+    expect(firstStmt("DROP SEQUENCE IF EXISTS s CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "sequence",
+      concurrently: false,
+      ifExists: true,
+      names: [["s"]],
+      behavior: "cascade",
+    });
+    expect(firstStmt("DROP TYPE mood RESTRICT;")).toMatchObject({ objectType: "type", behavior: "restrict" });
+    expect(firstStmt("DROP SCHEMA a, b;")).toMatchObject({ objectType: "schema", names: [["a"], ["b"]] });
+  });
+
+  it("drops an index CONCURRENTLY", () => {
+    expect(firstStmt("DROP INDEX CONCURRENTLY IF EXISTS idx;")).toEqual({
+      kind: "drop",
+      objectType: "index",
+      concurrently: true,
+      ifExists: true,
+      names: [["idx"]],
+      behavior: null,
+    });
+  });
+
+  it("truncates one or more tables with identity and behavior", () => {
+    expect(firstStmt("TRUNCATE t;")).toEqual({
+      kind: "truncate",
+      names: [["t"]],
+      identity: null,
+      behavior: null,
+    });
+    expect(firstStmt("TRUNCATE TABLE a, b RESTART IDENTITY CASCADE;")).toEqual({
+      kind: "truncate",
+      names: [["a"], ["b"]],
+      identity: "restart",
+      behavior: "cascade",
+    });
+    expect(firstStmt("TRUNCATE public.t CONTINUE IDENTITY;")).toMatchObject({
+      names: [["public", "t"]],
+      identity: "continue",
     });
   });
 });
@@ -892,7 +1028,7 @@ describe("SQL-lite robustness", () => {
     // The malformed `42 bad` item is dropped; the siblings around it survive.
     expect(stmts[0].items.map((i: any) => i.name)).toEqual(["id", "ok"]);
     // The statement after the recovered one still parses.
-    expect(stmts[1]).toMatchObject({ kind: "dropTable", names: [["t"]] });
+    expect(stmts[1]).toMatchObject({ kind: "drop", objectType: "table", names: [["t"]] });
   });
 
   it("strict parse() throws on a malformed column with no recovery", () => {

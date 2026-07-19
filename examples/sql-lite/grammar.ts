@@ -202,23 +202,53 @@ export type AlterAction =
   | { kind: "dropColumn"; name: string }
   | { kind: "addConstraint"; name: string | null; constraint: TableConstraint }
   | { kind: "setDefault"; column: string; expr: Expr }
-  | { kind: "dropDefault"; column: string };
+  | { kind: "dropDefault"; column: string }
+  | { kind: "setNotNull"; column: string }
+  | { kind: "dropNotNull"; column: string }
+  | { kind: "setDataType"; column: string; dataType: ColType }
+  | { kind: "renameColumn"; from: string; to: string }
+  | { kind: "renameConstraint"; from: string; to: string }
+  | { kind: "renameTable"; to: string }
+  | { kind: "ownerTo"; owner: string }
+  | { kind: "replicaIdentity"; mode: "default" | "full" | "nothing" | "usingIndex"; index: string | null };
 
 export type Stmt =
   | { kind: "createTable"; ifNotExists: boolean; name: string[]; items: TableItem[]; span: Span }
   | {
       kind: "createIndex";
       unique: boolean;
+      concurrently: boolean;
+      ifNotExists: boolean;
       name: string | null;
       table: string[];
       using: string | null;
       columns: Expr[];
+      include: string[] | null;
       where: Expr | null;
       span: Span;
     }
   | { kind: "createType"; name: string[]; values: string[]; span: Span }
   | { kind: "alterTable"; name: string[]; action: AlterAction; span: Span }
-  | { kind: "dropTable"; ifExists: boolean; names: string[][]; span: Span }
+  // Generalized DROP: `DROP {TABLE|VIEW|INDEX|TYPE|SEQUENCE|SCHEMA}
+  // [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `objectType` is the
+  // folded keyword; `behavior` is the trailing CASCADE/RESTRICT (null when absent).
+  | {
+      kind: "drop";
+      objectType: string;
+      concurrently: boolean;
+      ifExists: boolean;
+      names: string[][];
+      behavior: "cascade" | "restrict" | null;
+      span: Span;
+    }
+  // `TRUNCATE [TABLE] name[, …] [RESTART|CONTINUE IDENTITY] [CASCADE|RESTRICT]`.
+  | {
+      kind: "truncate";
+      names: string[][];
+      identity: "restart" | "continue" | null;
+      behavior: "cascade" | "restrict" | null;
+      span: Span;
+    }
   | { kind: "comment"; objectType: string; name: string[]; comment: string | null; span: Span }
   // A top-level query or DML statement is a statement too.
   | Query
@@ -1317,6 +1347,16 @@ const createIndexRest = seq(
     optional(kw("unique")).map((x) => x !== null),
   ),
   skip(kw("index")),
+  field(
+    "concurrently",
+    optional(kw("concurrently")).map((x) => x !== null),
+  ),
+  // `IF NOT EXISTS` precedes the (still optional) index name. attempt() so a
+  // typo'd `IF NOT EXIST` backtracks to try a name/ON instead of hard-committing.
+  field(
+    "ifNotExists",
+    optional(attempt(kwseq("if", "not", "exists"))).map((x) => x !== null),
+  ),
   // The index name is optional; `attempt` lets it backtrack when `on` follows
   // instead (an `on` ident matches the type-only first set but is reserved).
   field("name", optional(attempt(nameWord))),
@@ -1324,15 +1364,20 @@ const createIndexRest = seq(
   field("table", qualName),
   field("using", optional(seq(skip(kw("using")), field("m", nameWord)).map((s) => s.m))),
   field("columns", exprList),
+  // `INCLUDE (col, …)` covering columns — plain names, kept null when absent.
+  field("include", optional(seq(skip(kw("include")), field("cols", columnList)).map((s) => s.cols))),
   field("where", optional(seq(skip(kw("where")), field("e", expression)).map((s) => s.e))),
 ).map(
-  ({ unique, name, table, using, columns, where }, span): Stmt => ({
+  ({ unique, concurrently, ifNotExists, name, table, using, columns, include, where }, span): Stmt => ({
     kind: "createIndex",
     unique,
+    concurrently,
+    ifNotExists,
     name,
     table,
     using,
     columns,
+    include,
     where,
     span,
   }),
@@ -1391,21 +1436,74 @@ const alterAction = custom<AlterAction, SqlTokenType>(
       ctx.next(); // ALTER
       ctx.eat("ident", "column"); // optional COLUMN
       const column = ctx.parse(nameWord);
-      if (ctx.is("ident", "set")) {
-        ctx.parse(kwseq("set", "default"));
-        return { kind: "setDefault", column, expr: ctx.parse(expression) };
+      // `TYPE t` — shorthand for `SET DATA TYPE t`.
+      if (ctx.eat("ident", "type") !== null) {
+        return { kind: "setDataType", column, dataType: ctx.parse(typeRef) };
       }
-      ctx.parse(kwseq("drop", "default"));
-      return { kind: "dropDefault", column };
+      if (ctx.is("ident", "set")) {
+        ctx.next(); // SET
+        if (ctx.eat("ident", "default") !== null) {
+          return { kind: "setDefault", column, expr: ctx.parse(expression) };
+        }
+        if (ctx.is("ident", "not")) {
+          ctx.parse(kwseq("not", "null"));
+          return { kind: "setNotNull", column };
+        }
+        ctx.parse(kwseq("data", "type"));
+        return { kind: "setDataType", column, dataType: ctx.parse(typeRef) };
+      }
+      ctx.parse(kw("drop"));
+      if (ctx.eat("ident", "default") !== null) return { kind: "dropDefault", column };
+      ctx.parse(kwseq("not", "null"));
+      return { kind: "dropNotNull", column };
     }
-    return ctx.croak(`Expected "add", "drop" or "alter" but found ${describeFound(ctx.peek())}`);
+    // `RENAME [COLUMN] old TO new` / `RENAME CONSTRAINT old TO new` /
+    // `RENAME TO new` (the table itself). `to`/`constraint`/`column` are matched
+    // by value regardless of their reserved status.
+    if (head !== null && head.type === "ident" && head.value === "rename") {
+      ctx.next(); // RENAME
+      if (ctx.eat("ident", "to") !== null) {
+        return { kind: "renameTable", to: ctx.parse(nameWord) };
+      }
+      if (ctx.eat("ident", "constraint") !== null) {
+        const from = ctx.parse(nameWord);
+        ctx.parse(kw("to"));
+        return { kind: "renameConstraint", from, to: ctx.parse(nameWord) };
+      }
+      ctx.eat("ident", "column"); // optional COLUMN
+      const from = ctx.parse(nameWord);
+      ctx.parse(kw("to"));
+      return { kind: "renameColumn", from, to: ctx.parse(nameWord) };
+    }
+    if (head !== null && head.type === "ident" && head.value === "owner") {
+      ctx.parse(kwseq("owner", "to"));
+      return { kind: "ownerTo", owner: ctx.parse(nameWord) };
+    }
+    // `REPLICA IDENTITY {DEFAULT | FULL | NOTHING | USING INDEX name}`.
+    if (head !== null && head.type === "ident" && head.value === "replica") {
+      ctx.parse(kwseq("replica", "identity"));
+      if (ctx.eat("ident", "full") !== null) return { kind: "replicaIdentity", mode: "full", index: null };
+      if (ctx.eat("ident", "nothing") !== null) return { kind: "replicaIdentity", mode: "nothing", index: null };
+      if (ctx.is("ident", "using")) {
+        ctx.parse(kwseq("using", "index"));
+        return { kind: "replicaIdentity", mode: "usingIndex", index: ctx.parse(nameWord) };
+      }
+      ctx.parse(kw("default"));
+      return { kind: "replicaIdentity", mode: "default", index: null };
+    }
+    return ctx.croak(
+      `Expected "add", "drop", "alter", "rename", "owner" or "replica" but found ${describeFound(ctx.peek())}`,
+    );
   },
   {
-    expected: '"add", "drop" or "alter"',
+    expected: '"add", "drop", "alter", "rename", "owner" or "replica"',
     first: [
       { type: "ident", value: "add" },
       { type: "ident", value: "drop" },
       { type: "ident", value: "alter" },
+      { type: "ident", value: "rename" },
+      { type: "ident", value: "owner" },
+      { type: "ident", value: "replica" },
     ],
   },
 );
@@ -1414,15 +1512,58 @@ const alterStmt = seq(skip(kw("alter")), skip(kw("table")), field("name", qualNa
   ({ name, action }, span): Stmt => ({ kind: "alterTable", name, action, span }),
 );
 
+// CASCADE / RESTRICT drop behavior, shared by DROP and TRUNCATE (null when absent).
+const dropBehavior = optional(oneOf(kw("cascade"), kw("restrict"))).map(
+  (n) => (n?.value ?? null) as "cascade" | "restrict" | null,
+);
+
+// The object kinds a bare DROP can target. Each is an unreserved keyword matched
+// by value; `table` is reserved but still matches here via `kw`.
+const dropObjectType = oneOf(kw("table"), kw("view"), kw("index"), kw("type"), kw("sequence"), kw("schema")).map(
+  (n) => n.value,
+);
+
 const dropStmt = seq(
   skip(kw("drop")),
-  skip(kw("table")),
+  field("objectType", dropObjectType),
+  // CONCURRENTLY is only meaningful for DROP INDEX, but we accept it after any
+  // object kind; it precedes IF EXISTS (PG order).
+  field(
+    "concurrently",
+    optional(kw("concurrently")).map((x) => x !== null),
+  ),
   field(
     "ifExists",
     optional(attempt(kwseq("if", "exists"))).map((x) => x !== null),
   ),
   field("names", sepBy(qualName, P(","))),
-).map(({ ifExists, names }, span): Stmt => ({ kind: "dropTable", ifExists, names, span }));
+  field("behavior", dropBehavior),
+).map(
+  ({ objectType, concurrently, ifExists, names, behavior }, span): Stmt => ({
+    kind: "drop",
+    objectType,
+    concurrently,
+    ifExists,
+    names,
+    behavior,
+    span,
+  }),
+);
+
+const truncateStmt = seq(
+  skip(kw("truncate")),
+  skip(optional(kw("table"))), // optional TABLE noise word
+  field("names", sepBy(qualName, P(","))),
+  field(
+    "identity",
+    optional(
+      seq(field("m", oneOf(kw("restart"), kw("continue"))), skip(kw("identity"))).map(
+        (s) => s.m.value as "restart" | "continue",
+      ),
+    ),
+  ),
+  field("behavior", dropBehavior),
+).map(({ names, identity, behavior }, span): Stmt => ({ kind: "truncate", names, identity, behavior, span }));
 
 const commentStmt = seq(
   skip(kw("comment")),
@@ -2078,9 +2219,11 @@ const dmlStatement = custom<Stmt, SqlTokenType>(
   },
 );
 
-// First-sets: create/alter/drop/comment each dispatch on their own keyword;
-// dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
-const statementBody = oneOf(createStmt, alterStmt, dropStmt, commentStmt, dmlStatement).describe("a statement");
+// First-sets: create/alter/drop/truncate/comment each dispatch on their own
+// keyword; dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
+const statementBody = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt, dmlStatement).describe(
+  "a statement",
+);
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.
 const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
 
