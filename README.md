@@ -235,3 +235,15 @@ pnpm --filter @database.io/parser-kit test         # unit tests per combinator +
 pnpm --filter @database.io/parser-kit types:check
 pnpm --filter @database.io/parser-kit build        # tsc → build/
 ```
+
+### Benchmarks
+
+[`examples/sql-lite/sql-lite.bench.ts`](examples/sql-lite/sql-lite.bench.ts) pits the sql-lite grammar against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from the sql-lite tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles.
+
+```sh
+pnpm --filter @database.io/parser-kit bench         # run once, print the table
+pnpm --filter @database.io/parser-kit bench:save    # write bench-baseline.json (the committed baseline)
+pnpm --filter @database.io/parser-kit bench:compare # diff the current run against bench-baseline.json
+```
+
+`bench-baseline.json` is committed so `bench:compare` shows per-benchmark deltas (`⇑`/`⇓`) as the grammar grows. Re-run `bench:save` to refresh the baseline after an intentional change. Absolute numbers drift with machine load — trust the sql-lite-vs-node ratio and the compare deltas over raw `hz`.

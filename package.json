@@ -5,12 +5,16 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "types:check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "bench": "vitest bench --run",
+    "bench:save": "vitest bench --run --outputJson=bench-baseline.json && node scripts/normalize-baseline.mjs",
+    "bench:compare": "vitest bench --run --compare=bench-baseline.json"
   },
   "dependencies": {
     "typescript": "catalog:"
   },
   "devDependencies": {
+    "node-sql-parser": "catalog:",
     "vitest": "catalog:"
   }
 }
