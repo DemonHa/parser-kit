@@ -385,6 +385,78 @@ export type CreateTrigger = {
   span: Span;
 };
 
+// --- Phase 9: DCL / TCL / session ---
+
+// A single privilege in GRANT/REVOKE: a keyword like SELECT/INSERT/USAGE with an
+// optional column list (`UPDATE (a, b)`). For a role grant the same shape carries
+// the granted role name (columns null).
+export type Privilege = { name: string; columns: string[] | null };
+
+// The `ON objectType name[, …]` target of an object-privilege grant. `objectType`
+// is the folded object keyword (default "table"); `names` lists the objects — or
+// is empty for the `ALL {TABLES|SEQUENCES|FUNCTIONS} IN SCHEMA s[, …]` form, whose
+// schemas live in `inSchema` (null otherwise).
+export type GrantObject = { objectType: string; names: string[][]; inSchema: string[][] | null };
+
+// `GRANT { privilege[, …] | ALL [PRIVILEGES] } ON … TO grantee[, …] [WITH GRANT
+// OPTION]`, or the role form `GRANT role[, …] TO grantee[, …] [WITH ADMIN
+// OPTION]`. `on` is null for a role grant; then `privileges` carries the granted
+// role names (each with columns null). `"all"` = ALL PRIVILEGES.
+export type Grant = {
+  kind: "grant";
+  privileges: Privilege[] | "all";
+  on: GrantObject | null;
+  grantees: string[];
+  withGrantOption: boolean; // WITH GRANT OPTION (object) or WITH ADMIN OPTION (role)
+  span: Span;
+};
+
+export type Revoke = {
+  kind: "revoke";
+  grantOptionFor: boolean; // GRANT OPTION FOR / ADMIN OPTION FOR
+  privileges: Privilege[] | "all";
+  on: GrantObject | null;
+  grantees: string[];
+  behavior: "cascade" | "restrict" | null;
+  span: Span;
+};
+
+export type TransactionMode =
+  | { kind: "isolation"; level: "serializable" | "repeatableRead" | "readCommitted" | "readUncommitted" }
+  | { kind: "readWrite"; value: boolean } // true = READ WRITE, false = READ ONLY
+  | { kind: "deferrable"; value: boolean }; // true = DEFERRABLE, false = NOT DEFERRABLE
+
+// BEGIN / START TRANSACTION / COMMIT / ROLLBACK / SAVEPOINT / RELEASE SAVEPOINT.
+export type Transaction =
+  | { kind: "begin"; start: boolean; modes: TransactionMode[]; span: Span } // start = `START TRANSACTION`
+  | { kind: "commit"; chain: boolean; span: Span } // chain = AND CHAIN
+  | { kind: "rollback"; chain: boolean; savepoint: string | null; span: Span } // savepoint = ROLLBACK TO [SAVEPOINT] name
+  | { kind: "savepoint"; name: string; span: Span }
+  | { kind: "releaseSavepoint"; name: string; span: Span };
+
+// SET [SESSION|LOCAL] { name {=|TO} value[, …] | TIME ZONE value | ROLE|SCHEMA|NAMES
+// value }. `name` is the dotted config parameter (or "time zone"/"role"/…);
+// `values` is the value list, or "default" for the DEFAULT keyword.
+export type SetStmt = {
+  kind: "set";
+  scope: "session" | "local" | null;
+  name: string;
+  values: Expr[] | "default";
+  span: Span;
+};
+
+// SHOW {name | ALL} — `name` is "all" for SHOW ALL.
+export type Show = { kind: "show"; name: string; span: Span };
+// RESET {name | ALL}.
+export type Reset = { kind: "reset"; name: string; span: Span };
+
+// DO [LANGUAGE lang] 'body' — the body is one (dollar-quoted) string, kept opaque
+// like a function body; LANGUAGE may precede or follow the code.
+export type Do = { kind: "do"; language: string | null; body: string; span: Span };
+
+// DEALLOCATE [PREPARE] {name | ALL} — `name` is null for DEALLOCATE ALL.
+export type Deallocate = { kind: "deallocate"; name: string | null; span: Span };
+
 export type Stmt =
   | { kind: "createTable"; ifNotExists: boolean; name: string[]; items: TableItem[]; span: Span }
   | {
@@ -430,6 +502,15 @@ export type Stmt =
       span: Span;
     }
   | { kind: "comment"; objectType: string; name: string[]; comment: string | null; span: Span }
+  // DCL / TCL / session (Phase 9).
+  | Grant
+  | Revoke
+  | Transaction
+  | SetStmt
+  | Show
+  | Reset
+  | Do
+  | Deallocate
   // A top-level query or DML statement is a statement too.
   | Query
   | Insert
@@ -2323,6 +2404,360 @@ const commentStmt = seq(
   ),
 ).map(({ objectType, name, comment }, span): Stmt => ({ kind: "comment", objectType, name, comment, span }));
 
+// --- Phase 9: DCL / TCL / session ---
+//
+// Every lead word here (revoke/begin/start/commit/rollback/savepoint/release/
+// show/reset/deallocate and the various option words) stays UNRESERVED — matched
+// by value via `kw()`/`ctx.eat` — so they remain usable as identifiers elsewhere.
+// (`grant`, `do`, and `set` are already reserved for other reasons.)
+
+// One or more `parseItem` results, comma-separated. A hand loop rather than
+// `sepBy` because the callers run inside a `custom` closure over raw `ctx`.
+function commaList<T>(ctx: ParseContext<SqlTokenType>, parseItem: (c: ParseContext<SqlTokenType>) => T): T[] {
+  const items = [parseItem(ctx)];
+  while (ctx.eat("punc", ",") !== null) items.push(parseItem(ctx));
+  return items;
+}
+
+// The privilege keywords a GRANT/REVOKE may name (folded, so all lowercase). A
+// word outside this set is read as a role name instead (role grants).
+const PRIVILEGE_WORDS: ReadonlySet<string> = new Set([
+  "select",
+  "insert",
+  "update",
+  "delete",
+  "truncate",
+  "references",
+  "trigger",
+  "usage",
+  "create",
+  "connect",
+  "temporary",
+  "temp",
+  "execute",
+  "maintain",
+]);
+
+// Object kinds a privilege may target (default TABLE when omitted).
+const GRANT_OBJECT_TYPES: ReadonlySet<string> = new Set([
+  "table",
+  "sequence",
+  "database",
+  "schema",
+  "function",
+  "procedure",
+  "routine",
+  "type",
+  "domain",
+  "language",
+  "tablespace",
+]);
+
+// Plural → singular for the `ALL {TABLES|…} IN SCHEMA` object form.
+const ALL_IN_SCHEMA: Record<string, string> = {
+  tables: "table",
+  sequences: "sequence",
+  functions: "function",
+  procedures: "procedure",
+  routines: "routine",
+};
+
+// One privilege keyword (or, in a role grant, a role name) with an optional
+// `(col, …)` column list. `nameWord` excludes reserved words, so privilege
+// keywords — several of which are reserved — are matched by value first.
+function parsePrivilege(ctx: ParseContext<SqlTokenType>): Privilege {
+  const cur = ctx.peek();
+  let n: string;
+  if (cur !== null && cur.type === "ident" && PRIVILEGE_WORDS.has(cur.value)) {
+    n = cur.value;
+    ctx.next();
+  } else {
+    n = ctx.parse(nameWord);
+  }
+  const columns = ctx.is("punc", "(") ? ctx.parse(columnList) : null;
+  return { name: n, columns };
+}
+
+// The `ON …` object target (the `ON` keyword already consumed by the caller).
+function parseGrantObject(ctx: ParseContext<SqlTokenType>): GrantObject {
+  // `ALL {TABLES|SEQUENCES|FUNCTIONS|PROCEDURES|ROUTINES} IN SCHEMA s[, …]`.
+  if (ctx.is("ident", "all") && ctx.peekAhead(1)?.value !== undefined && ALL_IN_SCHEMA[ctx.peekAhead(1)!.value]) {
+    ctx.next(); // ALL
+    const plural = ctx.next()!.value; // tables / sequences / …
+    ctx.parse(kwseq("in", "schema"));
+    return { objectType: ALL_IN_SCHEMA[plural]!, names: [], inSchema: commaList(ctx, (c) => c.parse(qualName)) };
+  }
+  // `[objectType] name[, …]` — objectType defaults to TABLE when omitted.
+  let objectType = "table";
+  const cur = ctx.peek();
+  if (cur !== null && cur.type === "ident" && GRANT_OBJECT_TYPES.has(cur.value)) {
+    objectType = cur.value;
+    ctx.next();
+  }
+  return { objectType, names: commaList(ctx, (c) => c.parse(qualName)), inSchema: null };
+}
+
+// A single grantee: `[GROUP] role`, PUBLIC, or a CURRENT_/SESSION_ pseudo-role
+// (those are reserved words, so they are matched by value before `nameWord`).
+const GRANTEE_KEYWORDS: ReadonlySet<string> = new Set(["public", "current_user", "current_role", "session_user"]);
+function parseGrantee(ctx: ParseContext<SqlTokenType>): string {
+  ctx.eat("ident", "group"); // optional GROUP noise word
+  const cur = ctx.peek();
+  if (cur !== null && cur.type === "ident" && GRANTEE_KEYWORDS.has(cur.value)) {
+    ctx.next();
+    return cur.value;
+  }
+  return ctx.parse(nameWord);
+}
+
+// The shared `{privileges | ALL} [ON object] {TO|FROM} grantees` middle of
+// GRANT and REVOKE. `granteeKw` is "to" for GRANT, "from" for REVOKE.
+function parseGrantBody(
+  ctx: ParseContext<SqlTokenType>,
+  granteeKw: string,
+): { privileges: Privilege[] | "all"; on: GrantObject | null; grantees: string[] } {
+  let privileges: Privilege[] | "all";
+  if (ctx.is("ident", "all")) {
+    ctx.next(); // ALL
+    ctx.eat("ident", "privileges"); // optional PRIVILEGES
+    privileges = "all";
+  } else {
+    privileges = commaList(ctx, parsePrivilege);
+  }
+  const on = ctx.eat("ident", "on") !== null ? parseGrantObject(ctx) : null;
+  ctx.parse(kw(granteeKw));
+  return { privileges, on, grantees: commaList(ctx, parseGrantee) };
+}
+
+const grantStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const revoke = ctx.eat("ident", "revoke") !== null;
+    if (!revoke) ctx.parse(kw("grant"));
+    // REVOKE [{GRANT|ADMIN} OPTION FOR] …
+    let grantOptionFor = false;
+    if (revoke) {
+      const w = ctx.peek();
+      if (
+        w !== null &&
+        w.type === "ident" &&
+        (w.value === "grant" || w.value === "admin") &&
+        ctx.peekAhead(1)?.value === "option"
+      ) {
+        ctx.next(); // GRANT / ADMIN
+        ctx.next(); // OPTION
+        ctx.parse(kw("for"));
+        grantOptionFor = true;
+      }
+    }
+    const { privileges, on, grantees } = parseGrantBody(ctx, revoke ? "from" : "to");
+    if (revoke) {
+      const behavior = ctx.parse(dropBehavior);
+      return { kind: "revoke", grantOptionFor, privileges, on, grantees, behavior, span: ctx.spanFrom(start) };
+    }
+    // GRANT: WITH GRANT OPTION (object) or WITH ADMIN OPTION (role).
+    let withGrantOption = false;
+    if (ctx.eat("ident", "with") !== null) {
+      if (ctx.eat("ident", "grant") === null) ctx.parse(kw("admin"));
+      ctx.parse(kw("option"));
+      withGrantOption = true;
+    }
+    return { kind: "grant", privileges, on, grantees, withGrantOption, span: ctx.spanFrom(start) };
+  },
+  {
+    expected: '"grant" or "revoke"',
+    first: [
+      { type: "ident", value: "grant" },
+      { type: "ident", value: "revoke" },
+    ],
+  },
+);
+
+// One transaction characteristic: ISOLATION LEVEL …, READ WRITE|ONLY,
+// [NOT] DEFERRABLE.
+function parseTransactionMode(ctx: ParseContext<SqlTokenType>): TransactionMode {
+  if (ctx.is("ident", "isolation")) {
+    ctx.parse(kwseq("isolation", "level"));
+    if (ctx.eat("ident", "serializable") !== null) return { kind: "isolation", level: "serializable" };
+    if (ctx.is("ident", "repeatable")) {
+      ctx.parse(kwseq("repeatable", "read"));
+      return { kind: "isolation", level: "repeatableRead" };
+    }
+    if (ctx.is("ident", "read") && ctx.peekAhead(1)?.value === "committed") {
+      ctx.parse(kwseq("read", "committed"));
+      return { kind: "isolation", level: "readCommitted" };
+    }
+    ctx.parse(kwseq("read", "uncommitted"));
+    return { kind: "isolation", level: "readUncommitted" };
+  }
+  if (ctx.is("ident", "read")) {
+    if (ctx.peekAhead(1)?.value === "only") {
+      ctx.parse(kwseq("read", "only"));
+      return { kind: "readWrite", value: false };
+    }
+    ctx.parse(kwseq("read", "write"));
+    return { kind: "readWrite", value: true };
+  }
+  if (ctx.eat("ident", "not") !== null) {
+    ctx.parse(kw("deferrable"));
+    return { kind: "deferrable", value: false };
+  }
+  ctx.parse(kw("deferrable"));
+  return { kind: "deferrable", value: true };
+}
+
+const TRANSACTION_MODE_LEADS: ReadonlySet<string> = new Set(["isolation", "read", "not", "deferrable"]);
+// Zero or more transaction modes (commas between them are optional in PG).
+function parseTransactionModes(ctx: ParseContext<SqlTokenType>): TransactionMode[] {
+  const modes: TransactionMode[] = [];
+  while (true) {
+    const t = ctx.peek();
+    if (t === null || t.type !== "ident" || !TRANSACTION_MODE_LEADS.has(t.value)) break;
+    modes.push(parseTransactionMode(ctx));
+    ctx.eat("punc", ","); // optional separator
+  }
+  return modes;
+}
+
+// `AND [NO] CHAIN` on COMMIT / ROLLBACK — returns whether CHAIN (not NO CHAIN).
+function parseAndChain(ctx: ParseContext<SqlTokenType>): boolean {
+  if (ctx.eat("ident", "and") === null) return false;
+  const no = ctx.eat("ident", "no") !== null;
+  ctx.parse(kw("chain"));
+  return !no;
+}
+
+const transactionStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const head = ctx.peek()!; // guaranteed an ident lead by the first set
+    if (head.value === "begin") {
+      ctx.next();
+      ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction"); // optional WORK|TRANSACTION
+      return { kind: "begin", start: false, modes: parseTransactionModes(ctx), span: ctx.spanFrom(start) };
+    }
+    if (head.value === "start") {
+      ctx.parse(kwseq("start", "transaction"));
+      return { kind: "begin", start: true, modes: parseTransactionModes(ctx), span: ctx.spanFrom(start) };
+    }
+    if (head.value === "commit") {
+      ctx.next();
+      ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
+      return { kind: "commit", chain: parseAndChain(ctx), span: ctx.spanFrom(start) };
+    }
+    if (head.value === "rollback") {
+      ctx.next();
+      ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
+      // `ROLLBACK TO [SAVEPOINT] name` and `ROLLBACK AND CHAIN` are exclusive.
+      if (ctx.eat("ident", "to") !== null) {
+        ctx.eat("ident", "savepoint"); // optional SAVEPOINT
+        return { kind: "rollback", chain: false, savepoint: ctx.parse(nameWord), span: ctx.spanFrom(start) };
+      }
+      return { kind: "rollback", chain: parseAndChain(ctx), savepoint: null, span: ctx.spanFrom(start) };
+    }
+    if (head.value === "savepoint") {
+      ctx.next();
+      return { kind: "savepoint", name: ctx.parse(nameWord), span: ctx.spanFrom(start) };
+    }
+    ctx.parse(kw("release"));
+    ctx.eat("ident", "savepoint"); // optional SAVEPOINT
+    return { kind: "releaseSavepoint", name: ctx.parse(nameWord), span: ctx.spanFrom(start) };
+  },
+  {
+    expected: "a transaction statement",
+    first: [
+      { type: "ident", value: "begin" },
+      { type: "ident", value: "start" },
+      { type: "ident", value: "commit" },
+      { type: "ident", value: "rollback" },
+      { type: "ident", value: "savepoint" },
+      { type: "ident", value: "release" },
+    ],
+  },
+);
+
+// A dotted config parameter name (`search_path`, `my.custom.guc`) → one string.
+const configName = sepBy(nameWord, P(".")).map((parts) => parts.join("."));
+// The single-value SET forms that take no `=`/`TO` operator.
+const SET_SINGLE_FORMS: ReadonlySet<string> = new Set(["role", "schema", "names"]);
+
+const sessionStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    if (ctx.eat("ident", "show") !== null) {
+      const name = ctx.eat("ident", "all") !== null ? "all" : ctx.parse(configName);
+      return { kind: "show", name, span: ctx.spanFrom(start) };
+    }
+    if (ctx.eat("ident", "reset") !== null) {
+      const name = ctx.eat("ident", "all") !== null ? "all" : ctx.parse(configName);
+      return { kind: "reset", name, span: ctx.spanFrom(start) };
+    }
+    ctx.parse(kw("set"));
+    let scope: "session" | "local" | null = null;
+    if (ctx.eat("ident", "session") !== null) scope = "session";
+    else if (ctx.eat("ident", "local") !== null) scope = "local";
+    // `SET TIME ZONE value` — a single value, no operator.
+    if (ctx.is("ident", "time")) {
+      ctx.parse(kwseq("time", "zone"));
+      const values: Expr[] | "default" = ctx.eat("ident", "default") !== null ? "default" : [ctx.parse(expression)];
+      return { kind: "set", scope, name: "time zone", values, span: ctx.spanFrom(start) };
+    }
+    // `SET {ROLE|SCHEMA|NAMES} value` — likewise operator-less.
+    const lead = ctx.peek();
+    if (lead !== null && lead.type === "ident" && SET_SINGLE_FORMS.has(lead.value)) {
+      ctx.next();
+      const values: Expr[] | "default" = ctx.eat("ident", "default") !== null ? "default" : [ctx.parse(expression)];
+      return { kind: "set", scope, name: lead.value, values, span: ctx.spanFrom(start) };
+    }
+    // Generic `SET name {=|TO} value[, …]`.
+    const name = ctx.parse(configName);
+    if (ctx.eat("op", "=") === null) ctx.parse(kw("to"));
+    const values: Expr[] | "default" =
+      ctx.eat("ident", "default") !== null ? "default" : commaList(ctx, (c) => c.parse(expression));
+    return { kind: "set", scope, name, values, span: ctx.spanFrom(start) };
+  },
+  {
+    expected: "a SET / SHOW / RESET statement",
+    first: [
+      { type: "ident", value: "set" },
+      { type: "ident", value: "show" },
+      { type: "ident", value: "reset" },
+    ],
+  },
+);
+
+const doStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("do"));
+    // LANGUAGE and the code body may appear in either order.
+    let language: string | null = null;
+    let body: string | null = null;
+    while (true) {
+      if (ctx.is("ident", "language")) {
+        ctx.next();
+        language = ctx.is("string") ? ctx.parse(strValue) : ctx.parse(nameWord);
+      } else if (ctx.is("string")) {
+        body = ctx.parse(strValue);
+      } else break;
+    }
+    if (body === null) return ctx.croak(`Expected a code body but found ${describeFound(ctx.peek())}`);
+    return { kind: "do", language, body, span: ctx.spanFrom(start) };
+  },
+  { expected: '"do"', first: [{ type: "ident", value: "do" }] },
+);
+
+const deallocateStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("deallocate"));
+    ctx.eat("ident", "prepare"); // optional PREPARE noise word
+    const name = ctx.eat("ident", "all") !== null ? null : ctx.parse(nameWord);
+    return { kind: "deallocate", name, span: ctx.spanFrom(start) };
+  },
+  { expected: '"deallocate"', first: [{ type: "ident", value: "deallocate" }] },
+);
+
 // --- DML: shared clause pieces ---
 
 // `[AS] alias`. A custom rule rather than optional(seq(...)) because the
@@ -2957,11 +3392,22 @@ const dmlStatement = custom<Stmt, SqlTokenType>(
   },
 );
 
-// First-sets: create/alter/drop/truncate/comment each dispatch on their own
-// keyword; dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
-const statementBody = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt, dmlStatement).describe(
-  "a statement",
-);
+// First-sets: create/alter/drop/truncate/comment and the Phase 9 DCL/TCL/session
+// rules each dispatch on their own lead keyword; dmlStatement owns
+// `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
+const statementBody = oneOf(
+  createStmt,
+  alterStmt,
+  dropStmt,
+  truncateStmt,
+  commentStmt,
+  grantStmt,
+  transactionStmt,
+  sessionStmt,
+  doStmt,
+  deallocateStmt,
+  dmlStatement,
+).describe("a statement");
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.
 const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
 

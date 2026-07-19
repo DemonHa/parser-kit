@@ -1767,3 +1767,159 @@ describe("SQL-lite DML robustness", () => {
     expect(stmts[stmts.length - 1]).toMatchObject({ kind: "select", columns: [col(num(1))] });
   });
 });
+
+// --- Phase 9: GRANT / REVOKE ---
+
+describe("SQL-lite GRANT / REVOKE", () => {
+  it("parses an object grant with a column-scoped privilege and WITH GRANT OPTION", () => {
+    expect(firstStmt("GRANT SELECT, UPDATE (a, b) ON TABLE t1, t2 TO alice, bob WITH GRANT OPTION;")).toEqual({
+      kind: "grant",
+      privileges: [
+        { name: "select", columns: null },
+        { name: "update", columns: ["a", "b"] },
+      ],
+      on: { objectType: "table", names: [["t1"], ["t2"]], inSchema: null },
+      grantees: ["alice", "bob"],
+      withGrantOption: true,
+    });
+  });
+
+  it("parses ALL PRIVILEGES and PUBLIC (object type defaulting to table)", () => {
+    expect(firstStmt("GRANT ALL PRIVILEGES ON s.t TO PUBLIC;")).toEqual({
+      kind: "grant",
+      privileges: "all",
+      on: { objectType: "table", names: [["s", "t"]], inSchema: null },
+      grantees: ["public"],
+      withGrantOption: false,
+    });
+  });
+
+  it("parses a role grant (no ON) with WITH ADMIN OPTION", () => {
+    expect(firstStmt("GRANT admin TO joe WITH ADMIN OPTION;")).toEqual({
+      kind: "grant",
+      privileges: [{ name: "admin", columns: null }],
+      on: null,
+      grantees: ["joe"],
+      withGrantOption: true,
+    });
+  });
+
+  it("parses ALL SEQUENCES IN SCHEMA and USAGE", () => {
+    expect(firstStmt("GRANT USAGE ON ALL SEQUENCES IN SCHEMA s TO r;")).toEqual({
+      kind: "grant",
+      privileges: [{ name: "usage", columns: null }],
+      on: { objectType: "sequence", names: [], inSchema: [["s"]] },
+      grantees: ["r"],
+      withGrantOption: false,
+    });
+  });
+
+  it("parses REVOKE GRANT OPTION FOR ... FROM ... CASCADE", () => {
+    expect(firstStmt("REVOKE GRANT OPTION FOR SELECT ON t FROM alice CASCADE;")).toEqual({
+      kind: "revoke",
+      grantOptionFor: true,
+      privileges: [{ name: "select", columns: null }],
+      on: { objectType: "table", names: [["t"]], inSchema: null },
+      grantees: ["alice"],
+      behavior: "cascade",
+    });
+  });
+
+  it("throws a descriptive error when the TO grantee list is missing", () => {
+    expect(() => sqlLite.parse("GRANT SELECT ON t;")).toThrow(ParseError);
+  });
+});
+
+// --- Phase 9: transaction control ---
+
+describe("SQL-lite transaction control", () => {
+  it("parses BEGIN (with optional WORK) and its lack of modes", () => {
+    expect(firstStmt("BEGIN WORK;")).toEqual({ kind: "begin", start: false, modes: [] });
+  });
+
+  it("parses START TRANSACTION with isolation + access modes", () => {
+    expect(firstStmt("START TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE;")).toEqual({
+      kind: "begin",
+      start: true,
+      modes: [
+        { kind: "isolation", level: "serializable" },
+        { kind: "readWrite", value: true },
+      ],
+    });
+    // Multi-word levels and NOT DEFERRABLE, commas optional between modes.
+    expect((firstStmt("START TRANSACTION ISOLATION LEVEL REPEATABLE READ NOT DEFERRABLE;") as any).modes).toEqual([
+      { kind: "isolation", level: "repeatableRead" },
+      { kind: "deferrable", value: false },
+    ]);
+  });
+
+  it("parses COMMIT AND CHAIN, ROLLBACK TO SAVEPOINT, SAVEPOINT and RELEASE", () => {
+    expect(firstStmt("COMMIT AND CHAIN;")).toEqual({ kind: "commit", chain: true });
+    expect(firstStmt("ROLLBACK;")).toEqual({ kind: "rollback", chain: false, savepoint: null });
+    expect(firstStmt("ROLLBACK TO SAVEPOINT sp1;")).toEqual({ kind: "rollback", chain: false, savepoint: "sp1" });
+    expect(firstStmt("SAVEPOINT sp1;")).toEqual({ kind: "savepoint", name: "sp1" });
+    expect(firstStmt("RELEASE sp1;")).toEqual({ kind: "releaseSavepoint", name: "sp1" });
+  });
+});
+
+// --- Phase 9: SET / SHOW / RESET ---
+
+describe("SQL-lite SET / SHOW / RESET", () => {
+  it("parses a generic SET with a value list and TO separator", () => {
+    expect(firstStmt("SET search_path TO my_schema, public;")).toEqual({
+      kind: "set",
+      scope: null,
+      name: "search_path",
+      values: [name("my_schema"), name("public")],
+    });
+  });
+
+  it("parses SET x = DEFAULT and the operator-less special forms", () => {
+    expect(firstStmt("SET my.guc = DEFAULT;")).toEqual({
+      kind: "set",
+      scope: null,
+      name: "my.guc",
+      values: "default",
+    });
+    expect(firstStmt("SET LOCAL TIME ZONE 'PST8PDT';")).toEqual({
+      kind: "set",
+      scope: "local",
+      name: "time zone",
+      values: [str("PST8PDT")],
+    });
+    expect(firstStmt("SET SESSION ROLE none;")).toEqual({
+      kind: "set",
+      scope: "session",
+      name: "role",
+      values: [name("none")],
+    });
+  });
+
+  it("parses SHOW / RESET including their ALL forms", () => {
+    expect(firstStmt("SHOW search_path;")).toEqual({ kind: "show", name: "search_path" });
+    expect(firstStmt("SHOW ALL;")).toEqual({ kind: "show", name: "all" });
+    expect(firstStmt("RESET ALL;")).toEqual({ kind: "reset", name: "all" });
+  });
+});
+
+// --- Phase 9: DO / DEALLOCATE ---
+
+describe("SQL-lite DO / DEALLOCATE", () => {
+  it("parses a DO block with an opaque dollar-quoted body (LANGUAGE either side)", () => {
+    expect(firstStmt("DO LANGUAGE plpgsql $$ BEGIN NULL; END $$;")).toEqual({
+      kind: "do",
+      language: "plpgsql",
+      body: " BEGIN NULL; END ",
+    });
+    expect(firstStmt("DO $$ SELECT 1 $$ LANGUAGE sql;")).toEqual({
+      kind: "do",
+      language: "sql",
+      body: " SELECT 1 ",
+    });
+  });
+
+  it("parses DEALLOCATE name and DEALLOCATE ALL", () => {
+    expect(firstStmt("DEALLOCATE PREPARE my_stmt;")).toEqual({ kind: "deallocate", name: "my_stmt" });
+    expect(firstStmt("DEALLOCATE ALL;")).toEqual({ kind: "deallocate", name: null });
+  });
+});
