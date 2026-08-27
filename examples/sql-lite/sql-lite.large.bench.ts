@@ -41,7 +41,7 @@ function buildBlob(targetKB: number): string {
   let size = 0;
   let i = 0;
   while (size < targetBytes) {
-    const stmt = SHARED_STATEMENTS[i % SHARED_STATEMENTS.length];
+    const stmt = SHARED_STATEMENTS[i % SHARED_STATEMENTS.length]!;
     parts.push(stmt);
     size += stmt.length + 1; // + newline
     i++;
@@ -66,7 +66,7 @@ const parseWithNode = (sql: string) => nodeParser.astify(sql, { database: "Postg
   console.log(`\n[large-file corpus]\n${lines.join("\n")}\n`);
 }
 
-for (const { kb, sql } of BLOBS) {
+for (const { sql } of BLOBS) {
   const bytes = Buffer.byteLength(sql, "utf8");
   const label = `${(bytes / 1024).toFixed(0)}KB file`;
   describe(label, () => {
