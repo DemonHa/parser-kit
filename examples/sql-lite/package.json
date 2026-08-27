@@ -10,8 +10,8 @@
     "@parser-kit/core": "workspace:*"
   },
   "devDependencies": {
-    "node-sql-parser": "5.1.0",
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "node-sql-parser": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   }
 }

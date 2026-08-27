@@ -28,8 +28,8 @@
     "types:check": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsc-alias": "^1.8.10",
-    "vitest": "^3.2.4",
-    "typescript": "^5.9.3"
+    "tsc-alias": "catalog:",
+    "vitest": "catalog:",
+    "typescript": "catalog:"
   }
 }

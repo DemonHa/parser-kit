@@ -4,27 +4,54 @@ settings:
   autoInstallPeers: false
   excludeLinksFromLockfile: false
 
+catalogs:
+  default:
+    '@biomejs/biome':
+      specifier: ^2.5.3
+      version: 2.5.10
+    '@commitlint/cli':
+      specifier: ^19.3.0
+      version: 19.8.1
+    '@commitlint/config-conventional':
+      specifier: ^19.2.2
+      version: 19.8.1
+    husky:
+      specifier: ^9.0.11
+      version: 9.1.7
+    node-sql-parser:
+      specifier: 5.1.0
+      version: 5.1.0
+    tsc-alias:
+      specifier: ^1.8.10
+      version: 1.9.2
+    typescript:
+      specifier: ^5.9.3
+      version: 5.9.3
+    vitest:
+      specifier: ^3.2.4
+      version: 3.2.7
+
 importers:
 
   .:
     devDependencies:
       '@biomejs/biome':
-        specifier: ^2.5.3
+        specifier: 'catalog:'
         version: 2.5.10
       '@commitlint/cli':
-        specifier: ^19.3.0
+        specifier: 'catalog:'
         version: 19.8.1(@types/node@26.4.0)(typescript@5.9.3)
       '@commitlint/config-conventional':
-        specifier: ^19.2.2
+        specifier: 'catalog:'
         version: 19.8.1
       husky:
-        specifier: ^9.0.11
+        specifier: 'catalog:'
         version: 9.1.7
       typescript:
-        specifier: ^5.9.3
+        specifier: 'catalog:'
         version: 5.9.3
       vitest:
-        specifier: ^3.2.4
+        specifier: 'catalog:'
         version: 3.2.7(@types/node@26.4.0)(jiti@2.6.1)
 
   examples/js-lite:
@@ -34,10 +61,10 @@ importers:
         version: link:../../packages/core
     devDependencies:
       typescript:
-        specifier: ^5.9.3
+        specifier: 'catalog:'
         version: 5.9.3
       vitest:
-        specifier: ^3.2.4
+        specifier: 'catalog:'
         version: 3.2.7(@types/node@26.4.0)(jiti@2.6.1)
 
   examples/sql-lite:
@@ -47,25 +74,25 @@ importers:
         version: link:../../packages/core
     devDependencies:
       node-sql-parser:
-        specifier: 5.1.0
+        specifier: 'catalog:'
         version: 5.1.0
       typescript:
-        specifier: ^5.9.3
+        specifier: 'catalog:'
         version: 5.9.3
       vitest:
-        specifier: ^3.2.4
+        specifier: 'catalog:'
         version: 3.2.7(@types/node@26.4.0)(jiti@2.6.1)
 
   packages/core:
     devDependencies:
       tsc-alias:
-        specifier: ^1.8.10
+        specifier: 'catalog:'
         version: 1.9.2
       typescript:
-        specifier: ^5.9.3
+        specifier: 'catalog:'
         version: 5.9.3
       vitest:
-        specifier: ^3.2.4
+        specifier: 'catalog:'
         version: 3.2.7(@types/node@26.4.0)(jiti@2.6.1)
 
 packages:
