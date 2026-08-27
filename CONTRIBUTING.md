@@ -78,7 +78,14 @@ Maintainers only. Merging to `main` with pending changesets makes the Release wo
 
 Two constraints worth knowing before touching the release setup:
 
-- **Publishing must go through `pnpm publish`, never `npm publish` or `changeset publish`.** Dependency versions live in the `catalog:` block of `pnpm-workspace.yaml`, and only pnpm rewrites those specifiers into real versions when packing. npm ships the literal string `catalog:`, which is why `changeset:publish` calls `pnpm publish -r` and CI fails the build if a `catalog:` string reaches the packed manifest.
-- **The tarball is verified in CI**, not just built: it must carry `LICENSE`, `README.md`, both module builds, and no test files, and it's installed into a scratch project and imported through both ESM and CJS entry points.
+- **Publishing goes through `pnpm publish`, never `npm publish` or `changeset publish`.** Dependency versions live in the `catalog:` block of `pnpm-workspace.yaml`, and only pnpm rewrites those specifiers into real versions when packing — npm ships the literal string `catalog:`. CI fails the build if a `catalog:` string reaches the packed manifest.
+- **There is no `NPM_TOKEN`.** Releases use npm's [trusted publishing](https://docs.npmjs.com/trusted-publishers) over OIDC: the workflow requests `id-token: write`, and npm exchanges that short-lived token for a package-scoped publish credential. `pnpm publish` has no OIDC support of its own — it packs a tarball and shells out to `npm publish`, and npm performs the exchange. That needs npm >= 11.5.1, newer than what Node 20 bundles, so the workflow enforces a floor. Provenance attestations are generated automatically.
 
-Provenance attestation is requested via `NPM_CONFIG_PROVENANCE` and `publishConfig.provenance`. It's best-effort — if a publish ever fails on it, drop the setting rather than blocking the release.
+Setting this up on npmjs.com (one-time, per package): **Settings → Trusted Publisher → GitHub Actions**, with repository `DemonHa/parser-kit` and workflow `release.yml`. Adding an `NPM_TOKEN` secret would put a static credential back in front of the OIDC exchange — don't.
+
+Two gotchas inherited from this setup:
+
+- The publish must run on a **GitHub-hosted runner**. npm rejects OIDC from self-hosted runners with HTTP 422.
+- `changesets/action`'s own `published` output is **always `false`** here. It detects a release by parsing changesets' `New tag:` lines, which only `changeset publish` prints — `pnpm publish` doesn't. Don't gate anything on it; diff `package.json` versions against `HEAD~1` instead.
+
+The tarball is also verified in CI rather than merely built: it must carry `LICENSE`, `README.md`, both module builds, and no test files, and it's installed into a scratch project and imported through both ESM and CJS entry points.

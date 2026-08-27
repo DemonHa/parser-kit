@@ -5,18 +5,23 @@ on:
     branches: ["main"]
 
 concurrency:
+  # changesets/action pushes the release branch, and npm publishes shouldn't
+  # race each other.
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: write
   pull-requests: write
-  id-token: write
+  id-token: write # required for npm trusted publishing (OIDC)
 
 jobs:
   release:
     name: Version or publish
+    # Must be a GitHub-hosted runner: npm rejects OIDC from self-hosted runners
+    # with HTTP 422 because their issuer isn't in npm's trusted list.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,19 +31,45 @@ jobs:
         with:
           node-version: 20
           cache: "pnpm"
-          registry-url: "https://registry.npmjs.org"
+
+      # `pnpm publish` has no OIDC support of its own: it packs a tarball and
+      # shells out to `npm publish`, and it's npm that trades the id-token for a
+      # short-lived publish token. That exchange landed in npm 11.5.1, newer than
+      # the npm bundled with Node 20 — so enforce a floor here.
+      - name: Ensure npm supports trusted publishing
+        run: |
+          MINIMUM=11.5.1
+          CURRENT=$(npm --version)
+          if [ "$(printf '%s\n' "$MINIMUM" "$CURRENT" | sort -V | head -n1)" != "$MINIMUM" ]; then
+            echo "npm $CURRENT is older than $MINIMUM, upgrading"
+            npm install --global npm@latest
+          fi
+          echo "npm $(npm --version)"
+
       - run: pnpm install --frozen-lockfile
 
       # With pending changesets this opens/updates the "version packages" PR.
-      # With none, it runs changeset:publish — which uses `pnpm publish` because
-      # only pnpm rewrites the workspace's catalog: specifiers.
+      # With none, it runs changeset:publish.
+      #
+      # `pnpm publish` (not `changeset publish`) because only pnpm rewrites the
+      # workspace's catalog: specifiers into real versions when packing; npm
+      # ships the literal string "catalog:". pnpm also skips any version already
+      # on the registry, so a plain push to main is a no-op.
+      #
+      # Note: steps.changesets.outputs.published is unusable with this publish
+      # command — the action only reports success by parsing changesets' own
+      # "New tag:" lines, which `pnpm publish` never prints. Don't gate anything
+      # on it; diff package.json versions against HEAD~1 instead.
       - uses: changesets/action@v1
+        id: changesets
         with:
           version: pnpm run changeset:version
           publish: pnpm run changeset:publish
           commit: "chore(release): version packages"
           title: "chore(release): version packages"
         env:
+          # No NPM_TOKEN on purpose. Without one, changesets/action leaves
+          # ~/.npmrc alone and npm exchanges this job's OIDC id-token for a
+          # short-lived, package-scoped publish token. Setting NPM_TOKEN would
+          # put a static credential back in front of that exchange.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"

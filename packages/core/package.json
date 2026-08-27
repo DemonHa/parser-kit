@@ -52,8 +52,7 @@
     "!src/**/*.test.ts"
   ],
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "scripts": {
     "build": "rm -rf build && pnpm run build:esm && pnpm run build:cjs && node scripts/write-dist-pkgjson.mjs",
