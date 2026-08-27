@@ -1,0 +1,16 @@
+{
+  "name": "@parser-kit/example-js-lite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "types:check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@parser-kit/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

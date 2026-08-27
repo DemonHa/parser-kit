@@ -1,0 +1,26 @@
+{
+  "name": "parser-kit-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "build": "pnpm --filter \"./packages/*\" run build",
+    "test": "vitest run",
+    "types:check": "pnpm -r run types:check",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "bench": "vitest bench --run",
+    "bench:save": "vitest bench --run --outputJson=bench-baseline.json && node scripts/normalize-baseline.mjs",
+    "bench:compare": "vitest bench --run --compare=bench-baseline.json",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.3",
+    "@commitlint/cli": "^19.3.0",
+    "@commitlint/config-conventional": "^19.2.2",
+    "husky": "^9.0.11",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

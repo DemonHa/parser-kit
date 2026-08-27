@@ -1,5 +1,5 @@
+import { createInputStream, ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
-import { createInputStream, ParseError, stripSpans } from "../../src/index";
 import { type Stmt, sqlLexer, sqlLite } from "./index";
 
 // --- helpers ---

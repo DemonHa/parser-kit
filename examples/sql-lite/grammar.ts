@@ -20,7 +20,7 @@ import {
   sepBy,
   seq,
   skip,
-} from "../../src/index";
+} from "@parser-kit/core";
 import { type SqlTokenType, sqlLexer } from "./lexer";
 
 // SQL-lite parses a slice of PostgreSQL DDL — CREATE TABLE (incl. TABLE AS) /

@@ -1,4 +1,4 @@
-import { defineLexer, readers } from "../../src/index";
+import { defineLexer, readers } from "@parser-kit/core";
 
 // SQL-lite is the PostgreSQL-flavoured counterpart to js-lite: it exercises the
 // reader and keyword machinery DBML doesn't touch. Identifiers fold to

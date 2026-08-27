@@ -13,7 +13,7 @@ import {
   type Span,
   seq,
   skip,
-} from "../../src/index";
+} from "@parser-kit/core";
 import { type JsTokenType, jsLexer } from "./lexer";
 
 // --- AST ---

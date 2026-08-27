@@ -1,5 +1,5 @@
+import { ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
-import { ParseError, stripSpans } from "../../src/index";
 import { type Expr, jsLite, type Stmt } from "./grammar";
 
 const parse = (text: string) => stripSpans(jsLite.parse(text));

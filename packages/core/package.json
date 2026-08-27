@@ -1,5 +1,5 @@
 {
-  "name": "@database.io/parser-kit",
+  "name": "@parser-kit/core",
   "version": "1.0.0",
   "type": "module",
   "main": "./build/cjs/index.js",
@@ -18,23 +18,18 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["build"],
+  "files": [
+    "build"
+  ],
   "scripts": {
     "build": "rm -rf build && pnpm run build:esm && pnpm run build:cjs && node scripts/write-dist-pkgjson.mjs",
     "build:esm": "tsc -p tsconfig.esm.json && tsc-alias -p tsconfig.esm.json",
     "build:cjs": "tsc -p tsconfig.cjs.json && tsc-alias -p tsconfig.cjs.json",
-    "types:check": "tsc --noEmit",
-    "test": "vitest run",
-    "bench": "vitest bench --run",
-    "bench:save": "vitest bench --run --outputJson=bench-baseline.json && node scripts/normalize-baseline.mjs",
-    "bench:compare": "vitest bench --run --compare=bench-baseline.json"
-  },
-  "dependencies": {
-    "typescript": "catalog:"
+    "types:check": "tsc --noEmit"
   },
   "devDependencies": {
-    "node-sql-parser": "catalog:",
-    "tsc-alias": "catalog:",
-    "vitest": "catalog:"
+    "tsc-alias": "^1.8.10",
+    "vitest": "^3.2.4",
+    "typescript": "^5.9.3"
   }
 }

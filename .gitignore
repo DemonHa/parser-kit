@@ -1,0 +1,29 @@
+# Build output
+build
+dist
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Test / coverage
+coverage
+*.lcov
+
+# Packaged tarballs
+*.tgz
+
+# Logs
+logs
+*.log
+npm-debug.log*
+.pnpm-debug.log*
+
+# Editor / OS
+.DS_Store
+.vscode-test
+
+# Env
+.env
+.env.local

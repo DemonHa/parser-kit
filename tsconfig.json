@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "target": "ES2022" /* Set the JavaScript language version for emitted JavaScript and include compatible library declarations. */,
+    "module": "ESNext" /* Specify what module code is generated. */,
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    // Required for isolated module compilation (ESBuild)
+    "isolatedModules": true,
+    // Support proper ESM builds
+    "esModuleInterop": true,
+    // Ensure that casing is correct in imports.
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "strictNullChecks": true,
+    "verbatimModuleSyntax": true,
+
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+
+    /* Strictness */
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // The examples type-check against core's source rather than its build
+    // output, so `pnpm types:check` works on a clean tree with no build step.
+    // Resolved relative to this file, so every extending config inherits it.
+    "paths": {
+      "@parser-kit/core": ["./packages/core/src/index.ts"]
+    }
+  },
+  "exclude": ["build", "**/build", "node_modules", "**/node_modules"],
+  // Required for path rewrites in the emitted output
+  "tsc-alias": {
+    "resolveFullPaths": true
+  }
+}

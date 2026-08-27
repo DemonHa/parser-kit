@@ -1,4 +1,4 @@
-import { defineLexer, readers } from "../../src/index";
+import { defineLexer, readers } from "@parser-kit/core";
 
 // JS-lite exercises the lexer config DBML doesn't: newlines are plain
 // whitespace (DBML lexes them as punctuation), keywords are case-sensitive,
