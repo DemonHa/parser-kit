@@ -1,11 +1,21 @@
-# @database.io/parser-kit
+# @parser-kit/core
+
+[![npm](https://img.shields.io/npm/v/@parser-kit/core.svg)](https://www.npmjs.com/package/@parser-kit/core)
+[![CI](https://github.com/DemonHa/parser-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/DemonHa/parser-kit/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/npm/l/@parser-kit/core.svg)](../../LICENSE)
 
 A generic, zod-like parser toolkit: describe a grammar as schema values and get the parser, the AST **and its TypeScript types** out of the same declaration. No code generation, no grammar files — rules are plain values you compose, and `Infer<typeof rule>` reads the output type the way `z.infer` does.
 
-The kit knows nothing about any particular language. `@database.io/dbml-parser` is being rebuilt on top of it, and two bundled examples parse real-shaped grammars with the same engine: [`examples/js-lite/`](examples/js-lite/) (a JavaScript subset) and [`examples/sql-lite/`](examples/sql-lite/) (a PostgreSQL-flavoured DDL subset).
+```sh
+npm install @parser-kit/core   # or: pnpm add / yarn add / bun add
+```
+
+Ships ESM and CommonJS builds with bundled type declarations. Node >= 18, zero runtime dependencies.
+
+The kit knows nothing about any particular language. Two bundled examples parse real-shaped grammars with the same engine: [`examples/js-lite/`](../../examples/js-lite/) (a JavaScript subset) and [`examples/sql-lite/`](../../examples/sql-lite/) (a PostgreSQL-flavoured DDL subset). It also backs [`@database.io/dbml-parser`](https://github.com/DemonHa/database.io).
 
 ```ts
-import { bindTokens, defineGrammar, defineLexer, field, type Infer, readers, seq, skip } from "@database.io/parser-kit";
+import { bindTokens, defineGrammar, defineLexer, field, type Infer, readers, seq, skip } from "@parser-kit/core";
 
 const lexer = defineLexer({
   identifier: { type: "ident", start: /[a-z_]/i, part: /[a-z0-9_]/i, display: "an identifier" },
@@ -47,7 +57,7 @@ grammar.parse("answer 42");         // → ParseError: Expected ":" but found "4
 
 **Always-on spans** — every engine-produced node carries `span: { start, end }` with `{ row, col }` positions. `.map` callbacks receive the span as a second argument. Use `stripSpans(value)` for structural comparisons in tests.
 
-**Errors** — the kit throws `ParseError { msg, start, end }` with human messages ("Expected a number but found \"foo\"", "Expected \"pk\", \"unique\" or \"note\" but found a new line"). Labels like "a number" come from the lexer's `display` config, never from internal type names. Consumers can subclass `ParseError` to keep their own error identity (`CroakException extends ParseError` in dbml-parser).
+**Errors** — the kit throws `ParseError { msg, start, end }` with human messages ("Expected a number but found \"foo\"", "Expected \"pk\", \"unique\" or \"note\" but found a new line"). Labels like "a number" come from the lexer's `display` config, never from internal type names. Consumers can subclass `ParseError` to keep their own error identity (`CroakException extends ParseError` in [dbml-parser](https://github.com/DemonHa/database.io)).
 
 ## Lexing: `defineLexer`
 
@@ -217,8 +227,8 @@ Every grammar exposes:
 
 Two runnable grammars double as the kit's genericity/integration tests and as the fastest way to learn it — read their `grammar.ts` top to bottom.
 
-- **[`examples/js-lite/`](examples/js-lite/)** — a JavaScript subset (`const`/`let`, `function`, `if`/`else`, `while`, `return`, blocks, expression statements, full expression precedence, arrays, arrow functions). Exercises what DBML doesn't: root-rule dispatch, newlines as whitespace, the whole `pratt()` table, load-bearing `attempt()` backtracking, and the template-literal *mode*.
-- **[`examples/sql-lite/`](examples/sql-lite/)** — a PostgreSQL-flavoured DDL subset (`CREATE`/`ALTER`/`DROP TABLE`, `CREATE INDEX`/`TYPE`, `COMMENT ON`) with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, and pratt expressions (cast `::`, `||`, non-associative comparisons, keyword operators `AND`/`OR`/`IS NULL`/`[NOT] LIKE`/`BETWEEN`/`IN`). The best reference for a folding lexer and `word()`/`phrase()` keyword matching.
+- **[`examples/js-lite/`](../../examples/js-lite/)** — a JavaScript subset (`const`/`let`, `function`, `if`/`else`, `while`, `return`, blocks, expression statements, full expression precedence, arrays, arrow functions). Exercises what DBML doesn't: root-rule dispatch, newlines as whitespace, the whole `pratt()` table, load-bearing `attempt()` backtracking, and the template-literal *mode*.
+- **[`examples/sql-lite/`](../../examples/sql-lite/)** — a PostgreSQL-flavoured DDL subset (`CREATE`/`ALTER`/`DROP TABLE`, `CREATE INDEX`/`TYPE`, `COMMENT ON`) with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, and pratt expressions (cast `::`, `||`, non-associative comparisons, keyword operators `AND`/`OR`/`IS NULL`/`[NOT] LIKE`/`BETWEEN`/`IN`). The best reference for a folding lexer and `word()`/`phrase()` keyword matching.
 
 ## Design notes & current limits
 
@@ -230,20 +240,26 @@ Two runnable grammars double as the kit's genericity/integration tests and as th
 
 ## Development
 
+This package lives in the [DemonHa/parser-kit](https://github.com/DemonHa/parser-kit) workspace. From the repo root:
+
 ```sh
-pnpm --filter @database.io/parser-kit test         # unit tests per combinator + lexer + JS-lite
-pnpm --filter @database.io/parser-kit types:check
-pnpm --filter @database.io/parser-kit build        # tsc → build/
+pnpm install
+pnpm test          # core unit tests + both example grammars
+pnpm types:check
+pnpm lint
+pnpm build         # tsc → packages/core/build/{esm,cjs}
 ```
+
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the change workflow.
 
 ### Benchmarks
 
-[`examples/sql-lite/sql-lite.bench.ts`](examples/sql-lite/sql-lite.bench.ts) pits the sql-lite grammar against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from the sql-lite tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles.
+[`examples/sql-lite/sql-lite.bench.ts`](../../examples/sql-lite/sql-lite.bench.ts) pits the sql-lite grammar against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from the sql-lite tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles.
 
 ```sh
-pnpm --filter @database.io/parser-kit bench         # run once, print the table
-pnpm --filter @database.io/parser-kit bench:save    # write bench-baseline.json (the committed baseline)
-pnpm --filter @database.io/parser-kit bench:compare # diff the current run against bench-baseline.json
+pnpm bench          # run once, print the table
+pnpm bench:save     # write bench-baseline.json (the committed baseline)
+pnpm bench:compare  # diff the current run against bench-baseline.json
 ```
 
 `bench-baseline.json` is committed so `bench:compare` shows per-benchmark deltas (`⇑`/`⇓`) as the grammar grows. Re-run `bench:save` to refresh the baseline after an intentional change. Absolute numbers drift with machine load — trust the sql-lite-vs-node ratio and the compare deltas over raw `hz`.

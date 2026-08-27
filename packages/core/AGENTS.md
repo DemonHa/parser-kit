@@ -1,15 +1,16 @@
-# AGENTS.md — @database.io/parser-kit
+# AGENTS.md — @parser-kit/core
 
 A generic, zod-like parser toolkit: describe a grammar as schema **values** and
 get the parser, the AST, and its TypeScript types out of one declaration
 (`Infer<typeof rule>` reads the output type the way `z.infer` does). The kit
-knows nothing about any particular language. See the root `AGENTS.md` for
-monorepo tooling, and `README.md` here for the full user-facing guide.
+knows nothing about any particular language. See the root `README.md` and
+`CONTRIBUTING.md` for workspace tooling, and `README.md` here for the full
+user-facing guide.
 
 ## Orientation
 
-Start with `README.md` (concepts + API) and then read `examples/js-lite/grammar.ts`
-and `examples/sql-lite/grammar.ts` top to bottom — the examples are the fastest
+Start with `README.md` (concepts + API) and then read `../../examples/js-lite/grammar.ts`
+and `../../examples/sql-lite/grammar.ts` top to bottom — the examples are the fastest
 way to learn the kit and are its genericity/integration tests.
 
 ## Public API
@@ -29,10 +30,12 @@ way to learn the kit and are its genericity/integration tests.
   `describe*` label helpers, and the lower-level `Rule`/`ParseContext`/`Token`
   types for hand-written `custom()` rules.
 
-**Changing the public API is a breaking change for its consumers.**
-`@database.io/dbml-parser` already imports `ParseError`, `Position`,
-`createInputStream`, and the trie helpers from here (its `CroakException extends
-ParseError`), and is mid-migration onto the rest. Update consumers in lockstep.
+**Changing the public API is a breaking change for published consumers.**
+The kit is released to npm as `@parser-kit/core`, so a break is no longer a
+same-repo refactor — it needs a major bump and a changeset that says so.
+`@database.io/dbml-parser` imports `ParseError`, `Position`, `createInputStream`,
+and the trie helpers from here (its `CroakException extends ParseError`), and is
+mid-migration onto the rest.
 
 ## Internals — layered, bottom-up
 
@@ -81,16 +84,19 @@ ParseError`), and is mid-migration onto the rest. Update consumers in lockstep.
 ## Tests
 
 Vitest, co-located as `*.test.ts` per module, plus the two `examples/*/`
-suites (234 tests total). Run `pnpm --filter @database.io/parser-kit test`
-(`types:check` / `build` likewise). When you add a feature:
+suites (350 tests total). One `pnpm test` at the repo root runs them all
+(`pnpm types:check` / `pnpm lint` / `pnpm build` likewise). When you add a
+feature:
 
 - Add unit tests at the level it lives (lexer / combinator / pratt / rule /
   grammar) **and** exercise it end-to-end in an example grammar if it's
   user-facing — the examples are the genericity guard.
-- **Keep every feature opt-in.** The kit's tests and, critically, the
-  **93 byte-exact dbml goldens** in `@database.io/dbml-parser` must stay green
-  after every change. Never regenerate a golden to make a change pass — a golden
-  diff means you changed observable parse/error output.
-- The `build` (`tsconfig.build.json`) compiles `src/` only — tests and
-  `examples/` are excluded from the published output but are type-checked by
-  `types:check`. Don't commit `build/`.
+- **Keep every feature opt-in.** The kit's tests must stay green, and so must
+  the **93 byte-exact dbml goldens** in the downstream
+  [database.io](https://github.com/DemonHa/database.io) repo — they are the
+  sharpest check that observable parse/error output did not shift. Never
+  regenerate a golden to make a change pass.
+- The `build` (`tsconfig.build.json`) compiles `src/` only; tests and
+  `examples/` are excluded from it but are type-checked by `types:check`. The
+  published tarball ships `build/` plus `src/` (minus tests) so the emitted
+  declaration maps resolve to real sources in editors. Don't commit `build/`.

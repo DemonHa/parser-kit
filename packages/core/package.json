@@ -1,7 +1,35 @@
 {
   "name": "@parser-kit/core",
-  "version": "1.0.0",
+  "version": "0.1.0",
+  "description": "A zod-like parser toolkit: lexers, combinators and Pratt tables are plain values, and the AST types are inferred from the grammar.",
+  "keywords": [
+    "parser",
+    "parser-combinator",
+    "lexer",
+    "tokenizer",
+    "pratt",
+    "precedence-climbing",
+    "grammar",
+    "ast",
+    "parsing",
+    "typescript",
+    "type-inference",
+    "dsl"
+  ],
+  "license": "MIT",
+  "author": "DemonHa",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DemonHa/parser-kit.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/DemonHa/parser-kit#readme",
+  "bugs": "https://github.com/DemonHa/parser-kit/issues",
   "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
   "main": "./build/cjs/index.js",
   "module": "./build/esm/index.js",
   "types": "./build/esm/index.d.ts",
@@ -19,8 +47,14 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "build"
+    "build",
+    "src",
+    "!src/**/*.test.ts"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "build": "rm -rf build && pnpm run build:esm && pnpm run build:cjs && node scripts/write-dist-pkgjson.mjs",
     "build:esm": "tsc -p tsconfig.esm.json && tsc-alias -p tsconfig.esm.json",
@@ -29,7 +63,7 @@
   },
   "devDependencies": {
     "tsc-alias": "catalog:",
-    "vitest": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   }
 }
