@@ -8,6 +8,8 @@ packages:
 catalog:
   # Tooling / linting
   "@biomejs/biome": "^2.5.3"
+  "@changesets/changelog-github": "^0.5.0"
+  "@changesets/cli": "^3.0.1"
   "@commitlint/cli": "^19.3.0"
   "@commitlint/config-conventional": "^19.2.2"
   husky: "^9.0.11"

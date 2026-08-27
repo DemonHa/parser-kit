@@ -13,10 +13,15 @@
     "bench": "vitest bench --run",
     "bench:save": "vitest bench --run --outputJson=bench-baseline.json && node scripts/normalize-baseline.mjs",
     "bench:compare": "vitest bench --run --compare=bench-baseline.json",
+    "changeset": "changeset",
+    "changeset:version": "changeset version && pnpm install --lockfile-only",
+    "changeset:publish": "pnpm build && pnpm publish -r --access public --no-git-checks",
     "prepare": "husky"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
+    "@changesets/changelog-github": "catalog:",
+    "@changesets/cli": "catalog:",
     "@commitlint/cli": "catalog:",
     "@commitlint/config-conventional": "catalog:",
     "husky": "catalog:",

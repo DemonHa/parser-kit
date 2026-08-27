@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint & types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm types:check
+
+  test:
+    name: Test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      # The published tarball must resolve catalog: specifiers and must import
+      # cleanly in both module systems. Only `pnpm pack` rewrites catalog:, so a
+      # leak here means the release script was switched to npm by mistake.
+      - name: Pack and verify the tarball
+        run: |
+          set -euo pipefail
+          cd packages/core
+          pnpm pack --pack-destination /tmp/pack
+          TGZ=$(ls /tmp/pack/*.tgz)
+          tar -xzOf "$TGZ" package/package.json > /tmp/manifest.json
+
+          if grep -q '"catalog:"' /tmp/manifest.json; then
+            echo "::error::catalog: specifier leaked into the published manifest"
+            cat /tmp/manifest.json
+            exit 1
+          fi
+          for required in package/LICENSE package/README.md package/build/esm/index.js package/build/cjs/index.js; do
+            tar -tzf "$TGZ" | grep -qx "$required" || { echo "::error::missing $required"; exit 1; }
+          done
+          if tar -tzf "$TGZ" | grep -q '\.test\.ts$'; then
+            echo "::error::test files leaked into the tarball"; exit 1
+          fi
+
+          mkdir -p /tmp/smoke && cd /tmp/smoke && npm init -y >/dev/null
+          npm install "$TGZ" >/dev/null
+          node -e "import('@parser-kit/core').then(m => { if (!m.defineGrammar) throw new Error('ESM export missing'); console.log('ESM ok:', Object.keys(m).length, 'exports'); })"
+          node -e "const m = require('@parser-kit/core'); if (!m.defineGrammar) throw new Error('CJS export missing'); console.log('CJS ok:', Object.keys(m).length, 'exports');"
