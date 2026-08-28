@@ -75,6 +75,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - [database.io](https://github.com/DemonHa/database.io) — `@database.io/dbml-parser` is built on the kit.
 
+## Security
+
+Parsing untrusted input, or found a way to make the parser hang on some? See [SECURITY.md](SECURITY.md).
+
 ## License
 
 [MIT](LICENSE) © DemonHa
