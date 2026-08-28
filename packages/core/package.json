@@ -1,6 +1,6 @@
 {
   "name": "@parser-kit/core",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "A zod-like parser toolkit: lexers, combinators and Pratt tables are plain values, and the AST types are inferred from the grammar.",
   "keywords": [
     "parser",
@@ -49,7 +49,8 @@
   "files": [
     "build",
     "src",
-    "!src/**/*.test.ts"
+    "!src/**/*.test.ts",
+    "CHANGELOG.md"
   ],
   "publishConfig": {
     "access": "public"
