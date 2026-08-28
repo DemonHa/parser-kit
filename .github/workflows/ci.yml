@@ -71,15 +71,22 @@ jobs:
           TGZ=$(ls /tmp/pack/*.tgz)
           tar -xzOf "$TGZ" package/package.json > /tmp/manifest.json
 
+          # List the entries once, then grep the file. `tar | grep -q` is a
+          # trap under pipefail: grep exits on its first match, GNU tar dies
+          # writing to the closed pipe, and the pipeline reports the *match*
+          # as a failure. The negative check inverts the same way — a leaked
+          # test file would short-circuit grep and read as "nothing leaked".
+          tar -tzf "$TGZ" > /tmp/entries.txt
+
           if grep -q '"catalog:"' /tmp/manifest.json; then
             echo "::error::catalog: specifier leaked into the published manifest"
             cat /tmp/manifest.json
             exit 1
           fi
           for required in package/LICENSE package/README.md package/build/esm/index.js package/build/cjs/index.js; do
-            tar -tzf "$TGZ" | grep -qx "$required" || { echo "::error::missing $required"; exit 1; }
+            grep -qx "$required" /tmp/entries.txt || { echo "::error::missing $required"; exit 1; }
           done
-          if tar -tzf "$TGZ" | grep -q '\.test\.ts$'; then
+          if grep -q '\.test\.ts$' /tmp/entries.txt; then
             echo "::error::test files leaked into the tarball"; exit 1
           fi
 
