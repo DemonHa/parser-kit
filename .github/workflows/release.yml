@@ -40,13 +40,18 @@ jobs:
       # shells out to `npm publish`, and it's npm that trades the id-token for a
       # short-lived publish token. That exchange landed in npm 11.5.1, newer than
       # the npm bundled with Node 20 — so enforce a floor here.
+      #
+      # The upgrade is pinned to the 11.x line, not @latest: npm 12 requires
+      # node ^22.22.2 || ^24.15.0 || >=26, so on this job's Node 20 it fails
+      # with EBADENGINE and takes the release with it. npm 11 accepts
+      # ^20.17.0 || >=22.9.0. Bump both together, or not at all.
       - name: Ensure npm supports trusted publishing
         run: |
           MINIMUM=11.5.1
           CURRENT=$(npm --version)
           if [ "$(printf '%s\n' "$MINIMUM" "$CURRENT" | sort -V | head -n1)" != "$MINIMUM" ]; then
             echo "npm $CURRENT is older than $MINIMUM, upgrading"
-            npm install --global npm@latest
+            npm install --global "npm@^$MINIMUM"
           fi
           echo "npm $(npm --version)"
 
