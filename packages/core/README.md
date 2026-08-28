@@ -12,7 +12,7 @@ npm install @parser-kit/core   # or: pnpm add / yarn add / bun add
 
 Ships ESM and CommonJS builds with bundled type declarations. Node >= 18, zero runtime dependencies.
 
-The kit knows nothing about any particular language. Two bundled examples parse real-shaped grammars with the same engine: [`examples/js-lite/`](../../examples/js-lite/) (a JavaScript subset) and [`examples/sql-lite/`](../../examples/sql-lite/) (a PostgreSQL-flavoured DDL subset). It also backs [`@database.io/dbml-parser`](https://github.com/DemonHa/database.io).
+The kit knows nothing about any particular language. Two bundled examples parse real-shaped grammars with the same engine: [`examples/js-lite/`](../../examples/js-lite/) (a JavaScript subset) and [`examples/sql-lite/`](../../examples/sql-lite/) (a PostgreSQL-flavoured DDL subset).
 
 ```ts
 import { bindTokens, defineGrammar, defineLexer, field, type Infer, readers, seq, skip } from "@parser-kit/core";
@@ -57,7 +57,7 @@ grammar.parse("answer 42");         // → ParseError: Expected ":" but found "4
 
 **Always-on spans** — every engine-produced node carries `span: { start, end }` with `{ row, col }` positions. `.map` callbacks receive the span as a second argument. Use `stripSpans(value)` for structural comparisons in tests.
 
-**Errors** — the kit throws `ParseError { msg, start, end }` with human messages ("Expected a number but found \"foo\"", "Expected \"pk\", \"unique\" or \"note\" but found a new line"). Labels like "a number" come from the lexer's `display` config, never from internal type names. Consumers can subclass `ParseError` to keep their own error identity (`CroakException extends ParseError` in [dbml-parser](https://github.com/DemonHa/database.io)).
+**Errors** — the kit throws `ParseError { msg, start, end }` with human messages ("Expected a number but found \"foo\"", "Expected \"pk\", \"unique\" or \"note\" but found a new line"). Labels like "a number" come from the lexer's `display` config, never from internal type names. Consumers can subclass `ParseError` to keep their own error identity (`class CroakException extends ParseError`) without losing the kit's messages.
 
 ## Lexing: `defineLexer`
 
