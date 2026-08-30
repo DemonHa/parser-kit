@@ -28,7 +28,7 @@ pnpm test
 Run these from the repo root:
 
 ```sh
-pnpm test          # core unit tests + both example grammars (350 tests)
+pnpm test          # core unit tests + both example grammars (354 tests)
 pnpm types:check   # tsc --noEmit across every package
 pnpm lint          # biome
 pnpm lint:fix
@@ -42,7 +42,7 @@ pnpm bench         # sql-lite vs node-sql-parser
 
 1. **Branch off `main`.**
 2. **Add tests at the level the change lives** — lexer, combinator, pratt, rule, or grammar. If it's user-facing, also exercise it end-to-end in one of the example grammars. The examples are the genericity guard: they're what catches a "generic" feature that quietly assumes DBML or SQL.
-3. **Never regenerate a golden or a snapshot to make a change pass.** A diff there means observable parse or error output moved, which is the thing under test.
+3. **Never regenerate a golden or a snapshot to make a change pass.** A diff there means observable parse or error output moved, which is the thing under test. That goes double for the `examples/*/parity.*.golden.json` files: they pin every corpus AST (spans and all) and every `diagnose()` message byte-for-byte, so they're what proves a "behaviour-preserving" refactor actually preserved behaviour. When output *is* meant to move, regenerate with `pnpm test -- -u` — the `--` matters, since pnpm eats a bare `-u` and exits 0 without running vitest — and call the diff out in review.
 4. **Write a conventional commit.** `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `chore:` — commitlint enforces it. Scope by area where it helps: `feat(lexer):`, `fix(pratt):`.
 5. **Add a changeset** for anything user-visible:
 

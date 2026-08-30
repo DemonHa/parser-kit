@@ -84,7 +84,7 @@ mid-migration onto the rest.
 ## Tests
 
 Vitest, co-located as `*.test.ts` per module, plus the two `examples/*/`
-suites (350 tests total). One `pnpm test` at the repo root runs them all
+suites (354 tests total). One `pnpm test` at the repo root runs them all
 (`pnpm types:check` / `pnpm lint` / `pnpm build` likewise). When you add a
 feature:
 
@@ -96,6 +96,17 @@ feature:
   [database.io](https://github.com/DemonHa/database.io) repo — they are the
   sharpest check that observable parse/error output did not shift. Never
   regenerate a golden to make a change pass.
+- **The parity harness is the in-repo version of that check.**
+  `examples/*/parity.test.ts` serialise the full AST — spans included, nothing
+  stripped — for every statement in each example's corpus, plus the messages
+  `diagnose()` collects for a fixed malformed-input list, and compare the result
+  byte-for-byte against committed `parity.*.golden.json` files. A refactor
+  that's meant to preserve behaviour (a performance rewrite, an internal data
+  structure swap) is only green if those files are untouched. Regenerating them
+  (`pnpm test -- -u` — a bare `-u` is swallowed by pnpm, which then exits 0
+  without running anything) is a claim that observable output moved on purpose,
+  and needs the same scrutiny and its own changeset line. Biome is configured
+  not to format them, so `pnpm lint:fix` can't quietly rewrite the baseline.
 - The `build` (`tsconfig.build.json`) compiles `src/` only; tests and
   `examples/` are excluded from it but are type-checked by `types:check`. The
   published tarball ships `build/` plus `src/` (minus tests) so the emitted
