@@ -1,0 +1,6 @@
+# The parity goldens are compared byte-for-byte, so they must not be rewritten
+# to CRLF on a checkout with `core.autocrlf=true`.
+*.golden.json text eol=lf
+
+# Collapse them in review by default; they are still diffable on demand.
+*.golden.json linguist-generated=true

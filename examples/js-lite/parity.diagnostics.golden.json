@@ -1,0 +1,280 @@
+[
+  {
+    "source": "const x = ;\nconst y = 2;",
+    "errors": [
+      {
+        "message": "Expected \"(\" or an identifier or \"(\" or a number or a string or \"true\" or \"false\" or \"null\" or \"[\" or an identifier but found \";\" (1:10)",
+        "end": {
+          "row": 1,
+          "col": 11
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "y",
+        "init": {
+          "kind": "number",
+          "value": 2,
+          "span": {
+            "start": {
+              "row": 2,
+              "col": 10
+            },
+            "end": {
+              "row": 2,
+              "col": 11
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 12
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "const = 1;\nconst z = 3;",
+    "errors": [
+      {
+        "message": "Expected an identifier but found \"=\" (1:6)",
+        "end": {
+          "row": 1,
+          "col": 7
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "z",
+        "init": {
+          "kind": "number",
+          "value": 3,
+          "span": {
+            "start": {
+              "row": 2,
+              "col": 10
+            },
+            "end": {
+              "row": 2,
+              "col": 11
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 12
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "1 + ;\nlet a = 4;",
+    "errors": [
+      {
+        "message": "Expected \"(\" or an identifier or \"(\" or a number or a string or \"true\" or \"false\" or \"null\" or \"[\" or an identifier but found \";\" (1:4)",
+        "end": {
+          "row": 1,
+          "col": 5
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "let",
+        "name": "a",
+        "init": {
+          "kind": "number",
+          "value": 4,
+          "span": {
+            "start": {
+              "row": 2,
+              "col": 8
+            },
+            "end": {
+              "row": 2,
+              "col": 9
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 10
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "@\nlet b = 5;",
+    "errors": [
+      {
+        "message": "Unexpected character \"@\" (1:0)",
+        "end": {
+          "row": 1,
+          "col": 1
+        }
+      }
+    ],
+    "ast": []
+  },
+  {
+    "source": "const x = 1; ]\nlet c = 6;",
+    "errors": [
+      {
+        "message": "Expected a statement but found \"]\" (1:13)",
+        "end": {
+          "row": 1,
+          "col": 14
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "x",
+        "init": {
+          "kind": "number",
+          "value": 1,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 10
+            },
+            "end": {
+              "row": 1,
+              "col": 11
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 12
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "const x = ;\nlet y = ;\nconst z = 7;",
+    "errors": [
+      {
+        "message": "Expected \"(\" or an identifier or \"(\" or a number or a string or \"true\" or \"false\" or \"null\" or \"[\" or an identifier but found \";\" (1:10)",
+        "end": {
+          "row": 1,
+          "col": 11
+        }
+      },
+      {
+        "message": "Expected \"(\" or an identifier or \"(\" or a number or a string or \"true\" or \"false\" or \"null\" or \"[\" or an identifier but found \";\" (2:8)",
+        "end": {
+          "row": 2,
+          "col": 9
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "z",
+        "init": {
+          "kind": "number",
+          "value": 7,
+          "span": {
+            "start": {
+              "row": 3,
+              "col": 10
+            },
+            "end": {
+              "row": 3,
+              "col": 11
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 3,
+            "col": 0
+          },
+          "end": {
+            "row": 3,
+            "col": 12
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "const é = 1;\nlet d = 8;",
+    "errors": [
+      {
+        "message": "Unexpected character \"é\" (1:6)",
+        "end": {
+          "row": 1,
+          "col": 7
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "let",
+        "name": "d",
+        "init": {
+          "kind": "number",
+          "value": 8,
+          "span": {
+            "start": {
+              "row": 2,
+              "col": 8
+            },
+            "end": {
+              "row": 2,
+              "col": 9
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 10
+          }
+        }
+      }
+    ]
+  }
+]

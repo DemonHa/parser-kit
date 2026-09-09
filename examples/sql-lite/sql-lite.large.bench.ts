@@ -10,7 +10,9 @@ import { sqlLite } from "./index";
 // the whole thing in one `parse` call — mirroring how you'd hand a real file to
 // either library.
 
-// Statements node-sql-parser (PostgreSQL) also accepts, lifted from the corpus.
+// Statements node-sql-parser (PostgreSQL) also accepts. A fixed, independent
+// subset — deliberately not `CORPUS.filter((s) => s.pg)` from `corpus.ts`, since
+// widening it would change the generated blob and invalidate this bench's baseline.
 const SHARED_STATEMENTS = [
   "SELECT * FROM users u;",
   "SELECT id, name AS n, u.age full_age FROM users u;",

@@ -1,0 +1,3235 @@
+[
+  {
+    "source": "const x = 1;",
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "x",
+        "init": {
+          "kind": "number",
+          "value": 1,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 10
+            },
+            "end": {
+              "row": 1,
+              "col": 11
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 12
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "let y = 2;",
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "let",
+        "name": "y",
+        "init": {
+          "kind": "number",
+          "value": 2,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 8
+            },
+            "end": {
+              "row": 1,
+              "col": 9
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 10
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "function add(a, b) { return a + b; }",
+    "ast": [
+      {
+        "kind": "function",
+        "name": "add",
+        "params": [
+          "a",
+          "b"
+        ],
+        "body": {
+          "kind": "block",
+          "body": [
+            {
+              "kind": "return",
+              "argument": {
+                "kind": "binary",
+                "op": "+",
+                "left": {
+                  "kind": "ident",
+                  "name": "a",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 28
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 29
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "ident",
+                  "name": "b",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 32
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 33
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 28
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 33
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 21
+                },
+                "end": {
+                  "row": 1,
+                  "col": 34
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 19
+            },
+            "end": {
+              "row": 1,
+              "col": 36
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 36
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "function noop() { }",
+    "ast": [
+      {
+        "kind": "function",
+        "name": "noop",
+        "params": [],
+        "body": {
+          "kind": "block",
+          "body": [],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 16
+            },
+            "end": {
+              "row": 1,
+              "col": 19
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 19
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "if (x > 1) { y = 2; } else y = 3;",
+    "ast": [
+      {
+        "kind": "if",
+        "test": {
+          "kind": "binary",
+          "op": ">",
+          "left": {
+            "kind": "ident",
+            "name": "x",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 4
+              },
+              "end": {
+                "row": 1,
+                "col": 5
+              }
+            }
+          },
+          "right": {
+            "kind": "number",
+            "value": 1,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 8
+              },
+              "end": {
+                "row": 1,
+                "col": 9
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 4
+            },
+            "end": {
+              "row": 1,
+              "col": 9
+            }
+          }
+        },
+        "consequent": {
+          "kind": "block",
+          "body": [
+            {
+              "kind": "expr",
+              "expression": {
+                "kind": "assign",
+                "target": {
+                  "kind": "ident",
+                  "name": "y",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 13
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 14
+                    }
+                  }
+                },
+                "value": {
+                  "kind": "number",
+                  "value": 2,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 17
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 18
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 13
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 18
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 13
+                },
+                "end": {
+                  "row": 1,
+                  "col": 19
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 11
+            },
+            "end": {
+              "row": 1,
+              "col": 21
+            }
+          }
+        },
+        "alternate": {
+          "kind": "expr",
+          "expression": {
+            "kind": "assign",
+            "target": {
+              "kind": "ident",
+              "name": "y",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 27
+                },
+                "end": {
+                  "row": 1,
+                  "col": 28
+                }
+              }
+            },
+            "value": {
+              "kind": "number",
+              "value": 3,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 31
+                },
+                "end": {
+                  "row": 1,
+                  "col": 32
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 27
+              },
+              "end": {
+                "row": 1,
+                "col": 32
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 27
+            },
+            "end": {
+              "row": 1,
+              "col": 33
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 33
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "if (x) return;",
+    "ast": [
+      {
+        "kind": "if",
+        "test": {
+          "kind": "ident",
+          "name": "x",
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 4
+            },
+            "end": {
+              "row": 1,
+              "col": 5
+            }
+          }
+        },
+        "consequent": {
+          "kind": "return",
+          "argument": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 7
+            },
+            "end": {
+              "row": 1,
+              "col": 14
+            }
+          }
+        },
+        "alternate": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 14
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "while (ok) { return; }",
+    "ast": [
+      {
+        "kind": "while",
+        "test": {
+          "kind": "ident",
+          "name": "ok",
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 7
+            },
+            "end": {
+              "row": 1,
+              "col": 9
+            }
+          }
+        },
+        "body": {
+          "kind": "block",
+          "body": [
+            {
+              "kind": "return",
+              "argument": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 13
+                },
+                "end": {
+                  "row": 1,
+                  "col": 20
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 11
+            },
+            "end": {
+              "row": 1,
+              "col": 22
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 22
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "while (x < 3) { x = x + 1; }",
+    "ast": [
+      {
+        "kind": "while",
+        "test": {
+          "kind": "binary",
+          "op": "<",
+          "left": {
+            "kind": "ident",
+            "name": "x",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 7
+              },
+              "end": {
+                "row": 1,
+                "col": 8
+              }
+            }
+          },
+          "right": {
+            "kind": "number",
+            "value": 3,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 11
+              },
+              "end": {
+                "row": 1,
+                "col": 12
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 7
+            },
+            "end": {
+              "row": 1,
+              "col": 12
+            }
+          }
+        },
+        "body": {
+          "kind": "block",
+          "body": [
+            {
+              "kind": "expr",
+              "expression": {
+                "kind": "assign",
+                "target": {
+                  "kind": "ident",
+                  "name": "x",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 16
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 17
+                    }
+                  }
+                },
+                "value": {
+                  "kind": "binary",
+                  "op": "+",
+                  "left": {
+                    "kind": "ident",
+                    "name": "x",
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 20
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 21
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 24
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 25
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 20
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 25
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 16
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 25
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 16
+                },
+                "end": {
+                  "row": 1,
+                  "col": 26
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 14
+            },
+            "end": {
+              "row": 1,
+              "col": 28
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 28
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "{ const inner = 1; inner; }",
+    "ast": [
+      {
+        "kind": "block",
+        "body": [
+          {
+            "kind": "var",
+            "declKind": "const",
+            "name": "inner",
+            "init": {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 16
+                },
+                "end": {
+                  "row": 1,
+                  "col": 17
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 2
+              },
+              "end": {
+                "row": 1,
+                "col": 18
+              }
+            }
+          },
+          {
+            "kind": "expr",
+            "expression": {
+              "kind": "ident",
+              "name": "inner",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 19
+                },
+                "end": {
+                  "row": 1,
+                  "col": 24
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 19
+              },
+              "end": {
+                "row": 1,
+                "col": 25
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 27
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "// setup\nconst x = 1;\n/* then */\nx = x + 1;\n",
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "x",
+        "init": {
+          "kind": "number",
+          "value": 1,
+          "span": {
+            "start": {
+              "row": 2,
+              "col": 10
+            },
+            "end": {
+              "row": 2,
+              "col": 11
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 12
+          }
+        }
+      },
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "assign",
+          "target": {
+            "kind": "ident",
+            "name": "x",
+            "span": {
+              "start": {
+                "row": 4,
+                "col": 0
+              },
+              "end": {
+                "row": 4,
+                "col": 1
+              }
+            }
+          },
+          "value": {
+            "kind": "binary",
+            "op": "+",
+            "left": {
+              "kind": "ident",
+              "name": "x",
+              "span": {
+                "start": {
+                  "row": 4,
+                  "col": 4
+                },
+                "end": {
+                  "row": 4,
+                  "col": 5
+                }
+              }
+            },
+            "right": {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 4,
+                  "col": 8
+                },
+                "end": {
+                  "row": 4,
+                  "col": 9
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 4,
+                "col": 4
+              },
+              "end": {
+                "row": 4,
+                "col": 9
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 4,
+              "col": 0
+            },
+            "end": {
+              "row": 4,
+              "col": 9
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 4,
+            "col": 0
+          },
+          "end": {
+            "row": 4,
+            "col": 10
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "1 + 2 * 3;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "binary",
+          "op": "+",
+          "left": {
+            "kind": "number",
+            "value": 1,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 1
+              }
+            }
+          },
+          "right": {
+            "kind": "binary",
+            "op": "*",
+            "left": {
+              "kind": "number",
+              "value": 2,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 4
+                },
+                "end": {
+                  "row": 1,
+                  "col": 5
+                }
+              }
+            },
+            "right": {
+              "kind": "number",
+              "value": 3,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 8
+                },
+                "end": {
+                  "row": 1,
+                  "col": 9
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 4
+              },
+              "end": {
+                "row": 1,
+                "col": 9
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 9
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 10
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "(1 + 2) * 3;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "binary",
+          "op": "*",
+          "left": {
+            "kind": "binary",
+            "op": "+",
+            "left": {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 1
+                },
+                "end": {
+                  "row": 1,
+                  "col": 2
+                }
+              }
+            },
+            "right": {
+              "kind": "number",
+              "value": 2,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 5
+                },
+                "end": {
+                  "row": 1,
+                  "col": 6
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 1
+              },
+              "end": {
+                "row": 1,
+                "col": 6
+              }
+            }
+          },
+          "right": {
+            "kind": "number",
+            "value": 3,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 10
+              },
+              "end": {
+                "row": 1,
+                "col": 11
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 11
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 12
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "a < 1 && b >= 2 || c === 3;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "binary",
+          "op": "||",
+          "left": {
+            "kind": "binary",
+            "op": "&&",
+            "left": {
+              "kind": "binary",
+              "op": "<",
+              "left": {
+                "kind": "ident",
+                "name": "a",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 0
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 1
+                  }
+                }
+              },
+              "right": {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 5
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 0
+                },
+                "end": {
+                  "row": 1,
+                  "col": 5
+                }
+              }
+            },
+            "right": {
+              "kind": "binary",
+              "op": ">=",
+              "left": {
+                "kind": "ident",
+                "name": "b",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 9
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 10
+                  }
+                }
+              },
+              "right": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 14
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 15
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 9
+                },
+                "end": {
+                  "row": 1,
+                  "col": 15
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 15
+              }
+            }
+          },
+          "right": {
+            "kind": "binary",
+            "op": "===",
+            "left": {
+              "kind": "ident",
+              "name": "c",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 19
+                },
+                "end": {
+                  "row": 1,
+                  "col": 20
+                }
+              }
+            },
+            "right": {
+              "kind": "number",
+              "value": 3,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 25
+                },
+                "end": {
+                  "row": 1,
+                  "col": 26
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 19
+              },
+              "end": {
+                "row": 1,
+                "col": 26
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 26
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 27
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "a != b !== c;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "binary",
+          "op": "!==",
+          "left": {
+            "kind": "binary",
+            "op": "!=",
+            "left": {
+              "kind": "ident",
+              "name": "a",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 0
+                },
+                "end": {
+                  "row": 1,
+                  "col": 1
+                }
+              }
+            },
+            "right": {
+              "kind": "ident",
+              "name": "b",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 5
+                },
+                "end": {
+                  "row": 1,
+                  "col": 6
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 6
+              }
+            }
+          },
+          "right": {
+            "kind": "ident",
+            "name": "c",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 11
+              },
+              "end": {
+                "row": 1,
+                "col": 12
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 12
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 13
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "a == b;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "binary",
+          "op": "==",
+          "left": {
+            "kind": "ident",
+            "name": "a",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 1
+              }
+            }
+          },
+          "right": {
+            "kind": "ident",
+            "name": "b",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 5
+              },
+              "end": {
+                "row": 1,
+                "col": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 6
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 7
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "a - b / c % d;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "binary",
+          "op": "-",
+          "left": {
+            "kind": "ident",
+            "name": "a",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 1
+              }
+            }
+          },
+          "right": {
+            "kind": "binary",
+            "op": "%",
+            "left": {
+              "kind": "binary",
+              "op": "/",
+              "left": {
+                "kind": "ident",
+                "name": "b",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 5
+                  }
+                }
+              },
+              "right": {
+                "kind": "ident",
+                "name": "c",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 8
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 9
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 4
+                },
+                "end": {
+                  "row": 1,
+                  "col": 9
+                }
+              }
+            },
+            "right": {
+              "kind": "ident",
+              "name": "d",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 12
+                },
+                "end": {
+                  "row": 1,
+                  "col": 13
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 4
+              },
+              "end": {
+                "row": 1,
+                "col": 13
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 13
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 14
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "a = b = 1;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "assign",
+          "target": {
+            "kind": "ident",
+            "name": "a",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 1
+              }
+            }
+          },
+          "value": {
+            "kind": "assign",
+            "target": {
+              "kind": "ident",
+              "name": "b",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 4
+                },
+                "end": {
+                  "row": 1,
+                  "col": 5
+                }
+              }
+            },
+            "value": {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 8
+                },
+                "end": {
+                  "row": 1,
+                  "col": 9
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 4
+              },
+              "end": {
+                "row": 1,
+                "col": 9
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 9
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 10
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ok ? 1 : 2;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "cond",
+          "test": {
+            "kind": "ident",
+            "name": "ok",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 2
+              }
+            }
+          },
+          "consequent": {
+            "kind": "number",
+            "value": 1,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 5
+              },
+              "end": {
+                "row": 1,
+                "col": 6
+              }
+            }
+          },
+          "alternate": {
+            "kind": "number",
+            "value": 2,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 9
+              },
+              "end": {
+                "row": 1,
+                "col": 10
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 10
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 11
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "-a * b;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "binary",
+          "op": "*",
+          "left": {
+            "kind": "unary",
+            "op": "-",
+            "operand": {
+              "kind": "ident",
+              "name": "a",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 1
+                },
+                "end": {
+                  "row": 1,
+                  "col": 2
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 2
+              }
+            }
+          },
+          "right": {
+            "kind": "ident",
+            "name": "b",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 5
+              },
+              "end": {
+                "row": 1,
+                "col": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 6
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 7
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "!a && b;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "binary",
+          "op": "&&",
+          "left": {
+            "kind": "unary",
+            "op": "!",
+            "operand": {
+              "kind": "ident",
+              "name": "a",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 1
+                },
+                "end": {
+                  "row": 1,
+                  "col": 2
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 2
+              }
+            }
+          },
+          "right": {
+            "kind": "ident",
+            "name": "b",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 6
+              },
+              "end": {
+                "row": 1,
+                "col": 7
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 7
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "a.b.c(1)[x];",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "index",
+          "object": {
+            "kind": "call",
+            "callee": {
+              "kind": "member",
+              "object": {
+                "kind": "member",
+                "object": {
+                  "kind": "ident",
+                  "name": "a",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 0
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 1
+                    }
+                  }
+                },
+                "property": "b",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 0
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 3
+                  }
+                }
+              },
+              "property": "c",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 0
+                },
+                "end": {
+                  "row": 1,
+                  "col": 5
+                }
+              }
+            },
+            "args": [
+              {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 6
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 7
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 8
+              }
+            }
+          },
+          "index": {
+            "kind": "ident",
+            "name": "x",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 9
+              },
+              "end": {
+                "row": 1,
+                "col": 10
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 11
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 12
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "f(1, 'two')(3);",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "call",
+          "callee": {
+            "kind": "call",
+            "callee": {
+              "kind": "ident",
+              "name": "f",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 0
+                },
+                "end": {
+                  "row": 1,
+                  "col": 1
+                }
+              }
+            },
+            "args": [
+              {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 3
+                  }
+                }
+              },
+              {
+                "kind": "string",
+                "value": "two",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 6
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 9
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 11
+              }
+            }
+          },
+          "args": [
+            {
+              "kind": "number",
+              "value": 3,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 12
+                },
+                "end": {
+                  "row": 1,
+                  "col": 13
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 14
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 15
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "[1, 'two', true, null];",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "array",
+          "elements": [
+            {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 1
+                },
+                "end": {
+                  "row": 1,
+                  "col": 2
+                }
+              }
+            },
+            {
+              "kind": "string",
+              "value": "two",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 5
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            {
+              "kind": "boolean",
+              "value": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 11
+                },
+                "end": {
+                  "row": 1,
+                  "col": 15
+                }
+              }
+            },
+            {
+              "kind": "null",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 17
+                },
+                "end": {
+                  "row": 1,
+                  "col": 21
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 22
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 23
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "[[1], [], [2, 3]];",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "array",
+          "elements": [
+            {
+              "kind": "array",
+              "elements": [
+                {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 2
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 3
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 1
+                },
+                "end": {
+                  "row": 1,
+                  "col": 4
+                }
+              }
+            },
+            {
+              "kind": "array",
+              "elements": [],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 6
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            {
+              "kind": "array",
+              "elements": [
+                {
+                  "kind": "number",
+                  "value": 2,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 11
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 12
+                    }
+                  }
+                },
+                {
+                  "kind": "number",
+                  "value": 3,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 14
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 15
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 10
+                },
+                "end": {
+                  "row": 1,
+                  "col": 16
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 17
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 18
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "(a, b) => a + b;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "arrow",
+          "params": [
+            "a",
+            "b"
+          ],
+          "body": {
+            "kind": "binary",
+            "op": "+",
+            "left": {
+              "kind": "ident",
+              "name": "a",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 10
+                },
+                "end": {
+                  "row": 1,
+                  "col": 11
+                }
+              }
+            },
+            "right": {
+              "kind": "ident",
+              "name": "b",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 14
+                },
+                "end": {
+                  "row": 1,
+                  "col": 15
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 10
+              },
+              "end": {
+                "row": 1,
+                "col": 15
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 15
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 16
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "(a + b);",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "binary",
+          "op": "+",
+          "left": {
+            "kind": "ident",
+            "name": "a",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 1
+              },
+              "end": {
+                "row": 1,
+                "col": 2
+              }
+            }
+          },
+          "right": {
+            "kind": "ident",
+            "name": "b",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 5
+              },
+              "end": {
+                "row": 1,
+                "col": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 1
+            },
+            "end": {
+              "row": 1,
+              "col": 6
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "(a);",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "ident",
+          "name": "a",
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 1
+            },
+            "end": {
+              "row": 1,
+              "col": 2
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 4
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "x => x * 2;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "arrow",
+          "params": [
+            "x"
+          ],
+          "body": {
+            "kind": "binary",
+            "op": "*",
+            "left": {
+              "kind": "ident",
+              "name": "x",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 5
+                },
+                "end": {
+                  "row": 1,
+                  "col": 6
+                }
+              }
+            },
+            "right": {
+              "kind": "number",
+              "value": 2,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 9
+                },
+                "end": {
+                  "row": 1,
+                  "col": 10
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 5
+              },
+              "end": {
+                "row": 1,
+                "col": 10
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 10
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 11
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "x;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "ident",
+          "name": "x",
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 1
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 2
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "() => 1;",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "arrow",
+          "params": [],
+          "body": {
+            "kind": "number",
+            "value": 1,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 6
+              },
+              "end": {
+                "row": 1,
+                "col": 7
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 7
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "(x) => { return x; };",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "arrow",
+          "params": [
+            "x"
+          ],
+          "body": {
+            "kind": "block",
+            "body": [
+              {
+                "kind": "return",
+                "argument": {
+                  "kind": "ident",
+                  "name": "x",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 16
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 17
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 9
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 18
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 7
+              },
+              "end": {
+                "row": 1,
+                "col": 20
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 20
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 21
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "apply(x => x + 1, [1, 2]);",
+    "ast": [
+      {
+        "kind": "expr",
+        "expression": {
+          "kind": "call",
+          "callee": {
+            "kind": "ident",
+            "name": "apply",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 0
+              },
+              "end": {
+                "row": 1,
+                "col": 5
+              }
+            }
+          },
+          "args": [
+            {
+              "kind": "arrow",
+              "params": [
+                "x"
+              ],
+              "body": {
+                "kind": "binary",
+                "op": "+",
+                "left": {
+                  "kind": "ident",
+                  "name": "x",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 11
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 12
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 15
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 16
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 11
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 16
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 6
+                },
+                "end": {
+                  "row": 1,
+                  "col": 16
+                }
+              }
+            },
+            {
+              "kind": "array",
+              "elements": [
+                {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 19
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 20
+                    }
+                  }
+                },
+                {
+                  "kind": "number",
+                  "value": 2,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 22
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 23
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 24
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 1,
+              "col": 25
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 26
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "const s = 'single' ; const d = \"double\";",
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "s",
+        "init": {
+          "kind": "string",
+          "value": "single",
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 11
+            },
+            "end": {
+              "row": 1,
+              "col": 17
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 20
+          }
+        }
+      },
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "d",
+        "init": {
+          "kind": "string",
+          "value": "double",
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 32
+            },
+            "end": {
+              "row": 1,
+              "col": 38
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 21
+          },
+          "end": {
+            "row": 1,
+            "col": 40
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "const n = 1.5; const z = 0; const big = 1234567890;",
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "n",
+        "init": {
+          "kind": "number",
+          "value": 1.5,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 10
+            },
+            "end": {
+              "row": 1,
+              "col": 13
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 14
+          }
+        }
+      },
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "z",
+        "init": {
+          "kind": "number",
+          "value": 0,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 25
+            },
+            "end": {
+              "row": 1,
+              "col": 26
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 15
+          },
+          "end": {
+            "row": 1,
+            "col": 27
+          }
+        }
+      },
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "big",
+        "init": {
+          "kind": "number",
+          "value": 1234567890,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 40
+            },
+            "end": {
+              "row": 1,
+              "col": 50
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 28
+          },
+          "end": {
+            "row": 1,
+            "col": 51
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "/* multi\n   line */ const after = 1; // eol\n",
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "after",
+        "init": {
+          "kind": "number",
+          "value": 1,
+          "span": {
+            "start": {
+              "row": 2,
+              "col": 25
+            },
+            "end": {
+              "row": 2,
+              "col": 26
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 11
+          },
+          "end": {
+            "row": 2,
+            "col": 27
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "const $dollar = _under$score;",
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "$dollar",
+        "init": {
+          "kind": "ident",
+          "name": "_under$score",
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 16
+            },
+            "end": {
+              "row": 1,
+              "col": 28
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 29
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "const s = 'héllo'; const t = \"wörld — dash\";",
+    "ast": [
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "s",
+        "init": {
+          "kind": "string",
+          "value": "héllo",
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 11
+            },
+            "end": {
+              "row": 1,
+              "col": 16
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 18
+          }
+        }
+      },
+      {
+        "kind": "var",
+        "declKind": "const",
+        "name": "t",
+        "init": {
+          "kind": "string",
+          "value": "wörld — dash",
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 30
+            },
+            "end": {
+              "row": 1,
+              "col": 42
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 19
+          },
+          "end": {
+            "row": 1,
+            "col": 44
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "function outer(a) {\n  const b = a + 1;\n  if (b > 2) {\n    return b;\n  }\n  return 0;\n}\n",
+    "ast": [
+      {
+        "kind": "function",
+        "name": "outer",
+        "params": [
+          "a"
+        ],
+        "body": {
+          "kind": "block",
+          "body": [
+            {
+              "kind": "var",
+              "declKind": "const",
+              "name": "b",
+              "init": {
+                "kind": "binary",
+                "op": "+",
+                "left": {
+                  "kind": "ident",
+                  "name": "a",
+                  "span": {
+                    "start": {
+                      "row": 2,
+                      "col": 12
+                    },
+                    "end": {
+                      "row": 2,
+                      "col": 13
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 2,
+                      "col": 16
+                    },
+                    "end": {
+                      "row": 2,
+                      "col": 17
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 12
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 17
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 2
+                },
+                "end": {
+                  "row": 2,
+                  "col": 18
+                }
+              }
+            },
+            {
+              "kind": "if",
+              "test": {
+                "kind": "binary",
+                "op": ">",
+                "left": {
+                  "kind": "ident",
+                  "name": "b",
+                  "span": {
+                    "start": {
+                      "row": 3,
+                      "col": 6
+                    },
+                    "end": {
+                      "row": 3,
+                      "col": 7
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "number",
+                  "value": 2,
+                  "span": {
+                    "start": {
+                      "row": 3,
+                      "col": 10
+                    },
+                    "end": {
+                      "row": 3,
+                      "col": 11
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 3,
+                    "col": 6
+                  },
+                  "end": {
+                    "row": 3,
+                    "col": 11
+                  }
+                }
+              },
+              "consequent": {
+                "kind": "block",
+                "body": [
+                  {
+                    "kind": "return",
+                    "argument": {
+                      "kind": "ident",
+                      "name": "b",
+                      "span": {
+                        "start": {
+                          "row": 4,
+                          "col": 11
+                        },
+                        "end": {
+                          "row": 4,
+                          "col": 12
+                        }
+                      }
+                    },
+                    "span": {
+                      "start": {
+                        "row": 4,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 4,
+                        "col": 13
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 3,
+                    "col": 13
+                  },
+                  "end": {
+                    "row": 5,
+                    "col": 3
+                  }
+                }
+              },
+              "alternate": null,
+              "span": {
+                "start": {
+                  "row": 3,
+                  "col": 2
+                },
+                "end": {
+                  "row": 5,
+                  "col": 3
+                }
+              }
+            },
+            {
+              "kind": "return",
+              "argument": {
+                "kind": "number",
+                "value": 0,
+                "span": {
+                  "start": {
+                    "row": 6,
+                    "col": 9
+                  },
+                  "end": {
+                    "row": 6,
+                    "col": 10
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 6,
+                  "col": 2
+                },
+                "end": {
+                  "row": 6,
+                  "col": 11
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 18
+            },
+            "end": {
+              "row": 7,
+              "col": 1
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 7,
+            "col": 1
+          }
+        }
+      }
+    ]
+  }
+]

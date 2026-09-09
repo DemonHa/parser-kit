@@ -1,0 +1,586 @@
+[
+  {
+    "source": "CREATE TABLE t (id int, 42 bad, ok text);\nDROP TABLE t;",
+    "errors": [
+      {
+        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or a name but found \"42\" (1:24)",
+        "end": {
+          "row": 1,
+          "col": 26
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "id",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 19
+                },
+                "end": {
+                  "row": 1,
+                  "col": 22
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 22
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "ok",
+            "dataType": {
+              "name": "text",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 35
+                },
+                "end": {
+                  "row": 1,
+                  "col": 39
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 32
+              },
+              "end": {
+                "row": 1,
+                "col": 39
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 40
+          }
+        }
+      },
+      {
+        "kind": "drop",
+        "objectType": "table",
+        "concurrently": false,
+        "ifExists": false,
+        "names": [
+          [
+            "t"
+          ]
+        ],
+        "behavior": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 12
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT * FRUM t;\nSELECT 1;",
+    "errors": [
+      {
+        "message": "Expected \";\" but found \"frum\" (1:9)",
+        "end": {
+          "row": 1,
+          "col": 13
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE IF NOT EXIST foo (id int);\nSELECT 1;",
+    "errors": [
+      {
+        "message": "Expected \"exists\" but found \"exist\" (1:20)",
+        "end": {
+          "row": 1,
+          "col": 25
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT * FROM;\nSELECT 2;",
+    "errors": [
+      {
+        "message": "Expected a name but found \";\" (1:13)",
+        "end": {
+          "row": 1,
+          "col": 14
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 2,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT $ FROM t;\nSELECT 3;",
+    "errors": [
+      {
+        "message": "Unexpected character \"$\" (1:7)",
+        "end": {
+          "row": 1,
+          "col": 8
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 3,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT * FROM;\nSELECT * FRUM u;\nSELECT 4;",
+    "errors": [
+      {
+        "message": "Expected a name but found \";\" (1:13)",
+        "end": {
+          "row": 1,
+          "col": 14
+        }
+      },
+      {
+        "message": "Expected \";\" but found \"frum\" (2:9)",
+        "end": {
+          "row": 2,
+          "col": 13
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 4,
+              "span": {
+                "start": {
+                  "row": 3,
+                  "col": 7
+                },
+                "end": {
+                  "row": 3,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 3,
+            "col": 0
+          },
+          "end": {
+            "row": 3,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE a (id int, 42 bad);\nSELECT * FROM;\nSELECT 5;",
+    "errors": [
+      {
+        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or a name but found \"42\" (1:24)",
+        "end": {
+          "row": 1,
+          "col": 26
+        }
+      },
+      {
+        "message": "Expected a name but found \";\" (2:13)",
+        "end": {
+          "row": 2,
+          "col": 14
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "a"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "id",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 19
+                },
+                "end": {
+                  "row": 1,
+                  "col": 22
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 22
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 31
+          }
+        }
+      },
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 5,
+              "span": {
+                "start": {
+                  "row": 3,
+                  "col": 7
+                },
+                "end": {
+                  "row": 3,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 3,
+            "col": 0
+          },
+          "end": {
+            "row": 3,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT é FROM t;\nSELECT 6;",
+    "errors": [
+      {
+        "message": "Unexpected character \"é\" (1:7)",
+        "end": {
+          "row": 1,
+          "col": 8
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 6,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 8
+          }
+        }
+      }
+    ]
+  }
+]
