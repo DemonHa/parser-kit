@@ -1184,6 +1184,119 @@ describe("SQL-lite window functions", () => {
   });
 });
 
+// --- aggregate call modifiers ---
+
+describe("SQL-lite aggregate call modifiers", () => {
+  const aggExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const call = (fnName: string, args: unknown[] = [], mods: Record<string, unknown> = {}) => ({
+    kind: "call",
+    name: fnName,
+    args,
+    ...mods,
+  });
+  const order = (expr: unknown, dir: string | null = null, nulls: string | null = null) => ({ expr, dir, nulls });
+  const named = (argName: string, value: unknown) => ({ kind: "namedArg", name: argName, value });
+
+  it("records DISTINCT on the call node, and omits the key on a plain call", () => {
+    expect(aggExpr("count(DISTINCT x)")).toEqual(call("count", [name("x")], { distinct: true }));
+    // Omit-when-absent, asserted on the keys rather than by equality: an always
+    // present `distinct: false` would add a key to every call in the AST golden.
+    expect(Object.keys(aggExpr("count(*)"))).toEqual(["kind", "name", "args"]);
+  });
+
+  it("parses an aggregate ORDER BY inside the argument list", () => {
+    expect(aggExpr("array_agg(a ORDER BY b DESC NULLS LAST)")).toEqual(
+      call("array_agg", [name("a")], { orderBy: [order(name("b"), "desc", "last")] }),
+    );
+    // A multi-argument aggregate: the ORDER BY closes the list, not an argument.
+    expect(aggExpr("string_agg(a, ',' ORDER BY b)")).toEqual(
+      call("string_agg", [name("a"), str(",")], { orderBy: [order(name("b"))] }),
+    );
+    // Both modifiers at once, as PG allows.
+    expect(aggExpr("array_agg(DISTINCT a ORDER BY a)")).toEqual(
+      call("array_agg", [name("a")], { distinct: true, orderBy: [order(name("a"))] }),
+    );
+  });
+
+  it("parses named arguments, in a call and in a FROM table function", () => {
+    expect(aggExpr("f(a => 1, b => 2)")).toEqual(call("f", [named("a", num(1)), named("b", num(2))]));
+    // Mixed with positional arguments. PG requires the positional ones first;
+    // the grammar accepts either order and leaves that to the planner.
+    expect(aggExpr("f(1, tail => 2)")).toEqual(call("f", [num(1), named("tail", num(2))]));
+    // `functionArg` is shared, so a FROM table function takes them too, as does
+    // SUBSTRING's comma form from its second argument on — its first goes through
+    // `expression`, so a named argument there is still rejected.
+    expect(aggExpr("substring(s, a => 1)")).toEqual(call("substring", [name("s"), named("a", num(1))]));
+    expect(() => sqlLite.parse("SELECT substring(str => 'abc', from => 2) FROM t;")).toThrow(/but found "=>"/);
+    expect((firstStmt("SELECT * FROM generate_series(start => 1, stop => 5) g;") as any).from).toEqual([
+      { kind: "function", call: call("generate_series", [named("start", num(1)), named("stop", num(5))]), alias: "g" },
+    ]);
+  });
+
+  it("parses IGNORE / RESPECT NULLS, nesting inside FILTER and OVER", () => {
+    expect(aggExpr("lag(x) IGNORE NULLS OVER (ORDER BY id)")).toEqual({
+      kind: "window",
+      fn: { kind: "nullTreatment", fn: call("lag", [name("x")]), treatment: "ignore" },
+      name: null,
+      partitionBy: null,
+      orderBy: [order(name("id"))],
+      frame: null,
+    });
+    expect(aggExpr("first_value(x) RESPECT NULLS OVER w")).toEqual({
+      kind: "window",
+      fn: { kind: "nullTreatment", fn: call("first_value", [name("x")]), treatment: "respect" },
+      name: "w",
+      partitionBy: null,
+      orderBy: null,
+      frame: null,
+    });
+    // The SQL-standard order — null treatment binds tightest, then FILTER, then
+    // OVER. (PG has no null treatment at all; the other two are its order.)
+    expect(aggExpr("count(x) IGNORE NULLS FILTER (WHERE x) OVER ()")).toEqual({
+      kind: "window",
+      fn: {
+        kind: "aggFilter",
+        fn: { kind: "nullTreatment", fn: call("count", [name("x")]), treatment: "ignore" },
+        where: name("x"),
+      },
+      name: null,
+      partitionBy: null,
+      orderBy: null,
+      frame: null,
+    });
+  });
+
+  it("keeps ignore / respect / nulls unreserved as names and aliases", () => {
+    expect((firstStmt("SELECT ignore, respect, nulls FROM t;") as any).columns).toEqual([
+      col(name("ignore")),
+      col(name("respect")),
+      col(name("nulls")),
+    ]);
+    // Not followed by `nulls`, each is an ordinary alias on the call.
+    expect((firstStmt("SELECT lag(x) ignore FROM t;") as any).columns).toEqual([
+      col(call("lag", [name("x")]), "ignore"),
+    ]);
+    expect((firstStmt("SELECT lag(x) respect FROM t;") as any).columns).toEqual([
+      col(call("lag", [name("x")]), "respect"),
+    ]);
+    // `nulls` on its own is an alias too — only the two-word pair is a modifier.
+    expect((firstStmt("SELECT lag(x) nulls FROM t;") as any).columns).toEqual([col(call("lag", [name("x")]), "nulls")]);
+    expect((firstStmt("CREATE TABLE t (ignore int, nulls text);") as any).items.map((i: any) => i.name)).toEqual([
+      "ignore",
+      "nulls",
+    ]);
+  });
+
+  it("reports a helpful error on a truncated modifier", () => {
+    // Both croak from inside `expression`, so the messages differ only in the
+    // position — pin that, or either assertion would pass on the other's error.
+    expect(() => sqlLite.parse("SELECT array_agg(a ORDER BY) FROM t;")).toThrow(/but found "\)" \(1:27\)/);
+    expect(() => sqlLite.parse("SELECT f(a => ) FROM t;")).toThrow(/but found "\)" \(1:14\)/);
+    // A named argument's label is a name, so a reserved word needs quoting.
+    expect(() => sqlLite.parse("SELECT f(select => 1) FROM t;")).toThrow(/Expected a name but found "select"/);
+  });
+});
+
 // --- remaining SELECT clauses (Phase 4) ---
 
 describe("SQL-lite FROM items: LATERAL, table functions, TABLESAMPLE", () => {
@@ -1453,8 +1566,11 @@ describe("SQL-lite SELECT", () => {
     const cols = (src: string) => (firstStmt(src) as any).columns;
     expect(cols("SELECT t.* FROM t;")).toEqual([col(star(["t"]))]);
     expect(cols("SELECT count(*) FROM t;")).toEqual([col({ kind: "call", name: "count", args: [star()] })]);
-    // DISTINCT inside an aggregate is accepted; the call AST stays unchanged.
-    expect(cols("SELECT count(distinct x) FROM t;")).toEqual([col({ kind: "call", name: "count", args: [name("x")] })]);
+    // DISTINCT inside an aggregate is recorded on the call node itself; the
+    // modifiers have their own suite below.
+    expect(cols("SELECT count(distinct x) FROM t;")).toEqual([
+      col({ kind: "call", name: "count", args: [name("x")], distinct: true }),
+    ]);
   });
 });
 
