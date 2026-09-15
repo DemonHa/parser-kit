@@ -882,6 +882,134 @@ describe("SQL-lite expression operators", () => {
   });
 });
 
+// --- arithmetic, bitwise and jsonpath operators ---
+
+describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
+  const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
+  const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(type) });
+
+  it("lexes the arithmetic, bitwise and jsonpath operators as single op tokens", () => {
+    const toks = lex("% ^ & | # << >> @?");
+    expect(toks.every((t) => t.type === "op")).toBe(true);
+    expect(toks.map((t) => t.value)).toEqual(["%", "^", "&", "|", "#", "<<", ">>", "@?"]);
+  });
+
+  it("parses modulo at the multiplicative tier", () => {
+    expect(exprOf("a % b")).toEqual(bin("%", name("a"), name("b")));
+    // bp 14, same tier as `*` and `/`: left-associative and above `+`.
+    expect(exprOf("a % b * c")).toEqual(bin("*", bin("%", name("a"), name("b")), name("c")));
+    expect(exprOf("a + b % c")).toEqual(bin("+", name("a"), bin("%", name("b"), name("c"))));
+  });
+
+  it("parses unary plus alongside unary minus", () => {
+    expect(exprOf("+a")).toEqual(un("+", name("a")));
+    // The operator is kept verbatim rather than folded away.
+    expect(exprOf("+1")).toEqual(un("+", num(1)));
+    // bp 16, above `*`: `(+a) * b`, not `+(a * b)`. (It is *not* above every
+    // arithmetic tier — `^` at bp 17 is tighter still; see the next test.)
+    expect(exprOf("+a * b")).toEqual(bin("*", un("+", name("a")), name("b")));
+    // A sign on the right-hand side of a binary operator still reaches the prefix.
+    expect(exprOf("a * +b")).toEqual(bin("*", name("a"), un("+", name("b"))));
+    // Unchanged: unary minus keeps its own shape and precedence.
+    expect(exprOf("-a * b")).toEqual(bin("*", un("-", name("a")), name("b")));
+  });
+
+  it("parses exponentiation tighter than the unary sign, left-associatively", () => {
+    expect(exprOf("a ^ b")).toEqual(bin("^", name("a"), name("b")));
+    expect(exprOf("a ^ b ^ c")).toEqual(bin("^", bin("^", name("a"), name("b")), name("c")));
+    // bp 17 is above the unary sign (16), so the sign wraps the whole power.
+    expect(exprOf("-2 ^ 2")).toEqual(un("-", bin("^", num(2), num(2))));
+    expect(exprOf("+2 ^ 2")).toEqual(un("+", bin("^", num(2), num(2))));
+    // ... and below the bp-18 postfixes. The right operand is what discriminates:
+    // a cast there binds to that operand, not to the power. (`a::int ^ 2` is the
+    // same tree at any bp, since the postfix loop runs before the infix scan.)
+    expect(exprOf("a ^ b::int")).toEqual(bin("^", name("a"), cast(name("b"), "int")));
+    expect(exprOf("a::int ^ 2")).toEqual(bin("^", cast(name("a"), "int"), num(2)));
+    // ... and above `*`, so the power is the multiplicand.
+    expect(exprOf("2 ^ 3 * 4")).toEqual(bin("*", bin("^", num(2), num(3)), num(4)));
+  });
+
+  it("nests a signed right operand of ^ under the sign, not the power", () => {
+    // The tail of putting `^` above the unary sign: a prefix parses its operand
+    // at its own bp (16), which is below `^`'s 17, so the sign on the right
+    // swallows the rest of the chain instead of the chain nesting left.
+    expect(exprOf("2 ^ -3 ^ 4")).toEqual(bin("^", num(2), un("-", bin("^", num(3), num(4)))));
+    // Without a sign the same chain is plain left-associative.
+    expect(exprOf("2 ^ 3 ^ 4")).toEqual(bin("^", bin("^", num(2), num(3)), num(4)));
+  });
+
+  it("parses the bitwise and shift operators at the bp-12 tier", () => {
+    expect(exprOf("a & b")).toEqual(bin("&", name("a"), name("b")));
+    expect(exprOf("a | b")).toEqual(bin("|", name("a"), name("b")));
+    expect(exprOf("a # b")).toEqual(bin("#", name("a"), name("b")));
+    expect(exprOf("a << 2")).toEqual(bin("<<", name("a"), num(2)));
+    expect(exprOf("a >> 2")).toEqual(bin(">>", name("a"), num(2)));
+    // Left-associative within the tier.
+    expect(exprOf("a | b | c")).toEqual(bin("|", bin("|", name("a"), name("b")), name("c")));
+    // bp 12 is below `+` (13) and above the bp-9 comparisons.
+    expect(exprOf("a | b + c")).toEqual(bin("|", name("a"), bin("+", name("b"), name("c"))));
+    expect(exprOf("a & b = c")).toEqual(bin("=", bin("&", name("a"), name("b")), name("c")));
+  });
+
+  it("parses the jsonpath existence operator", () => {
+    expect(exprOf("data @? '$.x'")).toEqual(bin("@?", name("data"), str("$.x")));
+    // Same tier as `@@`, so a comparison still takes the whole match as its LHS.
+    expect(exprOf("data @? '$.x' = b")).toEqual(bin("=", bin("@?", name("data"), str("$.x")), name("b")));
+  });
+
+  it("keeps the longer operators that share a lead character intact", () => {
+    // `#` is bitwise XOR, but `#-` / `#>` / `#>>` are their own tokens: maximal
+    // munch in the lexer, so adding `#` cannot split them.
+    expect(exprOf("meta #- '{x}'")).toEqual(bin("#-", name("meta"), str("{x}")));
+    expect(exprOf("meta #> '{x}'")).toEqual(bin("#>", name("meta"), str("{x}")));
+    expect(exprOf("meta #>> '{x}'")).toEqual(bin("#>>", name("meta"), str("{x}")));
+    // `|` is bitwise OR, `||` is still concatenation, `?|` still key-existence.
+    expect(exprOf("a || b")).toEqual(bin("||", name("a"), name("b")));
+    expect(exprOf("tags ?| other")).toEqual(bin("?|", name("tags"), name("other")));
+    // `@?` is jsonpath existence, `@>` containment and `@@` full-text match.
+    expect(exprOf("a @> b")).toEqual(bin("@>", name("a"), name("b")));
+    expect(exprOf("doc @@ 'q'")).toEqual(bin("@@", name("doc"), str("q")));
+  });
+
+  it("leaves the lexer's trailing-sign rule to decide where an unspaced sign goes", () => {
+    // The operator reader trims a trailing `+`/`-` from a run unless the run
+    // holds a "strong" character, so `<<` and `>>` let the sign go while
+    // `% & | ^` absorb it into one unknown operator — PG's own rule, now
+    // reachable from both sides because the sign is a prefix here.
+    expect(exprOf("a << -1")).toEqual(bin("<<", name("a"), un("-", num(1))));
+    expect(exprOf("a >> -1")).toEqual(bin(">>", name("a"), un("-", num(1))));
+    // Spaced, the sign is its own token and the power parses.
+    expect(exprOf("2 ^ -2")).toEqual(bin("^", num(2), un("-", num(2))));
+    // Unspaced, `^-` lexes as one operator that no group claims.
+    expect(() => sqlLite.parse("SELECT 2^-2 FROM t;")).toThrow(/but found "\^-"/);
+    // `++` is trimmed to a single `+`, so a doubled sign reaches the prefix.
+    expect(exprOf("a ++ b")).toEqual(bin("+", name("a"), un("+", name("b"))));
+  });
+
+  it("shares the new operators with the b-expression", () => {
+    // POSITION's first operand is parsed by the b-expression, which reuses
+    // `arithInfix` verbatim — so a widened group (`%` joining `*` and `/`) and
+    // a brand-new one (`^`) both reach it without a second table.
+    const posOf = (src: string) => (firstStmt(`SELECT position(${src}) FROM t;`) as any).columns[0].expr;
+    expect(posOf("a % 2 IN s")).toEqual({
+      kind: "position",
+      substring: bin("%", name("a"), num(2)),
+      string: name("s"),
+    });
+    expect(posOf("a ^ 2 IN s")).toEqual({
+      kind: "position",
+      substring: bin("^", name("a"), num(2)),
+      string: name("s"),
+    });
+    // The prefix group is shared too, so the widened sign reaches it as well.
+    expect(posOf("+a IN s")).toEqual({ kind: "position", substring: un("+", name("a")), string: name("s") });
+  });
+
+  it("reports a missing right operand at the token that should have started it", () => {
+    expect(() => sqlLite.parse("SELECT a ^ FROM t;")).toThrow(/Expected a name but found "from"/);
+  });
+});
+
 // --- expression special forms (Phase 2) ---
 
 describe("SQL-lite expression special forms", () => {

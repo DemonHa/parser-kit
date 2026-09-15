@@ -1205,10 +1205,12 @@ const typeRef = seq(
 ).map(({ name, args, array }, span): ColType => ({ name, args: args ?? [], array, span }));
 
 // --- pratt operator table ---
-// Binding powers follow PG (highest binds tightest): :: cast, unary -, * /,
-// + -, other operators (|| @>), BETWEEN/IN/LIKE, comparisons (nonassoc), IS,
-// NOT, AND, OR. Keyword operators are plain `ident`-typed matches thanks to
-// folding; multi-word ones (NOT LIKE, BETWEEN … AND) use match-based groups.
+// Binding powers follow PG (highest binds tightest): :: cast, ^, unary + -,
+// * / %, + -, other operators (|| @> & | # << >> -> @?), BETWEEN/IN/LIKE,
+// comparisons (nonassoc), IS, NOT, AND, OR — with one deliberate departure
+// among those tiers, at `^`, documented where that group is declared. Keyword operators
+// are plain `ident`-typed matches thanks to folding; multi-word ones (NOT
+// LIKE, BETWEEN … AND) use match-based groups.
 const binary = (ops: string[], bp: number, assoc?: "nonassoc") => ({
   ops,
   bp,
@@ -1247,25 +1249,48 @@ const escapeTail = (ctx: ParseContext<SqlTokenType>, h: PrattHelpers<Expr>): Exp
   ctx.eat("ident", "escape") !== null ? h.parseRhs(11) : undefined;
 
 // --- shared pratt groups (reused by the full expression rule and the b-expr) ---
-const unaryMinusPrefix = {
-  ops: ["-"],
+// Unary sign. PG accepts a leading `+` wherever it accepts a leading `-`, and
+// both produce a `unary` node carrying the operator verbatim — `+a` is not
+// folded away, so the AST keeps what was written.
+const unarySignPrefix = {
+  ops: ["-", "+"],
   type: "op" as const,
   bp: 16,
   map: (op: string, operand: Expr, span: Span): Expr => ({ kind: "unary", op, operand, span }),
 };
 
-// The tight arithmetic / concat / JSON-and-regex tier (bp ≥ 12) — everything
-// above the comparison/logical forms. Shared verbatim with the b-expression.
+// The tight arithmetic / concat / bitwise / JSON-and-regex tier (bp ≥ 12) —
+// everything above the comparison/logical forms. Shared verbatim with the
+// b-expression.
 const arithInfix = [
-  binary(["*", "/"], 14),
+  // Exponentiation, left-associative (`a ^ b ^ c` is `(a ^ b) ^ c`) and tighter
+  // than the unary sign, so `-2 ^ 2` reads as `-(2 ^ 2)`. That is where the
+  // table departs from PG, which declares UMINUS *above* `^` and so reads the
+  // same input as `(-2) ^ 2`; the usual reading of `-2 ^ 2` wins here instead.
+  // (Only the sign relationship diverges — the left-associativity above is
+  // PG's own `%left '^'`, not the right-associativity maths would give it.)
+  // The departure has a tail: a sign on the *right* re-enters at the prefix's
+  // own bp 16, which is below 17, so `2 ^ -3 ^ 4` is `2 ^ (-(3 ^ 4))` rather
+  // than left-nesting. bp 17 also sits below the bp-18 postfixes, which is what
+  // keeps `a ^ b::int` casting the right operand alone instead of the power.
+  binary(["^"], 17),
+  binary(["*", "/", "%"], 14),
   binary(["+", "-"], 13),
   binary(["||"], 12),
   binary(["@>"], 12),
+  // Bitwise and shift operators (`& | # << >>`). PG has no tier of its own for
+  // these: they fall into the catch-all "any other operator" level, below the
+  // arithmetic it names explicitly and above the comparisons, which is this
+  // grammar's bp 12 — so `a | b + c` is `a | (b + c)` and `a | b = c` is
+  // `(a | b) = c`. `#` is bitwise XOR here; the JSON `#>`/`#>>`/`#-` spellings
+  // are separate tokens the lexer takes whole, not a `#` followed by anything.
+  binary(["&", "|", "#", "<<", ">>"], 12),
   // JSON/JSONB access & containment (`-> ->> #> #>> #-`, existence `? ?| ?&`,
-  // `<@`), POSIX regex (`~ !~ ~* !~*`) and full-text match (`@@`). All lex as
-  // single `op` tokens already; they share the bp-12 "other operators" tier
-  // with `||`/`@>` and are left-associative, so `a -> 'k' ->> 'j'` nests left.
-  binary(["->", "->>", "#>", "#>>", "#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@@"], 12),
+  // `<@`), jsonpath existence (`@?`), full-text and jsonpath predicate match
+  // (`@@`), POSIX regex (`~ !~ ~* !~*`). All lex as single `op` tokens already;
+  // they share the bp-12 "other operators" tier with `||`/`@>` and are
+  // left-associative, so `a -> 'k' ->> 'j'` nests left.
+  binary(["->", "->>", "#>", "#>>", "#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@?", "@@"], 12),
 ];
 
 // `::` cast and `[…]` subscript bind tightest (bp 18). Both are shared with the
@@ -1325,7 +1350,7 @@ const atTimeZonePostfix = {
 const expressionRule = pratt<Expr, SqlTokenType>({
   atom,
   prefix: [
-    unaryMinusPrefix,
+    unarySignPrefix,
     {
       ops: ["not"],
       type: "ident",
@@ -1505,7 +1530,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
 // `IN` separator is left for the special-call parser instead of the `in` postfix.
 const bExprRule = pratt<Expr, SqlTokenType>({
   atom,
-  prefix: [unaryMinusPrefix],
+  prefix: [unarySignPrefix],
   infix: arithInfix,
   postfix: [castPostfix, subscriptPostfix],
 });

@@ -40,6 +40,8 @@ const SUPPLEMENTAL = [
   "SELECT * FROM t AS x TABLESAMPLE bernoulli (10) REPEATABLE (5);",
   // --- the expression grammar: pratt levels and the special-call dispatch ---
   "SELECT -a, NOT b FROM t;",
+  "SELECT +a, -2 ^ 2, a ^ b ^ c, a % b, a::int ^ 2 FROM t;",
+  "SELECT a & b, c | d, e # f, g << 1, h >> 1, doc @? '$.x' FROM t;",
   "SELECT CASE WHEN a THEN 1 WHEN b THEN 2 ELSE 3 END, CASE x WHEN 1 THEN 'a' END FROM t;",
   "SELECT ARRAY[1, 2, 3], a[1], b[1:2] FROM t;",
   "SELECT ROW(1, 2) FROM t;",
