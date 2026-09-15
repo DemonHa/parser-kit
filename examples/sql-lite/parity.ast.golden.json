@@ -9177,6 +9177,206 @@
     ]
   },
   {
+    "source": "CREATE TABLE t (flags bit DEFAULT B'1011', mask bit DEFAULT X'ff', label text DEFAULT U&'\\0041');",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "flags",
+            "dataType": {
+              "name": "bit",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 22
+                },
+                "end": {
+                  "row": 1,
+                  "col": 25
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "default",
+                "expr": {
+                  "kind": "bitString",
+                  "value": "1011",
+                  "hex": false,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 36
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 40
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 26
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 40
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 40
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "mask",
+            "dataType": {
+              "name": "bit",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 48
+                },
+                "end": {
+                  "row": 1,
+                  "col": 51
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "default",
+                "expr": {
+                  "kind": "bitString",
+                  "value": "ff",
+                  "hex": true,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 62
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 64
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 52
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 64
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 43
+              },
+              "end": {
+                "row": 1,
+                "col": 64
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "label",
+            "dataType": {
+              "name": "text",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 73
+                },
+                "end": {
+                  "row": 1,
+                  "col": 77
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "default",
+                "expr": {
+                  "kind": "string",
+                  "value": "A",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 89
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 94
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 78
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 94
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 67
+              },
+              "end": {
+                "row": 1,
+                "col": 94
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 96
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {
@@ -10329,6 +10529,323 @@
           "end": {
             "row": 1,
             "col": 44
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT B'1011', b'0', X'ff', x'AB' FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "bitString",
+              "value": "1011",
+              "hex": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 9
+                },
+                "end": {
+                  "row": 1,
+                  "col": 13
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "bitString",
+              "value": "0",
+              "hex": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 19
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "bitString",
+              "value": "ff",
+              "hex": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 24
+                },
+                "end": {
+                  "row": 1,
+                  "col": 26
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "bitString",
+              "value": "AB",
+              "hex": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 31
+                },
+                "end": {
+                  "row": 1,
+                  "col": 33
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 41
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT U&'\\0041', U&'d\\0061t\\+000061', U&'d!0061t!+000061' UESCAPE '!' FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "string",
+              "value": "A",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 10
+                },
+                "end": {
+                  "row": 1,
+                  "col": 15
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "string",
+              "value": "data",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 21
+                },
+                "end": {
+                  "row": 1,
+                  "col": 36
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "string",
+              "value": "data",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 42
+                },
+                "end": {
+                  "row": 1,
+                  "col": 70
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 77
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT U&'it''s' uescape, b, x, u FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "string",
+              "value": "it's",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 10
+                },
+                "end": {
+                  "row": 1,
+                  "col": 15
+                }
+              }
+            },
+            "alias": "uescape"
+          },
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "b"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 26
+                },
+                "end": {
+                  "row": 1,
+                  "col": 27
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "x"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 29
+                },
+                "end": {
+                  "row": 1,
+                  "col": 30
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "u"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 32
+                },
+                "end": {
+                  "row": 1,
+                  "col": 33
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 40
           }
         }
       }

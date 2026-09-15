@@ -30,8 +30,8 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // OFFSET / UNION-INTERSECT-EXCEPT) and INSERT / UPDATE / DELETE with
 // RETURNING — over the scalar expression sublanguage that DEFAULT / CHECK /
 // index / WHERE clauses share. It is the end-to-end test for the PG-grade kit
-// features: escaped/dollar strings, PG numbers, bind parameters, the operator
-// reader, the fold-and-match keyword strategy, match-based and non-associative
+// features: escaped/prefixed/dollar strings, PG numbers, bind parameters, the
+// operator reader, the fold-and-match keyword strategy, match-based and non-associative
 // pratt operators, mutual expr↔query recursion via lazy(), and farthest-failure
 // / nested recovery. The expression sublanguage also covers the PG special forms
 // — CAST / EXTRACT / SUBSTRING / POSITION / TRIM, ARRAY[…] / ROW(…), array
@@ -133,7 +133,15 @@ export type Expr =
   // underlying call so `count(*) FILTER (…) OVER (…)` nests filter inside window.
   | { kind: "aggFilter"; fn: Expr; where: Expr; span: Span }
   // `fn(…) WITHIN GROUP (ORDER BY …)` — an ordered-set / hypothetical-set aggregate.
-  | { kind: "withinGroup"; fn: Expr; orderBy: OrderItem[]; span: Span };
+  | { kind: "withinGroup"; fn: Expr; orderBy: OrderItem[]; span: Span }
+  // --- Phase 10: the remaining literal forms ---
+  // PG's bit-string constants, `B'1011'` and `X'ff'`. `value` is the digits as
+  // written, case included — so `X'AB'` and `X'ab'` stay distinguishable even
+  // though they denote the same bits — and `hex` records which spelling
+  // produced them, since the two differ in width per digit rather than in
+  // value. The third new literal form, `U&'\0041'`, needs no node: it decodes
+  // in the lexer to an ordinary `string` token, exactly as an E-string does.
+  | { kind: "bitString"; value: string; hex: boolean; span: Span };
 
 // One bound of a window frame (`ROWS/RANGE/GROUPS` extent). `preceding` /
 // `following` carry the offset expression; the others are nullary.
@@ -821,6 +829,17 @@ const parenQuery = seq(skip(punc("(")), field("q", query), skip(punc(")"))).map(
 
 const numberLit = token("number").map((node, span): Expr => ({ kind: "number", value: Number(node.value), span }));
 const stringLit = token("string").map((node, span): Expr => ({ kind: "string", value: node.value, span }));
+// `B'1011'` and `X'ff'` lex as token types of their own, which is what lets the
+// node record the spelling without re-reading the source. Any literal that
+// closed has had its digits checked by the lexer, leaving these plain maps; one
+// that did not has swallowed the `;` as well, so no statement can be built from
+// it either way.
+const bitStringLit = token("bitstring").map(
+  (node, span): Expr => ({ kind: "bitString", value: node.value, hex: false, span }),
+);
+const hexStringLit = token("hexstring").map(
+  (node, span): Expr => ({ kind: "bitString", value: node.value, hex: true, span }),
+);
 const boolLit = token("ident", { values: ["true", "false"] }).map(
   (node, span): Expr => ({ kind: "bool", value: node.value === "true", span }),
 );
@@ -1166,6 +1185,8 @@ const arrayExpr = seq(
 const atom = oneOf(
   numberLit,
   stringLit,
+  bitStringLit,
+  hexStringLit,
   boolLit,
   nullLit,
   paramLit,
