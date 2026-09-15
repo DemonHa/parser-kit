@@ -9348,6 +9348,432 @@
     ]
   },
   {
+    "source": "SELECT a::double precision, b::timestamp(3) with time zone, c::interval day to second FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "cast",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "a"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 8
+                  }
+                }
+              },
+              "type": {
+                "name": "double precision",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 10
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 26
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 26
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "cast",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "b"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 28
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 29
+                  }
+                }
+              },
+              "type": {
+                "name": "timestamp with time zone",
+                "args": [
+                  3
+                ],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 31
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 58
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 28
+                },
+                "end": {
+                  "row": 1,
+                  "col": 58
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "cast",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "c"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 60
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 61
+                  }
+                }
+              },
+              "type": {
+                "name": "interval day to second",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 63
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 85
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 60
+                },
+                "end": {
+                  "row": 1,
+                  "col": 85
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 92
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (a character varying(10), b bit varying(4), c time without time zone, d double precision[]);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "a",
+            "dataType": {
+              "name": "character varying",
+              "args": [
+                10
+              ],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 39
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 39
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "b",
+            "dataType": {
+              "name": "bit varying",
+              "args": [
+                4
+              ],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 43
+                },
+                "end": {
+                  "row": 1,
+                  "col": 57
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 41
+              },
+              "end": {
+                "row": 1,
+                "col": 57
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "c",
+            "dataType": {
+              "name": "time without time zone",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 61
+                },
+                "end": {
+                  "row": 1,
+                  "col": 83
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 59
+              },
+              "end": {
+                "row": 1,
+                "col": 83
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "d",
+            "dataType": {
+              "name": "double precision",
+              "args": [],
+              "array": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 87
+                },
+                "end": {
+                  "row": 1,
+                  "col": 105
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 85
+              },
+              "end": {
+                "row": 1,
+                "col": 105
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 106
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE FUNCTION f(double precision, a timestamp with time zone) RETURNS int LANGUAGE sql AS $$SELECT 1$$;",
+    "ast": [
+      {
+        "kind": "createFunction",
+        "orReplace": false,
+        "name": [
+          "f"
+        ],
+        "args": [
+          {
+            "mode": null,
+            "name": null,
+            "type": {
+              "name": "double precision",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 34
+                }
+              }
+            },
+            "defaultValue": null
+          },
+          {
+            "mode": null,
+            "name": "a",
+            "type": {
+              "name": "timestamp with time zone",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 38
+                },
+                "end": {
+                  "row": 1,
+                  "col": 62
+                }
+              }
+            },
+            "defaultValue": null
+          }
+        ],
+        "returns": {
+          "kind": "type",
+          "setof": false,
+          "type": {
+            "name": "int",
+            "args": [],
+            "array": false,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 72
+              },
+              "end": {
+                "row": 1,
+                "col": 75
+              }
+            }
+          }
+        },
+        "options": [
+          {
+            "kind": "language",
+            "name": "sql"
+          },
+          {
+            "kind": "as",
+            "parts": [
+              "SELECT 1"
+            ]
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 102
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "GRANT SELECT, UPDATE (a, b) ON TABLE t1, t2 TO alice, bob WITH GRANT OPTION;",
     "ast": [
       {
