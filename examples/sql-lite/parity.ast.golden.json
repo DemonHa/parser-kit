@@ -6471,6 +6471,7 @@
                   }
                 }
               ],
+              "distinct": true,
               "span": {
                 "start": {
                   "row": 1,
@@ -6510,6 +6511,591 @@
           "end": {
             "row": 1,
             "col": 31
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT array_agg(a ORDER BY b DESC) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "call",
+              "name": "array_agg",
+              "args": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "a"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 17
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 18
+                    }
+                  }
+                }
+              ],
+              "orderBy": [
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "b"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 28
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 29
+                      }
+                    }
+                  },
+                  "dir": "desc",
+                  "nulls": null
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 35
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 42
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT string_agg(a, ',' ORDER BY b) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "call",
+              "name": "string_agg",
+              "args": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "a"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 18
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 19
+                    }
+                  }
+                },
+                {
+                  "kind": "string",
+                  "value": ",",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 22
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 23
+                    }
+                  }
+                }
+              ],
+              "orderBy": [
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "b"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 34
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 35
+                      }
+                    }
+                  },
+                  "dir": null,
+                  "nulls": null
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 36
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 43
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT f(a => 1, b => 2) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "call",
+              "name": "f",
+              "args": [
+                {
+                  "kind": "namedArg",
+                  "name": "a",
+                  "value": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 14
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 15
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 9
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 15
+                    }
+                  }
+                },
+                {
+                  "kind": "namedArg",
+                  "name": "b",
+                  "value": {
+                    "kind": "number",
+                    "value": 2,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 22
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 23
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 17
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 23
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 24
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 31
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT lag(x) IGNORE NULLS OVER (ORDER BY id) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "window",
+              "fn": {
+                "kind": "nullTreatment",
+                "fn": {
+                  "kind": "call",
+                  "name": "lag",
+                  "args": [
+                    {
+                      "kind": "name",
+                      "parts": [
+                        "x"
+                      ],
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 11
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 12
+                        }
+                      }
+                    }
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 7
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 13
+                    }
+                  }
+                },
+                "treatment": "ignore",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 26
+                  }
+                }
+              },
+              "name": null,
+              "partitionBy": null,
+              "orderBy": [
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "id"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 42
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 44
+                      }
+                    }
+                  },
+                  "dir": null,
+                  "nulls": null
+                }
+              ],
+              "frame": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 45
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 52
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT count(x) RESPECT NULLS FILTER (WHERE x) OVER () FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "window",
+              "fn": {
+                "kind": "aggFilter",
+                "fn": {
+                  "kind": "nullTreatment",
+                  "fn": {
+                    "kind": "call",
+                    "name": "count",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "parts": [
+                          "x"
+                        ],
+                        "span": {
+                          "start": {
+                            "row": 1,
+                            "col": 13
+                          },
+                          "end": {
+                            "row": 1,
+                            "col": 14
+                          }
+                        }
+                      }
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 7
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 15
+                      }
+                    }
+                  },
+                  "treatment": "respect",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 7
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 29
+                    }
+                  }
+                },
+                "where": {
+                  "kind": "name",
+                  "parts": [
+                    "x"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 44
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 45
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 46
+                  }
+                }
+              },
+              "name": null,
+              "partitionBy": null,
+              "orderBy": null,
+              "frame": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 54
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 61
           }
         }
       }
