@@ -582,5 +582,192 @@
         }
       }
     ]
+  },
+  {
+    "source": "SELECT B'12' FROM t;\nSELECT 1;",
+    "errors": [
+      {
+        "message": "Invalid binary digit \"2\" (1:7)",
+        "end": {
+          "row": 1,
+          "col": 12
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT U&'\\00' FROM t;\nSELECT 2;",
+    "errors": [
+      {
+        "message": "Invalid Unicode escape value (1:7)",
+        "end": {
+          "row": 1,
+          "col": 14
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 2,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT U&'x' UESCAPE '5' FROM t;\nSELECT 3;",
+    "errors": [
+      {
+        "message": "Invalid Unicode escape character (1:21)",
+        "end": {
+          "row": 1,
+          "col": 24
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 3,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT U&'\\0041' UESCAPE '!\nSELECT 4;",
+    "errors": [
+      {
+        "message": "Invalid Unicode escape character (1:25)",
+        "end": {
+          "row": 2,
+          "col": 9
+        }
+      }
+    ],
+    "ast": []
   }
 ]
