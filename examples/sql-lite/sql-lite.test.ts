@@ -2199,3 +2199,185 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
     expect(() => sqlLite.parse("SELECT U&'\\0041' UESCAPE '!")).toThrow(/Invalid Unicode escape character/);
   });
 });
+
+// --- multi-word type names ---
+
+describe("SQL-lite multi-word type names", () => {
+  const colType = (type: string) => (firstStmt(`CREATE TABLE t (c ${type});`) as any).items[0].dataType;
+  const castType = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr.type;
+  const fnArgs = (signature: string) =>
+    (firstStmt(`CREATE FUNCTION f(${signature}) RETURNS int LANGUAGE sql AS $$SELECT 1$$;`) as any).args;
+
+  it("parses the PG types spelled with more than one word", () => {
+    expect(colType("double precision")).toEqual(ct("double precision"));
+    expect(colType("character varying(10)")).toEqual(ct("character varying", { args: [10] }));
+    expect(colType("char varying(10)")).toEqual(ct("char varying", { args: [10] }));
+    expect(colType("national character varying(8)")).toEqual(ct("national character varying", { args: [8] }));
+    expect(colType("national character(8)")).toEqual(ct("national character", { args: [8] }));
+    expect(colType("national char(8)")).toEqual(ct("national char", { args: [8] }));
+    // Listed before the bare `national char`, so the greedy match takes the
+    // longer spelling rather than choking on the leftover `varying`.
+    expect(colType("national char varying(3)")).toEqual(ct("national char varying", { args: [3] }));
+    expect(colType("bit varying(4)")).toEqual(ct("bit varying", { args: [4] }));
+    expect(colType("timestamp with time zone")).toEqual(ct("timestamp with time zone"));
+    expect(colType("timestamp without time zone")).toEqual(ct("timestamp without time zone"));
+    expect(colType("time with time zone")).toEqual(ct("time with time zone"));
+    expect(colType("interval day to second")).toEqual(ct("interval day to second"));
+    expect(colType("interval year to month")).toEqual(ct("interval year to month"));
+    expect(colType("interval hour")).toEqual(ct("interval hour"));
+  });
+
+  it("hoists a mid-name precision out into args", () => {
+    // PG puts the precision inside the name; the node keeps the words together
+    // and the args separate, never `{ name: "timestamp(3) with time zone" }`.
+    expect(colType("timestamp(3) with time zone")).toEqual(ct("timestamp with time zone", { args: [3] }));
+    expect(colType("time(6) without time zone")).toEqual(ct("time without time zone", { args: [6] }));
+    expect(colType("interval day to second(3)")).toEqual(ct("interval day to second", { args: [3] }));
+  });
+
+  it("leaves the single-word, arg and array spellings alone", () => {
+    expect(colType("int")).toEqual(ct("int"));
+    expect(colType("numeric(10,2)[]")).toEqual(ct("numeric", { args: [10, 2], array: true }));
+    expect(colType("double precision[]")).toEqual(ct("double precision", { array: true }));
+    expect(colType("pg_catalog.numeric")).toEqual(ct("pg_catalog.numeric"));
+  });
+
+  it("casts to a multi-word type instead of aliasing the second word", () => {
+    // `SELECT a::double precision FROM t` used to cast to `double` and read
+    // `precision` as the column's alias.
+    expect(castType("a::double precision")).toEqual(ct("double precision"));
+    expect((firstStmt("SELECT a::double precision FROM t;") as any).columns[0].alias).toBeNull();
+    expect(castType("a::timestamp(3) with time zone")).toEqual(ct("timestamp with time zone", { args: [3] }));
+    // A trailing INTERVAL field now belongs to the type name, as it does in PG.
+    expect(castType("x::interval day")).toEqual(ct("interval day"));
+  });
+
+  it("only extends a bare, unqualified lead word", () => {
+    // A quoted lead is an ordinary name, so `precision` stays an alias.
+    expect(firstStmt('SELECT a::"double" precision FROM t;')).toEqual(
+      sel({
+        columns: [{ expr: { kind: "cast", expr: name("a"), type: ct("double") }, alias: "precision" }],
+        from: [tableFrom(["t"])],
+      }),
+    );
+    // So is a dotted one.
+    expect(firstStmt("SELECT x::public.interval day FROM t;")).toEqual(
+      sel({
+        columns: [{ expr: { kind: "cast", expr: name("x"), type: ct("public.interval") }, alias: "day" }],
+        from: [tableFrom(["t"])],
+      }),
+    );
+  });
+
+  it("never half-consumes a tail it cannot complete", () => {
+    // The whole continuation is checked by lookahead before a token is taken,
+    // so a WITH that is not `WITH TIME ZONE` is left for the enclosing rule.
+    const mv = firstStmt("CREATE MATERIALIZED VIEW mv AS SELECT now()::timestamp WITH NO DATA;") as any;
+    expect(mv).toMatchObject({ kind: "createView", materialized: true, withData: false });
+    // …and the type really stopped at `timestamp`, rather than the clause being
+    // re-parsed from a half-consumed tail.
+    expect(mv.query.columns[0].expr.type).toEqual(ct("timestamp"));
+    expect(() => sqlLite.parse("CREATE TABLE t (c timestamp with zone);")).toThrow(/Expected "," but found "with"/);
+    expect(() => sqlLite.parse("CREATE TABLE t (c interval to second);")).toThrow(/Expected "," but found "to"/);
+  });
+
+  it("fixes which side of the name the precision sits on", () => {
+    // Only the datetime types spell it before the tail, so a mid-name list is
+    // the syntax error PG reports rather than a silently accepted spelling.
+    expect(() => sqlLite.parse("CREATE TABLE t (c character(10) varying);")).toThrow(
+      /Expected "," but found "varying"/,
+    );
+    expect(() => sqlLite.parse("CREATE TABLE t (c interval(3) day);")).toThrow(/Expected "," but found "day"/);
+    // A lead with no tail still takes its ordinary trailing list.
+    expect(colType("timestamp(3)")).toEqual(ct("timestamp", { args: [3] }));
+    expect(colType("interval(3)")).toEqual(ct("interval", { args: [3] }));
+    // What is *not* checked is whether the type takes a precision at all — PG
+    // rejects all three of these, and so does no type in this grammar: the
+    // single-word `text(5)` is equally lenient, on main and here.
+    expect(colType("double precision(10)")).toEqual(ct("double precision", { args: [10] }));
+    expect(colType("timestamp with time zone(3)")).toEqual(ct("timestamp with time zone", { args: [3] }));
+    expect(colType("text(5)")).toEqual(ct("text", { args: [5] }));
+  });
+
+  it("treats a type name that collides with Object.prototype as an ordinary name", () => {
+    // Identifiers fold to lowercase, so these reach the tail lookup verbatim. An
+    // object literal keyed by lead word would hand back an inherited value here.
+    expect(colType("constructor")).toEqual(ct("constructor"));
+    expect(colType("__proto__")).toEqual(ct("__proto__"));
+    expect(castType("x::constructor")).toEqual(ct("constructor"));
+    // And `diagnose` must still collect rather than throw.
+    expect(sqlLite.diagnose("CREATE TABLE t (c constructor);").errors).toEqual([]);
+  });
+
+  it("rethrows a lex error raised inside the tail lookahead", () => {
+    // Filling the lookahead buffer consumes the offending character, so the
+    // error cannot simply be discarded with the failed candidate: `interval day`
+    // is a complete tail, and the rest of the statement parses, so nothing else
+    // would ever report it. Under `parse` there is no collector to report to.
+    expect(() => sqlLite.parse("CREATE TABLE t (c interval day é);")).toThrow(/Unexpected character "é"/);
+    expect(sqlLite.diagnose("CREATE TABLE t (c interval day é);").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "é" (1:31)',
+    ]);
+  });
+
+  it("names a function argument only when the two words are not a type name", () => {
+    const arg = (over: Record<string, unknown>) => ({ mode: null, name: null, defaultValue: null, ...over });
+    // Both words are the type: one unnamed argument, not a `double` of type
+    // `precision`.
+    expect(fnArgs("double precision")).toEqual([arg({ type: ct("double precision") })]);
+    expect(fnArgs("timestamp with time zone")).toEqual([arg({ type: ct("timestamp with time zone") })]);
+    // A name in front of one still works, and used to fail outright.
+    expect(fnArgs("a double precision")).toEqual([arg({ name: "a", type: ct("double precision") })]);
+    expect(fnArgs("a timestamp with time zone")).toEqual([arg({ name: "a", type: ct("timestamp with time zone") })]);
+    // The ordinary `name type` pair is untouched.
+    expect(fnArgs("a integer")).toEqual([arg({ name: "a", type: ct("integer") })]);
+    expect(fnArgs("integer")).toEqual([arg({ type: ct("integer") })]);
+    // A lead word followed by something that cannot continue it is a name again —
+    // including a word that starts a tail but cannot finish one, since the test
+    // is the whole tail rather than just the pair.
+    expect(fnArgs("interval integer")).toEqual([arg({ name: "interval", type: ct("integer") })]);
+    expect(fnArgs("timestamp without")).toEqual([arg({ name: "timestamp", type: ct("without") })]);
+    expect(fnArgs("in double precision")).toEqual([arg({ mode: "in", type: ct("double precision") })]);
+  });
+
+  it("keeps the type words unreserved as names and aliases", () => {
+    // Every word this rule matches by value that was not already reserved stays
+    // usable as a bare name. (`with` and `to` are the two it matches that are
+    // reserved, and were reserved long before this rule existed.)
+    const words = [
+      "double",
+      "precision",
+      "character",
+      "char",
+      "varying",
+      "national",
+      "bit",
+      "without",
+      "zone",
+      "time",
+      "timestamp",
+      "interval",
+      "year",
+      "month",
+      "day",
+      "hour",
+      "minute",
+      "second",
+    ];
+    expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(name(w))));
+    // …as column names, with an ordinary type after them,
+    expect((firstStmt("CREATE TABLE t (double int, interval text, zone int);") as any).items).toEqual([
+      { kind: "column", name: "double", dataType: ct("int"), constraints: [] },
+      { kind: "column", name: "interval", dataType: ct("text"), constraints: [] },
+      { kind: "column", name: "zone", dataType: ct("int"), constraints: [] },
+    ]);
+    // `date` is the neighbouring unreserved type word this rule does *not* match
+    // by value; it stays an ordinary column reference.
+    expect((firstStmt("SELECT date FROM t;") as any).columns).toEqual([col(name("date"))]);
+    // …and as aliases.
+    expect((firstStmt("SELECT a AS precision, b AS varying FROM t;") as any).columns).toEqual([
+      col(name("a"), "precision"),
+      col(name("b"), "varying"),
+    ]);
+  });
+});

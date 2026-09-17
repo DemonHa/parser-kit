@@ -97,6 +97,10 @@ const SUPPLEMENTAL = [
   "CREATE OR REPLACE FUNCTION add(a integer, b integer DEFAULT 0) RETURNS integer LANGUAGE sql IMMUTABLE STRICT AS $$SELECT a + b$$;",
   "CREATE FUNCTION h() RETURNS int LANGUAGE sql LEAKPROOF ROWS 100 SET x FROM CURRENT AS $$SELECT 1$$;",
   "CREATE FUNCTION g() RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public COST 100 PARALLEL SAFE AS $$SELECT 1$$;",
+  // --- multi-word type names: the spellings typeRef used to alias apart ---
+  "SELECT a::double precision, b::timestamp(3) with time zone, c::interval day to second FROM t;",
+  "CREATE TABLE t (a character varying(10), b bit varying(4), c time without time zone, d double precision[]);",
+  "CREATE FUNCTION f(double precision, a timestamp with time zone) RETURNS int LANGUAGE sql AS $$SELECT 1$$;",
   "GRANT SELECT, UPDATE (a, b) ON TABLE t1, t2 TO alice, bob WITH GRANT OPTION;",
   "REVOKE GRANT OPTION FOR SELECT ON t FROM alice CASCADE;",
   "BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE;",
@@ -191,6 +195,17 @@ const MALFORMED = [
   // here whose trailing statement is *not* recoverable, and necessarily so —
   // the unclosed literal swallowed it, exactly as an unclosed `'…'` would.
   "SELECT U&'\\0041' UESCAPE '!\nSELECT 4;",
+  // A lex error *inside* a multi-word type name's lookahead. Filling the
+  // lookahead buffer consumes the offending character, so typeRef has to report
+  // it rather than discard it along with the failed tail. Both errors survive,
+  // but this is the one row here whose list is not in source order: the
+  // lookahead runs, and reports, before the syntax error it declines to cause.
+  "CREATE TABLE t (c timestamp with é);\nSELECT 7;",
+  // The same mechanism with the tail completing rather than failing, which is
+  // the more surprising outcome and so pinned separately: `interval day` is a
+  // type, the bad character is the statement's only error, and the column
+  // definition around it recovers into the AST whole.
+  "CREATE TABLE t (c interval day é);\nSELECT 8;",
 ];
 
 // Record a throw rather than propagating it, so one bad case doesn't abort the
