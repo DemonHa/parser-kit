@@ -40,6 +40,8 @@ const SUPPLEMENTAL = [
   "SELECT * FROM t AS x TABLESAMPLE bernoulli (10) REPEATABLE (5);",
   // --- the expression grammar: pratt levels and the special-call dispatch ---
   "SELECT -a, NOT b FROM t;",
+  "SELECT +a, -2 ^ 2, a ^ b ^ c, a % b, a::int ^ 2 FROM t;",
+  "SELECT a & b, c | d, e # f, g << 1, h >> 1, doc @? '$.x' FROM t;",
   "SELECT CASE WHEN a THEN 1 WHEN b THEN 2 ELSE 3 END, CASE x WHEN 1 THEN 'a' END FROM t;",
   "SELECT ARRAY[1, 2, 3], a[1], b[1:2] FROM t;",
   "SELECT ROW(1, 2) FROM t;",
@@ -118,6 +120,7 @@ const SUPPLEMENTAL = [
   "COMMENT ON COLUMN users.email IS $q$primary contact$q$;",
   "DEALLOCATE PREPARE my_stmt;",
   "INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;",
+  "CREATE TABLE t (flags bit DEFAULT B'1011', mask bit DEFAULT X'ff', label text DEFAULT U&'\\0041');",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind
@@ -141,7 +144,10 @@ const MULTI_LINE = [
 // quotes; dollar quoting; non-ASCII *inside* string and quoted-identifier
 // bodies, which pins column counting across a multi-byte run (a non-ASCII
 // character can never *start* a token in this grammar, so that path is in
-// MALFORMED below); and the operator / punctuation-trie partition.
+// MALFORMED below); the operator / punctuation-trie partition; and the three
+// letter-prefixed literal forms, whose prefixes are case-insensitive for the
+// same reason the E-string's is, and whose bodies are decoded (unicode) or
+// validated (bit / hex) before the parser ever sees them.
 const LEXER_EDGE_CASES = [
   "SELECT 0xff, 1_000, 1e5, .5, 1.5e-3 FROM t;",
   "SELECT E'a\\nb', e'lower\\tprefix', 'it''s', \"MixedCase\" FROM t;",
@@ -149,6 +155,9 @@ const LEXER_EDGE_CASES = [
   "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$SELECT 1$$;",
   "SELECT a || b, c @> d, x::int, $1, $name FROM t;",
   "/* outer /* inner */ still outer */ SELECT 1; -- trailing\n",
+  "SELECT B'1011', b'0', X'ff', x'AB' FROM t;",
+  "SELECT U&'\\0041', U&'d\\0061t\\+000061', U&'d!0061t!+000061' UESCAPE '!' FROM t;",
+  "SELECT U&'it''s' uescape, b, x, u FROM t;",
 ];
 
 // Malformed inputs, each trailed by a statement that recovery at the `;` sync
@@ -175,6 +184,21 @@ const MALFORMED = [
   // the out-of-range path of an ASCII-indexed dispatch or char-class table. It
   // is a lex error in this grammar, which is why it belongs in this list.
   "SELECT é FROM t;\nSELECT 6;",
+  // The three croak sites in the letter-prefixed literal readers. A lexer
+  // croak has to leave the cursor somewhere recovery can resync from, and the
+  // only way to see that is to pin what `diagnose` salvages: the first two
+  // read past the whole literal, so the trailing statement survives.
+  "SELECT B'12' FROM t;\nSELECT 1;",
+  "SELECT U&'\\00' FROM t;\nSELECT 2;",
+  // The UESCAPE character is read as a whole `'…'` for exactly this reason —
+  // croaking with its closing quote unconsumed left that quote to open a
+  // runaway string that ate the rest of the input.
+  "SELECT U&'x' UESCAPE '5' FROM t;\nSELECT 3;",
+  // A truncated tail is rejected on the same test: one legal character is not
+  // enough if the quote that would have closed it never arrived. The one row
+  // here whose trailing statement is *not* recoverable, and necessarily so —
+  // the unclosed literal swallowed it, exactly as an unclosed `'…'` would.
+  "SELECT U&'\\0041' UESCAPE '!\nSELECT 4;",
 ];
 
 // Record a throw rather than propagating it, so one bad case doesn't abort the

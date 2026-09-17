@@ -30,8 +30,8 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // OFFSET / UNION-INTERSECT-EXCEPT) and INSERT / UPDATE / DELETE with
 // RETURNING — over the scalar expression sublanguage that DEFAULT / CHECK /
 // index / WHERE clauses share. It is the end-to-end test for the PG-grade kit
-// features: escaped/dollar strings, PG numbers, bind parameters, the operator
-// reader, the fold-and-match keyword strategy, match-based and non-associative
+// features: escaped/prefixed/dollar strings, PG numbers, bind parameters, the
+// operator reader, the fold-and-match keyword strategy, match-based and non-associative
 // pratt operators, mutual expr↔query recursion via lazy(), and farthest-failure
 // / nested recovery. The expression sublanguage also covers the PG special forms
 // — CAST / EXTRACT / SUBSTRING / POSITION / TRIM, ARRAY[…] / ROW(…), array
@@ -146,7 +146,15 @@ export type Expr =
   | { kind: "withinGroup"; fn: Expr; orderBy: OrderItem[]; span: Span }
   // `fn(…) IGNORE NULLS` / `RESPECT NULLS` — a window function's null treatment.
   // Wraps the call like the other modifiers, nesting inside FILTER / OVER.
-  | { kind: "nullTreatment"; fn: Expr; treatment: "ignore" | "respect"; span: Span };
+  | { kind: "nullTreatment"; fn: Expr; treatment: "ignore" | "respect"; span: Span }
+  // --- Phase 10: the remaining literal forms ---
+  // PG's bit-string constants, `B'1011'` and `X'ff'`. `value` is the digits as
+  // written, case included — so `X'AB'` and `X'ab'` stay distinguishable even
+  // though they denote the same bits — and `hex` records which spelling
+  // produced them, since the two differ in width per digit rather than in
+  // value. The third new literal form, `U&'\0041'`, needs no node: it decodes
+  // in the lexer to an ordinary `string` token, exactly as an E-string does.
+  | { kind: "bitString"; value: string; hex: boolean; span: Span };
 
 // One bound of a window frame (`ROWS/RANGE/GROUPS` extent). `preceding` /
 // `following` carry the offset expression; the others are nullary.
@@ -834,6 +842,17 @@ const parenQuery = seq(skip(punc("(")), field("q", query), skip(punc(")"))).map(
 
 const numberLit = token("number").map((node, span): Expr => ({ kind: "number", value: Number(node.value), span }));
 const stringLit = token("string").map((node, span): Expr => ({ kind: "string", value: node.value, span }));
+// `B'1011'` and `X'ff'` lex as token types of their own, which is what lets the
+// node record the spelling without re-reading the source. Any literal that
+// closed has had its digits checked by the lexer, leaving these plain maps; one
+// that did not has swallowed the `;` as well, so no statement can be built from
+// it either way.
+const bitStringLit = token("bitstring").map(
+  (node, span): Expr => ({ kind: "bitString", value: node.value, hex: false, span }),
+);
+const hexStringLit = token("hexstring").map(
+  (node, span): Expr => ({ kind: "bitString", value: node.value, hex: true, span }),
+);
 const boolLit = token("ident", { values: ["true", "false"] }).map(
   (node, span): Expr => ({ kind: "bool", value: node.value === "true", span }),
 );
@@ -1238,6 +1257,8 @@ const arrayExpr = seq(
 const atom = oneOf(
   numberLit,
   stringLit,
+  bitStringLit,
+  hexStringLit,
   boolLit,
   nullLit,
   paramLit,
@@ -1277,10 +1298,12 @@ const typeRef = seq(
 ).map(({ name, args, array }, span): ColType => ({ name, args: args ?? [], array, span }));
 
 // --- pratt operator table ---
-// Binding powers follow PG (highest binds tightest): :: cast, unary -, * /,
-// + -, other operators (|| @>), BETWEEN/IN/LIKE, comparisons (nonassoc), IS,
-// NOT, AND, OR. Keyword operators are plain `ident`-typed matches thanks to
-// folding; multi-word ones (NOT LIKE, BETWEEN … AND) use match-based groups.
+// Binding powers follow PG (highest binds tightest): :: cast, ^, unary + -,
+// * / %, + -, other operators (|| @> & | # << >> -> @?), BETWEEN/IN/LIKE,
+// comparisons (nonassoc), IS, NOT, AND, OR — with one deliberate departure
+// among those tiers, at `^`, documented where that group is declared. Keyword operators
+// are plain `ident`-typed matches thanks to folding; multi-word ones (NOT
+// LIKE, BETWEEN … AND) use match-based groups.
 const binary = (ops: string[], bp: number, assoc?: "nonassoc") => ({
   ops,
   bp,
@@ -1319,25 +1342,48 @@ const escapeTail = (ctx: ParseContext<SqlTokenType>, h: PrattHelpers<Expr>): Exp
   ctx.eat("ident", "escape") !== null ? h.parseRhs(11) : undefined;
 
 // --- shared pratt groups (reused by the full expression rule and the b-expr) ---
-const unaryMinusPrefix = {
-  ops: ["-"],
+// Unary sign. PG accepts a leading `+` wherever it accepts a leading `-`, and
+// both produce a `unary` node carrying the operator verbatim — `+a` is not
+// folded away, so the AST keeps what was written.
+const unarySignPrefix = {
+  ops: ["-", "+"],
   type: "op" as const,
   bp: 16,
   map: (op: string, operand: Expr, span: Span): Expr => ({ kind: "unary", op, operand, span }),
 };
 
-// The tight arithmetic / concat / JSON-and-regex tier (bp ≥ 12) — everything
-// above the comparison/logical forms. Shared verbatim with the b-expression.
+// The tight arithmetic / concat / bitwise / JSON-and-regex tier (bp ≥ 12) —
+// everything above the comparison/logical forms. Shared verbatim with the
+// b-expression.
 const arithInfix = [
-  binary(["*", "/"], 14),
+  // Exponentiation, left-associative (`a ^ b ^ c` is `(a ^ b) ^ c`) and tighter
+  // than the unary sign, so `-2 ^ 2` reads as `-(2 ^ 2)`. That is where the
+  // table departs from PG, which declares UMINUS *above* `^` and so reads the
+  // same input as `(-2) ^ 2`; the usual reading of `-2 ^ 2` wins here instead.
+  // (Only the sign relationship diverges — the left-associativity above is
+  // PG's own `%left '^'`, not the right-associativity maths would give it.)
+  // The departure has a tail: a sign on the *right* re-enters at the prefix's
+  // own bp 16, which is below 17, so `2 ^ -3 ^ 4` is `2 ^ (-(3 ^ 4))` rather
+  // than left-nesting. bp 17 also sits below the bp-18 postfixes, which is what
+  // keeps `a ^ b::int` casting the right operand alone instead of the power.
+  binary(["^"], 17),
+  binary(["*", "/", "%"], 14),
   binary(["+", "-"], 13),
   binary(["||"], 12),
   binary(["@>"], 12),
+  // Bitwise and shift operators (`& | # << >>`). PG has no tier of its own for
+  // these: they fall into the catch-all "any other operator" level, below the
+  // arithmetic it names explicitly and above the comparisons, which is this
+  // grammar's bp 12 — so `a | b + c` is `a | (b + c)` and `a | b = c` is
+  // `(a | b) = c`. `#` is bitwise XOR here; the JSON `#>`/`#>>`/`#-` spellings
+  // are separate tokens the lexer takes whole, not a `#` followed by anything.
+  binary(["&", "|", "#", "<<", ">>"], 12),
   // JSON/JSONB access & containment (`-> ->> #> #>> #-`, existence `? ?| ?&`,
-  // `<@`), POSIX regex (`~ !~ ~* !~*`) and full-text match (`@@`). All lex as
-  // single `op` tokens already; they share the bp-12 "other operators" tier
-  // with `||`/`@>` and are left-associative, so `a -> 'k' ->> 'j'` nests left.
-  binary(["->", "->>", "#>", "#>>", "#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@@"], 12),
+  // `<@`), jsonpath existence (`@?`), full-text and jsonpath predicate match
+  // (`@@`), POSIX regex (`~ !~ ~* !~*`). All lex as single `op` tokens already;
+  // they share the bp-12 "other operators" tier with `||`/`@>` and are
+  // left-associative, so `a -> 'k' ->> 'j'` nests left.
+  binary(["->", "->>", "#>", "#>>", "#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@?", "@@"], 12),
 ];
 
 // `::` cast and `[…]` subscript bind tightest (bp 18). Both are shared with the
@@ -1397,7 +1443,7 @@ const atTimeZonePostfix = {
 const expressionRule = pratt<Expr, SqlTokenType>({
   atom,
   prefix: [
-    unaryMinusPrefix,
+    unarySignPrefix,
     {
       ops: ["not"],
       type: "ident",
@@ -1577,7 +1623,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
 // `IN` separator is left for the special-call parser instead of the `in` postfix.
 const bExprRule = pratt<Expr, SqlTokenType>({
   atom,
-  prefix: [unaryMinusPrefix],
+  prefix: [unarySignPrefix],
   infix: arithInfix,
   postfix: [castPostfix, subscriptPostfix],
 });

@@ -28,7 +28,7 @@ pnpm test
 Run these from the repo root:
 
 ```sh
-pnpm test          # core unit tests + both example grammars (354 tests)
+pnpm test          # core unit tests + both example grammars (380 tests)
 pnpm types:check   # tsc --noEmit across every package
 pnpm lint          # biome
 pnpm lint:fix
