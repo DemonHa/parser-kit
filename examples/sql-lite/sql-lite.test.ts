@@ -2199,3 +2199,51 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
     expect(() => sqlLite.parse("SELECT U&'\\0041' UESCAPE '!")).toThrow(/Invalid Unicode escape character/);
   });
 });
+
+// --- keyword dispatch maps ---
+// The CREATE / ALTER / constraint rules derive their "Expected …" strings from
+// keyword-keyed dispatch maps rather than restating them. What follows pins the
+// parts of that no other test and neither golden covers. The comma-form croaks
+// are already pinned — ALTER's action list above, the OR-REPLACE target list in
+// the CREATE TABLE AS block — and stay there, one copy each, so that adding an
+// action or a replaceable target is still a one-line test edit.
+
+describe("SQL-lite keyword dispatch maps", () => {
+  const rawFirst = (text: string) => sqlLite.parse(text)[0] as Record<string, any>;
+
+  it("names the keyword-led CREATE targets in the join form", () => {
+    expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
+      /Expected "table" or "unique" or "type" or "sequence" or "domain" but found "frobnicate"/,
+    );
+  });
+
+  it("names the table-item alternatives in the join form", () => {
+    expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(
+      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or a name but found "42"/,
+    );
+  });
+
+  // A record literal inherits `constructor` and `__proto__`, so a lead word
+  // spelled like one must still miss the map rather than find a keyless entry.
+  it("treats an Object.prototype key as an unknown lead word", () => {
+    expect(() => sqlLite.parse("ALTER TABLE t constructor;")).toThrow(ParseError);
+    expect(() => sqlLite.parse("ALTER TABLE t __proto__;")).toThrow(/Expected "add", "drop"/);
+    expect(() => sqlLite.parse("CREATE constructor;")).toThrow(/Expected "table" or "unique"/);
+    expect(() => sqlLite.parse("CREATE OR REPLACE __proto__;")).toThrow(/Expected "view", "materialized"/);
+    expect(() => sqlLite.parse("CREATE TABLE t (id int, constructor text);")).not.toThrow();
+  });
+
+  // stripSpans hides this everywhere else in the file: the keyword-led targets
+  // open their span after CREATE, the OR-REPLACE-able bodies before it.
+  it("opens a keyword-led CREATE span on its own keyword and an OR-REPLACE-able one on CREATE", () => {
+    expect(rawFirst("CREATE TABLE t (id int);").span.start).toEqual({ row: 1, col: 7 });
+    expect(rawFirst("CREATE UNIQUE INDEX i ON t (a);").span.start).toEqual({ row: 1, col: 7 });
+    expect(rawFirst("CREATE VIEW v AS SELECT 1;").span.start).toEqual({ row: 1, col: 0 });
+    expect(rawFirst("CREATE MATERIALIZED VIEW mv AS SELECT 1;").span.start).toEqual({ row: 1, col: 0 });
+  });
+
+  it("omits the CREATE prefix-modifier bag rather than emitting an empty one", () => {
+    expect(rawFirst("CREATE TABLE t (id int);")).not.toHaveProperty("modifiers");
+    expect(rawFirst("CREATE TABLE snap AS SELECT 1;")).not.toHaveProperty("modifiers");
+  });
+});
