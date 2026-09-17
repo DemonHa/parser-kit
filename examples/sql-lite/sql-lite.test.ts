@@ -1463,6 +1463,136 @@ describe("SQL-lite GROUP BY ROLLUP / CUBE / GROUPING SETS", () => {
   });
 });
 
+// --- SELECT INTO & GROUP BY modifiers ---
+
+describe("SQL-lite SELECT INTO and GROUP BY modifiers", () => {
+  const stmt = (src: string) => firstStmt(src) as any;
+  const groupBy = (src: string) => stmt(`SELECT a FROM t GROUP BY ${src};`).groupBy;
+  const into = (src: string) => stmt(src).into;
+
+  it("parses SELECT … INTO, with the optional TABLE noise word and a qualified target", () => {
+    expect(stmt("SELECT a INTO newtab FROM t;")).toEqual(
+      sel({ columns: [col(name("a"))], into: { name: ["newtab"] }, from: [tableFrom(["t"])] }),
+    );
+    expect(into("SELECT a INTO TABLE reports.newtab FROM t;")).toEqual({ name: ["reports", "newtab"] });
+    // The clause does not require a FROM after it.
+    expect(into("SELECT 1 INTO newtab;")).toEqual({ name: ["newtab"] });
+  });
+
+  it("parses the storage words PG allows between INTO and the target", () => {
+    expect(into("SELECT a INTO TEMP scratch FROM t;")).toEqual({ name: ["scratch"], modifiers: ["temp"] });
+    expect(into("SELECT a INTO UNLOGGED TABLE scratch FROM t;")).toEqual({
+      name: ["scratch"],
+      modifiers: ["unlogged"],
+    });
+    // `global`/`local` are legal only ahead of a temp word, and are kept in
+    // source order alongside it.
+    expect(into("SELECT a INTO GLOBAL TEMPORARY scratch FROM t;")).toEqual({
+      name: ["scratch"],
+      modifiers: ["global", "temporary"],
+    });
+    expect(into("SELECT a INTO LOCAL TEMP TABLE scratch FROM t;")).toEqual({
+      name: ["scratch"],
+      modifiers: ["local", "temp"],
+    });
+    // `modifiers` follows the same omit-when-absent rule as `into` itself.
+    expect("modifiers" in into("SELECT a INTO scratch FROM t;")).toBe(false);
+  });
+
+  it("keeps the storage words usable as target names", () => {
+    // None of them is reserved, so each is a modifier only when a name can
+    // still follow it. Here nothing can — a reserved clause word or the
+    // terminator follows — and the word is the target itself.
+    for (const word of ["temp", "temporary", "unlogged", "global", "local"]) {
+      expect(into(`SELECT a INTO ${word} FROM t;`)).toEqual({ name: [word] });
+    }
+    expect(into("SELECT a INTO temp;")).toEqual({ name: ["temp"] });
+    // A schema called `temp` survives too: `.` cannot start a target name.
+    expect(into("SELECT a INTO temp.scratch FROM t;")).toEqual({ name: ["temp", "scratch"] });
+    // …and all five remain ordinary column names elsewhere.
+    expect(stmt("SELECT temp, temporary, unlogged, global, local FROM t;").columns).toEqual([
+      col(name("temp")),
+      col(name("temporary")),
+      col(name("unlogged")),
+      col(name("global")),
+      col(name("local")),
+    ]);
+  });
+
+  it("omits `into` entirely when there is no INTO clause", () => {
+    // A required `into: null` would add a key to every SELECT node in the
+    // parity golden; the field is spread in only when the clause is written.
+    expect("into" in stmt("SELECT a FROM t;")).toBe(false);
+  });
+
+  it("records GROUP BY DISTINCT and treats an explicit ALL as the default", () => {
+    expect(stmt("SELECT a FROM t GROUP BY DISTINCT a, b;")).toEqual(
+      sel({
+        columns: [col(name("a"))],
+        from: [tableFrom(["t"])],
+        groupBy: [name("a"), name("b")],
+        groupByDistinct: true,
+      }),
+    );
+    // ALL is the no-op spelling of the default, exactly as `SELECT ALL` is, so
+    // it records nothing and the key stays off the node.
+    const all = stmt("SELECT a FROM t GROUP BY ALL a;");
+    expect(all.groupBy).toEqual([name("a")]);
+    expect("groupByDistinct" in all).toBe(false);
+    // The modifier applies to grouping elements too, not just bare expressions.
+    expect(stmt("SELECT a FROM t GROUP BY DISTINCT ROLLUP (a);").groupBy).toEqual([
+      { kind: "rollup", args: [[name("a")]] },
+    ]);
+  });
+
+  it("parses the empty grouping `()` as a GROUP BY item", () => {
+    expect(groupBy("()")).toEqual([{ kind: "emptyGrouping" }]);
+    expect(groupBy("a, ()")).toEqual([name("a"), { kind: "emptyGrouping" }]);
+    // Whitespace between the parens is not a token, so this is the same item.
+    expect(groupBy("(  )")).toEqual([{ kind: "emptyGrouping" }]);
+    // A parenthesised expression is untouched: only the empty pair is claimed,
+    // and an empty pair nested inside one is not an item of its own.
+    expect(groupBy("(a)")).toEqual([name("a")]);
+    expect(() => sqlLite.parse("SELECT a FROM t GROUP BY (());")).toThrow(ParseError);
+    // Inside GROUPING SETS the empty grouping stays an empty element list.
+    expect(groupBy("GROUPING SETS (())")).toEqual([{ kind: "groupingSets", sets: [[]] }]);
+  });
+
+  it("takes no name away: the clause keywords were already reserved", () => {
+    // `into`, `table`, `distinct` and `all` are all matched by value here, and
+    // all four were already in RESERVED — so, unlike the storage words above,
+    // none of them was usable as a bare name before this clause existed.
+    // Quoted, they are names as they always were.
+    expect(stmt('SELECT "into", "distinct", "all" FROM t;').columns).toEqual([
+      col(name("into")),
+      col(name("distinct")),
+      col(name("all")),
+    ]);
+    // A quoted `"table"` lexes as a qident, which the ident-only noise word can
+    // never match, so it is the target name rather than a word being skipped.
+    expect(into('SELECT 1 INTO "table";')).toEqual({ name: ["table"] });
+  });
+
+  it("rejects the storage-word shapes PG's OptTempTableName has no rule for", () => {
+    // `global`/`local` alone, a repeated word, and two storage words together
+    // are all syntax errors in PG. Each is rejected here because the surplus
+    // word has nowhere to go once the shape ahead of it has been consumed — as
+    // a target name for the scope-word cases, as modifier-plus-target for the
+    // repeated and doubled ones.
+    expect(() => sqlLite.parse("SELECT a INTO GLOBAL scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => sqlLite.parse("SELECT a INTO LOCAL scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => sqlLite.parse("SELECT a INTO GLOBAL TEMP FROM t;")).toThrow(/but found "temp"/);
+    expect(() => sqlLite.parse("SELECT a INTO TEMP TEMP scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => sqlLite.parse("SELECT a INTO UNLOGGED TEMP scratch FROM t;")).toThrow(/but found "scratch"/);
+  });
+
+  it("rejects a missing INTO target, a bare GROUP BY modifier and a malformed grouping", () => {
+    expect(() => sqlLite.parse("SELECT a INTO FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => sqlLite.parse("SELECT a FROM t GROUP BY DISTINCT;")).toThrow(/but found ";"/);
+    expect(() => sqlLite.parse("SELECT a FROM t GROUP BY (,);")).toThrow(ParseError);
+  });
+});
+
 // --- robustness ---
 
 describe("SQL-lite robustness", () => {

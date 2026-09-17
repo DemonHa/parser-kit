@@ -7250,6 +7250,279 @@
     ]
   },
   {
+    "source": "SELECT a FROM t GROUP BY DISTINCT a, ();",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "a"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": [
+          {
+            "kind": "name",
+            "parts": [
+              "a"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 34
+              },
+              "end": {
+                "row": 1,
+                "col": 35
+              }
+            }
+          },
+          {
+            "kind": "emptyGrouping",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 37
+              },
+              "end": {
+                "row": 1,
+                "col": 39
+              }
+            }
+          }
+        ],
+        "groupByDistinct": true,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 39
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT a, count(*) INTO TABLE reports.summary FROM t GROUP BY ALL a;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "a"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "call",
+              "name": "count",
+              "args": [
+                {
+                  "kind": "star",
+                  "table": null,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 16
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 17
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 10
+                },
+                "end": {
+                  "row": 1,
+                  "col": 18
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "into": {
+          "name": [
+            "reports",
+            "summary"
+          ]
+        },
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": [
+          {
+            "kind": "name",
+            "parts": [
+              "a"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 66
+              },
+              "end": {
+                "row": 1,
+                "col": 67
+              }
+            }
+          }
+        ],
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 67
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT a INTO GLOBAL TEMP scratch FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "a"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "into": {
+          "name": [
+            "scratch"
+          ],
+          "modifiers": [
+            "global",
+            "temp"
+          ]
+        },
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 40
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "SELECT 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;",
     "ast": [
       {

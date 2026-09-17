@@ -20,6 +20,7 @@ import {
   sepBy,
   seq,
   skip,
+  type Token,
 } from "@parser-kit/core";
 import { type SqlTokenType, sqlLexer } from "./lexer";
 
@@ -41,10 +42,11 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 //
 // The SELECT surface also carries the remaining query clauses: LATERAL /
 // table-function / TABLESAMPLE FROM items, VALUES as a standalone query and
-// table source, FETCH FIRST … ROWS, FOR UPDATE/SHARE locking, and GROUP BY
-// ROLLUP / CUBE / GROUPING SETS. A WITH prefix may lead any DML statement
-// (`WITH … INSERT/UPDATE/DELETE`), and a CTE body may itself be data-modifying
-// (`WITH x AS (DELETE … RETURNING …) …`).
+// table source, FETCH FIRST … ROWS, FOR UPDATE/SHARE locking, SELECT … INTO a
+// new (optionally TEMP / UNLOGGED) table, and GROUP BY [ALL | DISTINCT] over
+// ROLLUP / CUBE / GROUPING SETS and the empty grouping `()`. A WITH prefix may
+// lead any DML statement (`WITH … INSERT/UPDATE/DELETE`), and a CTE body may
+// itself be data-modifying (`WITH x AS (DELETE … RETURNING …) …`).
 //
 // Out of scope (v1): column-alias lists on FROM items (`t (a, b)`). Ordinary
 // aggregates (no OVER/FILTER/WITHIN GROUP) still parse as plain function calls.
@@ -551,6 +553,12 @@ export type LockingClause = {
   wait: "nowait" | "skipLocked" | null;
 };
 
+// `SELECT … INTO [[GLOBAL | LOCAL] {TEMP | TEMPORARY} | UNLOGGED] [TABLE] target`
+// — the result rows become a new table. `modifiers` holds the storage words in
+// source order (so at most `["global", "temp"]`-shaped pairs) and is present
+// only when at least one is written.
+export type SelectInto = { name: string[]; modifiers?: string[] };
+
 export type SelectStmt = {
   kind: "select";
   with_: Cte[] | null;
@@ -558,11 +566,20 @@ export type SelectStmt = {
   // `false` = no DISTINCT, `true` = DISTINCT, `Expr[]` = DISTINCT ON (…).
   distinct: boolean | Expr[];
   columns: SelectItem[];
+  // Present only when a SELECT INTO clause is written. PG's grammar admits the
+  // clause on any `simple_select` — a set-op arm, a subquery, a CTE body — and
+  // rejects the misplaced ones in parse analysis rather than in the grammar, so
+  // this parser records it wherever it is written.
+  into?: SelectInto;
   from: FromItem[] | null;
   where: Expr | null;
   // A GROUP BY item is a plain expression or a ROLLUP / CUBE / GROUPING SETS
   // grouping element (a bare expr keeps its Expr shape, so ungrouped tests hold).
   groupBy: GroupByItem[] | null;
+  // `GROUP BY DISTINCT …`; present only for the DISTINCT modifier, and then
+  // always `true` — an explicit `ALL` is the default spelling and records
+  // nothing, exactly as `SELECT ALL` does.
+  groupByDistinct?: true;
   having: Expr | null;
   // Named windows from a `WINDOW w AS (…)` clause (after HAVING, before ORDER BY).
   window: NamedWindow[] | null;
@@ -580,7 +597,12 @@ export type SelectStmt = {
 export type GroupingElement =
   | { kind: "rollup"; args: Expr[][]; span: Span }
   | { kind: "cube"; args: Expr[][]; span: Span }
-  | { kind: "groupingSets"; sets: Expr[][]; span: Span };
+  | { kind: "groupingSets"; sets: Expr[][]; span: Span }
+  // PG's `empty_grouping_set`: the `()` written directly as a GROUP BY item —
+  // one grouping over no columns, i.e. the grand-total row. Inside GROUPING SETS
+  // the same empty grouping is an empty `Expr[]` instead, since there it is one
+  // element of a list rather than an item in its own right.
+  | { kind: "emptyGrouping"; span: Span };
 export type GroupByItem = Expr | GroupingElement;
 
 // `expr` may be a `star` node (`*`, `t.*`).
@@ -2859,15 +2881,26 @@ function parseGroupingList(ctx: ParseContext<SqlTokenType>): Expr[][] {
   return elements;
 }
 
-// A GROUP BY item: `ROLLUP (…)`, `CUBE (…)`, `GROUPING SETS (…)`, or a plain
-// expression. The construct keywords stay unreserved — each is recognised only
-// when the tell-tale token follows (`(` for rollup/cube, `sets` for grouping),
-// so `GROUP BY cube` (a column) and `GROUP BY grouping(x)` (a function) still
-// parse as ordinary expressions.
+// A GROUP BY item: `ROLLUP (…)`, `CUBE (…)`, `GROUPING SETS (…)`, the empty
+// grouping `()`, or a plain expression. The three construct keywords stay
+// unreserved — each is recognised only when the tell-tale token follows (`(` for
+// rollup/cube, `sets` for grouping), so `GROUP BY cube` (a column) and
+// `GROUP BY grouping(x)` (a function) still parse as ordinary expressions. The
+// empty grouping has no keyword to protect: `()` is not a valid expression, so
+// claiming it takes nothing away from the expression fallthrough below.
 const groupByItem = custom<GroupByItem, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
     const head = ctx.peek();
+    if (head?.type === "punc" && head.value === "(") {
+      const after = ctx.peekAhead(1);
+      // Only the empty pair: `(a)` and `(SELECT …)` fall through untouched.
+      if (after?.type === "punc" && after.value === ")") {
+        ctx.next(); // "("
+        ctx.next(); // ")"
+        return { kind: "emptyGrouping", span: ctx.spanFrom(start) };
+      }
+    }
     if (head?.type === "ident" && (head.value === "rollup" || head.value === "cube")) {
       const after = ctx.peekAhead(1);
       if (after?.type === "punc" && after.value === "(") {
@@ -2885,7 +2918,17 @@ const groupByItem = custom<GroupByItem, SqlTokenType>(
   { expected: "a grouping element or expression", first: expression.first() },
 );
 
-const groupByClause = seq(skip(kwseq("group", "by")), field("items", sepBy(groupByItem, P(",")))).map((s) => s.items);
+// `GROUP BY [ALL | DISTINCT] element, …`. ALL is the default, so only DISTINCT
+// is recorded — the same convention `distinctClause` follows for `SELECT ALL`.
+// Both words are reserved, so neither can be a grouping expression of its own.
+const groupByClause = seq(
+  skip(kwseq("group", "by")),
+  field(
+    "distinct",
+    optional(oneOf(kw("distinct"), kw("all"))).map((node) => node?.value === "distinct"),
+  ),
+  field("items", sepBy(groupByItem, P(","))),
+);
 const havingClause = seq(skip(kw("having")), field("e", expression)).map((s) => s.e);
 
 // `WINDOW w AS (spec), … ` — named window definitions. `overSpecRule` (declared
@@ -3135,10 +3178,63 @@ const fromClause = sepBy(joinTail, P(","));
 
 // --- SELECT core + set-ops + WITH ---
 
+// The words PG's `OptTempTableName` puts between INTO and the target. Its nine
+// productions allow at most one of `temp`/`temporary`/`unlogged` — two of them
+// take none at all — with the scope words `global`/`local` legal only ahead of a
+// `temp`/`temporary`, never on their own and never repeated.
+const INTO_SCOPE_WORDS: ReadonlySet<string> = new Set(["global", "local"]);
+const INTO_TEMP_WORDS: ReadonlySet<string> = new Set(["temp", "temporary"]);
+const INTO_STORAGE_WORDS: ReadonlySet<string> = new Set(["temp", "temporary", "unlogged"]);
+
+// None of those words is reserved, so one counts as a modifier only when the
+// token past it can still start the target: an unreserved name, a quoted one,
+// or the reserved `table` noise word.
+const startsIntoTarget = (tok: Token<SqlTokenType> | null): boolean =>
+  tok !== null &&
+  (tok.type === "qident" || (tok.type === "ident" && (!RESERVED.has(tok.value) || tok.value === "table")));
+
+// `INTO [[GLOBAL | LOCAL] {TEMP | TEMPORARY} | UNLOGGED] [TABLE] target` — SELECT
+// INTO, which writes the result rows into a new table. It sits between the
+// select list and FROM, where `into`'s own reservation is what stops `asAlias`
+// from reading it as the last column's alias.
+//
+// The two shapes are taken whole rather than in a loop, so the clause accepts
+// exactly what `OptTempTableName` does: `INTO GLOBAL t` and `INTO TEMP TEMP t`
+// are errors here as they are in PG. Since the words double as ordinary names,
+// each shape is claimed only when a target still follows it —
+// `SELECT a INTO temp FROM t` targets a table called `temp`, and
+// `SELECT a INTO temp.t FROM x` reads a schema called `temp`.
+const intoClause = custom<SelectInto, SqlTokenType>(
+  (ctx) => {
+    ctx.parse(kw("into"));
+    const modifiers: string[] = [];
+    const head = ctx.peek();
+    const second = ctx.peekAhead(1);
+    if (
+      head?.type === "ident" &&
+      second?.type === "ident" &&
+      INTO_SCOPE_WORDS.has(head.value) &&
+      INTO_TEMP_WORDS.has(second.value) &&
+      startsIntoTarget(ctx.peekAhead(2))
+    ) {
+      modifiers.push(head.value, second.value);
+      ctx.next(); // global / local
+      ctx.next(); // temp / temporary
+    } else if (head?.type === "ident" && INTO_STORAGE_WORDS.has(head.value) && startsIntoTarget(second)) {
+      modifiers.push(head.value);
+      ctx.next(); // the storage word
+    }
+    ctx.eat("ident", "table"); // the optional noise word
+    return { name: ctx.parse(qualName), ...(modifiers.length > 0 && { modifiers }) };
+  },
+  { expected: '"into"', first: [{ type: "ident", value: "into" }] },
+);
+
 const selectCore = seq(
   skip(kw("select")),
   field("distinct", distinctClause),
   field("columns", sepBy(selectItem, P(","))),
+  field("into", optional(intoClause)),
   field("from", optional(seq(skip(kw("from")), field("f", fromClause)).map((s) => s.f))),
   field("where", optional(whereClause)),
   field("groupBy", optional(groupByClause)),
@@ -3149,7 +3245,7 @@ const selectCore = seq(
   field("locking", optional(lockingClause)),
 ).map(
   (
-    { distinct, columns, from, where, groupBy, having, window: windowDefs, orderBy, limitOffset: lo, locking },
+    { distinct, columns, into, from, where, groupBy, having, window: windowDefs, orderBy, limitOffset: lo, locking },
     span,
   ): SelectStmt => ({
     kind: "select",
@@ -3157,9 +3253,11 @@ const selectCore = seq(
     recursive: false,
     distinct,
     columns,
+    ...(into && { into }),
     from: from ?? null,
     where: where ?? null,
-    groupBy: groupBy ?? null,
+    groupBy: groupBy?.items ?? null,
+    ...(groupBy?.distinct && { groupByDistinct: true }),
     having: having ?? null,
     window: windowDefs ?? null,
     orderBy: orderBy ?? null,
