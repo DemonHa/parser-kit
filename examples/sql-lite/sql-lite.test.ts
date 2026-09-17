@@ -882,6 +882,134 @@ describe("SQL-lite expression operators", () => {
   });
 });
 
+// --- arithmetic, bitwise and jsonpath operators ---
+
+describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
+  const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
+  const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(type) });
+
+  it("lexes the arithmetic, bitwise and jsonpath operators as single op tokens", () => {
+    const toks = lex("% ^ & | # << >> @?");
+    expect(toks.every((t) => t.type === "op")).toBe(true);
+    expect(toks.map((t) => t.value)).toEqual(["%", "^", "&", "|", "#", "<<", ">>", "@?"]);
+  });
+
+  it("parses modulo at the multiplicative tier", () => {
+    expect(exprOf("a % b")).toEqual(bin("%", name("a"), name("b")));
+    // bp 14, same tier as `*` and `/`: left-associative and above `+`.
+    expect(exprOf("a % b * c")).toEqual(bin("*", bin("%", name("a"), name("b")), name("c")));
+    expect(exprOf("a + b % c")).toEqual(bin("+", name("a"), bin("%", name("b"), name("c"))));
+  });
+
+  it("parses unary plus alongside unary minus", () => {
+    expect(exprOf("+a")).toEqual(un("+", name("a")));
+    // The operator is kept verbatim rather than folded away.
+    expect(exprOf("+1")).toEqual(un("+", num(1)));
+    // bp 16, above `*`: `(+a) * b`, not `+(a * b)`. (It is *not* above every
+    // arithmetic tier — `^` at bp 17 is tighter still; see the next test.)
+    expect(exprOf("+a * b")).toEqual(bin("*", un("+", name("a")), name("b")));
+    // A sign on the right-hand side of a binary operator still reaches the prefix.
+    expect(exprOf("a * +b")).toEqual(bin("*", name("a"), un("+", name("b"))));
+    // Unchanged: unary minus keeps its own shape and precedence.
+    expect(exprOf("-a * b")).toEqual(bin("*", un("-", name("a")), name("b")));
+  });
+
+  it("parses exponentiation tighter than the unary sign, left-associatively", () => {
+    expect(exprOf("a ^ b")).toEqual(bin("^", name("a"), name("b")));
+    expect(exprOf("a ^ b ^ c")).toEqual(bin("^", bin("^", name("a"), name("b")), name("c")));
+    // bp 17 is above the unary sign (16), so the sign wraps the whole power.
+    expect(exprOf("-2 ^ 2")).toEqual(un("-", bin("^", num(2), num(2))));
+    expect(exprOf("+2 ^ 2")).toEqual(un("+", bin("^", num(2), num(2))));
+    // ... and below the bp-18 postfixes. The right operand is what discriminates:
+    // a cast there binds to that operand, not to the power. (`a::int ^ 2` is the
+    // same tree at any bp, since the postfix loop runs before the infix scan.)
+    expect(exprOf("a ^ b::int")).toEqual(bin("^", name("a"), cast(name("b"), "int")));
+    expect(exprOf("a::int ^ 2")).toEqual(bin("^", cast(name("a"), "int"), num(2)));
+    // ... and above `*`, so the power is the multiplicand.
+    expect(exprOf("2 ^ 3 * 4")).toEqual(bin("*", bin("^", num(2), num(3)), num(4)));
+  });
+
+  it("nests a signed right operand of ^ under the sign, not the power", () => {
+    // The tail of putting `^` above the unary sign: a prefix parses its operand
+    // at its own bp (16), which is below `^`'s 17, so the sign on the right
+    // swallows the rest of the chain instead of the chain nesting left.
+    expect(exprOf("2 ^ -3 ^ 4")).toEqual(bin("^", num(2), un("-", bin("^", num(3), num(4)))));
+    // Without a sign the same chain is plain left-associative.
+    expect(exprOf("2 ^ 3 ^ 4")).toEqual(bin("^", bin("^", num(2), num(3)), num(4)));
+  });
+
+  it("parses the bitwise and shift operators at the bp-12 tier", () => {
+    expect(exprOf("a & b")).toEqual(bin("&", name("a"), name("b")));
+    expect(exprOf("a | b")).toEqual(bin("|", name("a"), name("b")));
+    expect(exprOf("a # b")).toEqual(bin("#", name("a"), name("b")));
+    expect(exprOf("a << 2")).toEqual(bin("<<", name("a"), num(2)));
+    expect(exprOf("a >> 2")).toEqual(bin(">>", name("a"), num(2)));
+    // Left-associative within the tier.
+    expect(exprOf("a | b | c")).toEqual(bin("|", bin("|", name("a"), name("b")), name("c")));
+    // bp 12 is below `+` (13) and above the bp-9 comparisons.
+    expect(exprOf("a | b + c")).toEqual(bin("|", name("a"), bin("+", name("b"), name("c"))));
+    expect(exprOf("a & b = c")).toEqual(bin("=", bin("&", name("a"), name("b")), name("c")));
+  });
+
+  it("parses the jsonpath existence operator", () => {
+    expect(exprOf("data @? '$.x'")).toEqual(bin("@?", name("data"), str("$.x")));
+    // Same tier as `@@`, so a comparison still takes the whole match as its LHS.
+    expect(exprOf("data @? '$.x' = b")).toEqual(bin("=", bin("@?", name("data"), str("$.x")), name("b")));
+  });
+
+  it("keeps the longer operators that share a lead character intact", () => {
+    // `#` is bitwise XOR, but `#-` / `#>` / `#>>` are their own tokens: maximal
+    // munch in the lexer, so adding `#` cannot split them.
+    expect(exprOf("meta #- '{x}'")).toEqual(bin("#-", name("meta"), str("{x}")));
+    expect(exprOf("meta #> '{x}'")).toEqual(bin("#>", name("meta"), str("{x}")));
+    expect(exprOf("meta #>> '{x}'")).toEqual(bin("#>>", name("meta"), str("{x}")));
+    // `|` is bitwise OR, `||` is still concatenation, `?|` still key-existence.
+    expect(exprOf("a || b")).toEqual(bin("||", name("a"), name("b")));
+    expect(exprOf("tags ?| other")).toEqual(bin("?|", name("tags"), name("other")));
+    // `@?` is jsonpath existence, `@>` containment and `@@` full-text match.
+    expect(exprOf("a @> b")).toEqual(bin("@>", name("a"), name("b")));
+    expect(exprOf("doc @@ 'q'")).toEqual(bin("@@", name("doc"), str("q")));
+  });
+
+  it("leaves the lexer's trailing-sign rule to decide where an unspaced sign goes", () => {
+    // The operator reader trims a trailing `+`/`-` from a run unless the run
+    // holds a "strong" character, so `<<` and `>>` let the sign go while
+    // `% & | ^` absorb it into one unknown operator — PG's own rule, now
+    // reachable from both sides because the sign is a prefix here.
+    expect(exprOf("a << -1")).toEqual(bin("<<", name("a"), un("-", num(1))));
+    expect(exprOf("a >> -1")).toEqual(bin(">>", name("a"), un("-", num(1))));
+    // Spaced, the sign is its own token and the power parses.
+    expect(exprOf("2 ^ -2")).toEqual(bin("^", num(2), un("-", num(2))));
+    // Unspaced, `^-` lexes as one operator that no group claims.
+    expect(() => sqlLite.parse("SELECT 2^-2 FROM t;")).toThrow(/but found "\^-"/);
+    // `++` is trimmed to a single `+`, so a doubled sign reaches the prefix.
+    expect(exprOf("a ++ b")).toEqual(bin("+", name("a"), un("+", name("b"))));
+  });
+
+  it("shares the new operators with the b-expression", () => {
+    // POSITION's first operand is parsed by the b-expression, which reuses
+    // `arithInfix` verbatim — so a widened group (`%` joining `*` and `/`) and
+    // a brand-new one (`^`) both reach it without a second table.
+    const posOf = (src: string) => (firstStmt(`SELECT position(${src}) FROM t;`) as any).columns[0].expr;
+    expect(posOf("a % 2 IN s")).toEqual({
+      kind: "position",
+      substring: bin("%", name("a"), num(2)),
+      string: name("s"),
+    });
+    expect(posOf("a ^ 2 IN s")).toEqual({
+      kind: "position",
+      substring: bin("^", name("a"), num(2)),
+      string: name("s"),
+    });
+    // The prefix group is shared too, so the widened sign reaches it as well.
+    expect(posOf("+a IN s")).toEqual({ kind: "position", substring: un("+", name("a")), string: name("s") });
+  });
+
+  it("reports a missing right operand at the token that should have started it", () => {
+    expect(() => sqlLite.parse("SELECT a ^ FROM t;")).toThrow(/Expected a name but found "from"/);
+  });
+});
+
 // --- expression special forms (Phase 2) ---
 
 describe("SQL-lite expression special forms", () => {
@@ -1921,6 +2049,154 @@ describe("SQL-lite DO / DEALLOCATE", () => {
   it("parses DEALLOCATE name and DEALLOCATE ALL", () => {
     expect(firstStmt("DEALLOCATE PREPARE my_stmt;")).toEqual({ kind: "deallocate", name: "my_stmt" });
     expect(firstStmt("DEALLOCATE ALL;")).toEqual({ kind: "deallocate", name: null });
+  });
+});
+
+// --- Phase 10: bit-string, hex-string and unicode-escape literals ---
+
+describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const columns = (src: string) => (firstStmt(src) as any).columns;
+  const bits = (value: string, hex = false) => ({ kind: "bitString", value, hex });
+  const ident = (value: string) => ({ type: "ident", value });
+
+  it("lexes the three prefixed forms in either case", () => {
+    expect(lex("B'1011' b'0' X'ff' x'AB'")).toEqual([
+      { type: "bitstring", value: "1011" },
+      { type: "bitstring", value: "0" },
+      { type: "hexstring", value: "ff" },
+      { type: "hexstring", value: "AB" },
+    ]);
+    // `u&` folds like the rest: a dispatch keyed on the uppercase spelling
+    // would silently disable the lowercase form.
+    expect(lex("u&'\\0041' U&'\\0042'")).toEqual([
+      { type: "string", value: "A" },
+      { type: "string", value: "B" },
+    ]);
+  });
+
+  it("parses bit-string constants wherever an expression is accepted", () => {
+    expect(colExpr("B'1011'")).toEqual(bits("1011"));
+    expect(colExpr("X'ff'")).toEqual(bits("ff", true));
+    // A zero-length bit string is legal in PG.
+    expect(colExpr("B''")).toEqual(bits(""));
+    // Not only the select list: DEFAULT takes the same expression rule.
+    expect((firstStmt("CREATE TABLE t (flags bit DEFAULT B'1011');") as any).items[0].constraints).toEqual([
+      { kind: "default", expr: bits("1011") },
+    ]);
+  });
+
+  it("rejects a digit outside the literal's base", () => {
+    expect(() => sqlLite.parse("SELECT B'12' FROM t;")).toThrow(/Invalid binary digit "2"/);
+    expect(() => sqlLite.parse("SELECT X'gg' FROM t;")).toThrow(/Invalid hexadecimal digit "g"/);
+    // A literal that never closed swallowed the rest of the input, so the base
+    // check would blame its first stray character for a missing quote. It is
+    // left to fail where an unterminated `'…'` fails: at the `;` never reached.
+    expect(() => sqlLite.parse("SELECT B'101 FROM t;")).toThrow(/Expected ";"/);
+    expect(() => sqlLite.parse("SELECT 'abc FROM t;")).toThrow(/Expected ";"/);
+    // Closed by a later quote, though, it is a terminated literal and is checked.
+    expect(() => sqlLite.parse("SELECT B'101 FROM t; SELECT 'x';")).toThrow(/Invalid binary digit " "/);
+  });
+
+  it("keeps b, x and u usable as names — a prefix only claims a quote right after it", () => {
+    expect(lex("b x u")).toEqual([ident("b"), ident("x"), ident("u")]);
+    expect(columns("SELECT b, x, u FROM t;")).toEqual([col(name("b")), col(name("x")), col(name("u"))]);
+    expect((firstStmt("CREATE TABLE t (b int, x int, u int);") as any).items.map((item: any) => item.name)).toEqual([
+      "b",
+      "x",
+      "u",
+    ]);
+    // Only `u&'` with nothing between the characters opens a unicode literal;
+    // spaced out it is still an operator between a name and a string.
+    expect(lex("u & 'x'")).toEqual([ident("u"), { type: "op", value: "&" }, { type: "string", value: "x" }]);
+    // `U&"…"` — a unicode-escaped *identifier* — is out of scope and unclaimed.
+    expect(lex('U&"MixedCase"')).toEqual([
+      ident("u"),
+      { type: "op", value: "&" },
+      { type: "qident", value: "MixedCase" },
+    ]);
+  });
+
+  it("decodes U&'…' into an ordinary string token", () => {
+    expect(lex("U&'\\0041'")).toEqual([{ type: "string", value: "A" }]);
+    expect(colExpr("U&'\\0041'")).toEqual(str("A"));
+    // Both escape widths: `\XXXX` and `\+XXXXXX`.
+    expect(colExpr("U&'d\\0061t\\+000061'")).toEqual(str("data"));
+    // A doubled escape character stands for a literal one, and `''` still
+    // doubles the way it does in any other single-quoted literal.
+    expect(colExpr("U&'a\\\\b'")).toEqual(str("a\\b"));
+    expect(colExpr("U&'it''s'")).toEqual(str("it's"));
+    // A surrogate pair composes on its own — JS strings are UTF-16 — and so
+    // does the same code point spelled directly.
+    expect(colExpr("U&'\\D83D\\DE00'")).toEqual(str("😀"));
+    expect(colExpr("U&'\\+01F600'")).toEqual(str("😀"));
+    // Decoding in the lexer is what lets one stand anywhere a plain string
+    // does — here an enum label, which is a `string` token, not an expression.
+    expect(firstStmt("CREATE TYPE m AS ENUM (U&'\\0041');")).toMatchObject({ values: ["A"] });
+    expect(firstStmt("COMMENT ON TABLE t IS U&'\\0041';")).toMatchObject({ comment: "A" });
+    // The asymmetry is PG's: a bit string is a `bit` constant, not text, so it
+    // reaches expression positions only. Widening these would diverge.
+    expect(() => sqlLite.parse("CREATE TYPE m AS ENUM (B'1011');")).toThrow(/Expected a string/);
+  });
+
+  it("carries bit strings through the rest of the expression grammar", () => {
+    // Being an `atom` at all is what does this: `atom` is the pratt operand
+    // rule, so a bit string composes with the postfixes, the keyword operators
+    // and every argument position for free. (Where it sits among `atom`'s
+    // branches is irrelevant — the token types are disjoint.)
+    expect(colExpr("B'1011'::bit")).toEqual({
+      kind: "cast",
+      expr: bits("1011"),
+      type: { name: "bit", args: [], array: false },
+    });
+    expect(colExpr("a IN (B'1', X'f')")).toMatchObject({
+      kind: "in",
+      list: [bits("1"), bits("f", true)],
+    });
+    expect(colExpr("count(B'1')")).toMatchObject({ kind: "call", name: "count", args: [bits("1")] });
+    // And through a statement that never touches the select list.
+    expect((firstStmt("INSERT INTO t (a, b, c) VALUES (B'1011', X'ff', U&'\\0041');") as any).source).toMatchObject({
+      rows: [[bits("1011"), bits("ff", true), str("A")]],
+    });
+  });
+
+  it("honours a UESCAPE clause, which replaces the escape character", () => {
+    expect(colExpr("U&'d!0061t!+000061' UESCAPE '!'")).toEqual(str("data"));
+    // With one in force a backslash is an ordinary character again.
+    expect(colExpr("U&'\\0041' UESCAPE '!'")).toEqual(str("\\0041"));
+  });
+
+  it("keeps uescape unreserved as a name and as an alias", () => {
+    expect(columns("SELECT uescape FROM t;")).toEqual([col(name("uescape"))]);
+    // The tail is a UESCAPE clause only when a quoted character follows it;
+    // otherwise the word is an ordinary alias and `\` stays the escape.
+    expect(columns("SELECT U&'\\0041' uescape FROM t;")).toEqual([col(str("A"), "uescape")]);
+    expect(columns("SELECT U&'\\0041' AS uescape FROM t;")).toEqual([col(str("A"), "uescape")]);
+  });
+
+  it("rejects a malformed escape and an invalid escape character", () => {
+    expect(() => sqlLite.parse("SELECT U&'\\00' FROM t;")).toThrow(/Invalid Unicode escape value/);
+    expect(() => sqlLite.parse("SELECT U&'\\xyzw' FROM t;")).toThrow(/Invalid Unicode escape value/);
+    // Past the last code point.
+    expect(() => sqlLite.parse("SELECT U&'\\+FFFFFF' FROM t;")).toThrow(/Invalid Unicode escape value/);
+    // Zero is not a valid escape value in PG, and an unpaired surrogate would
+    // reach the AST as a JS string that is not valid Unicode text.
+    expect(() => sqlLite.parse("SELECT U&'\\0000' FROM t;")).toThrow(/Invalid Unicode escape value/);
+    expect(() => sqlLite.parse("SELECT U&'\\D83D' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(() => sqlLite.parse("SELECT U&'\\DE00' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    // Both sides of the pairing test, and both places a pending high surrogate
+    // can be interrupted: by a literal character, and by a doubled escape.
+    expect(() => sqlLite.parse("SELECT U&'\\D83D\\D83D' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(() => sqlLite.parse("SELECT U&'\\D83Dx' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(() => sqlLite.parse("SELECT U&'\\D83D\\\\' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    // A hex digit or a `+` would be ambiguous with the escape it introduces.
+    expect(() => sqlLite.parse("SELECT U&'x' UESCAPE '5' FROM t;")).toThrow(/Invalid Unicode escape character/);
+    expect(() => sqlLite.parse("SELECT U&'x' UESCAPE '+' FROM t;")).toThrow(/Invalid Unicode escape character/);
+    expect(() => sqlLite.parse("SELECT U&'x' UESCAPE 'ab' FROM t;")).toThrow(/Invalid Unicode escape character/);
+    // A truncated tail fails the same test: one legal character is not enough
+    // without the quote that closes it, or it would silently re-point the
+    // escape character of the literal in front of it.
+    expect(() => sqlLite.parse("SELECT U&'\\0041' UESCAPE '!")).toThrow(/Invalid Unicode escape character/);
   });
 });
 
