@@ -12,6 +12,7 @@ import {
   oneOf,
   optional,
   type ParseContext,
+  ParseError,
   type Position,
   type PrattHelpers,
   pratt,
@@ -332,7 +333,8 @@ export type CreateTableAs = {
 // expr]`. `mode` and `name` are null when absent; both are recovered by a small
 // two-token heuristic (a mode word is only a mode when a further name/type word
 // follows it, and a name only precedes the type when two name-ish tokens run
-// together — so bare `integer` / `numeric(10,2)` / a dotted type have no name).
+// together that do not themselves open a multi-word type name — so bare
+// `integer` / `numeric(10,2)` / a dotted type / `double precision` have no name).
 export type FunctionArg = {
   mode: "in" | "out" | "inout" | "variadic" | null;
   name: string | null;
@@ -1303,7 +1305,9 @@ const atom = oneOf(
 
 // --- data types ---
 // A type name with optional `(args)` (varchar(10), numeric(10,2)) and an array
-// suffix (`int[]`, `text[][]`). Array dims are collapsed to a boolean.
+// suffix (`int[]`, `text[][]`). Array dims are collapsed to a boolean. The name
+// may be several words (`double precision`, `timestamp with time zone`) — see
+// MULTI_WORD_TYPES below.
 const typeArg = token("number").map((node) => Number(node.value));
 const arraySuffix = custom<boolean, SqlTokenType>(
   (ctx) => {
@@ -1319,14 +1323,146 @@ const arraySuffix = custom<boolean, SqlTokenType>(
   },
   { expected: '"["', first: [{ type: "punc", value: "[" }] },
 );
-const typeRef = seq(
-  field(
-    "name",
-    qualName.map((parts) => parts.join(".")),
-  ),
-  field("args", optional(delimited(P("("), P(")"), P(","), typeArg, { interleaved: true }))),
-  field("array", arraySuffix),
-).map(({ name, args, array }, span): ColType => ({ name, args: args ?? [], array, span }));
+const typeArgs = delimited(P("("), P(")"), P(","), typeArg, { interleaved: true });
+
+// PG spells a good many types with more than one word, and the datetime ones
+// carry their precision *inside* the name (`timestamp(3) with time zone`). The
+// tails are keyed by lead word and listed longest-first, so a greedy match never
+// stops short of a longer valid spelling (`national character varying` before
+// `national character`).
+//
+// INTERVAL's field spec is enumerated rather than generated: PG allows only
+// these thirteen combinations, not every `<field> TO <field>` pair.
+const INTERVAL_TAILS: readonly (readonly string[])[] = [
+  ["year", "to", "month"],
+  ["day", "to", "hour"],
+  ["day", "to", "minute"],
+  ["day", "to", "second"],
+  ["hour", "to", "minute"],
+  ["hour", "to", "second"],
+  ["minute", "to", "second"],
+  ["year"],
+  ["month"],
+  ["day"],
+  ["hour"],
+  ["minute"],
+  ["second"],
+];
+
+// A Map, not an object literal: identifiers fold to lowercase, so a column of
+// type `constructor` or `__proto__` would otherwise find a tail list on
+// Object.prototype — and `?? []` does not fire for a non-nullish inherited value.
+const MULTI_WORD_TYPES: ReadonlyMap<string, readonly (readonly string[])[]> = new Map([
+  ["double", [["precision"]]],
+  ["character", [["varying"]]],
+  ["char", [["varying"]]],
+  ["national", [["character", "varying"], ["char", "varying"], ["character"], ["char"]]],
+  ["bit", [["varying"]]],
+  [
+    "timestamp",
+    [
+      ["with", "time", "zone"],
+      ["without", "time", "zone"],
+    ],
+  ],
+  [
+    "time",
+    [
+      ["with", "time", "zone"],
+      ["without", "time", "zone"],
+    ],
+  ],
+  ["interval", INTERVAL_TAILS],
+]);
+
+// The two types whose precision PG spells *before* the rest of the name. For
+// every other multi-word type the args trail the whole name (`character
+// varying(10)`, `interval day to second(3)`), so reading them early would accept
+// the PG-invalid `character(10) varying`.
+//
+// This fixes where the one arg list may sit, not whether the type takes one:
+// `double precision(10)` is accepted, exactly as the single-word `text(5)` is.
+// Rejecting it is a property of the *tail* rather than the lead — `varying` and
+// `second` take a precision where `precision` and `with time zone` do not — and
+// no other type in this grammar has its arity checked.
+const ARGS_BEFORE_TAIL: ReadonlySet<string> = new Set(["timestamp", "time"]);
+
+// The longest continuation of `lead` sitting `offset` tokens past the cursor, or
+// null. Pure lookahead: nothing is consumed, so the caller decides. Every word
+// must be a bare `ident` — `readers.string("qident", …)` yields the *inner*
+// text, so a quoted `"precision"` is otherwise indistinguishable from the
+// keyword by value alone, and PG treats it as an ordinary name.
+function findTypeTail(ctx: ParseContext<SqlTokenType>, lead: string, offset: number): readonly string[] | null {
+  const tails = MULTI_WORD_TYPES.get(lead);
+  if (tails === undefined) return null;
+  // Lexing is lazy, so a peek past the cursor can raise the *next* token's lex
+  // error. Two things have to happen to it. Input that does not lex is not a
+  // tail, so the candidate fails rather than the whole type — otherwise
+  // `diagnose("CREATE TABLE t (c timestamp with é);")` reports the bad character
+  // and loses the column-definition error. But filling the lookahead buffer
+  // consumes the offending character, so simply discarding the error would drop
+  // it for good, and `c interval day é` would parse clean. Hence report() —
+  // which records it in diagnose() and returns false under strict parse(), where
+  // there is no collector and rethrowing is the only honest answer.
+  const word = (index: number): string | null => {
+    let ahead: Token<SqlTokenType> | null;
+    try {
+      ahead = ctx.peekAhead(offset + index);
+    } catch (error) {
+      if (!(error instanceof ParseError) || !ctx.report(error)) throw error;
+      return null;
+    }
+    return ahead !== null && ahead.type === "ident" ? ahead.value : null;
+  };
+  for (const tail of tails) {
+    if (tail.every((expected, index) => word(index) === expected)) return tail;
+  }
+  return null;
+}
+
+// True when the token at the cursor opens a multi-word type name that actually
+// completes. parseFunctionArg needs that decision one token before typeRef is
+// entered, to tell `f(double precision)` (one unnamed two-word argument) from
+// `f(a integer)` (an argument named `a`) — and asking for the whole tail, not
+// just the pair, keeps the two in step: `f(timestamp without)` has no completable
+// tail, so `timestamp` is a name again, exactly as typeRef would have it.
+const startsMultiWordType = (ctx: ParseContext<SqlTokenType>, lead: Token<SqlTokenType> | null): boolean =>
+  lead !== null && lead.type === "ident" && findTypeTail(ctx, lead.value, 1) !== null;
+
+// Consume the longest continuation of `lead` that is present, or nothing. The
+// whole candidate is checked before a single token is consumed — `phrase()`
+// commits after one word with no rollback, which would eat the `WITH` of
+// `CREATE MATERIALIZED VIEW mv AS SELECT now()::timestamp WITH NO DATA`.
+function eatTypeTail(ctx: ParseContext<SqlTokenType>, lead: string): readonly string[] {
+  const tail = findTypeTail(ctx, lead, 0);
+  if (tail === null) return [];
+  for (let index = 0; index < tail.length; index++) ctx.next();
+  return tail;
+}
+
+// The args are hoisted out of wherever PG puts them, so the name is always the
+// words alone: `timestamp(3) with time zone` is
+// `{ name: "timestamp with time zone", args: [3] }`.
+const typeRef = custom<ColType, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    // Only a bare, unqualified lead word can open a multi-word spelling: a
+    // quoted `"double"` or a dotted `pg_catalog.double` is an ordinary name.
+    const bare = ctx.peek()?.type === "ident";
+    const parts = ctx.parse(qualName);
+    const words = [parts.join(".")];
+    let args: number[] | null = null;
+    if (bare && parts.length === 1) {
+      const lead = parts[0]!;
+      if (ARGS_BEFORE_TAIL.has(lead) && ctx.is("punc", "(")) args = ctx.parse(typeArgs);
+      words.push(...eatTypeTail(ctx, lead));
+    }
+    if (args === null && ctx.is("punc", "(")) args = ctx.parse(typeArgs);
+    const array = ctx.parse(arraySuffix);
+    return { name: words.join(" "), args: args ?? [], array, span: ctx.spanFrom(start) };
+  },
+  { expected: "a name", first: qualName.first() },
+);
 
 // --- pratt operator table ---
 // Binding powers follow PG (highest binds tightest): :: cast, ^, unary + -,
@@ -2210,7 +2346,12 @@ function parseFunctionArg(ctx: ParseContext<SqlTokenType>): FunctionArg {
   }
   // An argument name precedes the type only when two name-ish tokens run together
   // (the second one starting the type). `numeric(10,2)` / a dotted type / a bare
-  // `integer` therefore has no leading name.
+  // `integer` therefore has no leading name — and neither does a multi-word type
+  // name, whose two words would otherwise read as `name type`: `f(double
+  // precision)` is one unnamed argument, not a `double` of type `precision`.
+  // Keyed on the word pair rather than a `tryParse(typeRef)`, which cannot
+  // decide it: typeRef succeeds on any bare identifier, so `f(a integer)` would
+  // take `a` for the type and then croak on `integer`.
   let name: string | null = null;
   const c2 = ctx.peek();
   const n2 = ctx.peekAhead(1);
@@ -2218,7 +2359,8 @@ function parseFunctionArg(ctx: ParseContext<SqlTokenType>): FunctionArg {
     c2 !== null &&
     (c2.type === "ident" || c2.type === "qident") &&
     n2 !== null &&
-    (n2.type === "ident" || n2.type === "qident")
+    (n2.type === "ident" || n2.type === "qident") &&
+    !startsMultiWordType(ctx, c2)
   ) {
     name = ctx.parse(nameWord);
   }
