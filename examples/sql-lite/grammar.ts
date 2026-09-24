@@ -40,8 +40,11 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // / nested recovery. The expression sublanguage also covers the PG special forms
 // — CAST / EXTRACT / SUBSTRING / POSITION / TRIM, ARRAY[…] / ROW(…), array
 // subscripts & slices, INTERVAL literals, and COLLATE / AT TIME ZONE postfixes —
-// plus window functions: `fn(…) [WITHIN GROUP (ORDER BY …)] [FILTER (WHERE …)]
-// [OVER (…) | OVER name]`, with named windows via a `WINDOW w AS (…)` clause.
+// plus window functions: `fn(…) [WITHIN GROUP (ORDER BY …)] [IGNORE|RESPECT
+// NULLS] [FILTER (WHERE …)] [OVER (…) | OVER name]`, with named windows via a
+// `WINDOW w AS (…)` clause. Calls also carry the aggregate modifiers that live
+// *inside* the argument list — `count(DISTINCT x)`, `array_agg(a ORDER BY b)` —
+// and PG's named-argument notation is accepted in argument position, `f(a => 1)`.
 //
 // The SELECT surface also carries the remaining query clauses: LATERAL /
 // table-function / TABLESAMPLE FROM items, VALUES as a standalone query and
@@ -51,7 +54,9 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // (`WITH x AS (DELETE … RETURNING …) …`).
 //
 // Out of scope (v1): column-alias lists on FROM items (`t (a, b)`). Ordinary
-// aggregates (no OVER/FILTER/WITHIN GROUP) still parse as plain function calls.
+// aggregates (no OVER / FILTER / WITHIN GROUP / IGNORE-RESPECT NULLS) still
+// parse as plain function calls, carrying their DISTINCT / ORDER BY modifiers on
+// the call node itself.
 
 // --- AST ---
 // Recursive nodes (Expr) are declared by hand, exactly as js-lite does; the
@@ -65,7 +70,12 @@ export type Expr =
   | { kind: "bool"; value: boolean; span: Span }
   | { kind: "null"; span: Span }
   | { kind: "name"; parts: string[]; span: Span }
-  | { kind: "call"; name: string; args: Expr[]; span: Span }
+  // `distinct` and `orderBy` are the aggregate modifiers that live inside the
+  // argument list (`count(DISTINCT x)`, `array_agg(a ORDER BY b)`); both keys are
+  // omitted entirely on a call that has neither.
+  | { kind: "call"; name: string; args: Expr[]; distinct?: true; orderBy?: OrderItem[]; span: Span }
+  // `name => value` in argument position — PG's named function-call notation.
+  | { kind: "namedArg"; name: string; value: Expr; span: Span }
   | { kind: "unary"; op: string; operand: Expr; span: Span }
   | { kind: "binary"; op: string; left: Expr; right: Expr; span: Span }
   | { kind: "cast"; expr: Expr; type: ColType; span: Span }
@@ -138,6 +148,9 @@ export type Expr =
   | { kind: "aggFilter"; fn: Expr; where: Expr; span: Span }
   // `fn(…) WITHIN GROUP (ORDER BY …)` — an ordered-set / hypothetical-set aggregate.
   | { kind: "withinGroup"; fn: Expr; orderBy: OrderItem[]; span: Span }
+  // `fn(…) IGNORE NULLS` / `RESPECT NULLS` — a window function's null treatment.
+  // Wraps the call like the other modifiers, nesting inside FILTER / OVER.
+  | { kind: "nullTreatment"; fn: Expr; treatment: "ignore" | "respect"; span: Span }
   // --- Phase 10: the remaining literal forms ---
   // PG's bit-string constants, `B'1011'` and `X'ff'`. `value` is the digits as
   // written, case included — so `X'AB'` and `X'ab'` stay distinguishable even
@@ -856,8 +869,41 @@ const boolLit = token("ident", { values: ["true", "false"] }).map(
 const nullLit = kw("null").map((_node, span): Expr => ({ kind: "null", span }));
 const parenExpr = seq(skip(punc("(")), field("e", expression), skip(punc(")"))).map((s) => s.e);
 
-// A function argument: `*` (for `count(*)`) or an ordinary expression.
-const functionArg = oneOf(bareStar, expression);
+// A function argument: `*` (for `count(*)`), a named argument (`a => 1`), or an
+// ordinary expression. The named form is picked out by a two-token peek rather
+// than a backtracking branch: `=>` appears in no operator table, so an argument
+// that is *not* named can never have consumed one. Widening this rule widens
+// every position that reaches it — a plain call, a FROM table function, and
+// SUBSTRING's comma form from its second argument on (`parseSubstring` reads the
+// first through `expression`, to tell the FROM/FOR form from the comma one, so
+// `substring(str => 'abc', from => 2)` is still rejected). That is deliberate as
+// far as it goes: PG accepts named arguments in all of those positions.
+const plainFunctionArg = oneOf(bareStar, expression);
+// lazy() so the first set and expected string stay verbatim the ones above;
+// custom() takes them eagerly, and evaluating them at module scope would enter
+// `expression`'s lazy() before `expressionRule` exists.
+const functionArg: Rule<Expr, SqlTokenType> = lazy(() =>
+  custom<Expr, SqlTokenType>(
+    (ctx) => {
+      const head = ctx.peek();
+      const after = ctx.peekAhead(1);
+      if (
+        head !== null &&
+        (head.type === "ident" || head.type === "qident") &&
+        after !== null &&
+        after.type === "op" &&
+        after.value === "=>"
+      ) {
+        const start = ctx.position();
+        const argName = ctx.parse(nameWord);
+        ctx.next(); // "=>"
+        return { kind: "namedArg", name: argName, value: ctx.parse(expression), span: ctx.spanFrom(start) };
+      }
+      return ctx.parse(plainFunctionArg);
+    },
+    { expected: plainFunctionArg.expected(), first: plainFunctionArg.first() },
+  ),
+);
 
 // --- special call syntaxes ---
 // A handful of PG functions take keyword-separated arguments rather than a plain
@@ -956,9 +1002,10 @@ const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Pos
 };
 
 // --- window functions ---
-// `fn(…)` may carry, in order, `WITHIN GROUP (ORDER BY …)`, `FILTER (WHERE …)`,
-// and `OVER (…)` / `OVER name`. These are attached in columnRef's call branch (so
-// the keywords stay unreserved and are only recognised right after a call's `)`),
+// `fn(…)` may carry, in order, `WITHIN GROUP (ORDER BY …)`, `IGNORE|RESPECT
+// NULLS`, `FILTER (WHERE …)`, and `OVER (…)` / `OVER name`. These are attached
+// in columnRef's call branch (so the keywords stay unreserved and are only
+// recognised right after a call's `)`),
 // each nesting around the previous. The frame / partition / order pieces reuse
 // the DML clause rules declared further down — safe because these helpers only
 // run at parse time, long after those consts are initialised.
@@ -1030,10 +1077,14 @@ const overSpecRule = custom<WindowSpec, SqlTokenType>(
   },
 );
 
-// Attach any trailing WITHIN GROUP / FILTER / OVER modifiers to a freshly-parsed
-// call node. Each is optional and guarded by a peek so the unreserved lead words
-// (`within`, `filter`, `over`) still work as plain aliases / names when they are
-// not actually starting a modifier (`count(*) filter` reads `filter` as an alias).
+// Attach any trailing WITHIN GROUP / IGNORE|RESPECT NULLS / FILTER / OVER
+// modifiers to a freshly-parsed call node, in that order. PG has no null
+// treatment at all, so its position here is the SQL-standard one — straight
+// after the argument list, inside FILTER and OVER. Each modifier is optional and
+// guarded by a peek so the unreserved lead words (`within`, `ignore`, `respect`,
+// `filter`, `over`) still work as plain aliases / names when they are not
+// actually starting a modifier
+// (`count(*) filter` reads `filter` as an alias, and so does `lag(x) ignore`).
 function applyCallModifiers(ctx: ParseContext<SqlTokenType>, fn: Expr, start: Position): Expr {
   let result = fn;
   if (ctx.is("ident", "within") && ctx.peekAhead(1)?.value === "group") {
@@ -1043,6 +1094,15 @@ function applyCallModifiers(ctx: ParseContext<SqlTokenType>, fn: Expr, start: Po
     const orderBy = ctx.parse(orderByClause);
     expectClose(ctx);
     result = { kind: "withinGroup", fn: result, orderBy, span: ctx.spanFrom(start) };
+  }
+  // `IGNORE NULLS` / `RESPECT NULLS`. Both lead words are unreserved and read as
+  // an alias on their own, so the guard requires a following `nulls` — itself
+  // unreserved, and a different word from the reserved `null`.
+  const nullsNext = ctx.peekAhead(1);
+  if (ctx.is("ident", ["ignore", "respect"]) && nullsNext?.type === "ident" && nullsNext.value === "nulls") {
+    const treatment = ctx.next()!.value as "ignore" | "respect";
+    ctx.next(); // nulls
+    result = { kind: "nullTreatment", fn: result, treatment, span: ctx.spanFrom(start) };
   }
   const filterNext = ctx.peekAhead(1);
   if (ctx.is("ident", "filter") && filterNext?.type === "punc" && filterNext.value === "(") {
@@ -1109,21 +1169,33 @@ const columnRef = custom<Expr, SqlTokenType>(
       // owns the rest of the call; a plain name falls through to a normal call.
       const special = parts.length === 1 ? SPECIAL_CALLS[parts[0]!] : undefined;
       if (special !== undefined) return special(ctx, start);
-      // PG allows a leading DISTINCT in an aggregate call; accepted but not
-      // recorded (the call AST is intentionally unchanged from the DDL era).
-      ctx.eat("ident", "distinct");
+      // The aggregate modifiers that live inside the argument list: a leading
+      // DISTINCT and a trailing `ORDER BY …` (`array_agg(a ORDER BY b)`). Both
+      // `distinct` and `order` are reserved, so neither can be an argument name
+      // and neither needs a guard. The keys are omitted when absent, so an
+      // ordinary call keeps exactly its prior shape.
+      const distinct = ctx.eat("ident", "distinct") !== null;
       const args: Expr[] = [];
+      let orderBy: OrderItem[] = [];
       if (!ctx.is("punc", ")")) {
         args.push(ctx.parse(functionArg));
         while (ctx.is("punc", ",")) {
           ctx.next(); // ","
           args.push(ctx.parse(functionArg));
         }
+        if (ctx.is("ident", "order")) orderBy = ctx.parse(orderByClause);
       }
       if (!ctx.is("punc", ")")) ctx.croak(`Expected ")" but found ${describeFound(ctx.peek())}`);
       ctx.next(); // ")"
-      const call: Expr = { kind: "call", name: parts.join("."), args, span: ctx.spanFrom(start) };
-      // Trailing WITHIN GROUP / FILTER / OVER window modifiers, if any.
+      const call: Expr = {
+        kind: "call",
+        name: parts.join("."),
+        args,
+        ...(distinct && { distinct: true }),
+        ...(orderBy.length > 0 && { orderBy }),
+        span: ctx.spanFrom(start),
+      };
+      // Trailing WITHIN GROUP / IGNORE|RESPECT NULLS / FILTER / OVER modifiers.
       return applyCallModifiers(ctx, call, start);
     }
     return { kind: "name", parts, span: ctx.spanFrom(start) };
