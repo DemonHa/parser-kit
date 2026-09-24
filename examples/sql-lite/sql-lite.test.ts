@@ -1312,6 +1312,119 @@ describe("SQL-lite window functions", () => {
   });
 });
 
+// --- aggregate call modifiers ---
+
+describe("SQL-lite aggregate call modifiers", () => {
+  const aggExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const call = (fnName: string, args: unknown[] = [], mods: Record<string, unknown> = {}) => ({
+    kind: "call",
+    name: fnName,
+    args,
+    ...mods,
+  });
+  const order = (expr: unknown, dir: string | null = null, nulls: string | null = null) => ({ expr, dir, nulls });
+  const named = (argName: string, value: unknown) => ({ kind: "namedArg", name: argName, value });
+
+  it("records DISTINCT on the call node, and omits the key on a plain call", () => {
+    expect(aggExpr("count(DISTINCT x)")).toEqual(call("count", [name("x")], { distinct: true }));
+    // Omit-when-absent, asserted on the keys rather than by equality: an always
+    // present `distinct: false` would add a key to every call in the AST golden.
+    expect(Object.keys(aggExpr("count(*)"))).toEqual(["kind", "name", "args"]);
+  });
+
+  it("parses an aggregate ORDER BY inside the argument list", () => {
+    expect(aggExpr("array_agg(a ORDER BY b DESC NULLS LAST)")).toEqual(
+      call("array_agg", [name("a")], { orderBy: [order(name("b"), "desc", "last")] }),
+    );
+    // A multi-argument aggregate: the ORDER BY closes the list, not an argument.
+    expect(aggExpr("string_agg(a, ',' ORDER BY b)")).toEqual(
+      call("string_agg", [name("a"), str(",")], { orderBy: [order(name("b"))] }),
+    );
+    // Both modifiers at once, as PG allows.
+    expect(aggExpr("array_agg(DISTINCT a ORDER BY a)")).toEqual(
+      call("array_agg", [name("a")], { distinct: true, orderBy: [order(name("a"))] }),
+    );
+  });
+
+  it("parses named arguments, in a call and in a FROM table function", () => {
+    expect(aggExpr("f(a => 1, b => 2)")).toEqual(call("f", [named("a", num(1)), named("b", num(2))]));
+    // Mixed with positional arguments. PG requires the positional ones first;
+    // the grammar accepts either order and leaves that to the planner.
+    expect(aggExpr("f(1, tail => 2)")).toEqual(call("f", [num(1), named("tail", num(2))]));
+    // `functionArg` is shared, so a FROM table function takes them too, as does
+    // SUBSTRING's comma form from its second argument on — its first goes through
+    // `expression`, so a named argument there is still rejected.
+    expect(aggExpr("substring(s, a => 1)")).toEqual(call("substring", [name("s"), named("a", num(1))]));
+    expect(() => sqlLite.parse("SELECT substring(str => 'abc', from => 2) FROM t;")).toThrow(/but found "=>"/);
+    expect((firstStmt("SELECT * FROM generate_series(start => 1, stop => 5) g;") as any).from).toEqual([
+      { kind: "function", call: call("generate_series", [named("start", num(1)), named("stop", num(5))]), alias: "g" },
+    ]);
+  });
+
+  it("parses IGNORE / RESPECT NULLS, nesting inside FILTER and OVER", () => {
+    expect(aggExpr("lag(x) IGNORE NULLS OVER (ORDER BY id)")).toEqual({
+      kind: "window",
+      fn: { kind: "nullTreatment", fn: call("lag", [name("x")]), treatment: "ignore" },
+      name: null,
+      partitionBy: null,
+      orderBy: [order(name("id"))],
+      frame: null,
+    });
+    expect(aggExpr("first_value(x) RESPECT NULLS OVER w")).toEqual({
+      kind: "window",
+      fn: { kind: "nullTreatment", fn: call("first_value", [name("x")]), treatment: "respect" },
+      name: "w",
+      partitionBy: null,
+      orderBy: null,
+      frame: null,
+    });
+    // The SQL-standard order — null treatment binds tightest, then FILTER, then
+    // OVER. (PG has no null treatment at all; the other two are its order.)
+    expect(aggExpr("count(x) IGNORE NULLS FILTER (WHERE x) OVER ()")).toEqual({
+      kind: "window",
+      fn: {
+        kind: "aggFilter",
+        fn: { kind: "nullTreatment", fn: call("count", [name("x")]), treatment: "ignore" },
+        where: name("x"),
+      },
+      name: null,
+      partitionBy: null,
+      orderBy: null,
+      frame: null,
+    });
+  });
+
+  it("keeps ignore / respect / nulls unreserved as names and aliases", () => {
+    expect((firstStmt("SELECT ignore, respect, nulls FROM t;") as any).columns).toEqual([
+      col(name("ignore")),
+      col(name("respect")),
+      col(name("nulls")),
+    ]);
+    // Not followed by `nulls`, each is an ordinary alias on the call.
+    expect((firstStmt("SELECT lag(x) ignore FROM t;") as any).columns).toEqual([
+      col(call("lag", [name("x")]), "ignore"),
+    ]);
+    expect((firstStmt("SELECT lag(x) respect FROM t;") as any).columns).toEqual([
+      col(call("lag", [name("x")]), "respect"),
+    ]);
+    // `nulls` on its own is an alias too — only the two-word pair is a modifier.
+    expect((firstStmt("SELECT lag(x) nulls FROM t;") as any).columns).toEqual([col(call("lag", [name("x")]), "nulls")]);
+    expect((firstStmt("CREATE TABLE t (ignore int, nulls text);") as any).items.map((i: any) => i.name)).toEqual([
+      "ignore",
+      "nulls",
+    ]);
+  });
+
+  it("reports a helpful error on a truncated modifier", () => {
+    // Both croak from inside `expression`, so the messages differ only in the
+    // position — pin that, or either assertion would pass on the other's error.
+    expect(() => sqlLite.parse("SELECT array_agg(a ORDER BY) FROM t;")).toThrow(/but found "\)" \(1:27\)/);
+    expect(() => sqlLite.parse("SELECT f(a => ) FROM t;")).toThrow(/but found "\)" \(1:14\)/);
+    // A named argument's label is a name, so a reserved word needs quoting.
+    expect(() => sqlLite.parse("SELECT f(select => 1) FROM t;")).toThrow(/Expected a name but found "select"/);
+  });
+});
+
 // --- remaining SELECT clauses (Phase 4) ---
 
 describe("SQL-lite FROM items: LATERAL, table functions, TABLESAMPLE", () => {
@@ -1463,6 +1576,136 @@ describe("SQL-lite GROUP BY ROLLUP / CUBE / GROUPING SETS", () => {
   });
 });
 
+// --- SELECT INTO & GROUP BY modifiers ---
+
+describe("SQL-lite SELECT INTO and GROUP BY modifiers", () => {
+  const stmt = (src: string) => firstStmt(src) as any;
+  const groupBy = (src: string) => stmt(`SELECT a FROM t GROUP BY ${src};`).groupBy;
+  const into = (src: string) => stmt(src).into;
+
+  it("parses SELECT … INTO, with the optional TABLE noise word and a qualified target", () => {
+    expect(stmt("SELECT a INTO newtab FROM t;")).toEqual(
+      sel({ columns: [col(name("a"))], into: { name: ["newtab"] }, from: [tableFrom(["t"])] }),
+    );
+    expect(into("SELECT a INTO TABLE reports.newtab FROM t;")).toEqual({ name: ["reports", "newtab"] });
+    // The clause does not require a FROM after it.
+    expect(into("SELECT 1 INTO newtab;")).toEqual({ name: ["newtab"] });
+  });
+
+  it("parses the storage words PG allows between INTO and the target", () => {
+    expect(into("SELECT a INTO TEMP scratch FROM t;")).toEqual({ name: ["scratch"], modifiers: ["temp"] });
+    expect(into("SELECT a INTO UNLOGGED TABLE scratch FROM t;")).toEqual({
+      name: ["scratch"],
+      modifiers: ["unlogged"],
+    });
+    // `global`/`local` are legal only ahead of a temp word, and are kept in
+    // source order alongside it.
+    expect(into("SELECT a INTO GLOBAL TEMPORARY scratch FROM t;")).toEqual({
+      name: ["scratch"],
+      modifiers: ["global", "temporary"],
+    });
+    expect(into("SELECT a INTO LOCAL TEMP TABLE scratch FROM t;")).toEqual({
+      name: ["scratch"],
+      modifiers: ["local", "temp"],
+    });
+    // `modifiers` follows the same omit-when-absent rule as `into` itself.
+    expect("modifiers" in into("SELECT a INTO scratch FROM t;")).toBe(false);
+  });
+
+  it("keeps the storage words usable as target names", () => {
+    // None of them is reserved, so each is a modifier only when a name can
+    // still follow it. Here nothing can — a reserved clause word or the
+    // terminator follows — and the word is the target itself.
+    for (const word of ["temp", "temporary", "unlogged", "global", "local"]) {
+      expect(into(`SELECT a INTO ${word} FROM t;`)).toEqual({ name: [word] });
+    }
+    expect(into("SELECT a INTO temp;")).toEqual({ name: ["temp"] });
+    // A schema called `temp` survives too: `.` cannot start a target name.
+    expect(into("SELECT a INTO temp.scratch FROM t;")).toEqual({ name: ["temp", "scratch"] });
+    // …and all five remain ordinary column names elsewhere.
+    expect(stmt("SELECT temp, temporary, unlogged, global, local FROM t;").columns).toEqual([
+      col(name("temp")),
+      col(name("temporary")),
+      col(name("unlogged")),
+      col(name("global")),
+      col(name("local")),
+    ]);
+  });
+
+  it("omits `into` entirely when there is no INTO clause", () => {
+    // A required `into: null` would add a key to every SELECT node in the
+    // parity golden; the field is spread in only when the clause is written.
+    expect("into" in stmt("SELECT a FROM t;")).toBe(false);
+  });
+
+  it("records GROUP BY DISTINCT and treats an explicit ALL as the default", () => {
+    expect(stmt("SELECT a FROM t GROUP BY DISTINCT a, b;")).toEqual(
+      sel({
+        columns: [col(name("a"))],
+        from: [tableFrom(["t"])],
+        groupBy: [name("a"), name("b")],
+        groupByDistinct: true,
+      }),
+    );
+    // ALL is the no-op spelling of the default, exactly as `SELECT ALL` is, so
+    // it records nothing and the key stays off the node.
+    const all = stmt("SELECT a FROM t GROUP BY ALL a;");
+    expect(all.groupBy).toEqual([name("a")]);
+    expect("groupByDistinct" in all).toBe(false);
+    // The modifier applies to grouping elements too, not just bare expressions.
+    expect(stmt("SELECT a FROM t GROUP BY DISTINCT ROLLUP (a);").groupBy).toEqual([
+      { kind: "rollup", args: [[name("a")]] },
+    ]);
+  });
+
+  it("parses the empty grouping `()` as a GROUP BY item", () => {
+    expect(groupBy("()")).toEqual([{ kind: "emptyGrouping" }]);
+    expect(groupBy("a, ()")).toEqual([name("a"), { kind: "emptyGrouping" }]);
+    // Whitespace between the parens is not a token, so this is the same item.
+    expect(groupBy("(  )")).toEqual([{ kind: "emptyGrouping" }]);
+    // A parenthesised expression is untouched: only the empty pair is claimed,
+    // and an empty pair nested inside one is not an item of its own.
+    expect(groupBy("(a)")).toEqual([name("a")]);
+    expect(() => sqlLite.parse("SELECT a FROM t GROUP BY (());")).toThrow(ParseError);
+    // Inside GROUPING SETS the empty grouping stays an empty element list.
+    expect(groupBy("GROUPING SETS (())")).toEqual([{ kind: "groupingSets", sets: [[]] }]);
+  });
+
+  it("takes no name away: the clause keywords were already reserved", () => {
+    // `into`, `table`, `distinct` and `all` are all matched by value here, and
+    // all four were already in RESERVED — so, unlike the storage words above,
+    // none of them was usable as a bare name before this clause existed.
+    // Quoted, they are names as they always were.
+    expect(stmt('SELECT "into", "distinct", "all" FROM t;').columns).toEqual([
+      col(name("into")),
+      col(name("distinct")),
+      col(name("all")),
+    ]);
+    // A quoted `"table"` lexes as a qident, which the ident-only noise word can
+    // never match, so it is the target name rather than a word being skipped.
+    expect(into('SELECT 1 INTO "table";')).toEqual({ name: ["table"] });
+  });
+
+  it("rejects the storage-word shapes PG's OptTempTableName has no rule for", () => {
+    // `global`/`local` alone, a repeated word, and two storage words together
+    // are all syntax errors in PG. Each is rejected here because the surplus
+    // word has nowhere to go once the shape ahead of it has been consumed — as
+    // a target name for the scope-word cases, as modifier-plus-target for the
+    // repeated and doubled ones.
+    expect(() => sqlLite.parse("SELECT a INTO GLOBAL scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => sqlLite.parse("SELECT a INTO LOCAL scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => sqlLite.parse("SELECT a INTO GLOBAL TEMP FROM t;")).toThrow(/but found "temp"/);
+    expect(() => sqlLite.parse("SELECT a INTO TEMP TEMP scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => sqlLite.parse("SELECT a INTO UNLOGGED TEMP scratch FROM t;")).toThrow(/but found "scratch"/);
+  });
+
+  it("rejects a missing INTO target, a bare GROUP BY modifier and a malformed grouping", () => {
+    expect(() => sqlLite.parse("SELECT a INTO FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => sqlLite.parse("SELECT a FROM t GROUP BY DISTINCT;")).toThrow(/but found ";"/);
+    expect(() => sqlLite.parse("SELECT a FROM t GROUP BY (,);")).toThrow(ParseError);
+  });
+});
+
 // --- robustness ---
 
 describe("SQL-lite robustness", () => {
@@ -1581,8 +1824,11 @@ describe("SQL-lite SELECT", () => {
     const cols = (src: string) => (firstStmt(src) as any).columns;
     expect(cols("SELECT t.* FROM t;")).toEqual([col(star(["t"]))]);
     expect(cols("SELECT count(*) FROM t;")).toEqual([col({ kind: "call", name: "count", args: [star()] })]);
-    // DISTINCT inside an aggregate is accepted; the call AST stays unchanged.
-    expect(cols("SELECT count(distinct x) FROM t;")).toEqual([col({ kind: "call", name: "count", args: [name("x")] })]);
+    // DISTINCT inside an aggregate is recorded on the call node itself; the
+    // modifiers have their own suite below.
+    expect(cols("SELECT count(distinct x) FROM t;")).toEqual([
+      col({ kind: "call", name: "count", args: [name("x")], distinct: true }),
+    ]);
   });
 });
 
@@ -2197,6 +2443,54 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
     // without the quote that closes it, or it would silently re-point the
     // escape character of the literal in front of it.
     expect(() => sqlLite.parse("SELECT U&'\\0041' UESCAPE '!")).toThrow(/Invalid Unicode escape character/);
+  });
+});
+
+// --- keyword dispatch maps ---
+// The CREATE / ALTER / constraint rules derive their "Expected …" strings from
+// keyword-keyed dispatch maps rather than restating them. What follows pins the
+// parts of that no other test and neither golden covers. The comma-form croaks
+// are already pinned — ALTER's action list above, the OR-REPLACE target list in
+// the CREATE TABLE AS block — and stay there, one copy each, so that adding an
+// action or a replaceable target is still a one-line test edit.
+
+describe("SQL-lite keyword dispatch maps", () => {
+  const rawFirst = (text: string) => sqlLite.parse(text)[0] as Record<string, any>;
+
+  it("names the keyword-led CREATE targets in the join form", () => {
+    expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
+      /Expected "table" or "unique" or "type" or "sequence" or "domain" but found "frobnicate"/,
+    );
+  });
+
+  it("names the table-item alternatives in the join form", () => {
+    expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(
+      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or a name but found "42"/,
+    );
+  });
+
+  // A record literal inherits `constructor` and `__proto__`, so a lead word
+  // spelled like one must still miss the map rather than find a keyless entry.
+  it("treats an Object.prototype key as an unknown lead word", () => {
+    expect(() => sqlLite.parse("ALTER TABLE t constructor;")).toThrow(ParseError);
+    expect(() => sqlLite.parse("ALTER TABLE t __proto__;")).toThrow(/Expected "add", "drop"/);
+    expect(() => sqlLite.parse("CREATE constructor;")).toThrow(/Expected "table" or "unique"/);
+    expect(() => sqlLite.parse("CREATE OR REPLACE __proto__;")).toThrow(/Expected "view", "materialized"/);
+    expect(() => sqlLite.parse("CREATE TABLE t (id int, constructor text);")).not.toThrow();
+  });
+
+  // stripSpans hides this everywhere else in the file: the keyword-led targets
+  // open their span after CREATE, the OR-REPLACE-able bodies before it.
+  it("opens a keyword-led CREATE span on its own keyword and an OR-REPLACE-able one on CREATE", () => {
+    expect(rawFirst("CREATE TABLE t (id int);").span.start).toEqual({ row: 1, col: 7 });
+    expect(rawFirst("CREATE UNIQUE INDEX i ON t (a);").span.start).toEqual({ row: 1, col: 7 });
+    expect(rawFirst("CREATE VIEW v AS SELECT 1;").span.start).toEqual({ row: 1, col: 0 });
+    expect(rawFirst("CREATE MATERIALIZED VIEW mv AS SELECT 1;").span.start).toEqual({ row: 1, col: 0 });
+  });
+
+  it("omits the CREATE prefix-modifier bag rather than emitting an empty one", () => {
+    expect(rawFirst("CREATE TABLE t (id int);")).not.toHaveProperty("modifiers");
+    expect(rawFirst("CREATE TABLE snap AS SELECT 1;")).not.toHaveProperty("modifiers");
   });
 });
 

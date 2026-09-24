@@ -55,9 +55,17 @@ const SUPPLEMENTAL = [
   "SELECT count(*) FILTER (WHERE a > 1) FROM t;",
   "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM t;",
   "SELECT count(*) FROM t;",
-  // DISTINCT inside a call is accepted and deliberately not recorded, so this
-  // row pins acceptance and the call's span, not a distinguishable node.
+  // The call modifiers that live inside the argument list: DISTINCT, an
+  // aggregate ORDER BY, and PG's named-argument notation. Each is a key the
+  // call node carries only when it is present, so these rows pin both the
+  // modifier and — against the plain `count(*)` row above — its omission.
   "SELECT count(distinct x) FROM t;",
+  "SELECT array_agg(a ORDER BY b DESC) FROM t;",
+  "SELECT string_agg(a, ',' ORDER BY b) FROM t;",
+  "SELECT f(a => 1, b => 2) FROM t;",
+  // IGNORE / RESPECT NULLS wraps the call, nesting inside FILTER and OVER.
+  "SELECT lag(x) IGNORE NULLS OVER (ORDER BY id) FROM t;",
+  "SELECT count(x) RESPECT NULLS FILTER (WHERE x) OVER () FROM t;",
   "SELECT t.* FROM t;",
   // --- clause tails ---
   "SELECT sum(x) OVER (PARTITION BY a ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t;",
@@ -65,6 +73,9 @@ const SUPPLEMENTAL = [
   "SELECT sum(x) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) FROM t;",
   "SELECT sum(x) OVER (ROWS 5 PRECEDING) FROM t;",
   "SELECT a FROM t GROUP BY CUBE (a, b), ROLLUP (c), GROUPING SETS ((a), ());",
+  "SELECT a FROM t GROUP BY DISTINCT a, ();",
+  "SELECT a, count(*) INTO TABLE reports.summary FROM t GROUP BY ALL a;",
+  "SELECT a INTO GLOBAL TEMP scratch FROM t;",
   "SELECT 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;",
   "SELECT 1 UNION VALUES (2);",
   "SELECT * FROM t FOR NO KEY UPDATE FOR KEY SHARE SKIP LOCKED;",
