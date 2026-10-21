@@ -4762,7 +4762,8 @@ function parseOwnerTo(ctx: ParseContext<SqlTokenType>): AlterOwnerTo {
 }
 
 // `DROP CONSTRAINT [IF EXISTS] name [CASCADE | RESTRICT]` once its CONSTRAINT
-// is consumed, and `VALIDATE CONSTRAINT name`: ALTER TABLE's and ALTER DOMAIN's.
+// is consumed, and `VALIDATE CONSTRAINT name` from its VALIDATE: ALTER TABLE's
+// and ALTER DOMAIN's.
 function parseDropConstraint(ctx: ParseContext<SqlTokenType>): AlterDropConstraint {
   const ifExists = parseIfExists(ctx);
   const name = ctx.parse(nameWord);
@@ -4781,6 +4782,10 @@ function parseTriggerTarget(ctx: ParseContext<SqlTokenType>): AlterTriggerTarget
   ctx.parse(kw("trigger"));
   if (ctx.eat("ident", "all") !== null) return { kind: "all" };
   if (ctx.eat("ident", "user") !== null) return { kind: "user" };
+  const tok = ctx.peek();
+  if (tok?.type !== "qident" && (tok?.type !== "ident" || RESERVED.has(tok.value))) {
+    ctx.croak(`Expected "all", "user" or a name but found ${describeFound(tok)}`);
+  }
   return { kind: "name", name: ctx.parse(nameWord) };
 }
 

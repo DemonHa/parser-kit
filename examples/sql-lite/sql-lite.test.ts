@@ -6970,8 +6970,13 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
     expect(fails("ALTER TABLE t SET frob;")).toThrow(
       /Expected "\(", "schema", "tablespace" or "without" but found "frob" \(1:18\)/,
     );
+    // PG's SET WITHOUT OIDS and ENABLE RULE are valid there but not parsed here.
     expect(fails("ALTER TABLE t SET WITHOUT OIDS;")).toThrow(/Expected "cluster" but found "oids"/);
     expect(fails("ALTER TABLE t ENABLE RULE r;")).toThrow(/Expected "replica", "always" or "trigger" but found "rule"/);
+    expect(fails("ALTER TABLE t DISABLE TRIGGER;")).toThrow(/Expected "all", "user" or a name but found ";"/);
+    expect(fails("ALTER TABLE t ENABLE TRIGGER select;")).toThrow(
+      /Expected "all", "user" or a name but found "select"/,
+    );
     expect(fails("ALTER TABLE t ENABLE REPLICA IDENTITY;")).toThrow(/Expected "trigger" but found "identity"/);
     // REPLICA and ALWAYS take a trigger's name only, as in PG.
     expect(fails("ALTER TABLE t ENABLE REPLICA TRIGGER ALL;")).toThrow(/Expected a name but found "all"/);
