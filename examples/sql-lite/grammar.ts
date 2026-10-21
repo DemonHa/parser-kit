@@ -1033,18 +1033,22 @@ function parseRow(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
 }
 
 // --- OVERLAPS ---
-// `row OVERLAPS row`. `overlaps` is unreserved — `SELECT a overlaps FROM t` reads
-// it as an alias — and a pratt infix group cannot decline once it has matched, so
-// the operator never enters the pratt table. The row constructors that may lead
-// it (the implicit `(a, b)` in parenOrSubquery, and ROW(…) above) look for the
-// tail themselves, and only claim `overlaps` when a row can follow it: a `(` or a
-// `ROW (`. Consuming the tail at atom level gives OVERLAPS the tightest
-// precedence there is, so a trailing `::` binds to the whole predicate rather
-// than to the right-hand row. That is PG's reading too: both of its operands are
-// rows, not expressions, so `(c, d)::text` cannot be one, and the cast can only
-// apply to the finished predicate. (A trailing `[…]` binds the same way, where PG
-// would reject it — the over-acceptance `ROW(a, b)[1]` already has.) Everything looser composes as
-// usual: `… OVERLAPS … AND x` is an AND, and `NOT` (a prefix) wraps the predicate.
+// `row OVERLAPS row`. `overlaps` is unreserved here — PG reserves it, but this
+// grammar never did, so `SELECT a overlaps FROM t` reads it as an alias — and a
+// pratt infix group cannot decline once it has matched, so the operator never
+// enters the pratt table. The row constructors that may lead it (the implicit
+// `(a, b)` in parenOrSubquery, and ROW(…) above) look for the tail themselves,
+// and only claim `overlaps` when a row can follow it: a `(` or a `ROW (`.
+// Consuming the tail at atom level gives OVERLAPS the tightest precedence there
+// is, so a trailing `::` binds to the whole predicate rather than to the
+// right-hand row. That is PG's reading too: both of its operands are rows, not
+// expressions, so `(c, d)::text` cannot be one, and the cast can only apply to
+// the finished predicate. Two over-acceptances come with the atom: a trailing
+// `[…]` binds the same way, where PG would reject it (as `ROW(a, b)[1]` already
+// was), and the b-expression shares the atom, so OVERLAPS also reaches positions
+// PG's b_expr does not admit, such as POSITION's first operand. Everything
+// looser composes as usual: `… OVERLAPS … AND x` is an AND, and `NOT` (a
+// prefix) wraps the predicate.
 const startsOverlaps = (ctx: ParseContext<SqlTokenType>): boolean => {
   if (!ctx.is("ident", "overlaps")) return false;
   const after = ctx.peekAhead(1);
@@ -1921,7 +1925,8 @@ const expressionRule = pratt<Expr, SqlTokenType>({
 
 // The b-expression: the tight sublanguage (arithmetic / concat / JSON / cast /
 // subscript) with none of the comparison, IS, IN, LIKE, BETWEEN or logical
-// forms — see `bExpression` above. Used for the first operand of POSITION so its
+// forms — see `bExpression` above. (OVERLAPS lives in the shared atom, so it is
+// the one predicate that still reaches it.) Used for the first operand of POSITION so its
 // `IN` separator is left for the special-call parser instead of the `in` postfix.
 const bExprRule = pratt<Expr, SqlTokenType>({
   atom,
