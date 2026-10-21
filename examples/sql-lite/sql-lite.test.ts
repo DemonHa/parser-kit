@@ -6840,6 +6840,93 @@ describe("SQL-lite COPY", () => {
   });
 });
 
+// --- multi-column UPDATE assignments ---
+
+describe("SQL-lite multi-column UPDATE assignments", () => {
+  const setOf = (src: string) => firstStmt(`UPDATE t SET ${src};`).set;
+  const conflictSetOf = (src: string) =>
+    firstStmt(`INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET ${src};`).onConflict.action.set;
+  const row = (items: unknown[], implicit = true) => ({ kind: "row", items, ...(implicit && { implicit }) });
+  const DEFAULT = { kind: "default" };
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses a parenthesised row, ROW() and a subquery as the source", () => {
+    expect(setOf("(a, b) = (1, 2)")).toEqual([{ columns: ["a", "b"], value: row([num(1), num(2)]) }]);
+    expect(setOf("(a, b) = ROW(1, 2)")).toEqual([{ columns: ["a", "b"], value: row([num(1), num(2)], false) }]);
+    expect(setOf("(a) = ROW(1)")).toEqual([{ columns: ["a"], value: row([num(1)], false) }]);
+    expect(setOf("(a, b) = (SELECT x, y FROM u)")).toEqual([
+      {
+        columns: ["a", "b"],
+        value: { kind: "subquery", query: firstStmt("SELECT x, y FROM u;") },
+      },
+    ]);
+    expect(setOf("(a, b) = (WITH w AS (SELECT 1, 2) SELECT * FROM w)")[0].value.kind).toBe("subquery");
+    expect(setOf("(a, b) = ((SELECT 1), 2)")).toEqual([
+      { columns: ["a", "b"], value: row([{ kind: "subquery", query: firstStmt("SELECT 1;") }, num(2)]) },
+    ]);
+    // Extra parentheses around a row or a subquery are transparent.
+    expect(setOf("(a, b) = ((1, 2))")).toEqual(setOf("(a, b) = (1, 2)"));
+    expect(setOf("(a, b) = ((SELECT x, y FROM u))")).toEqual(setOf("(a, b) = (SELECT x, y FROM u)"));
+  });
+
+  it("takes DEFAULT as a row item and mixes with single-column items", () => {
+    expect(setOf("(a, b) = (DEFAULT, 1), c = 3, (d, e) = ROW(DEFAULT, DEFAULT)")).toEqual([
+      { columns: ["a", "b"], value: row([DEFAULT, num(1)]) },
+      { column: "c", value: num(3) },
+      { columns: ["d", "e"], value: row([DEFAULT, DEFAULT], false) },
+    ]);
+  });
+
+  it("leaves single-column assignments unchanged", () => {
+    expect(setOf("a = 1, b = (1, 2)")).toEqual([
+      { column: "a", value: num(1) },
+      { column: "b", value: row([num(1), num(2)]) },
+    ]);
+    expect(conflictSetOf("a = 2")).toEqual([{ column: "a", value: num(2) }]);
+  });
+
+  it("spans an implicit row from its paren and a ROW() from the keyword", () => {
+    const [explicit, implicit] = (sqlLite.parse("UPDATE t SET (a) = ROW(1), (b, c) = (2, 3);")[0] as any).set;
+    expect(explicit.value.span).toEqual({ start: { row: 1, col: 19 }, end: { row: 1, col: 25 } });
+    expect(implicit.value.span).toEqual({ start: { row: 1, col: 36 }, end: { row: 1, col: 42 } });
+  });
+
+  it("parses the same forms under ON CONFLICT DO UPDATE", () => {
+    expect(conflictSetOf("(a, b) = (excluded.a, DEFAULT), c = 4")).toEqual([
+      { columns: ["a", "b"], value: row([name("excluded", "a"), DEFAULT]) },
+      { column: "c", value: num(4) },
+    ]);
+    expect(conflictSetOf("(a) = ROW(DEFAULT)")).toEqual([{ columns: ["a"], value: row([DEFAULT], false) }]);
+    expect(conflictSetOf("(a, b) = (SELECT 1, 2)")[0].value.kind).toBe("subquery");
+  });
+
+  it("keeps row unreserved", () => {
+    expect(setOf("row = 1, (row, a) = (row, ROW(1))")).toEqual([
+      { column: "row", value: num(1) },
+      { columns: ["row", "a"], value: row([name("row"), row([num(1)], false)]) },
+    ]);
+  });
+
+  it("rejects a non-row source, an empty target list and a count mismatch", () => {
+    expect(bad("UPDATE t SET (a) = row;")).toThrow(/but found "row" \(1:19\)/);
+    expect(bad("UPDATE t SET (a, b) = 1;")).toThrow(/Expected a row constructor or a subquery but found "1" \(1:22\)/);
+    expect(bad("UPDATE t SET () = ();")).toThrow(/Expected a name but found "\)" \(1:14\)/);
+    expect(bad("UPDATE t SET (a) = (1);")).toThrow(/a subquery as a multi-column assignment source \(1:19\)/);
+    expect(bad("UPDATE t SET (a, b) = (1, 2, 3);")).toThrow(
+      /Expected 2 values for 2 assigned columns but found 3 \(1:22\)/,
+    );
+    expect(bad("UPDATE t SET (a, b) = ROW();")).toThrow(/Expected 2 values for 2 assigned columns but found 0/);
+    expect(bad("UPDATE t SET (a, b) = ((1, 2, 3));")).toThrow(/assigned columns but found 3 \(1:23\)/);
+    expect(bad("UPDATE t SET (a) = (DEFAULT), b = 1;")).toThrow(/assignment source \(1:19\)/);
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET (a, b) = 1;")).toThrow(
+      /Expected a row constructor or a subquery but found "1"/,
+    );
+    expect(bad("UPDATE t SET (a, b) = (1, 2) OVERLAPS (3, 4);")).toThrow(/Expected ";" but found "overlaps"/);
+    expect(bad("UPDATE t SET (a, b) = (SELECT 1, 2) + 1;")).toThrow(/Expected ";" but found "\+"/);
+    expect(bad("UPDATE t SET = 1;")).toThrow(/Expected "\(" or a name but found "="/);
+  });
+});
+
 // --- MERGE ---
 
 describe("SQL-lite MERGE", () => {

@@ -292,6 +292,11 @@ const SUPPLEMENTAL = [
   "COPY t TO PROGRAM 'gzip > /tmp/t.gz' (FORMAT csv, FORCE_QUOTE *, DELIMITER ';', ENCODING 'UTF8');",
   "COPY (WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x RETURNING id) TO STDOUT;",
   "COPY (SELECT a FROM t UNION SELECT b FROM u) TO '/tmp/out.csv' (HEADER);",
+  // --- multi-column SET: implicit row, ROW() with DEFAULT, subquery, mixed with
+  // single items, and under ON CONFLICT DO UPDATE ---
+  "UPDATE t SET (a, b) = (1, DEFAULT), c = 3, (d, e) = ROW(c + 1, DEFAULT) WHERE id = 1;",
+  "UPDATE t SET (a, b) = (SELECT x, y FROM u WHERE u.id = t.id), (c) = ROW(2) RETURNING a;",
+  "INSERT INTO t VALUES (1, 2) ON CONFLICT (id) DO UPDATE SET (a, b) = (excluded.a, DEFAULT), c = 4;",
   // --- MERGE: every WHEN form and action, INSERT's DEFAULT VALUES / OVERRIDING
   // forms, ONLY, aliases, a joined and a subquery source, WITH and RETURNING ---
   "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED AND s.gone THEN DELETE WHEN MATCHED THEN UPDATE SET a = s.a WHEN NOT MATCHED THEN INSERT (id, a) VALUES (s.id, DEFAULT) WHEN NOT MATCHED BY SOURCE THEN DO NOTHING;",
