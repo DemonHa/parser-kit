@@ -452,7 +452,7 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
       /Expected "exists" but found "exist"/,
     );
     expect(() => sqlLite.parse("ALTER frobnicate t;")).toThrow(
-      /Expected "table", "schema", "domain", "type" or "index" but found "frobnicate"/,
+      /Expected "table", "schema", "domain", "type", "index", "function", "aggregate", "view", "materialized" or "sequence" but found "frobnicate"/,
     );
   });
 });
@@ -5005,6 +5005,220 @@ describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
     expect(fails("ALTER INDEX i RESET (a, fillfactor = 70);")).toThrow(
       /RESET must not include values for parameters \(1:24\)/,
     );
+  });
+});
+
+// --- ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE ---
+
+describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
+  const alter = (text: string) => firstStmt(text) as any;
+  const action = (text: string) => alter(text).action;
+  const fails = (text: string) => () => sqlLite.parse(text);
+  const arg = (type: string, argName: string | null = null) => ({
+    mode: null,
+    name: argName,
+    type: { name: type, args: [], array: false },
+    defaultValue: null,
+  });
+
+  it("parses ALTER FUNCTION with and without a signature", () => {
+    expect(alter("ALTER FUNCTION s.f(double precision, a int) RENAME TO g;")).toEqual({
+      kind: "alterFunction",
+      name: ["s", "f"],
+      args: [arg("double precision"), arg("int", "a")],
+      action: { kind: "rename", to: "g" },
+    });
+    expect(alter("ALTER FUNCTION f OWNER TO r;")).toMatchObject({
+      args: null,
+      action: { kind: "ownerTo", owner: "r" },
+    });
+    expect(alter("ALTER FUNCTION f() SET SCHEMA s;")).toMatchObject({
+      args: [],
+      action: { kind: "setSchema", schema: "s" },
+    });
+  });
+
+  it("parses ALTER FUNCTION attributes as one run of CREATE FUNCTION's options", () => {
+    expect(action("ALTER FUNCTION f(int) IMMUTABLE NOT LEAKPROOF STRICT SECURITY DEFINER COST 5;")).toEqual({
+      kind: "options",
+      options: [
+        { kind: "volatility", value: "immutable" },
+        { kind: "leakproof", value: false },
+        { kind: "strictness", value: "strict" },
+        { kind: "security", external: false, definer: true },
+        { kind: "cost", value: num(5) },
+      ],
+    });
+    // SET is SET SCHEMA only when a name follows `schema`; otherwise it sets a parameter.
+    expect(action("ALTER FUNCTION f SET search_path = public;").options).toEqual([
+      { kind: "set", parameter: "search_path", value: { kind: "list", values: [name("public")] } },
+    ]);
+    for (const src of ["= 'x'", "TO 'x'", "FROM CURRENT"]) {
+      expect(action(`ALTER FUNCTION f SET schema ${src};`).options).toMatchObject([
+        { kind: "set", parameter: "schema" },
+      ]);
+    }
+  });
+
+  it("parses ALTER AGGREGATE with a (*) or a type-list signature", () => {
+    expect(alter("ALTER AGGREGATE a(*) RENAME TO b;")).toEqual({
+      kind: "alterAggregate",
+      name: ["a"],
+      star: true,
+      args: [],
+      action: { kind: "rename", to: "b" },
+    });
+    expect(alter("ALTER AGGREGATE s.a(int, text) SET SCHEMA t;")).toMatchObject({
+      star: false,
+      args: [arg("int"), arg("text")],
+      action: { kind: "setSchema", schema: "t" },
+    });
+    expect(action("ALTER AGGREGATE a(int) OWNER TO r;")).toEqual({ kind: "ownerTo", owner: "r" });
+  });
+
+  it("parses ALTER [MATERIALIZED] VIEW [IF EXISTS] and its action list", () => {
+    expect(alter("ALTER VIEW IF EXISTS s.v RENAME COLUMN a TO b;")).toEqual({
+      kind: "alterView",
+      materialized: false,
+      ifExists: true,
+      name: ["s", "v"],
+      actions: [{ kind: "renameColumn", from: "a", to: "b" }],
+    });
+    expect(alter("ALTER VIEW v RENAME a TO b;").actions).toEqual([{ kind: "renameColumn", from: "a", to: "b" }]);
+    expect(alter("ALTER VIEW v RENAME TO w;").actions).toEqual([{ kind: "rename", to: "w" }]);
+    expect(alter("ALTER VIEW v SET SCHEMA s;").actions).toEqual([{ kind: "setSchema", schema: "s" }]);
+    const opt = (optName: string) => ({ name: optName, value: null });
+    expect(
+      alter("ALTER VIEW v ALTER COLUMN c SET DEFAULT 1, ALTER c DROP DEFAULT, OWNER TO r, SET (a), RESET (b);").actions,
+    ).toEqual([
+      { kind: "setDefault", column: "c", expr: num(1) },
+      { kind: "dropDefault", column: "c" },
+      { kind: "ownerTo", owner: "r" },
+      { kind: "setOptions", options: [opt("a")] },
+      { kind: "resetOptions", options: [opt("b")] },
+    ]);
+    expect(alter("ALTER MATERIALIZED VIEW IF EXISTS m RENAME TO n;")).toEqual({
+      kind: "alterView",
+      materialized: true,
+      ifExists: true,
+      name: ["m"],
+      actions: [{ kind: "rename", to: "n" }],
+    });
+  });
+
+  it("parses ALTER SEQUENCE [IF EXISTS] options, RESTART and the shared actions", () => {
+    expect(alter("ALTER SEQUENCE IF EXISTS s.q RESTART WITH 5 INCREMENT BY 2 OWNED BY t.id;")).toEqual({
+      kind: "alterSequence",
+      ifExists: true,
+      name: ["s", "q"],
+      action: {
+        kind: "options",
+        options: [
+          { kind: "restart", value: num(5) },
+          { kind: "increment", value: num(2) },
+          { kind: "ownedBy", owner: ["t", "id"] },
+        ],
+      },
+    });
+    expect(action("ALTER SEQUENCE q RESTART;").options).toEqual([{ kind: "restart", value: null }]);
+    expect(action("ALTER SEQUENCE q RESTART 7 NO CYCLE;").options).toEqual([
+      { kind: "restart", value: num(7) },
+      { kind: "cycle", value: false },
+    ]);
+    expect(action("ALTER SEQUENCE q RENAME TO r;")).toEqual({ kind: "rename", to: "r" });
+    expect(action("ALTER SEQUENCE q OWNER TO r;")).toEqual({ kind: "ownerTo", owner: "r" });
+    expect(action("ALTER SEQUENCE q SET SCHEMA s;")).toEqual({ kind: "setSchema", schema: "s" });
+  });
+
+  it("spans the whole statement, from ALTER through the action", () => {
+    const [stmt] = sqlLite.parse("ALTER MATERIALIZED VIEW m OWNER TO r;") as Record<string, any>[];
+    expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 36 } });
+  });
+
+  it("keeps the new ALTER words unreserved as names and aliases", () => {
+    const words = [
+      "function",
+      "aggregate",
+      "view",
+      "materialized",
+      "sequence",
+      "restart",
+      "immutable",
+      "stable",
+      "volatile",
+      "leakproof",
+      "strict",
+      "security",
+      "owned",
+      "increment",
+      "called",
+      "returns",
+      "external",
+      "parallel",
+      "cost",
+      "rows",
+      "minvalue",
+      "maxvalue",
+      "start",
+      "cache",
+      "cycle",
+      "no",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS function, 2 restart FROM sequence AS view;")).toMatchObject({
+      columns: [{ alias: "function" }, { alias: "restart" }],
+      from: [{ name: ["sequence"], alias: "view" }],
+    });
+    // …and as the names of the objects being altered.
+    expect(alter("ALTER FUNCTION function(immutable) RENAME TO aggregate;")).toMatchObject({
+      name: ["function"],
+      args: [arg("immutable")],
+      action: { to: "aggregate" },
+    });
+    expect(alter("ALTER AGGREGATE aggregate(*) OWNER TO stable;")).toMatchObject({ name: ["aggregate"] });
+    expect(alter("ALTER VIEW view RENAME materialized TO view;").actions).toEqual([
+      { kind: "renameColumn", from: "materialized", to: "view" },
+    ]);
+    expect(alter("ALTER SEQUENCE restart RESTART;")).toMatchObject({ name: ["restart"] });
+    expect(alter("ALTER SEQUENCE if RESTART;")).toMatchObject({ ifExists: false, name: ["if"] });
+  });
+
+  it("rejects an unknown action, a misplaced word and a combined RENAME or SET SCHEMA", () => {
+    expect(fails("ALTER FUNCTION f frobnicate;")).toThrow(
+      /Expected "rename", "owner", "set", "immutable", .*, "cost" or "rows" but found "frobnicate"/,
+    );
+    expect(fails("ALTER FUNCTION f(int) LANGUAGE sql;")).toThrow(/Expected "rename", .* but found "language"/);
+    expect(fails("ALTER FUNCTION f NOT NULL;")).toThrow(/Expected "leakproof" but found "null"/);
+    expect(fails("ALTER FUNCTION f IMMUTABLE SET SCHEMA s;")).toThrow(/Expected "to" or "=" but found "s"/);
+    expect(fails("ALTER AGGREGATE a RENAME TO b;")).toThrow(/Expected "\(" but found "rename"/);
+    expect(fails("ALTER AGGREGATE a(*) IMMUTABLE;")).toThrow(
+      /Expected "rename", "owner" or "set" but found "immutable"/,
+    );
+    expect(fails("ALTER VIEW v frobnicate;")).toThrow(
+      /Expected "rename", "owner", "set", "reset" or "alter" but found "frobnicate"/,
+    );
+    expect(fails("ALTER MATERIALIZED VIEW m ALTER c DROP DEFAULT;")).toThrow(
+      /Expected "rename", "owner", "set" or "reset" but found "alter"/,
+    );
+    expect(fails("ALTER MATERIALIZED m RENAME TO n;")).toThrow(/Expected "view" but found "m"/);
+    expect(fails("ALTER VIEW v SET frob;")).toThrow(/Expected "\(" or "schema" but found "frob"/);
+    expect(fails("ALTER VIEW v ALTER c SET NOT NULL;")).toThrow(/Expected "default" but found "not"/);
+    expect(fails("ALTER VIEW v ALTER c TYPE int;")).toThrow(/Expected "set" or "drop" but found "type"/);
+    expect(fails("ALTER VIEW v RESET (a = 1);")).toThrow(/RESET must not include values for parameters/);
+    expect(fails("ALTER VIEW v OWNER TO r, SET SCHEMA s;")).toThrow(
+      /SET SCHEMA cannot be combined with other ALTER VIEW actions/,
+    );
+    expect(fails("ALTER MATERIALIZED VIEW m RENAME TO n, OWNER TO r;")).toThrow(
+      /RENAME cannot be combined with other ALTER MATERIALIZED VIEW actions/,
+    );
+    expect(fails("ALTER SEQUENCE s frobnicate;")).toThrow(
+      /Expected "rename", "owner", "set", "as", .*, "no" or "owned" but found "frobnicate"/,
+    );
+    expect(fails("ALTER SEQUENCE s NO frob;")).toThrow(/Expected "minvalue", "maxvalue" or "cycle" but found "frob"/);
+    expect(fails("ALTER SEQUENCE s SET frob;")).toThrow(/Expected "schema" but found "frob"/);
+    expect(fails("ALTER SEQUENCE s RESTART RENAME TO t;")).toThrow(/Expected ";" but found "rename"/);
   });
 });
 
