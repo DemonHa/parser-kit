@@ -1475,7 +1475,10 @@ const columnRef = custom<Expr, SqlTokenType>(
       ctx.next(); // "("
       // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW / SUBSTRING)
       // owns the rest of the call; a plain name falls through to a normal call.
-      const special = parts.length === 1 ? SPECIAL_CALLS[parts[0]!] : undefined;
+      // `Object.hasOwn` for the reason `lookup` gives: `constructor(1)` and
+      // `__proto__(1)` would otherwise find an inherited "handler".
+      const special =
+        parts.length === 1 && Object.hasOwn(SPECIAL_CALLS, parts[0]!) ? SPECIAL_CALLS[parts[0]!] : undefined;
       if (special !== undefined) return special(ctx, start);
       // The aggregate modifiers that live inside the argument list: a leading
       // DISTINCT and a trailing `ORDER BY …` (`array_agg(a ORDER BY b)`). Both
@@ -2646,8 +2649,12 @@ const tableItem = oneOf(tableConstraint, likeBody, columnDef);
 
 // `WITH [NO] DATA` — the trailing materialization flag on CREATE TABLE AS /
 // MATERIALIZED VIEW. Returns true (WITH DATA), false (WITH NO DATA), or null when
-// no clause follows. The preceding query never consumes it (WITH DATA is not a
-// query continuation), so a bare `ctx.is("with")` peek is unambiguous here.
+// no clause follows. The preceding query does not usually consume it (WITH DATA
+// is not a query continuation, and typeRef takes a WITH only as `WITH TIME
+// ZONE`), so a bare `ctx.is("with")` peek is enough here. Two query endings do
+// take a WITH unconditionally, and so leave none for this clause: a trailing
+// `IS JSON` (its uniqueness clause, as in PG) and a FETCH clause not closed by
+// ONLY (its WITH TIES).
 function parseWithData(ctx: ParseContext<SqlTokenType>): boolean | null {
   if (!ctx.is("ident", "with")) return null;
   ctx.next(); // WITH
@@ -3854,7 +3861,10 @@ function parsePrivilege(ctx: ParseContext<SqlTokenType>): Privilege {
 // The `ON …` object target (the `ON` keyword already consumed by the caller).
 function parseGrantObject(ctx: ParseContext<SqlTokenType>): GrantObject {
   // `ALL {TABLES|SEQUENCES|FUNCTIONS|PROCEDURES|ROUTINES} IN SCHEMA s[, …]`.
-  if (ctx.is("ident", "all") && ctx.peekAhead(1)?.value !== undefined && ALL_IN_SCHEMA[ctx.peekAhead(1)!.value]) {
+  // A bare word, checked with `Object.hasOwn`, as in `lookup`: so neither
+  // `ALL constructor` nor a quoted `ALL "tables"` is taken for a plural.
+  const next = ctx.is("ident", "all") ? ctx.peekAhead(1) : null;
+  if (next?.type === "ident" && Object.hasOwn(ALL_IN_SCHEMA, next.value)) {
     ctx.next(); // ALL
     const plural = ctx.next()!.value; // tables / sequences / …
     ctx.parse(kwseq("in", "schema"));
