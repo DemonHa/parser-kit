@@ -460,6 +460,26 @@ export type AlterIndexAction =
   | { kind: "setTablespace"; tablespace: string }
   | { kind: "setOptions"; options: RelationOption[] }
   | { kind: "resetOptions"; options: RelationOption[] };
+// ALTER FUNCTION's and ALTER SEQUENCE's `options` hold the run of attributes or
+// sequence options written in place of a named action, in source order.
+export type AlterFunctionAction =
+  | AlterRenameTo
+  | AlterOwnerTo
+  | AlterSetSchema
+  | { kind: "options"; options: FunctionOption[] };
+export type AlterAggregateAction = AlterRenameTo | AlterOwnerTo | AlterSetSchema;
+// The column actions are ALTER TABLE's shapes, the option lists ALTER INDEX's.
+export type AlterViewAction =
+  | AlterRenameTo
+  | AlterOwnerTo
+  | AlterSetSchema
+  | Extract<AlterAction, { kind: "renameColumn" | "setDefault" | "dropDefault" }>
+  | Extract<AlterIndexAction, { kind: "setOptions" | "resetOptions" }>;
+export type AlterSequenceAction =
+  | AlterRenameTo
+  | AlterOwnerTo
+  | AlterSetSchema
+  | { kind: "options"; options: SequenceOption[] };
 
 // --- Phase 7: more CREATE objects ---
 
@@ -526,6 +546,51 @@ export type CreateDomain = {
   name: string[];
   dataType: ColType;
   constraints: DomainConstraint[];
+  span: Span;
+};
+
+// `CREATE DATABASE name [[WITH] option …]`. The options are PG's space-separated
+// `name [=] value` list, kept in written order with PG's two-word `CONNECTION
+// LIMIT` folded into one name — `[]` when none is written.
+export type CreateDatabase = { kind: "createDatabase"; name: string; options: RelationOption[]; span: Span };
+
+// `CREATE SCHEMA [IF NOT EXISTS] {name [AUTHORIZATION role] | AUTHORIZATION
+// role} [element …]`. `name` is null in the AUTHORIZATION-only form (PG names
+// the schema after the role), `authorization` null when no AUTHORIZATION is
+// written, and `elements` the CREATE / GRANT statements nested in it, `[]` when
+// none is.
+export type CreateSchema = {
+  kind: "createSchema";
+  ifNotExists: boolean;
+  name: string | null;
+  authorization: string | null;
+  elements: Stmt[];
+  span: Span;
+};
+
+// One `CREATE EXTENSION` option, in written order (PG takes them in any).
+export type ExtensionOption =
+  | { kind: "schema"; schema: string }
+  | { kind: "version"; version: string }
+  | { kind: "cascade" };
+
+// `CREATE EXTENSION [IF NOT EXISTS] name [WITH] option*`.
+export type CreateExtension = {
+  kind: "createExtension";
+  ifNotExists: boolean;
+  name: string;
+  options: ExtensionOption[];
+  span: Span;
+};
+
+// `CREATE TABLESPACE name [OWNER role] LOCATION 'dir' [WITH (option, …)]`.
+// `options` is `[]` when no WITH list is written.
+export type CreateTablespace = {
+  kind: "createTablespace";
+  name: string;
+  owner: string | null;
+  location: string;
+  options: RelationOption[];
   span: Span;
 };
 
@@ -770,6 +835,10 @@ export type Stmt =
   | CreateView
   | CreateSequence
   | CreateDomain
+  | CreateDatabase
+  | CreateSchema
+  | CreateExtension
+  | CreateTablespace
   | CreateTableAs
   | CreateFunction
   | CreateAggregate
@@ -782,6 +851,27 @@ export type Stmt =
   | { kind: "alterType"; name: string[]; action: AlterTypeAction; span: Span }
   // As on alterTable, `actions` is never empty and a RENAME stands alone.
   | { kind: "alterIndex"; ifExists: boolean; name: string[]; actions: AlterIndexAction[]; span: Span }
+  // `args` is null when the signature is left off, as PG allows for a name that
+  // is not overloaded; an aggregate's is never optional, and `star` marks `(*)`.
+  | { kind: "alterFunction"; name: string[]; args: FunctionArg[] | null; action: AlterFunctionAction; span: Span }
+  | {
+      kind: "alterAggregate";
+      name: string[];
+      star: boolean;
+      args: FunctionArg[];
+      action: AlterAggregateAction;
+      span: Span;
+    }
+  // As on alterIndex, `actions` is never empty and a RENAME or SET SCHEMA stands alone.
+  | {
+      kind: "alterView";
+      materialized: boolean;
+      ifExists: boolean;
+      name: string[];
+      actions: AlterViewAction[];
+      span: Span;
+    }
+  | { kind: "alterSequence"; ifExists: boolean; name: string[]; action: AlterSequenceAction; span: Span }
   // Generalized DROP: `DROP {TABLE|VIEW|INDEX|TYPE|SEQUENCE|SCHEMA}
   // [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `objectType` is the
   // folded keyword; `behavior` is the trailing CASCADE/RESTRICT (null when absent).
@@ -3629,6 +3719,171 @@ const createDomainRest = custom<Stmt, SqlTokenType>(
   { expected: '"domain"', first: [{ type: "ident", value: "domain" }] },
 );
 
+// The handlers below parse their own lead word and span from it, as the three
+// above do. None takes `IF NOT EXISTS` by attempt(): DATABASE and TABLESPACE
+// have none in PG, and SCHEMA / EXTENSION peek for `not` after `if`, which is
+// reserved, so no name can be read there in its place — a schema or extension
+// called `if` costs no backtrack.
+function parseIfNotExists(ctx: ParseContext<SqlTokenType>): boolean {
+  const next = ctx.peekAhead(1);
+  const ifNotExists = ctx.is("ident", "if") && next?.type === "ident" && next.value === "not";
+  if (ifNotExists) ctx.parse(kwseq("if", "not", "exists"));
+  return ifNotExists;
+}
+
+// A role: a name, or one of the CURRENT_ / SESSION_ pseudo-roles, which are
+// reserved and so matched by value ahead of `nameWord` (as parseGrantee does).
+const ROLE_KEYWORDS: ReadonlySet<string> = new Set(["current_user", "current_role", "session_user"]);
+function parseRoleSpec(ctx: ParseContext<SqlTokenType>): string {
+  const tok = ctx.peek();
+  if (tok !== null && tok.type === "ident" && ROLE_KEYWORDS.has(tok.value)) {
+    ctx.next();
+    return tok.value;
+  }
+  return ctx.parse(nameWord);
+}
+
+// One CREATE DATABASE option: the entry `relationOption` parses inside a
+// parenthesised `WITH (…)` list, or PG's two-word `CONNECTION LIMIT [=] n`,
+// which it cannot (see optionName). Reusing the entry takes its shape whole, so
+// the namespace form and the `*` and list values pass here too, as PG's grammar
+// would not have them; one shape for every list is the trade relationOption
+// already makes. So is a lone `CONNECTION = n`, read as an ordinary option
+// named `connection`. The list has no delimiter, so it runs while a name leads:
+// an unreserved word or a quoted one, as PG's own option names are IDENT bar a
+// few.
+function isDatabaseOptionStart(ctx: ParseContext<SqlTokenType>): boolean {
+  const tok = ctx.peek();
+  return tok !== null && (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value)));
+}
+
+function parseDatabaseOption(ctx: ParseContext<SqlTokenType>): RelationOption {
+  const next = ctx.peekAhead(1);
+  if (!(ctx.is("ident", "connection") && next?.type === "ident" && next.value === "limit")) {
+    return ctx.parse(relationOption);
+  }
+  const start = ctx.position();
+  ctx.parse(kwseq("connection", "limit"));
+  ctx.eat("op", "=");
+  return { name: "connection limit", value: optionScalar(ctx), span: ctx.spanFrom(start) };
+}
+
+function createDatabaseRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("database"));
+  const name = ctx.parse(nameWord);
+  // `with` is reserved, so it can only open the list; PG lets the list after it
+  // be empty too.
+  ctx.eat("ident", "with");
+  const options: RelationOption[] = [];
+  while (isDatabaseOptionStart(ctx)) options.push(parseDatabaseOption(ctx));
+  return { kind: "createDatabase", name, options, span: ctx.spanFrom(start) };
+}
+
+// One schema element: a GRANT of privileges ON an object, or a CREATE of one of
+// the kinds PG's schema_stmt list has — TABLE / [UNIQUE] INDEX / SEQUENCE / VIEW
+// / TRIGGER, only the last two after OR REPLACE. CREATE and OR REPLACE are
+// consumed here so that a wrong target croaks at the target word itself, and
+// the entry is then entered straight from createStmt's two maps, with the same
+// two starts createStmt gives it. A nested CREATE SCHEMA can therefore never
+// swallow the elements after it. CREATE TABLE AS and a role GRANT share their
+// lead words with an admitted form, so only the finished node tells them apart.
+const SCHEMA_ELEMENT_TARGETS = ["table", "unique", "index", "sequence", "view", "trigger"];
+const SCHEMA_REPLACEABLE_TARGETS = ["view", "trigger"];
+function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
+  if (ctx.is("ident", "grant")) {
+    const grant = ctx.parse(grantStmt);
+    if (grant.kind === "grant" && grant.on === null) {
+      const message = "A schema element GRANT must grant privileges ON an object, not a role";
+      return ctx.croak(message, grant.span.start, grant.span.end);
+    }
+    return grant;
+  }
+  const start = ctx.position();
+  ctx.parse(kw("create"));
+  const tailStart = ctx.position();
+  const orReplace = ctx.is("ident", "or");
+  if (orReplace) ctx.parse(kwseq("or", "replace"));
+  const allowed = orReplace ? SCHEMA_REPLACEABLE_TARGETS : SCHEMA_ELEMENT_TARGETS;
+  const tok = ctx.peek();
+  if (tok === null || tok.type !== "ident" || !allowed.includes(tok.value)) {
+    return ctx.croak(`Expected ${quoteList(allowed)} but found ${describeFound(tok)}`);
+  }
+  if (SCHEMA_REPLACEABLE_TARGETS.includes(tok.value)) {
+    ctx.next(); // the target's lead word, as createStmt consumes it
+    return REPLACEABLE_CREATE[tok.value]!.parse(ctx, start, orReplace);
+  }
+  const element = PLAIN_CREATE[tok.value]!.parse(ctx, tailStart, []);
+  if (element.kind === "createTableAs") {
+    return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", element.span.start, element.span.end);
+  }
+  return element;
+}
+
+function createSchemaRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("schema"));
+  const ifNotExists = parseIfNotExists(ctx);
+  // `authorization` is reserved in PG and leads the role-only form there; this
+  // parser keeps it a name everywhere else and reads it as the clause only here.
+  const name = ctx.is("ident", "authorization") ? null : ctx.parse(nameWord);
+  let authorization: string | null = null;
+  if (name === null || ctx.is("ident", "authorization")) {
+    ctx.parse(kw("authorization"));
+    authorization = parseRoleSpec(ctx);
+  }
+  // Schema elements follow with no `;` between them. PG's grammar takes none
+  // after IF NOT EXISTS.
+  const elements: Stmt[] = [];
+  while (ctx.is("ident", "create") || ctx.is("ident", "grant")) {
+    if (ifNotExists) return ctx.croak("CREATE SCHEMA IF NOT EXISTS cannot include schema elements");
+    elements.push(parseSchemaElement(ctx));
+  }
+  return { kind: "createSchema", ifNotExists, name, authorization, elements, span: ctx.spanFrom(start) };
+}
+
+// `SCHEMA s`, `VERSION v` and `CASCADE`, in any order, after an optional WITH.
+// A version is a string or a word (PG's NonReservedWord_or_Sconst).
+function parseExtensionOptions(ctx: ParseContext<SqlTokenType>): ExtensionOption[] {
+  ctx.eat("ident", "with");
+  const options: ExtensionOption[] = [];
+  while (true) {
+    if (ctx.eat("ident", "schema") !== null) {
+      options.push({ kind: "schema", schema: ctx.parse(nameWord) });
+    } else if (ctx.eat("ident", "version") !== null) {
+      const tok = ctx.peek();
+      const version = tok?.type === "string" ? ctx.next()!.value : ctx.parse(nameWord);
+      options.push({ kind: "version", version });
+    } else if (ctx.eat("ident", "cascade") !== null) {
+      options.push({ kind: "cascade" });
+    } else {
+      return options;
+    }
+  }
+}
+
+function createExtensionRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("extension"));
+  const ifNotExists = parseIfNotExists(ctx);
+  const name = ctx.parse(nameWord);
+  return { kind: "createExtension", ifNotExists, name, options: parseExtensionOptions(ctx), span: ctx.spanFrom(start) };
+}
+
+function createTablespaceRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("tablespace"));
+  const name = ctx.parse(nameWord);
+  const owner = ctx.eat("ident", "owner") !== null ? parseRoleSpec(ctx) : null;
+  ctx.parse(kw("location"));
+  const tok = ctx.peek();
+  if (tok?.type !== "string") return ctx.croak(`Expected a string but found ${describeFound(tok)}`);
+  ctx.next();
+  // `with` is reserved, so it can only open the option list here.
+  const options = ctx.eat("ident", "with") !== null ? ctx.parse(relationOptions) : [];
+  return { kind: "createTablespace", name, owner, location: tok.value, options, span: ctx.spanFrom(start) };
+}
+
 // The body of a (MATERIALIZED) VIEW after the VIEW keyword: `[IF NOT EXISTS] name
 // [(cols)] AS query [WITH [NO] DATA]`. The query reuses the shared `query` rule.
 function parseViewBody(
@@ -3734,13 +3989,15 @@ function parseSecurityKind(ctx: ParseContext<SqlTokenType>): boolean {
 }
 
 // The order-free characteristic loop of CREATE FUNCTION. Stops at the first token
-// that is not an option lead-word (the trailing `;`). All option words stay
-// unreserved and are matched by value.
-function parseFunctionOptions(ctx: ParseContext<SqlTokenType>): FunctionOption[] {
+// that is not an option lead-word (the trailing `;`), or, given `only`, at the
+// first that `only` does not name. All option words stay unreserved and are
+// matched by value.
+function parseFunctionOptions(ctx: ParseContext<SqlTokenType>, only?: ReadonlySet<string>): FunctionOption[] {
   const options: FunctionOption[] = [];
   while (true) {
     const tok = ctx.peek();
     if (tok === null || tok.type !== "ident") break;
+    if (only !== undefined && !only.has(tok.value)) break;
     switch (tok.value) {
       case "language": {
         ctx.next();
@@ -3888,16 +4145,7 @@ function parseAggregateBody(ctx: ParseContext<SqlTokenType>, start: Position, or
       span: ctx.spanFrom(start),
     };
   }
-  let star = false;
-  let args: FunctionArg[] = [];
-  if (ctx.peekAhead(1)?.type === "op" && ctx.peekAhead(1)?.value === "*") {
-    ctx.next(); // "("
-    ctx.next(); // "*"
-    expectClose(ctx);
-    star = true;
-  } else {
-    args = ctx.parse(functionArgs);
-  }
+  const { star, args } = parseAggregateSignature(ctx);
   return {
     kind: "createAggregate",
     orReplace,
@@ -3907,6 +4155,17 @@ function parseAggregateBody(ctx: ParseContext<SqlTokenType>, start: Position, or
     options: parseAggregateOptions(ctx),
     span: ctx.spanFrom(start),
   };
+}
+
+// An aggregate's `( * )` or `( type, … )` signature, its `(` not yet consumed.
+function parseAggregateSignature(ctx: ParseContext<SqlTokenType>): { star: boolean; args: FunctionArg[] } {
+  if (ctx.is("punc", "(") && ctx.peekAhead(1)?.type === "op" && ctx.peekAhead(1)?.value === "*") {
+    ctx.next(); // "("
+    ctx.next(); // "*"
+    expectClose(ctx);
+    return { star: true, args: [] };
+  }
+  return { star: false, args: ctx.parse(functionArgs) };
 }
 
 // One trigger event: INSERT / DELETE / TRUNCATE, or UPDATE with an optional
@@ -4005,7 +4264,7 @@ function parseTempPrefix(ctx: ParseContext<SqlTokenType>): string[] {
 // PLAIN_CREATE dispatch PEEKS: each handler parses its own lead keyword, so its
 // node's span still opens on `TABLE` / `INDEX` / …. Every handler is offered the
 // position just after CREATE and the prefix-modifier bag, but only `table` reads
-// them — the other five build their own span from their own keyword and drop the
+// them — the others build their own span from their own keyword and drop the
 // bag, which is safe only because createStmt refuses modifiers ahead of any
 // target but TABLE. Widen that check along with any handler that learns them.
 const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
@@ -4017,6 +4276,10 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   type: { parse: (ctx) => ctx.parse(createTypeRest) },
   sequence: { parse: (ctx) => ctx.parse(createSequenceRest) },
   domain: { parse: (ctx) => ctx.parse(createDomainRest) },
+  database: { parse: createDatabaseRest },
+  schema: { parse: createSchemaRest },
+  extension: { parse: createExtensionRest },
+  tablespace: { parse: createTablespaceRest },
 };
 
 // REPLACEABLE_CREATE dispatch CONSUMES the lead word: these bodies are entered
@@ -4051,12 +4314,24 @@ for (const key of Object.keys(PLAIN_CREATE)) {
   }
 }
 
+// Every admitted target must lead an entry in the map parseSchemaElement looks
+// it up in, or its `!` would find nothing, and an OR REPLACE target must be
+// admitted without it too; checked at load, as the overlap above is.
+for (const target of SCHEMA_ELEMENT_TARGETS) {
+  const map: Record<string, unknown> = SCHEMA_REPLACEABLE_TARGETS.includes(target) ? REPLACEABLE_CREATE : PLAIN_CREATE;
+  if (!Object.hasOwn(map, target)) throw new Error(`Schema element target "${target}" leads no CREATE entry`);
+}
+for (const target of SCHEMA_REPLACEABLE_TARGETS) {
+  if (!SCHEMA_ELEMENT_TARGETS.includes(target)) throw new Error(`Schema element target "${target}" is not admitted`);
+}
+
 // After CREATE: an optional `OR REPLACE`, then one of the objects that permit it
 // (VIEW / MATERIALIZED VIEW / FUNCTION / AGGREGATE / TRIGGER) — or, with no such
 // prefix, one of the remaining keyword-led targets (TABLE / [UNIQUE] INDEX /
-// TYPE / SEQUENCE / DOMAIN), TABLE alone taking the TEMP / UNLOGGED prefix.
-// `OR REPLACE` before a non-replaceable object croaks, as does a prefix before
-// anything but TABLE — PG's TEMP VIEW and TEMP SEQUENCE are not parsed.
+// TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION / TABLESPACE), TABLE
+// alone taking the TEMP / UNLOGGED prefix. `OR REPLACE` before a non-replaceable
+// object croaks, as does a prefix before anything but TABLE — PG's TEMP VIEW and
+// TEMP SEQUENCE are not parsed.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -4246,8 +4521,9 @@ function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt 
   return { kind: "alterTable", ifExists, name, actions, span: ctx.spanFrom(start) };
 }
 
-// The `action[, …]` list of ALTER TABLE and ALTER INDEX, whose lead words are
-// `map`'s keys. A `solo` kind is fine alone and rejected beside any other.
+// The `action[, …]` list of ALTER TABLE, INDEX and [MATERIALIZED] VIEW, whose
+// lead words are `map`'s keys. A `solo` kind is fine alone and rejected beside
+// any other.
 function parseActionList<A extends { kind: string }>(
   ctx: ParseContext<SqlTokenType>,
   target: string,
@@ -4298,7 +4574,13 @@ function parseSetSchema(ctx: ParseContext<SqlTokenType>): AlterSetSchema {
   return { kind: "setSchema", schema: ctx.parse(nameWord) };
 }
 
-// A map per target; only INDEX takes a list, as ALTER TABLE does. Each croak is
+// SET SCHEMA from its SET, for a target whose SET leads nothing else.
+function parseSetSchemaAction(ctx: ParseContext<SqlTokenType>): AlterSetSchema {
+  ctx.next(); // SET
+  return parseSetSchema(ctx);
+}
+
+// A map per target; only INDEX and VIEW take a list, as ALTER TABLE does. Each croak is
 // the comma form over its own keys, as ALTER_ACTIONS' is.
 const SCHEMA_ACTIONS: DispatchMap<AlterSchemaAction> = {
   rename: { parse: parseRenameTo },
@@ -4392,15 +4674,21 @@ const TYPE_ACTIONS: DispatchMap<AlterTypeAction> = {
     },
   },
   owner: { parse: parseOwnerTo },
-  set: {
-    parse: (ctx) => {
-      ctx.next(); // SET
-      return parseSetSchema(ctx);
-    },
-  },
+  set: { parse: parseSetSchemaAction },
 };
 
-// RESET shares SET's option-list rule and, as PG does, refuses a value in it.
+// `RESET (name, …)`, ALTER INDEX's and ALTER VIEW's. It shares SET's option-list
+// rule and, as PG does, refuses a value in it.
+function parseResetOptions(ctx: ParseContext<SqlTokenType>): Extract<AlterIndexAction, { kind: "resetOptions" }> {
+  ctx.next(); // RESET
+  const options = ctx.parse(relationOptions);
+  const valued = options.find((option) => option.value !== null);
+  if (valued !== undefined) {
+    ctx.croak("RESET must not include values for parameters", valued.span.start, valued.span.end);
+  }
+  return { kind: "resetOptions", options };
+}
+
 const INDEX_ACTIONS: DispatchMap<AlterIndexAction> = {
   rename: { parse: parseRenameTo },
   set: {
@@ -4413,23 +4701,169 @@ const INDEX_ACTIONS: DispatchMap<AlterIndexAction> = {
       return { kind: "setTablespace", tablespace: ctx.parse(nameWord) };
     },
   },
-  reset: {
+  reset: { parse: parseResetOptions },
+};
+
+// The function attributes ALTER FUNCTION takes: CREATE FUNCTION's, bar the
+// LANGUAGE, AS and WINDOW that only a definition can carry.
+const ALTER_FUNCTION_OPTIONS: ReadonlySet<string> = new Set([
+  "immutable",
+  "stable",
+  "volatile",
+  "leakproof",
+  "not",
+  "strict",
+  "called",
+  "returns",
+  "external",
+  "security",
+  "parallel",
+  "cost",
+  "rows",
+  "set",
+]);
+// Only a NOT that does not lead NOT LEAKPROOF stops the loop at once.
+function parseAlterFunctionOptions(ctx: ParseContext<SqlTokenType>): AlterFunctionAction {
+  const options = parseFunctionOptions(ctx, ALTER_FUNCTION_OPTIONS);
+  if (options.length === 0) ctx.parse(kwseq("not", "leakproof"));
+  return { kind: "options", options };
+}
+
+// SET leads both SET SCHEMA and an attribute's `SET parameter {TO | =} value`.
+// It is SET SCHEMA only when a name follows `schema`, as in PG, where `SET
+// schema = …` and `SET schema TO …` set a parameter of that name; TO and FROM
+// are reserved, so an unquoted one is never the new schema.
+const FUNCTION_ACTIONS: DispatchMap<AlterFunctionAction> = {
+  rename: { parse: parseRenameTo },
+  owner: { parse: parseOwnerTo },
+  set: {
     parse: (ctx) => {
-      ctx.next(); // RESET
-      const options = ctx.parse(relationOptions);
-      const valued = options.find((option) => option.value !== null);
-      if (valued !== undefined) {
-        ctx.croak("RESET must not include values for parameters", valued.span.start, valued.span.end);
-      }
-      return { kind: "resetOptions", options };
+      const word = ctx.peekAhead(1);
+      const after = ctx.peekAhead(2);
+      const setSchema =
+        word?.type === "ident" &&
+        word.value === "schema" &&
+        (after?.type === "qident" || (after?.type === "ident" && !RESERVED.has(after.value)));
+      if (!setSchema) return parseAlterFunctionOptions(ctx);
+      ctx.next(); // SET
+      return parseSetSchema(ctx);
     },
   },
 };
+for (const word of ALTER_FUNCTION_OPTIONS) {
+  if (!Object.hasOwn(FUNCTION_ACTIONS, word)) FUNCTION_ACTIONS[word] = { parse: parseAlterFunctionOptions };
+}
+
+const AGGREGATE_ACTIONS: DispatchMap<AlterAggregateAction> = {
+  rename: { parse: parseRenameTo },
+  owner: { parse: parseOwnerTo },
+  set: { parse: parseSetSchemaAction },
+};
+
+// After RENAME, TO is tried before a column name, as ALTER TABLE's RENAME does.
+const MATERIALIZED_VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
+  rename: {
+    parse: (ctx) => {
+      ctx.next(); // RENAME
+      if (ctx.eat("ident", "to") !== null) return { kind: "rename", to: ctx.parse(nameWord) };
+      ctx.eat("ident", "column"); // optional COLUMN
+      const from = ctx.parse(nameWord);
+      ctx.parse(kw("to"));
+      return { kind: "renameColumn", from, to: ctx.parse(nameWord) };
+    },
+  },
+  owner: { parse: parseOwnerTo },
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
+      if (!ctx.is("ident", "schema")) {
+        ctx.croak(`Expected ${quoteList(["(", "schema"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return parseSetSchema(ctx);
+    },
+  },
+  reset: { parse: parseResetOptions },
+};
+// A materialized view has no column defaults to set or drop.
+const VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
+  ...MATERIALIZED_VIEW_ACTIONS,
+  alter: {
+    parse: (ctx) => {
+      ctx.next(); // ALTER
+      ctx.eat("ident", "column"); // optional COLUMN
+      const column = ctx.parse(nameWord);
+      if (ctx.eat("ident", "set") !== null) {
+        ctx.parse(kw("default"));
+        return { kind: "setDefault", column, expr: ctx.parse(expression) };
+      }
+      if (ctx.eat("ident", "drop") === null) {
+        ctx.croak(`Expected ${quoteList(["set", "drop"])} but found ${describeFound(ctx.peek())}`);
+      }
+      ctx.parse(kw("default"));
+      return { kind: "dropDefault", column };
+    },
+  },
+};
+const SOLO_VIEW_ACTIONS: Partial<Record<AlterViewAction["kind"], string>> = {
+  rename: "RENAME",
+  renameColumn: "RENAME",
+  setSchema: "SET SCHEMA",
+};
+
+// Every sequence option leads an `options` action, which takes the whole run.
+// Only a NO that leads none of NO {MINVALUE | MAXVALUE | CYCLE} stops it at once.
+function parseAlterSequenceOptions(ctx: ParseContext<SqlTokenType>): AlterSequenceAction {
+  const options = parseSequenceOptions(ctx);
+  if (options.length === 0) {
+    ctx.next(); // NO
+    ctx.croak(`Expected ${quoteList(["minvalue", "maxvalue", "cycle"])} but found ${describeFound(ctx.peek())}`);
+  }
+  return { kind: "options", options };
+}
+// parseSequenceOptions' lead words, which it matches by hand and so cannot list.
+const SEQUENCE_OPTIONS = [
+  "as",
+  "increment",
+  "minvalue",
+  "maxvalue",
+  "start",
+  "restart",
+  "cache",
+  "cycle",
+  "no",
+  "owned",
+];
+const SEQUENCE_ACTIONS: DispatchMap<AlterSequenceAction> = {
+  rename: { parse: parseRenameTo },
+  owner: { parse: parseOwnerTo },
+  set: { parse: parseSetSchemaAction },
+};
+for (const word of SEQUENCE_OPTIONS) SEQUENCE_ACTIONS[word] = { parse: parseAlterSequenceOptions };
 
 const SCHEMA_ACTION_EXPECTED = keyList(SCHEMA_ACTIONS);
 const DOMAIN_ACTION_EXPECTED = keyList(DOMAIN_ACTIONS);
 const TYPE_ACTION_EXPECTED = keyList(TYPE_ACTIONS);
 const INDEX_ACTION_EXPECTED = keyList(INDEX_ACTIONS);
+const FUNCTION_ACTION_EXPECTED = keyList(FUNCTION_ACTIONS);
+const AGGREGATE_ACTION_EXPECTED = keyList(AGGREGATE_ACTIONS);
+const VIEW_ACTION_EXPECTED = keyList(VIEW_ACTIONS);
+const MATERIALIZED_VIEW_ACTION_EXPECTED = keyList(MATERIALIZED_VIEW_ACTIONS);
+const SEQUENCE_ACTION_EXPECTED = keyList(SEQUENCE_ACTIONS);
+
+// `[IF EXISTS] name action[, …]`, the rest of ALTER [MATERIALIZED] VIEW once VIEW
+// is consumed.
+function alterViewRest(ctx: ParseContext<SqlTokenType>, start: Position, materialized: boolean): Stmt {
+  const ifExists = parseIfExists(ctx);
+  const name = ctx.parse(qualName);
+  const [map, expected] = materialized
+    ? [MATERIALIZED_VIEW_ACTIONS, MATERIALIZED_VIEW_ACTION_EXPECTED]
+    : [VIEW_ACTIONS, VIEW_ACTION_EXPECTED];
+  const parseAction = (c: ParseContext<SqlTokenType>) => dispatch(map, expected, c);
+  const target = materialized ? "MATERIALIZED VIEW" : "VIEW";
+  const actions = parseActionList(ctx, target, parseAction, map, SOLO_VIEW_ACTIONS);
+  return { kind: "alterView", materialized, ifExists, name, actions, span: ctx.spanFrom(start) };
+}
 
 // The ALTER targets. Dispatch peeks, as PLAIN_CREATE's does: each handler
 // consumes its own lead word, and is handed the position before ALTER so its
@@ -4469,6 +4903,45 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
       const parseAction = (c: ParseContext<SqlTokenType>) => dispatch(INDEX_ACTIONS, INDEX_ACTION_EXPECTED, c);
       const actions = parseActionList(ctx, "INDEX", parseAction, INDEX_ACTIONS, { rename: "RENAME" });
       return { kind: "alterIndex", ifExists, name, actions, span: ctx.spanFrom(start) };
+    },
+  },
+  function: {
+    parse: (ctx, start) => {
+      ctx.next(); // FUNCTION
+      const name = ctx.parse(qualName);
+      const args = ctx.is("punc", "(") ? ctx.parse(functionArgs) : null;
+      const action = dispatch(FUNCTION_ACTIONS, FUNCTION_ACTION_EXPECTED, ctx);
+      return { kind: "alterFunction", name, args, action, span: ctx.spanFrom(start) };
+    },
+  },
+  aggregate: {
+    parse: (ctx, start) => {
+      ctx.next(); // AGGREGATE
+      const name = ctx.parse(qualName);
+      const { star, args } = parseAggregateSignature(ctx);
+      const action = dispatch(AGGREGATE_ACTIONS, AGGREGATE_ACTION_EXPECTED, ctx);
+      return { kind: "alterAggregate", name, star, args, action, span: ctx.spanFrom(start) };
+    },
+  },
+  view: {
+    parse: (ctx, start) => {
+      ctx.next(); // VIEW
+      return alterViewRest(ctx, start, false);
+    },
+  },
+  materialized: {
+    parse: (ctx, start) => {
+      ctx.parse(kwseq("materialized", "view"));
+      return alterViewRest(ctx, start, true);
+    },
+  },
+  sequence: {
+    parse: (ctx, start) => {
+      ctx.next(); // SEQUENCE
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(qualName);
+      const action = dispatch(SEQUENCE_ACTIONS, SEQUENCE_ACTION_EXPECTED, ctx);
+      return { kind: "alterSequence", ifExists, name, action, span: ctx.spanFrom(start) };
     },
   },
 };
