@@ -63,6 +63,13 @@ const SUPPLEMENTAL = [
   "SELECT a IS JSON, b IS NOT JSON OBJECT WITH UNIQUE KEYS, c IS JSON ARRAY WITHOUT UNIQUE FROM t;",
   "SELECT EXISTS (SELECT 1 FROM u) FROM t;",
   "SELECT INTERVAL '1 day' FROM t;",
+  // The niladic keyword functions (with and without a precision, which is
+  // omitted rather than null when absent), the typed datetime literals, whose
+  // type node carries its own span, and both spellings of OVERLAY.
+  "SELECT current_date, current_timestamp(3), localtime(0), user, session_user FROM t;",
+  "SELECT date '2024-01-01', time '10:00', timestamp(3) with time zone '2024-01-01 00:00' FROM t;",
+  "SELECT overlay(s PLACING 'ab' FROM 2 FOR 3), overlay(s PLACING 'x' FROM 1), overlay(s, 'x', 1) FROM t;",
+  "CREATE TABLE t (at timestamp DEFAULT current_timestamp, d date DEFAULT date '2020-01-01');",
   "SELECT count(*) FILTER (WHERE a > 1) FROM t;",
   "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM t;",
   "SELECT count(*) FROM t;",
