@@ -15073,6 +15073,337 @@
     ]
   },
   {
+    "source": "INSERT INTO t AS x DEFAULT VALUES RETURNING x.id;",
+    "ast": [
+      {
+        "kind": "insert",
+        "table": [
+          "t"
+        ],
+        "alias": "x",
+        "columns": null,
+        "source": {
+          "kind": "defaultValues"
+        },
+        "onConflict": null,
+        "returning": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "x",
+                "id"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 44
+                },
+                "end": {
+                  "row": 1,
+                  "col": 48
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 48
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "INSERT INTO t (a, b) VALUES (DEFAULT, 1), (2, DEFAULT);",
+    "ast": [
+      {
+        "kind": "insert",
+        "table": [
+          "t"
+        ],
+        "columns": [
+          "a",
+          "b"
+        ],
+        "source": {
+          "kind": "values",
+          "rows": [
+            [
+              {
+                "kind": "default",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 29
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 36
+                  }
+                }
+              },
+              {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 38
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 39
+                  }
+                }
+              }
+            ],
+            [
+              {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 43
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 44
+                  }
+                }
+              },
+              {
+                "kind": "default",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 46
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 53
+                  }
+                }
+              }
+            ]
+          ]
+        },
+        "onConflict": null,
+        "returning": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 54
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "INSERT INTO t AS x (a) OVERRIDING SYSTEM VALUE VALUES (1) ON CONFLICT ON CONSTRAINT t_pkey DO UPDATE SET a = x.a + 1;",
+    "ast": [
+      {
+        "kind": "insert",
+        "table": [
+          "t"
+        ],
+        "alias": "x",
+        "columns": [
+          "a"
+        ],
+        "overriding": "system",
+        "source": {
+          "kind": "values",
+          "rows": [
+            [
+              {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 55
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 56
+                  }
+                }
+              }
+            ]
+          ]
+        },
+        "onConflict": {
+          "target": null,
+          "constraint": "t_pkey",
+          "action": {
+            "kind": "update",
+            "set": [
+              {
+                "column": "a",
+                "value": {
+                  "kind": "binary",
+                  "op": "+",
+                  "left": {
+                    "kind": "name",
+                    "parts": [
+                      "x",
+                      "a"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 109
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 112
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 115
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 116
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 109
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 116
+                    }
+                  }
+                }
+              }
+            ],
+            "where": null
+          }
+        },
+        "returning": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 116
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "INSERT INTO t OVERRIDING USER VALUE SELECT * FROM u ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING;",
+    "ast": [
+      {
+        "kind": "insert",
+        "table": [
+          "t"
+        ],
+        "columns": null,
+        "overriding": "user",
+        "source": {
+          "kind": "select",
+          "query": {
+            "kind": "select",
+            "with_": null,
+            "recursive": false,
+            "distinct": false,
+            "columns": [
+              {
+                "expr": {
+                  "kind": "star",
+                  "table": null,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 43
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 44
+                    }
+                  }
+                },
+                "alias": null
+              }
+            ],
+            "from": [
+              {
+                "kind": "table",
+                "name": [
+                  "u"
+                ],
+                "alias": null
+              }
+            ],
+            "where": null,
+            "groupBy": null,
+            "having": null,
+            "window": null,
+            "orderBy": null,
+            "limit": null,
+            "offset": null,
+            "locking": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 36
+              },
+              "end": {
+                "row": 1,
+                "col": 51
+              }
+            }
+          }
+        },
+        "onConflict": {
+          "target": null,
+          "constraint": "t_pkey",
+          "action": {
+            "kind": "nothing"
+          }
+        },
+        "returning": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 95
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {

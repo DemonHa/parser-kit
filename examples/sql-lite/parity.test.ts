@@ -169,6 +169,12 @@ const SUPPLEMENTAL = [
   "DEALLOCATE PREPARE my_stmt;",
   "INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;",
   "CREATE TABLE t (flags bit DEFAULT B'1011', mask bit DEFAULT X'ff', label text DEFAULT U&'\\0041');",
+  // INSERT's DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON
+  // CONFLICT ON CONSTRAINT; the INSERT rows above pin the keys they omit.
+  "INSERT INTO t AS x DEFAULT VALUES RETURNING x.id;",
+  "INSERT INTO t (a, b) VALUES (DEFAULT, 1), (2, DEFAULT);",
+  "INSERT INTO t AS x (a) OVERRIDING SYSTEM VALUE VALUES (1) ON CONFLICT ON CONSTRAINT t_pkey DO UPDATE SET a = x.a + 1;",
+  "INSERT INTO t OVERRIDING USER VALUE SELECT * FROM u ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING;",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind
