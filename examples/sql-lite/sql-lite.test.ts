@@ -3134,7 +3134,7 @@ describe("SQL-lite keyword dispatch maps", () => {
 
   it("names the table-item alternatives in the join form", () => {
     expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(
-      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or a name but found "42"/,
+      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or "like" or a name but found "42"/,
     );
   });
 
@@ -3345,6 +3345,222 @@ describe("SQL-lite multi-word type names", () => {
       col(name("a"), "precision"),
       col(name("b"), "varying"),
     ]);
+  });
+});
+
+// --- CREATE TABLE storage options, LIKE and INHERITS ---
+
+describe("SQL-lite CREATE TABLE storage options, LIKE and INHERITS", () => {
+  const stmt = (src: string) => firstStmt(src) as any;
+  const items = (body: string) => stmt(`CREATE TABLE t (${body});`).items;
+  const options = (list: string) => stmt(`CREATE TABLE t (id int) WITH (${list});`).options;
+  const rawFirst = (text: string) => sqlLite.parse(text)[0] as Record<string, any>;
+  const idCol = { kind: "column", name: "id", dataType: ct("int"), constraints: [] };
+
+  it("parses LIKE as a table item, with its INCLUDING / EXCLUDING options in source order", () => {
+    expect(items("LIKE src INCLUDING DEFAULTS EXCLUDING INDEXES, id int")).toEqual([
+      {
+        kind: "likeTable",
+        table: ["src"],
+        options: [
+          { mode: "including", property: "defaults" },
+          { mode: "excluding", property: "indexes" },
+        ],
+      },
+      idCol,
+    ]);
+    // The options are optional, and the source may be qualified.
+    expect(items("id int, LIKE app.src")).toEqual([idCol, { kind: "likeTable", table: ["app", "src"], options: [] }]);
+    expect(items("LIKE src INCLUDING ALL")[0].options).toEqual([{ mode: "including", property: "all" }]);
+  });
+
+  it("reserves `like`, so a bare `like` is the LIKE clause and never a name", () => {
+    // The one reservation this clause costs. PG makes the same call — `like` is
+    // a type_func_name_keyword there — so these are not names in PG either:
+    expect(items("like text")).toEqual([{ kind: "likeTable", table: ["text"], options: [] }]);
+    expect(() => sqlLite.parse("SELECT like FROM t;")).toThrow(/Expected a name but found "like"/);
+    expect(() => sqlLite.parse("SELECT * FROM t like;")).toThrow(/but found "like"/);
+    expect(() => sqlLite.parse("CREATE TABLE like (id int);")).toThrow(/Expected a name but found "like"/);
+    expect(() => sqlLite.parse("ALTER TABLE t ADD like text;")).toThrow(/Expected a name but found "like"/);
+    // …but PG's tier still admits it as an alias after AS, a function name, a
+    // type name and the tail of a qualified name. Reserved here, it loses all
+    // four, exactly as any other reserved word (`left`, say) already does.
+    expect(() => sqlLite.parse("SELECT a AS like FROM t;")).toThrow(/Expected an alias but found "like"/);
+    expect(() => sqlLite.parse("SELECT like('abc', 'a%');")).toThrow(/Expected a name but found "like"/);
+    expect(() => sqlLite.parse("SELECT a::like FROM t;")).toThrow(/Expected a name but found "like"/);
+    expect(() => sqlLite.parse("SELECT t.like FROM t;")).toThrow(/Expected a name but found "like"/);
+    // Quoted, it is a name as it always was.
+    expect(items('"like" text')).toEqual([{ kind: "column", name: "like", dataType: ct("text"), constraints: [] }]);
+    // The LIKE operator never read the word as a name, so it is untouched.
+    expect(exprOf("name LIKE 'a%'")).toMatchObject({ kind: "like", negated: false, ci: false });
+  });
+
+  it("parses INHERITS, WITH, ON COMMIT and TABLESPACE after the element list", () => {
+    expect(
+      stmt("CREATE TABLE t (id int) INHERITS (p, app.q) WITH (fillfactor = 70) ON COMMIT DELETE ROWS TABLESPACE fast;"),
+    ).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["t"],
+      items: [idCol],
+      inherits: [["p"], ["app", "q"]],
+      options: [{ name: "fillfactor", value: num(70) }],
+      onCommit: "deleteRows",
+      tablespace: "fast",
+    });
+    expect(stmt("CREATE TABLE t (id int) ON COMMIT PRESERVE ROWS;").onCommit).toBe("preserveRows");
+    expect(stmt("CREATE TABLE t (id int) ON COMMIT DROP;").onCommit).toBe("drop");
+    // Any subset may be written, so long as it keeps PG's order.
+    expect(stmt("CREATE TABLE t (LIKE src) TABLESPACE ts;")).toMatchObject({ tablespace: "ts" });
+    expect(stmt('CREATE TABLE t (id int) INHERITS ("Parent");').inherits).toEqual([["Parent"]]);
+  });
+
+  it("omits every clause key from a table that writes none of them", () => {
+    // Each key is spread in only when its clause is written, so the AST golden's
+    // existing CREATE TABLE rows keep exactly the shape they had.
+    const plain = stmt("CREATE TABLE t (id int);");
+    for (const key of ["inherits", "options", "onCommit", "tablespace"]) expect(plain).not.toHaveProperty(key);
+  });
+
+  it("reads each option as a name with an optional, optionally `=`-led value", () => {
+    expect(options("a = 1, b 2, c, d = 'x', e = word, f = true, g false")).toEqual([
+      { name: "a", value: num(1) },
+      { name: "b", value: num(2) },
+      { name: "c", value: null },
+      { name: "d", value: str("x") },
+      // A bare word and a quoted string are different values, and stay so.
+      { name: "e", value: name("word") },
+      { name: "f", value: { kind: "bool", value: true } },
+      { name: "g", value: { kind: "bool", value: false } },
+    ]);
+    // A sign belongs to the number it precedes.
+    expect(options("x = -1, y +2.5")).toEqual([
+      { name: "x", value: num(-1) },
+      { name: "y", value: num(2.5) },
+    ]);
+    // Names (PG's ColLabel) and word values may be reserved words, or quoted.
+    expect(options('analyze, null = on, "Mixed" = "Word"')).toEqual([
+      { name: "analyze", value: null },
+      { name: "null", value: name("on") },
+      { name: "Mixed", value: name("Word") },
+    ]);
+  });
+
+  it("reads a reloption's namespace, and COPY's `*` and list values", () => {
+    // `namespace` follows the omit-when-absent rule: only a qualified name has it.
+    expect(options("toast.autovacuum_enabled = false, toast.fillfactor 70, toast.x, plain")).toEqual([
+      { namespace: "toast", name: "autovacuum_enabled", value: { kind: "bool", value: false } },
+      { namespace: "toast", name: "fillfactor", value: num(70) },
+      { namespace: "toast", name: "x", value: null },
+      { name: "plain", value: null },
+    ]);
+    expect(options("force_quote *, force_null (a, 'b')")).toEqual([
+      { name: "force_quote", value: star() },
+      { name: "force_null", value: { kind: "optionList", items: [name("a"), str("b")] } },
+    ]);
+  });
+
+  it("records spans for LIKE items, options and signed values", () => {
+    const node = rawFirst("CREATE TABLE t (LIKE src INCLUDING ALL) WITH (x = -1);");
+    expect(node.items[0].span).toEqual({ start: { row: 1, col: 16 }, end: { row: 1, col: 38 } });
+    expect(node.options[0].span).toEqual({ start: { row: 1, col: 46 }, end: { row: 1, col: 52 } });
+    expect(node.options[0].value.span).toEqual({ start: { row: 1, col: 50 }, end: { row: 1, col: 52 } });
+  });
+
+  it("keeps the clause and option words usable as names", () => {
+    // Everything here but `fillfactor` — there as a sample option name, which
+    // the grammar never matches by value — is matched by value in a position no
+    // name could occupy: past a source table's name, or past the element list's
+    // `)`, or ahead of a CTAS's AS. So none of it needed reserving. (`with` and
+    // `on` were reserved already.)
+    const words = [
+      "inherits",
+      "tablespace",
+      "including",
+      "excluding",
+      "commit",
+      "preserve",
+      "rows",
+      "comments",
+      "compression",
+      "constraints",
+      "defaults",
+      "identity",
+      "generated",
+      "indexes",
+      "statistics",
+      "storage",
+      "fillfactor",
+    ];
+    expect(stmt(`SELECT ${words.join(", ")} FROM t;`).columns).toEqual(words.map((w) => col(name(w))));
+    expect(items(words.map((w) => `${w} int`).join(", ")).map((c: any) => c.name)).toEqual(words);
+    expect(stmt("SELECT a AS inherits, b AS tablespace FROM t;").columns).toEqual([
+      col(name("a"), "inherits"),
+      col(name("b"), "tablespace"),
+    ]);
+    // …as table names, including in the very clauses that use them as keywords.
+    expect(stmt("CREATE TABLE inherits (LIKE including) INHERITS (tablespace) TABLESPACE storage;")).toMatchObject({
+      name: ["inherits"],
+      items: [{ kind: "likeTable", table: ["including"], options: [] }],
+      inherits: [["tablespace"]],
+      tablespace: "storage",
+    });
+  });
+
+  it("takes the storage clauses ahead of a CREATE TABLE AS, apart from its WITH [NO] DATA tail", () => {
+    expect(
+      stmt("CREATE TABLE t WITH (fillfactor = 70) ON COMMIT DROP TABLESPACE ts AS SELECT 1 WITH NO DATA;"),
+    ).toEqual({
+      kind: "createTableAs",
+      ifNotExists: false,
+      name: ["t"],
+      columns: null,
+      query: sel({ columns: [col(num(1))] }),
+      withData: false,
+      options: [{ name: "fillfactor", value: num(70) }],
+      onCommit: "drop",
+      tablespace: "ts",
+    });
+    // After a column-name list too, which still backtracks to the element-list
+    // form when no AS follows.
+    expect(stmt("CREATE TABLE t (a, b) WITH (fillfactor = 70) AS SELECT 1, 2;")).toMatchObject({
+      kind: "createTableAs",
+      columns: ["a", "b"],
+      options: [{ name: "fillfactor", value: num(70) }],
+    });
+    expect(stmt("CREATE TABLE t (id int) WITH (fillfactor = 70);").kind).toBe("createTable");
+    // A CTAS with no clause keeps exactly the node it had.
+    const plain = stmt("CREATE TABLE snap AS SELECT 1 WITH NO DATA;");
+    expect(plain).toMatchObject({ kind: "createTableAs", withData: false });
+    for (const key of ["options", "onCommit", "tablespace"]) expect(plain).not.toHaveProperty(key);
+    // INHERITS belongs to the element-list form only, as in PG; and once a
+    // storage clause follows the name, AS is the only way on.
+    expect(() => sqlLite.parse("CREATE TABLE t INHERITS (p) AS SELECT 1;")).toThrow(/but found "inherits"/);
+    expect(() => sqlLite.parse("CREATE TABLE t WITH (x = 1) (id int);")).toThrow(/Expected "as" but found "\("/);
+  });
+
+  it("rejects malformed clauses, empty lists and out-of-order clauses", () => {
+    const bad = (tail: string) => () => sqlLite.parse(`CREATE TABLE t (id int) ${tail};`);
+    expect(bad("WITH ()")).toThrow(/Expected an option name but found "\)"/);
+    expect(bad("WITH (a =)")).toThrow(/Expected an option value but found "\)"/);
+    expect(bad("WITH (a - b)")).toThrow(/Expected an option value but found "-"/);
+    expect(bad("WITH (a b c)")).toThrow(/Expected "\)" but found "c"/);
+    expect(bad("WITH fillfactor = 70")).toThrow(/Expected "\(" but found "fillfactor"/);
+    expect(bad("WITH (a = ())")).toThrow(/Expected an option value but found "\)"/);
+    expect(bad("WITH (a = (*))")).toThrow(/Expected an option value but found "\*"/);
+    expect(bad("WITH (toast. = 1)")).toThrow(/Expected an option name but found "="/);
+    expect(bad("INHERITS ()")).toThrow(/Expected a name but found "\)"/);
+    expect(bad("INHERITS p")).toThrow(/Expected "\(" but found "p"/);
+    expect(bad("ON COMMIT KEEP ROWS")).toThrow(/Expected "preserve rows" or "delete rows" or "drop" but found "keep"/);
+    expect(bad("ON DELETE ROWS")).toThrow(/Expected "commit" but found "delete"/);
+    expect(bad("TABLESPACE")).toThrow(/Expected a name but found ";"/);
+    // PG fixes the order of the clauses, and so does this.
+    expect(bad("TABLESPACE ts WITH (a = 1)")).toThrow(/Expected ";" but found "with"/);
+    expect(bad("ON COMMIT DROP INHERITS (p)")).toThrow(/Expected ";" but found "inherits"/);
+    expect(() => sqlLite.parse("CREATE TABLE t (LIKE src INCLUDING everything);")).toThrow(
+      /Expected "comments", "compression", "constraints", "defaults", "identity", "generated", "indexes", "statistics", "storage" or "all" but found "everything"/,
+    );
+    expect(() => sqlLite.parse("CREATE TABLE t (LIKE);")).toThrow(/Expected a name but found "\)"/);
   });
 });
 

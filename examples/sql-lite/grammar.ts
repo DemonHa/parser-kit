@@ -28,9 +28,10 @@ import {
 } from "@parser-kit/core";
 import { type SqlTokenType, sqlLexer } from "./lexer";
 
-// SQL-lite parses a slice of PostgreSQL DDL — CREATE TABLE (incl. TABLE AS) /
-// INDEX / TYPE (enum, composite, RANGE) / [MATERIALIZED] VIEW / SEQUENCE / DOMAIN,
-// ALTER TABLE, DROP family, TRUNCATE, COMMENT ON — plus a DML core — SELECT (with
+// SQL-lite parses a slice of PostgreSQL DDL — CREATE TABLE (incl. TABLE AS,
+// LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
+// (enum, composite, RANGE) / [MATERIALIZED] VIEW / SEQUENCE / DOMAIN, ALTER
+// TABLE, DROP family, TRUNCATE, COMMENT ON — plus a DML core — SELECT (with
 // WITH / DISTINCT / joins / WHERE / GROUP BY / HAVING / ORDER BY / LIMIT /
 // OFFSET / UNION-INTERSECT-EXCEPT) and INSERT / UPDATE / DELETE with
 // RETURNING — over the scalar expression sublanguage that DEFAULT / CHECK /
@@ -278,7 +279,42 @@ export type TableConstraint =
     } & ForeignKeyTail &
       ConstraintAttrs);
 
-export type TableItem = ColumnDef | TableConstraint;
+// One `{INCLUDING | EXCLUDING} property` option of a `LIKE source` table item.
+export type LikeOption = {
+  mode: "including" | "excluding";
+  property:
+    | "comments"
+    | "compression"
+    | "constraints"
+    | "defaults"
+    | "identity"
+    | "generated"
+    | "indexes"
+    | "statistics"
+    | "storage"
+    | "all";
+};
+
+// `LIKE source [option …]` in a CREATE TABLE element list — copy the source
+// table's columns (and whatever the options name) into the new one. `options`
+// is in source order and empty when none is written.
+export type LikeTable = { kind: "likeTable"; table: string[]; options: LikeOption[]; span: Span };
+
+export type TableItem = ColumnDef | TableConstraint | LikeTable;
+
+// One `[namespace.]name [[=] value]` entry of a parenthesised option list — the
+// storage parameters of `CREATE TABLE … WITH (…)`, and the shape PG reuses for
+// its other generic option lists. `value` is null for a bare name, which PG's
+// boolean options read as true (`WITH (security_barrier)`); a word value keeps
+// the `name` shape, a quoted string the `string` one, so the two stay apart.
+// `*` and a parenthesised list are COPY's (`FORCE_QUOTE *`, `FORCE_NULL (a, b)`).
+// `namespace` is present only for a qualified reloption (`toast.fillfactor`).
+export type RelationOptionScalar = Extract<Expr, { kind: "number" | "string" | "bool" | "name" }>;
+export type RelationOptionValue =
+  | RelationOptionScalar
+  | Extract<Expr, { kind: "star" }>
+  | { kind: "optionList"; items: RelationOptionScalar[]; span: Span };
+export type RelationOption = { namespace?: string; name: string; value: RelationOptionValue | null; span: Span };
 
 export type AlterAction =
   | { kind: "addColumn"; column: ColumnDef }
@@ -373,6 +409,12 @@ export type CreateTableAs = {
   columns: string[] | null;
   query: Query;
   withData: boolean | null;
+  // The storage clauses PG allows ahead of the AS (its `USING method` aside,
+  // which is not parsed), each omitted when absent — the same keys, and the
+  // same rule, as on `createTable` (INHERITS aside).
+  options?: RelationOption[];
+  onCommit?: "preserveRows" | "deleteRows" | "drop";
+  tablespace?: string;
   // As on `createTable`: the CREATE prefix modifiers, omitted when absent —
   // which, until CREATE_PREFIX_WORDS names one, is always.
   modifiers?: string[];
@@ -547,7 +589,20 @@ export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
   // UNLOGGED family). Omitted, not null, when there are none — and no word
   // qualifies yet (see CREATE_PREFIX_WORDS), so today it is always absent.
-  | { kind: "createTable"; ifNotExists: boolean; name: string[]; items: TableItem[]; modifiers?: string[]; span: Span }
+  // The four clauses after the element list follow the same rule: each key is
+  // present only when its clause is written (see parseTableClauses).
+  | {
+      kind: "createTable";
+      ifNotExists: boolean;
+      name: string[];
+      items: TableItem[];
+      inherits?: string[][];
+      options?: RelationOption[];
+      onCommit?: "preserveRows" | "deleteRows" | "drop";
+      tablespace?: string;
+      modifiers?: string[];
+      span: Span;
+    }
   | {
       kind: "createIndex";
       unique: boolean;
@@ -799,7 +854,7 @@ export type Delete = {
 // quoted identifier. Everything else (`type`, `role`, `comment`, `data`, `int`,
 // `text`, …) stays usable as a name for free, because the fold-and-match strategy
 // never took it away. Non-reserved keywords used by the grammar (`index`,
-// `enum`, `cascade`, `between`, `like`, …) are matched by value regardless.
+// `enum`, `cascade`, `between`, `ilike`, …) are matched by value regardless.
 const RESERVED: ReadonlySet<string> = new Set([
   "all",
   "analyse",
@@ -896,6 +951,17 @@ const RESERVED: ReadonlySet<string> = new Set([
   // before it (else `FROM t TABLESAMPLE …` reads `tablesample` as t's alias).
   "tablesample",
   "values",
+  // Not in PG's reserved list proper but a `type_func_name_keyword`, which is no
+  // more usable as a column or table name there. `CREATE TABLE t (LIKE src)` and
+  // a column `like text` are the same tokens, so a table body always reads
+  // `like` as the LIKE clause (see tableItem); reserving the word, which is PG's
+  // own answer, makes it no column name anywhere rather than everywhere but
+  // there — and keeps a bare `(like)` from passing for a CTAS column list.
+  // Being coarser than PG's tier, it also costs what that tier keeps: `like` as
+  // an alias after AS, a function name (`like(a, b)`), a type name (`a::like`)
+  // and the last part of a qualified name (`t.like`) — the same four a reserved
+  // word such as `left` already costs here.
+  "like",
 ]);
 
 // --- token sugar ---
@@ -2359,11 +2425,55 @@ const columnDef = seq(
   field("constraints", many(columnConstraint)),
 ).map(({ name, dataType, constraints }, span): ColumnDef => ({ kind: "column", name, dataType, constraints, span }));
 
-// A table body item: a table constraint (keyword-led, value-specific first set)
-// or a column definition (name-led, type-only first set). oneOf's
-// value-specific-first dispatch picks the constraint on `primary`/`unique`/… and
-// the column on any other name, with no ambiguity.
-const tableItem = oneOf(tableConstraint, columnDef);
+// The properties a LIKE option may copy, in the order PG's TableLikeOption
+// lists them — which is also the order the "Expected …" message names them in.
+const likeProperty = token("ident", {
+  values: [
+    "comments",
+    "compression",
+    "constraints",
+    "defaults",
+    "identity",
+    "generated",
+    "indexes",
+    "statistics",
+    "storage",
+    "all",
+  ],
+}).map((node) => node.value as LikeOption["property"]);
+
+// `LIKE source [{INCLUDING | EXCLUDING} property …]`. The options are optional,
+// so `LIKE src` and a column `like text` are the same two tokens and no
+// lookahead can tell them apart: in a table body, `like` always leads this
+// clause (see tableItem). The option words need no reservation: after the
+// source name only `,` or `)` could otherwise follow.
+const likeBody = custom<LikeTable, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("like"));
+    const table = ctx.parse(qualName);
+    const options: LikeOption[] = [];
+    while (ctx.is("ident", ["including", "excluding"])) {
+      const mode = ctx.next()!.value as LikeOption["mode"];
+      options.push({ mode, property: ctx.parse(likeProperty) });
+    }
+    return { kind: "likeTable", table, options, span: ctx.spanFrom(start) };
+  },
+  { expected: '"like"', first: [{ type: "ident", value: "like" }] },
+);
+
+// A table body item: a table constraint or a LIKE clause (both keyword-led, a
+// value-specific first set) or a column definition (name-led, type-only). oneOf's
+// value-specific-first dispatch picks the constraint on `primary`/`unique`/…,
+// LIKE on `like`, and the column on any other name. A value-specific key wins
+// even over a word that could be a column name, so every key ahead of
+// `columnDef` takes its word away from columns; that is harmless only because
+// each is reserved anyway — `like` for exactly this reason (see RESERVED). A
+// key that is a legal column name needs a backtracking branch instead.
+//
+// Branch order is load-bearing: oneOf joins its `expected` in declaration order,
+// which the diagnostics golden pins.
+const tableItem = oneOf(tableConstraint, likeBody, columnDef);
 
 // --- statements ---
 
@@ -2382,9 +2492,166 @@ function parseWithData(ctx: ParseContext<SqlTokenType>): boolean | null {
   return true;
 }
 
-// A CTAS column-name list `(a, b) AS` — bare names, ending in AS. attempt() so a
-// real column-definition list (`(id int, …)`) rolls back to the table-item path.
-const ctasColumns = attempt(seq(field("cols", columnList), skip(kw("as"))).map((s) => s.cols));
+// `([namespace.]name [[=] value], …)` — PG's generic option list: the storage
+// parameters of `CREATE TABLE … WITH (…)`, and the same shape its index, view,
+// COPY, EXPLAIN, ALTER TABLE SET/RESET and partition-bound options take, which
+// is why it is a shared rule rather than local to CREATE TABLE. Both halves of
+// the value are optional: a bare name is a boolean option set to true
+// (`security_barrier`), and the `=` may be left out (`MODULUS 4`, `FORMAT csv`).
+// That makes `WITH (fillfactor 70)` legal here although PG's reloption grammar
+// wants the `=`; one shape for every list is the trade. The same goes for the
+// `toast.` namespace, which only reloptions take, and for COPY's `*` and list
+// values. (RESET's values-free form is PG's to police too: its grammar takes the
+// same list and rejects a value only in analysis.)
+//
+// Option names are PG's ColLabel, so a reserved word is a name here too
+// (`EXPLAIN (ANALYZE)`, COPY's `NULL '…'`). A word value may also be reserved
+// (`= on`), and `true`/`false` are read as booleans, as they are everywhere.
+// A list whose entries are not parenthesised (CREATE DATABASE's `WITH OWNER = x
+// TEMPLATE t0`) can reuse `relationOption`, the single entry — all but its
+// two-word `CONNECTION LIMIT`, which PG's grammar special-cases too.
+function optionName(ctx: ParseContext<SqlTokenType>): string {
+  const tok = ctx.peek();
+  if (tok === null || (tok.type !== "ident" && tok.type !== "qident")) {
+    return ctx.croak(`Expected an option name but found ${describeFound(tok)}`);
+  }
+  ctx.next();
+  return tok.value;
+}
+
+// A value that is not itself a list: a number (a sign included), a string, a
+// boolean or a word.
+function optionScalar(ctx: ParseContext<SqlTokenType>): RelationOptionScalar {
+  const start = ctx.position();
+  const tok = ctx.peek();
+  // A signed number is one value, its sign included in the span.
+  const sign = tok?.type === "op" && (tok.value === "-" || tok.value === "+") ? tok.value : null;
+  if (sign !== null && ctx.peekAhead(1)?.type === "number") {
+    ctx.next(); // the sign
+    const value = Number(ctx.next()!.value);
+    return { kind: "number", value: sign === "-" ? -value : value, span: ctx.spanFrom(start) };
+  }
+  if (tok?.type === "number") return { kind: "number", value: Number(ctx.next()!.value), span: ctx.spanFrom(start) };
+  if (tok?.type === "string") return { kind: "string", value: ctx.next()!.value, span: ctx.spanFrom(start) };
+  if (tok?.type === "ident" && (tok.value === "true" || tok.value === "false")) {
+    ctx.next();
+    return { kind: "bool", value: tok.value === "true", span: ctx.spanFrom(start) };
+  }
+  if (tok?.type === "ident" || tok?.type === "qident") {
+    ctx.next();
+    return { kind: "name", parts: [tok.value], span: ctx.spanFrom(start) };
+  }
+  return ctx.croak(`Expected an option value but found ${describeFound(tok)}`);
+}
+
+function optionValue(ctx: ParseContext<SqlTokenType>): RelationOptionValue {
+  const start = ctx.position();
+  if (ctx.is("op", "*")) {
+    ctx.next();
+    return { kind: "star", table: null, span: ctx.spanFrom(start) };
+  }
+  if (ctx.eat("punc", "(") !== null) {
+    const items: RelationOptionScalar[] = [];
+    do {
+      items.push(optionScalar(ctx));
+    } while (ctx.eat("punc", ",") !== null);
+    expectClose(ctx);
+    return { kind: "optionList", items, span: ctx.spanFrom(start) };
+  }
+  return optionScalar(ctx);
+}
+
+const relationOption = custom<RelationOption, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const first = optionName(ctx);
+    const namespace = ctx.eat("punc", ".") !== null ? first : null;
+    const name = namespace !== null ? optionName(ctx) : first;
+    // With `=` a value must follow; without it, one does unless the entry ends.
+    const hasEq = ctx.eat("op", "=") !== null;
+    const value = hasEq || !(ctx.is("punc", ",") || ctx.is("punc", ")")) ? optionValue(ctx) : null;
+    return { ...(namespace !== null && { namespace }), name, value, span: ctx.spanFrom(start) };
+  },
+  { expected: "an option name", first: [{ type: "ident" }, { type: "qident" }] },
+);
+
+const relationOptions = custom<RelationOption[], SqlTokenType>(
+  (ctx) => {
+    if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+    ctx.next(); // "("
+    const options: RelationOption[] = [];
+    do {
+      options.push(ctx.parse(relationOption));
+    } while (ctx.eat("punc", ",") !== null);
+    expectClose(ctx);
+    return options;
+  },
+  { expected: '"("', first: [{ type: "punc", value: "(" }] },
+);
+
+// The storage clauses, in the fixed order PG's CreateStmt gives them: `[WITH
+// (option, …)] [ON COMMIT {PRESERVE ROWS | DELETE ROWS | DROP}] [TABLESPACE
+// name]`. CREATE TABLE takes them after its element list (and after INHERITS,
+// below), CREATE TABLE AS ahead of its AS. Written out of order they are an
+// error, as in PG. Every key is set only when its clause is written, so a table
+// with none of them keeps exactly the node it had before they existed.
+//
+// The lead words take no name away: `with` and `on` are reserved, and in either
+// position nothing else but `;` or `AS` could follow. PG accepts ON COMMIT on
+// any table in its grammar and rejects it on a permanent one only in analysis;
+// this parser has no analysis pass, so it accepts it everywhere.
+type StorageClauses = Pick<CreateTableAs, "options" | "onCommit" | "tablespace">;
+type TableClauses = Pick<Extract<Stmt, { kind: "createTable" }>, "inherits"> & StorageClauses;
+
+const onCommitAction = oneOf(
+  kwseq("preserve", "rows").map(() => "preserveRows" as const),
+  kwseq("delete", "rows").map(() => "deleteRows" as const),
+  kw("drop").map(() => "drop" as const),
+);
+
+function parseStorageClauses(ctx: ParseContext<SqlTokenType>): StorageClauses {
+  const clauses: StorageClauses = {};
+  if (ctx.eat("ident", "with") !== null) clauses.options = ctx.parse(relationOptions);
+  if (ctx.is("ident", "on")) {
+    ctx.parse(kwseq("on", "commit"));
+    clauses.onCommit = ctx.parse(onCommitAction);
+  }
+  if (ctx.eat("ident", "tablespace") !== null) clauses.tablespace = ctx.parse(nameWord);
+  return clauses;
+}
+
+// `[INHERITS (parent, …)]` and then the storage clauses — what this grammar
+// takes after a table's element list. PG also allows `PARTITION BY …` and
+// `USING method` between INHERITS and WITH; neither is parsed yet.
+function parseTableClauses(ctx: ParseContext<SqlTokenType>): TableClauses {
+  const clauses: TableClauses = {};
+  if (ctx.eat("ident", "inherits") !== null) {
+    if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+    ctx.next(); // "("
+    const parents: string[][] = [];
+    do {
+      parents.push(ctx.parse(qualName));
+    } while (ctx.eat("punc", ",") !== null);
+    expectClose(ctx);
+    clauses.inherits = parents;
+  }
+  return { ...clauses, ...parseStorageClauses(ctx) };
+}
+
+// A CTAS column-name list `(a, b) [storage clauses] AS` — bare names, ending in
+// AS. attempt() so a real column-definition list (`(id int, …)`) rolls back to
+// the table-item path.
+const ctasColumns = attempt(
+  custom<{ cols: string[]; storage: StorageClauses }, SqlTokenType>(
+    (ctx) => {
+      const cols = ctx.parse(columnList);
+      const storage = parseStorageClauses(ctx);
+      ctx.parse(kw("as"));
+      return { cols, storage };
+    },
+    { expected: columnList.expected(), first: columnList.first() },
+  ),
+);
 
 // CREATE TABLE — the ordinary `(items)` form or the query-backed `AS query`
 // (CREATE TABLE AS). A handler rather than a rule so the CTAS branches (`name
@@ -2397,8 +2664,12 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
   // than hard-committing — the vector the farthest-failure test exploits.
   const ifNotExists = ctx.parse(optional(attempt(kwseq("if", "not", "exists")))) !== null;
   const name = ctx.parse(qualName);
-  // `CREATE TABLE name AS query [WITH [NO] DATA]`.
-  if (ctx.eat("ident", "as") !== null) {
+  // `CREATE TABLE name [storage clauses] AS query [WITH [NO] DATA]`. A storage
+  // clause straight after the name can only lead into AS: the classic form
+  // writes its clauses after the element list.
+  const storage = parseStorageClauses(ctx);
+  if (Object.keys(storage).length > 0 || ctx.is("ident", "as")) {
+    ctx.parse(kw("as"));
     const q = ctx.parse(query);
     return {
       kind: "createTableAs",
@@ -2407,22 +2678,25 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
       columns: null,
       query: q,
       withData: parseWithData(ctx),
+      ...storage,
       ...(modifiers.length > 0 && { modifiers }),
       span: ctx.spanFrom(start),
     };
   }
-  // `CREATE TABLE name (cols) AS query` — the `(cols) AS` prefix backtracks
-  // (via ctasColumns) when the `(` really opens a column-definition list.
-  const cols = ctx.parse(optional(ctasColumns));
-  if (cols !== null) {
+  // `CREATE TABLE name (cols) [storage clauses] AS query` — the `(cols) … AS`
+  // prefix backtracks (via ctasColumns) when the `(` really opens a
+  // column-definition list.
+  const ctas = ctx.parse(optional(ctasColumns));
+  if (ctas !== null) {
     const q = ctx.parse(query);
     return {
       kind: "createTableAs",
       ifNotExists,
       name,
-      columns: cols,
+      columns: ctas.cols,
       query: q,
       withData: parseWithData(ctx),
+      ...ctas.storage,
       ...(modifiers.length > 0 && { modifiers }),
       span: ctx.spanFrom(start),
     };
@@ -2433,6 +2707,7 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
     ifNotExists,
     name,
     items,
+    ...parseTableClauses(ctx),
     ...(modifiers.length > 0 && { modifiers }),
     span: ctx.spanFrom(start),
   };

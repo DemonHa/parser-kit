@@ -11321,6 +11321,537 @@
     ]
   },
   {
+    "source": "CREATE TABLE t (LIKE app.src INCLUDING DEFAULTS EXCLUDING INDEXES, id int) INHERITS (p, app.q);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "likeTable",
+            "table": [
+              "app",
+              "src"
+            ],
+            "options": [
+              {
+                "mode": "including",
+                "property": "defaults"
+              },
+              {
+                "mode": "excluding",
+                "property": "indexes"
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 65
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "id",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 70
+                },
+                "end": {
+                  "row": 1,
+                  "col": 73
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 67
+              },
+              "end": {
+                "row": 1,
+                "col": 73
+              }
+            }
+          }
+        ],
+        "inherits": [
+          [
+            "p"
+          ],
+          [
+            "app",
+            "q"
+          ]
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 94
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (id int) WITH (fillfactor = 70, autovacuum_enabled, x -1, y = 'z') ON COMMIT DELETE ROWS TABLESPACE ts;",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "id",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 19
+                },
+                "end": {
+                  "row": 1,
+                  "col": 22
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 22
+              }
+            }
+          }
+        ],
+        "options": [
+          {
+            "name": "fillfactor",
+            "value": {
+              "kind": "number",
+              "value": 70,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 43
+                },
+                "end": {
+                  "row": 1,
+                  "col": 45
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 30
+              },
+              "end": {
+                "row": 1,
+                "col": 45
+              }
+            }
+          },
+          {
+            "name": "autovacuum_enabled",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 47
+              },
+              "end": {
+                "row": 1,
+                "col": 65
+              }
+            }
+          },
+          {
+            "name": "x",
+            "value": {
+              "kind": "number",
+              "value": -1,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 69
+                },
+                "end": {
+                  "row": 1,
+                  "col": 71
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 67
+              },
+              "end": {
+                "row": 1,
+                "col": 71
+              }
+            }
+          },
+          {
+            "name": "y",
+            "value": {
+              "kind": "string",
+              "value": "z",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 78
+                },
+                "end": {
+                  "row": 1,
+                  "col": 79
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 73
+              },
+              "end": {
+                "row": 1,
+                "col": 79
+              }
+            }
+          }
+        ],
+        "onCommit": "deleteRows",
+        "tablespace": "ts",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 117
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (id int) WITH (toast.autovacuum_enabled = false, force_quote *, force_null (a, 'b'));",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "id",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 19
+                },
+                "end": {
+                  "row": 1,
+                  "col": 22
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 22
+              }
+            }
+          }
+        ],
+        "options": [
+          {
+            "namespace": "toast",
+            "name": "autovacuum_enabled",
+            "value": {
+              "kind": "bool",
+              "value": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 57
+                },
+                "end": {
+                  "row": 1,
+                  "col": 62
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 30
+              },
+              "end": {
+                "row": 1,
+                "col": 62
+              }
+            }
+          },
+          {
+            "name": "force_quote",
+            "value": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 76
+                },
+                "end": {
+                  "row": 1,
+                  "col": 77
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 64
+              },
+              "end": {
+                "row": 1,
+                "col": 77
+              }
+            }
+          },
+          {
+            "name": "force_null",
+            "value": {
+              "kind": "optionList",
+              "items": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "a"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 91
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 92
+                    }
+                  }
+                },
+                {
+                  "kind": "string",
+                  "value": "b",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 95
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 96
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 90
+                },
+                "end": {
+                  "row": 1,
+                  "col": 98
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 79
+              },
+              "end": {
+                "row": 1,
+                "col": 98
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 99
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (a, b) WITH (fillfactor = 70) ON COMMIT DROP TABLESPACE ts AS SELECT 1, 2 WITH NO DATA;",
+    "ast": [
+      {
+        "kind": "createTableAs",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "columns": [
+          "a",
+          "b"
+        ],
+        "query": {
+          "kind": "select",
+          "with_": null,
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 84
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 85
+                  }
+                }
+              },
+              "alias": null
+            },
+            {
+              "expr": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 87
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 88
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "from": null,
+          "where": null,
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": null,
+          "limit": null,
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 77
+            },
+            "end": {
+              "row": 1,
+              "col": 88
+            }
+          }
+        },
+        "withData": false,
+        "options": [
+          {
+            "name": "fillfactor",
+            "value": {
+              "kind": "number",
+              "value": 70,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 41
+                },
+                "end": {
+                  "row": 1,
+                  "col": 43
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 28
+              },
+              "end": {
+                "row": 1,
+                "col": 43
+              }
+            }
+          }
+        ],
+        "onCommit": "drop",
+        "tablespace": "ts",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 101
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE TABLE t (a int REFERENCES p (id) MATCH FULL ON UPDATE CASCADE ON DELETE SET DEFAULT DEFERRABLE INITIALLY DEFERRED NOT NULL, b int UNIQUE NOT DEFERRABLE, CONSTRAINT fk FOREIGN KEY (b) REFERENCES p ON DELETE NO ACTION ON UPDATE SET NULL INITIALLY IMMEDIATE, PRIMARY KEY (a) DEFERRABLE);",
     "ast": [
       {
