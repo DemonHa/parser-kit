@@ -428,7 +428,20 @@ export type AlterAction =
   | { kind: "renameConstraint"; from: string; to: string }
   | { kind: "renameTable"; to: string }
   | { kind: "ownerTo"; owner: string }
-  | { kind: "replicaIdentity"; mode: "default" | "full" | "nothing" | "usingIndex"; index: string | null };
+  | { kind: "replicaIdentity"; mode: "default" | "full" | "nothing" | "usingIndex"; index: string | null }
+  | AlterDropConstraint
+  | AlterValidateConstraint
+  | AlterSetSchema
+  | Extract<AlterIndexAction, { kind: "setTablespace" | "setOptions" | "resetOptions" }>
+  | { kind: "enableTrigger"; mode: null; trigger: AlterTriggerTarget }
+  | { kind: "enableTrigger"; mode: "replica" | "always"; trigger: Extract<AlterTriggerTarget, { kind: "name" }> }
+  | { kind: "disableTrigger"; trigger: AlterTriggerTarget }
+  | { kind: "attachPartition"; partition: string[]; bound: PartitionBound }
+  | { kind: "detachPartition"; partition: string[]; mode: "concurrently" | "finalize" | null }
+  | { kind: "clusterOn"; index: string }
+  | { kind: "setWithoutCluster" };
+// The trigger an ENABLE / DISABLE TRIGGER names: one by name, or ALL / USER.
+export type AlterTriggerTarget = { kind: "all" | "user" } | { kind: "name"; name: string };
 
 // The actions of ALTER {SCHEMA | DOMAIN | TYPE | INDEX}. `rename` is the object's
 // own (ALTER TABLE's is `renameTable`); a domain's `addConstraint` keeps its name
@@ -436,6 +449,14 @@ export type AlterAction =
 type AlterRenameTo = { kind: "rename"; to: string };
 type AlterOwnerTo = Extract<AlterAction, { kind: "ownerTo" }>;
 type AlterSetSchema = { kind: "setSchema"; schema: string };
+// ALTER TABLE's and ALTER DOMAIN's, the same words and shape on both.
+type AlterDropConstraint = {
+  kind: "dropConstraint";
+  ifExists: boolean;
+  name: string;
+  behavior: "cascade" | "restrict" | null;
+};
+type AlterValidateConstraint = { kind: "validateConstraint"; name: string };
 export type AlterSchemaAction = AlterRenameTo | AlterOwnerTo;
 export type AlterDomainAction =
   | AlterRenameTo
@@ -446,9 +467,9 @@ export type AlterDomainAction =
   | { kind: "setNotNull" }
   | { kind: "dropNotNull" }
   | { kind: "addConstraint"; constraint: Extract<DomainConstraint, { kind: "check" }>; notValid: boolean }
-  | { kind: "dropConstraint"; ifExists: boolean; name: string; behavior: "cascade" | "restrict" | null }
+  | AlterDropConstraint
   | { kind: "renameConstraint"; from: string; to: string }
-  | { kind: "validateConstraint"; name: string };
+  | AlterValidateConstraint;
 // `position` is the `{BEFORE | AFTER} 'existing'` placement of a new enum value.
 export type AlterTypeAction =
   | AlterRenameTo
@@ -4740,6 +4761,29 @@ function parseOwnerTo(ctx: ParseContext<SqlTokenType>): AlterOwnerTo {
   return { kind: "ownerTo", owner: ctx.parse(nameWord) };
 }
 
+// `DROP CONSTRAINT [IF EXISTS] name [CASCADE | RESTRICT]` once its CONSTRAINT
+// is consumed, and `VALIDATE CONSTRAINT name`: ALTER TABLE's and ALTER DOMAIN's.
+function parseDropConstraint(ctx: ParseContext<SqlTokenType>): AlterDropConstraint {
+  const ifExists = parseIfExists(ctx);
+  const name = ctx.parse(nameWord);
+  return { kind: "dropConstraint", ifExists, name, behavior: ctx.parse(dropBehavior) };
+}
+
+function parseValidateConstraint(ctx: ParseContext<SqlTokenType>): AlterValidateConstraint {
+  ctx.parse(kwseq("validate", "constraint"));
+  return { kind: "validateConstraint", name: ctx.parse(nameWord) };
+}
+
+// `TRIGGER {name | ALL | USER}`, the tail of ENABLE / DISABLE TRIGGER; ENABLE
+// REPLICA and ENABLE ALWAYS take a name only. ALL and USER are reserved, so an
+// unquoted one never names a trigger.
+function parseTriggerTarget(ctx: ParseContext<SqlTokenType>): AlterTriggerTarget {
+  ctx.parse(kw("trigger"));
+  if (ctx.eat("ident", "all") !== null) return { kind: "all" };
+  if (ctx.eat("ident", "user") !== null) return { kind: "user" };
+  return { kind: "name", name: ctx.parse(nameWord) };
+}
+
 // The ALTER TABLE actions. Dispatch peeks; each handler consumes its own lead
 // word and owns whatever lookahead its own shapes need — `ADD [COLUMN] …` vs
 // `ADD [CONSTRAINT name] …` vs a bare table constraint all begin with `add`, and
@@ -4773,9 +4817,11 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       return parseAddColumn(ctx);
     },
   },
+  // `constraint` is reserved, so an unquoted one never names the column dropped.
   drop: {
     parse: (ctx) => {
       ctx.next(); // DROP
+      if (ctx.eat("ident", "constraint") !== null) return parseDropConstraint(ctx);
       ctx.eat("ident", "column"); // optional COLUMN
       return { kind: "dropColumn", name: ctx.parse(nameWord) };
     },
@@ -4842,10 +4888,75 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       return { kind: "replicaIdentity", mode: "default", index: null };
     },
   },
+  // `SET {SCHEMA name | TABLESPACE name | (option, …) | WITHOUT CLUSTER}`. The
+  // word after SET is a fixed slot, never a name.
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
+      if (ctx.is("ident", "schema")) return parseSetSchema(ctx);
+      if (ctx.is("ident", "tablespace")) return parseSetTablespace(ctx);
+      if (ctx.eat("ident", "without") === null) {
+        ctx.croak(
+          `Expected ${quoteList(["(", "schema", "tablespace", "without"])} but found ${describeFound(ctx.peek())}`,
+        );
+      }
+      ctx.parse(kw("cluster"));
+      return { kind: "setWithoutCluster" };
+    },
+  },
+  reset: { parse: parseResetOptions },
+  validate: { parse: parseValidateConstraint },
+  // `ENABLE [REPLICA | ALWAYS] TRIGGER …` / `DISABLE TRIGGER …`.
+  enable: {
+    parse: (ctx) => {
+      ctx.next(); // ENABLE
+      const mode = ctx.eat("ident", "replica") ?? ctx.eat("ident", "always");
+      if (mode !== null) {
+        ctx.parse(kw("trigger"));
+        const trigger = { kind: "name" as const, name: ctx.parse(nameWord) };
+        return { kind: "enableTrigger", mode: mode.value as "replica" | "always", trigger };
+      }
+      if (!ctx.is("ident", "trigger")) {
+        ctx.croak(`Expected ${quoteList(["replica", "always", "trigger"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return { kind: "enableTrigger", mode: null, trigger: parseTriggerTarget(ctx) };
+    },
+  },
+  disable: {
+    parse: (ctx) => {
+      ctx.next(); // DISABLE
+      return { kind: "disableTrigger", trigger: parseTriggerTarget(ctx) };
+    },
+  },
+  cluster: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("cluster", "on"));
+      return { kind: "clusterOn", index: ctx.parse(nameWord) };
+    },
+  },
+  // `ATTACH PARTITION name {FOR VALUES … | DEFAULT}`, CREATE TABLE … PARTITION
+  // OF's bound.
+  attach: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("attach", "partition"));
+      const partition = ctx.parse(qualName);
+      return { kind: "attachPartition", partition, bound: parsePartitionBound(ctx) };
+    },
+  },
+  detach: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("detach", "partition"));
+      const partition = ctx.parse(qualName);
+      const mode = ctx.eat("ident", "concurrently") ?? ctx.eat("ident", "finalize");
+      return { kind: "detachPartition", partition, mode: (mode?.value ?? null) as "concurrently" | "finalize" | null };
+    },
+  },
 };
 
-// Hand-written croak, so the comma form over the KEYS — `owner` and `replica`
-// would otherwise announce themselves as "owner to" / "replica identity". One
+// Hand-written croak, so the comma form over the KEYS — `owner`, `cluster` and
+// the other keys whose handlers consume a phrase would otherwise announce
+// themselves as "owner to", "cluster on" and so on. One
 // expression, used for both the croak and the rule's own `expected`.
 const ALTER_ACTION_EXPECTED = keyList(ALTER_ACTIONS);
 
@@ -4861,6 +4972,9 @@ const SOLO_ALTER_ACTIONS: Partial<Record<AlterAction["kind"], string>> = {
   renameColumn: "RENAME",
   renameConstraint: "RENAME",
   renameTable: "RENAME",
+  setSchema: "SET SCHEMA",
+  attachPartition: "ATTACH PARTITION",
+  detachPartition: "DETACH PARTITION",
 };
 
 // An optional `IF EXISTS`, decided by peeking like ADD's IF NOT EXISTS: `exists`
@@ -4976,9 +5090,7 @@ const DOMAIN_ACTIONS: DispatchMap<AlterDomainAction> = {
       if (ctx.eat("ident", "constraint") === null) {
         ctx.croak(`Expected ${quoteList(["default", "not", "constraint"])} but found ${describeFound(ctx.peek())}`);
       }
-      const ifExists = parseIfExists(ctx);
-      const name = ctx.parse(nameWord);
-      return { kind: "dropConstraint", ifExists, name, behavior: ctx.parse(dropBehavior) };
+      return parseDropConstraint(ctx);
     },
   },
   add: {
@@ -5002,12 +5114,7 @@ const DOMAIN_ACTIONS: DispatchMap<AlterDomainAction> = {
     },
   },
   owner: { parse: parseOwnerTo },
-  validate: {
-    parse: (ctx) => {
-      ctx.parse(kwseq("validate", "constraint"));
-      return { kind: "validateConstraint", name: ctx.parse(nameWord) };
-    },
-  },
+  validate: { parse: parseValidateConstraint },
 };
 
 // No choice after a TYPE action's lead word is against a bare name: RENAME's
@@ -5050,16 +5157,22 @@ function parseResetOptions(ctx: ParseContext<SqlTokenType>): Extract<AlterIndexA
   return { kind: "resetOptions", options };
 }
 
+// `TABLESPACE name` once its SET is consumed, ALTER INDEX's and ALTER TABLE's.
+function parseSetTablespace(ctx: ParseContext<SqlTokenType>): Extract<AlterIndexAction, { kind: "setTablespace" }> {
+  ctx.parse(kw("tablespace"));
+  return { kind: "setTablespace", tablespace: ctx.parse(nameWord) };
+}
+
 const INDEX_ACTIONS: DispatchMap<AlterIndexAction> = {
   rename: { parse: parseRenameTo },
   set: {
     parse: (ctx) => {
       ctx.next(); // SET
       if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
-      if (ctx.eat("ident", "tablespace") === null) {
+      if (!ctx.is("ident", "tablespace")) {
         ctx.croak(`Expected ${quoteList(["(", "tablespace"])} but found ${describeFound(ctx.peek())}`);
       }
-      return { kind: "setTablespace", tablespace: ctx.parse(nameWord) };
+      return parseSetTablespace(ctx);
     },
   },
   reset: { parse: parseResetOptions },
