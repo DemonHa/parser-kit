@@ -452,7 +452,7 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
       /Expected "exists" but found "exist"/,
     );
     expect(() => sqlLite.parse("ALTER frobnicate t;")).toThrow(
-      /Expected "table", "schema", "domain", "type" or "index" but found "frobnicate"/,
+      /Expected "table", "schema", "domain", "type", "index", "function", "aggregate", "view", "materialized" or "sequence" but found "frobnicate"/,
     );
   });
 });
@@ -3251,7 +3251,7 @@ describe("SQL-lite keyword dispatch maps", () => {
 
   it("names the keyword-led CREATE targets in the join form", () => {
     expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
-      /Expected "table" or "unique" or "type" or "sequence" or "domain" but found "frobnicate"/,
+      /Expected "table" or "unique" or "type" or "sequence" or "domain" or "database" or "schema" or "extension" or "tablespace" but found "frobnicate"/,
     );
   });
 
@@ -5008,6 +5008,220 @@ describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
   });
 });
 
+// --- ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE ---
+
+describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
+  const alter = (text: string) => firstStmt(text) as any;
+  const action = (text: string) => alter(text).action;
+  const fails = (text: string) => () => sqlLite.parse(text);
+  const arg = (type: string, argName: string | null = null) => ({
+    mode: null,
+    name: argName,
+    type: { name: type, args: [], array: false },
+    defaultValue: null,
+  });
+
+  it("parses ALTER FUNCTION with and without a signature", () => {
+    expect(alter("ALTER FUNCTION s.f(double precision, a int) RENAME TO g;")).toEqual({
+      kind: "alterFunction",
+      name: ["s", "f"],
+      args: [arg("double precision"), arg("int", "a")],
+      action: { kind: "rename", to: "g" },
+    });
+    expect(alter("ALTER FUNCTION f OWNER TO r;")).toMatchObject({
+      args: null,
+      action: { kind: "ownerTo", owner: "r" },
+    });
+    expect(alter("ALTER FUNCTION f() SET SCHEMA s;")).toMatchObject({
+      args: [],
+      action: { kind: "setSchema", schema: "s" },
+    });
+  });
+
+  it("parses ALTER FUNCTION attributes as one run of CREATE FUNCTION's options", () => {
+    expect(action("ALTER FUNCTION f(int) IMMUTABLE NOT LEAKPROOF STRICT SECURITY DEFINER COST 5;")).toEqual({
+      kind: "options",
+      options: [
+        { kind: "volatility", value: "immutable" },
+        { kind: "leakproof", value: false },
+        { kind: "strictness", value: "strict" },
+        { kind: "security", external: false, definer: true },
+        { kind: "cost", value: num(5) },
+      ],
+    });
+    // SET is SET SCHEMA only when a name follows `schema`; otherwise it sets a parameter.
+    expect(action("ALTER FUNCTION f SET search_path = public;").options).toEqual([
+      { kind: "set", parameter: "search_path", value: { kind: "list", values: [name("public")] } },
+    ]);
+    for (const src of ["= 'x'", "TO 'x'", "FROM CURRENT"]) {
+      expect(action(`ALTER FUNCTION f SET schema ${src};`).options).toMatchObject([
+        { kind: "set", parameter: "schema" },
+      ]);
+    }
+  });
+
+  it("parses ALTER AGGREGATE with a (*) or a type-list signature", () => {
+    expect(alter("ALTER AGGREGATE a(*) RENAME TO b;")).toEqual({
+      kind: "alterAggregate",
+      name: ["a"],
+      star: true,
+      args: [],
+      action: { kind: "rename", to: "b" },
+    });
+    expect(alter("ALTER AGGREGATE s.a(int, text) SET SCHEMA t;")).toMatchObject({
+      star: false,
+      args: [arg("int"), arg("text")],
+      action: { kind: "setSchema", schema: "t" },
+    });
+    expect(action("ALTER AGGREGATE a(int) OWNER TO r;")).toEqual({ kind: "ownerTo", owner: "r" });
+  });
+
+  it("parses ALTER [MATERIALIZED] VIEW [IF EXISTS] and its action list", () => {
+    expect(alter("ALTER VIEW IF EXISTS s.v RENAME COLUMN a TO b;")).toEqual({
+      kind: "alterView",
+      materialized: false,
+      ifExists: true,
+      name: ["s", "v"],
+      actions: [{ kind: "renameColumn", from: "a", to: "b" }],
+    });
+    expect(alter("ALTER VIEW v RENAME a TO b;").actions).toEqual([{ kind: "renameColumn", from: "a", to: "b" }]);
+    expect(alter("ALTER VIEW v RENAME TO w;").actions).toEqual([{ kind: "rename", to: "w" }]);
+    expect(alter("ALTER VIEW v SET SCHEMA s;").actions).toEqual([{ kind: "setSchema", schema: "s" }]);
+    const opt = (optName: string) => ({ name: optName, value: null });
+    expect(
+      alter("ALTER VIEW v ALTER COLUMN c SET DEFAULT 1, ALTER c DROP DEFAULT, OWNER TO r, SET (a), RESET (b);").actions,
+    ).toEqual([
+      { kind: "setDefault", column: "c", expr: num(1) },
+      { kind: "dropDefault", column: "c" },
+      { kind: "ownerTo", owner: "r" },
+      { kind: "setOptions", options: [opt("a")] },
+      { kind: "resetOptions", options: [opt("b")] },
+    ]);
+    expect(alter("ALTER MATERIALIZED VIEW IF EXISTS m RENAME TO n;")).toEqual({
+      kind: "alterView",
+      materialized: true,
+      ifExists: true,
+      name: ["m"],
+      actions: [{ kind: "rename", to: "n" }],
+    });
+  });
+
+  it("parses ALTER SEQUENCE [IF EXISTS] options, RESTART and the shared actions", () => {
+    expect(alter("ALTER SEQUENCE IF EXISTS s.q RESTART WITH 5 INCREMENT BY 2 OWNED BY t.id;")).toEqual({
+      kind: "alterSequence",
+      ifExists: true,
+      name: ["s", "q"],
+      action: {
+        kind: "options",
+        options: [
+          { kind: "restart", value: num(5) },
+          { kind: "increment", value: num(2) },
+          { kind: "ownedBy", owner: ["t", "id"] },
+        ],
+      },
+    });
+    expect(action("ALTER SEQUENCE q RESTART;").options).toEqual([{ kind: "restart", value: null }]);
+    expect(action("ALTER SEQUENCE q RESTART 7 NO CYCLE;").options).toEqual([
+      { kind: "restart", value: num(7) },
+      { kind: "cycle", value: false },
+    ]);
+    expect(action("ALTER SEQUENCE q RENAME TO r;")).toEqual({ kind: "rename", to: "r" });
+    expect(action("ALTER SEQUENCE q OWNER TO r;")).toEqual({ kind: "ownerTo", owner: "r" });
+    expect(action("ALTER SEQUENCE q SET SCHEMA s;")).toEqual({ kind: "setSchema", schema: "s" });
+  });
+
+  it("spans the whole statement, from ALTER through the action", () => {
+    const [stmt] = sqlLite.parse("ALTER MATERIALIZED VIEW m OWNER TO r;") as Record<string, any>[];
+    expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 36 } });
+  });
+
+  it("keeps the new ALTER words unreserved as names and aliases", () => {
+    const words = [
+      "function",
+      "aggregate",
+      "view",
+      "materialized",
+      "sequence",
+      "restart",
+      "immutable",
+      "stable",
+      "volatile",
+      "leakproof",
+      "strict",
+      "security",
+      "owned",
+      "increment",
+      "called",
+      "returns",
+      "external",
+      "parallel",
+      "cost",
+      "rows",
+      "minvalue",
+      "maxvalue",
+      "start",
+      "cache",
+      "cycle",
+      "no",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS function, 2 restart FROM sequence AS view;")).toMatchObject({
+      columns: [{ alias: "function" }, { alias: "restart" }],
+      from: [{ name: ["sequence"], alias: "view" }],
+    });
+    // …and as the names of the objects being altered.
+    expect(alter("ALTER FUNCTION function(immutable) RENAME TO aggregate;")).toMatchObject({
+      name: ["function"],
+      args: [arg("immutable")],
+      action: { to: "aggregate" },
+    });
+    expect(alter("ALTER AGGREGATE aggregate(*) OWNER TO stable;")).toMatchObject({ name: ["aggregate"] });
+    expect(alter("ALTER VIEW view RENAME materialized TO view;").actions).toEqual([
+      { kind: "renameColumn", from: "materialized", to: "view" },
+    ]);
+    expect(alter("ALTER SEQUENCE restart RESTART;")).toMatchObject({ name: ["restart"] });
+    expect(alter("ALTER SEQUENCE if RESTART;")).toMatchObject({ ifExists: false, name: ["if"] });
+  });
+
+  it("rejects an unknown action, a misplaced word and a combined RENAME or SET SCHEMA", () => {
+    expect(fails("ALTER FUNCTION f frobnicate;")).toThrow(
+      /Expected "rename", "owner", "set", "immutable", .*, "cost" or "rows" but found "frobnicate"/,
+    );
+    expect(fails("ALTER FUNCTION f(int) LANGUAGE sql;")).toThrow(/Expected "rename", .* but found "language"/);
+    expect(fails("ALTER FUNCTION f NOT NULL;")).toThrow(/Expected "leakproof" but found "null"/);
+    expect(fails("ALTER FUNCTION f IMMUTABLE SET SCHEMA s;")).toThrow(/Expected "to" or "=" but found "s"/);
+    expect(fails("ALTER AGGREGATE a RENAME TO b;")).toThrow(/Expected "\(" but found "rename"/);
+    expect(fails("ALTER AGGREGATE a(*) IMMUTABLE;")).toThrow(
+      /Expected "rename", "owner" or "set" but found "immutable"/,
+    );
+    expect(fails("ALTER VIEW v frobnicate;")).toThrow(
+      /Expected "rename", "owner", "set", "reset" or "alter" but found "frobnicate"/,
+    );
+    expect(fails("ALTER MATERIALIZED VIEW m ALTER c DROP DEFAULT;")).toThrow(
+      /Expected "rename", "owner", "set" or "reset" but found "alter"/,
+    );
+    expect(fails("ALTER MATERIALIZED m RENAME TO n;")).toThrow(/Expected "view" but found "m"/);
+    expect(fails("ALTER VIEW v SET frob;")).toThrow(/Expected "\(" or "schema" but found "frob"/);
+    expect(fails("ALTER VIEW v ALTER c SET NOT NULL;")).toThrow(/Expected "default" but found "not"/);
+    expect(fails("ALTER VIEW v ALTER c TYPE int;")).toThrow(/Expected "set" or "drop" but found "type"/);
+    expect(fails("ALTER VIEW v RESET (a = 1);")).toThrow(/RESET must not include values for parameters/);
+    expect(fails("ALTER VIEW v OWNER TO r, SET SCHEMA s;")).toThrow(
+      /SET SCHEMA cannot be combined with other ALTER VIEW actions/,
+    );
+    expect(fails("ALTER MATERIALIZED VIEW m RENAME TO n, OWNER TO r;")).toThrow(
+      /RENAME cannot be combined with other ALTER MATERIALIZED VIEW actions/,
+    );
+    expect(fails("ALTER SEQUENCE s frobnicate;")).toThrow(
+      /Expected "rename", "owner", "set", "as", .*, "no" or "owned" but found "frobnicate"/,
+    );
+    expect(fails("ALTER SEQUENCE s NO frob;")).toThrow(/Expected "minvalue", "maxvalue" or "cycle" but found "frob"/);
+    expect(fails("ALTER SEQUENCE s SET frob;")).toThrow(/Expected "schema" but found "frob"/);
+    expect(fails("ALTER SEQUENCE s RESTART RENAME TO t;")).toThrow(/Expected ";" but found "rename"/);
+  });
+});
+
 // --- INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT ---
 
 describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT", () => {
@@ -5366,5 +5580,218 @@ describe("SQL-lite generated identity and stored columns and column collation", 
     expect(bad("GENERATED ALWAYS AS IDENTITY ()")).toThrow(/Expected a sequence option but found "\)"/);
     expect(bad("GENERATED ALWAYS AS IDENTITY (START 1 frob)")).toThrow(/Expected "\)" but found "frob"/);
     expect(bad("COLLATE")).toThrow(/Expected a name but found "\)"/);
+  });
+});
+
+// --- CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE ---
+
+describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
+  const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
+  const bool = (value: boolean) => ({ kind: "bool", value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses CREATE DATABASE with its space-separated options, CONNECTION LIMIT included", () => {
+    expect(firstStmt("CREATE DATABASE d;")).toEqual({ kind: "createDatabase", name: "d", options: [] });
+    expect(firstStmt('CREATE DATABASE "D" WITH;')).toEqual({ kind: "createDatabase", name: "D", options: [] });
+    expect(
+      firstStmt(
+        "CREATE DATABASE d WITH OWNER = bob TEMPLATE template0 ENCODING 'UTF8' LOCALE = 'C' " +
+          "TABLESPACE fast ALLOW_CONNECTIONS true CONNECTION LIMIT = -1 IS_TEMPLATE false;",
+      ).options,
+    ).toEqual([
+      opt("owner", name("bob")),
+      opt("template", name("template0")),
+      opt("encoding", str("UTF8")),
+      opt("locale", str("C")),
+      opt("tablespace", name("fast")),
+      opt("allow_connections", bool(true)),
+      opt("connection limit", num(-1)),
+      opt("is_template", bool(false)),
+    ]);
+    expect(firstStmt("CREATE DATABASE d LC_COLLATE 'C' LC_CTYPE = 'C' CONNECTION LIMIT 5;").options).toEqual([
+      opt("lc_collate", str("C")),
+      opt("lc_ctype", str("C")),
+      opt("connection limit", num(5)),
+    ]);
+  });
+
+  it("spans a folded CONNECTION LIMIT from CONNECTION through its value", () => {
+    const [stmt] = sqlLite.parse("CREATE DATABASE d CONNECTION LIMIT = -1;") as Record<string, any>[];
+    expect(stmt!.options[0].span).toEqual({ start: { row: 1, col: 18 }, end: { row: 1, col: 39 } });
+  });
+
+  it("parses CREATE SCHEMA with a name, an AUTHORIZATION role or both, and its elements", () => {
+    const schema = { kind: "createSchema", ifNotExists: false, name: "s", authorization: null, elements: [] };
+    expect(firstStmt("CREATE SCHEMA s;")).toEqual(schema);
+    expect(firstStmt("CREATE SCHEMA IF NOT EXISTS s AUTHORIZATION bob;")).toEqual({
+      ...schema,
+      ifNotExists: true,
+      authorization: "bob",
+    });
+    expect(firstStmt("CREATE SCHEMA AUTHORIZATION bob;")).toEqual({ ...schema, name: null, authorization: "bob" });
+    expect(firstStmt("CREATE SCHEMA IF NOT EXISTS AUTHORIZATION bob;")).toMatchObject({
+      ifNotExists: true,
+      name: null,
+    });
+    const nested = firstStmt(
+      "CREATE SCHEMA s CREATE TABLE t (id int) CREATE VIEW v AS SELECT id FROM t GRANT SELECT ON v TO bob;",
+    );
+    expect(nested.elements.map((e: any) => e.kind)).toEqual(["createTable", "createView", "grant"]);
+    expect(
+      firstStmt("CREATE SCHEMA s CREATE OR REPLACE VIEW v AS SELECT 1 CREATE UNIQUE INDEX i ON t (a);").elements.map(
+        (e: any) => e.kind,
+      ),
+    ).toEqual(["createView", "createIndex"]);
+    // Each element spans from its own target keyword, as at the top level.
+    const [outer] = sqlLite.parse("CREATE SCHEMA s CREATE TABLE t (id int);") as Record<string, any>[];
+    expect(outer!.elements[0].span).toEqual({ start: { row: 1, col: 23 }, end: { row: 1, col: 39 } });
+    // …and a VIEW or TRIGGER from its CREATE, again as at the top level.
+    const [withTrigger] = sqlLite.parse(
+      "CREATE SCHEMA s CREATE OR REPLACE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();",
+    ) as Record<string, any>[];
+    expect(withTrigger!.elements[0]).toMatchObject({ kind: "createTrigger", orReplace: true, name: "tr" });
+    expect(withTrigger!.elements[0].span).toEqual({ start: { row: 1, col: 16 }, end: { row: 1, col: 96 } });
+    // The elements own no `;`: the statement after the schema parses separately.
+    expect(parse("CREATE SCHEMA s CREATE SEQUENCE q; SELECT 1;").map((st) => st.kind)).toEqual([
+      "createSchema",
+      "select",
+    ]);
+  });
+
+  it("takes CURRENT_USER, CURRENT_ROLE and SESSION_USER as a role", () => {
+    expect(firstStmt("CREATE SCHEMA AUTHORIZATION CURRENT_USER;")).toMatchObject({ authorization: "current_user" });
+    expect(firstStmt("CREATE SCHEMA s AUTHORIZATION current_role;")).toMatchObject({ authorization: "current_role" });
+    expect(firstStmt("CREATE TABLESPACE ts OWNER session_user LOCATION 'x';")).toMatchObject({
+      owner: "session_user",
+    });
+  });
+
+  it("reads `if` as a schema or extension name when NOT does not follow it", () => {
+    expect(firstStmt("CREATE SCHEMA if AUTHORIZATION bob;")).toMatchObject({ ifNotExists: false, name: "if" });
+    expect(firstStmt("CREATE EXTENSION if CASCADE;")).toMatchObject({ ifNotExists: false, name: "if" });
+  });
+
+  it("parses CREATE EXTENSION with its options in any order", () => {
+    const ext = { kind: "createExtension", ifNotExists: false, name: "hstore", options: [] };
+    expect(firstStmt("CREATE EXTENSION hstore;")).toEqual(ext);
+    expect(firstStmt("CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public VERSION '1.4' CASCADE;")).toEqual({
+      ...ext,
+      ifNotExists: true,
+      options: [{ kind: "schema", schema: "public" }, { kind: "version", version: "1.4" }, { kind: "cascade" }],
+    });
+    expect(firstStmt('CREATE EXTENSION "uuid-ossp" CASCADE VERSION v2;')).toEqual({
+      ...ext,
+      name: "uuid-ossp",
+      options: [{ kind: "cascade" }, { kind: "version", version: "v2" }],
+    });
+  });
+
+  it("parses CREATE TABLESPACE with its owner, location and option list", () => {
+    expect(firstStmt("CREATE TABLESPACE ts LOCATION '/data';")).toEqual({
+      kind: "createTablespace",
+      name: "ts",
+      owner: null,
+      location: "/data",
+      options: [],
+    });
+    expect(
+      firstStmt("CREATE TABLESPACE ts OWNER bob LOCATION '' WITH (seq_page_cost = 1.5, random_page_cost = 2);"),
+    ).toEqual({
+      kind: "createTablespace",
+      name: "ts",
+      owner: "bob",
+      location: "",
+      options: [opt("seq_page_cost", num(1.5)), opt("random_page_cost", num(2))],
+    });
+  });
+
+  it("spans each target from its own keyword, as CREATE TABLE's does", () => {
+    for (const src of [
+      "CREATE TABLE t (id int);",
+      "CREATE DATABASE d;",
+      "CREATE SCHEMA s;",
+      "CREATE EXTENSION e;",
+      "CREATE TABLESPACE ts LOCATION 'x' WITH (a = 1);",
+    ]) {
+      const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+      expect(stmt!.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: src.length - 1 } });
+    }
+  });
+
+  it("keeps the new CREATE words unreserved as names", () => {
+    const words = [
+      "database",
+      "schema",
+      "extension",
+      "tablespace",
+      "location",
+      "encoding",
+      "version",
+      "owner",
+      "authorization",
+      "connection",
+      "cascade",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM database;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    const cols = words.map((word) => `${word} text`).join(", ");
+    expect(firstStmt(`CREATE TABLE extension (${cols});`).items.map((i: any) => i.name)).toEqual(words);
+    // …and as the names these statements create.
+    expect(firstStmt("CREATE DATABASE database OWNER owner;")).toMatchObject({
+      name: "database",
+      options: [opt("owner", name("owner"))],
+    });
+    expect(firstStmt("CREATE SCHEMA schema AUTHORIZATION authorization;")).toMatchObject({
+      name: "schema",
+      authorization: "authorization",
+    });
+    expect(firstStmt("CREATE EXTENSION version SCHEMA schema VERSION version;")).toMatchObject({
+      name: "version",
+      options: [
+        { kind: "schema", schema: "schema" },
+        { kind: "version", version: "version" },
+      ],
+    });
+    expect(firstStmt("CREATE TABLESPACE location OWNER owner LOCATION 'x';")).toMatchObject({
+      name: "location",
+      owner: "owner",
+    });
+  });
+
+  it("rejects malformed CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
+    expect(bad("CREATE DATABASE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CREATE DATABASE d OWNER;")).toThrow(/Expected an option value but found ";"/);
+    expect(bad("CREATE DATABASE d IS_TEMPLATE;")).toThrow(/Expected an option value but found ";"/);
+    expect(bad("CREATE DATABASE d CONNECTION LIMIT;")).toThrow(/Expected an option value but found ";"/);
+    expect(bad("CREATE DATABASE d (owner = bob);")).toThrow(/Expected ";" but found "\("/);
+    expect(bad("CREATE SCHEMA;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CREATE SCHEMA AUTHORIZATION;")).toThrow(/Expected a name but found ";"/);
+    // A schema element is one of the CREATE kinds PG admits there, or GRANT.
+    // The croak points at the target word, past CREATE and OR REPLACE.
+    expect(bad("CREATE SCHEMA s CREATE frobnicate;")).toThrow(
+      /Expected "table", "unique", "index", "sequence", "view" or "trigger" but found "frobnicate" \(1:23\)/,
+    );
+    expect(bad("CREATE SCHEMA s CREATE SCHEMA t CREATE TABLE u (a int);")).toThrow(/or "trigger" but found "schema"/);
+    expect(bad("CREATE SCHEMA s CREATE DATABASE d;")).toThrow(/or "trigger" but found "database"/);
+    expect(bad("CREATE SCHEMA s CREATE OR REPLACE TABLE t (a int);")).toThrow(
+      /Expected "view" or "trigger" but found "table" \(1:34\)/,
+    );
+    expect(bad("CREATE SCHEMA s CREATE OR TABLE t (a int);")).toThrow(/Expected "replace" but found "table" \(1:26\)/);
+    // These two are only told apart once parsed, so they croak over the element.
+    expect(bad("CREATE SCHEMA s CREATE TABLE t AS SELECT 1;")).toThrow(/cannot be CREATE TABLE AS \(1:23\)/);
+    expect(bad("CREATE SCHEMA s GRANT admin TO bob CREATE TABLE t (a int);")).toThrow(
+      /must grant privileges ON an object, not a role \(1:16\)/,
+    );
+    expect(bad("CREATE SCHEMA IF NOT EXISTS s CREATE TABLE t (a int);")).toThrow(
+      /CREATE SCHEMA IF NOT EXISTS cannot include schema elements \(1:30\)/,
+    );
+    expect(bad("CREATE SCHEMA IF NOT EXIST s;")).toThrow(/Expected "exists" but found "exist"/);
+    expect(bad("CREATE EXTENSION e VERSION;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CREATE EXTENSION e SCHEMA 's';")).toThrow(/Expected a name but found "s" \(1:27\)/);
+    expect(bad("CREATE TABLESPACE ts;")).toThrow(/Expected "location" but found ";"/);
+    expect(bad("CREATE TABLESPACE ts LOCATION data;")).toThrow(/Expected a string but found "data"/);
+    expect(bad("CREATE TABLESPACE ts LOCATION 'x' WITH seq_page_cost = 1;")).toThrow(/Expected "\(" but found/);
+    expect(bad("CREATE OR REPLACE SCHEMA s;")).toThrow(/Expected "view", "materialized"/);
   });
 });
