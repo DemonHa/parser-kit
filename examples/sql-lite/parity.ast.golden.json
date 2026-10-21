@@ -3755,6 +3755,325 @@
     ]
   },
   {
+    "source": "SELECT * FROM ONLY t AS x (a, b) TABLESAMPLE system (10), (VALUES (1, 2)) AS v (c, d);",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": "x",
+            "columns": [
+              "a",
+              "b"
+            ],
+            "tablesample": {
+              "method": "system",
+              "args": [
+                {
+                  "kind": "number",
+                  "value": 10,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 53
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 55
+                    }
+                  }
+                }
+              ],
+              "repeatable": null
+            },
+            "only": true
+          },
+          {
+            "kind": "subquery",
+            "query": {
+              "kind": "values",
+              "rows": [
+                [
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 67
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 68
+                      }
+                    }
+                  },
+                  {
+                    "kind": "number",
+                    "value": 2,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 70
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 71
+                      }
+                    }
+                  }
+                ]
+              ],
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 59
+                },
+                "end": {
+                  "row": 1,
+                  "col": 72
+                }
+              }
+            },
+            "alias": "v",
+            "columns": [
+              "c",
+              "d"
+            ]
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 85
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT * FROM generate_series(1, 3) g (n) JOIN ONLY (s.u) ON true, LATERAL (SELECT 1) l (one);",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "join",
+            "joinType": "inner",
+            "left": {
+              "kind": "function",
+              "call": {
+                "kind": "call",
+                "name": "generate_series",
+                "args": [
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 30
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 31
+                      }
+                    }
+                  },
+                  {
+                    "kind": "number",
+                    "value": 3,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 33
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 34
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 14
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 35
+                  }
+                }
+              },
+              "alias": "g",
+              "columns": [
+                "n"
+              ]
+            },
+            "right": {
+              "kind": "table",
+              "name": [
+                "s",
+                "u"
+              ],
+              "alias": null,
+              "only": true
+            },
+            "on": {
+              "kind": "bool",
+              "value": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 61
+                },
+                "end": {
+                  "row": 1,
+                  "col": 65
+                }
+              }
+            },
+            "using": null
+          },
+          {
+            "kind": "subquery",
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 83
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 84
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": null,
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 76
+                },
+                "end": {
+                  "row": 1,
+                  "col": 84
+                }
+              }
+            },
+            "alias": "l",
+            "columns": [
+              "one"
+            ],
+            "lateral": true
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 93
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "SELECT -a, NOT b FROM t;",
     "ast": [
       {

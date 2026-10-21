@@ -1480,6 +1480,186 @@ describe("SQL-lite FROM items: LATERAL, table functions, TABLESAMPLE", () => {
   });
 });
 
+// --- FROM-item column-alias lists and ONLY ---
+
+describe("SQL-lite FROM-item column-alias lists and ONLY", () => {
+  const from = (src: string) => (firstStmt(src) as any).from;
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+
+  it("reads a column-alias list after a table alias, with or without AS", () => {
+    expect(from("SELECT * FROM t AS x (a, b);")).toEqual([
+      { kind: "table", name: ["t"], alias: "x", columns: ["a", "b"] },
+    ]);
+    // The alias has been consumed before the `(`, so the AS-less spelling is
+    // no harder to read than the AS one.
+    expect(from("SELECT * FROM t x (a, b);")).toEqual([
+      { kind: "table", name: ["t"], alias: "x", columns: ["a", "b"] },
+    ]);
+    // A quoted column alias keeps its case, as any quoted name does.
+    expect(from('SELECT * FROM s.t AS x ("A", b);')).toEqual([
+      { kind: "table", name: ["s", "t"], alias: "x", columns: ["A", "b"] },
+    ]);
+  });
+
+  it("reads the list on subquery, VALUES and table-function items too", () => {
+    expect(from("SELECT * FROM (VALUES (1, 2)) AS v (a, b);")).toEqual([
+      {
+        kind: "subquery",
+        query: { kind: "values", rows: [[num(1), num(2)]], orderBy: null, limit: null, offset: null },
+        alias: "v",
+        columns: ["a", "b"],
+      },
+    ]);
+    expect(from("SELECT * FROM (SELECT 1) s (a);")).toEqual([
+      { kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "s", columns: ["a"] },
+    ]);
+    expect(from("SELECT * FROM generate_series(1, 3) AS g (n);")).toEqual([
+      { kind: "function", call: call("generate_series", [num(1), num(3)]), alias: "g", columns: ["n"] },
+    ]);
+    expect(from("SELECT * FROM a, LATERAL unnest(a.tags) u (tag);")).toEqual([
+      tableFrom(["a"]),
+      { kind: "function", call: call("unnest", [name("a", "tags")]), alias: "u", columns: ["tag"], lateral: true },
+    ]);
+    expect(from("SELECT * FROM a, LATERAL (SELECT 1) l (one);")[1]).toEqual({
+      kind: "subquery",
+      query: sel({ columns: [col(num(1))] }),
+      alias: "l",
+      columns: ["one"],
+      lateral: true,
+    });
+  });
+
+  it("puts the list before TABLESAMPLE and reads it wherever a FROM item appears", () => {
+    // PG's order is `relation_expr alias_clause tablesample_clause`.
+    expect(from("SELECT * FROM t AS x (a) TABLESAMPLE system (10);")).toEqual([
+      {
+        kind: "table",
+        name: ["t"],
+        alias: "x",
+        columns: ["a"],
+        tablesample: { method: "system", args: [num(10)], repeatable: null },
+      },
+    ]);
+    expect(from("SELECT * FROM a x (p) JOIN b y (q) USING (p);")).toEqual([
+      {
+        kind: "join",
+        joinType: "inner",
+        left: { kind: "table", name: ["a"], alias: "x", columns: ["p"] },
+        right: { kind: "table", name: ["b"], alias: "y", columns: ["q"] },
+        on: null,
+        using: ["p"],
+      },
+    ]);
+    // FROM items reach DELETE … USING, CTE bodies and set-op arms through the
+    // same rule.
+    expect((firstStmt("DELETE FROM t USING u AS x (b) WHERE t.a = x.b;") as any).using).toEqual([
+      { kind: "table", name: ["u"], alias: "x", columns: ["b"] },
+    ]);
+    expect((firstStmt("WITH c AS (SELECT * FROM t x (a)) SELECT 1;") as any).with_[0].query.from).toEqual([
+      { kind: "table", name: ["t"], alias: "x", columns: ["a"] },
+    ]);
+    expect((firstStmt("SELECT 1 UNION SELECT * FROM u y (b);") as any).right.from).toEqual([
+      { kind: "table", name: ["u"], alias: "y", columns: ["b"] },
+    ]);
+  });
+
+  it("parses ONLY on a bare, qualified or parenthesised table name", () => {
+    expect(from("SELECT * FROM ONLY t;")).toEqual([{ kind: "table", only: true, name: ["t"], alias: null }]);
+    expect(from("SELECT * FROM ONLY s.t AS x (a);")).toEqual([
+      { kind: "table", only: true, name: ["s", "t"], alias: "x", columns: ["a"] },
+    ]);
+    // PG's `relation_expr` also admits `ONLY (name)`; the parentheses are not
+    // recorded, as they change nothing.
+    expect(from("SELECT * FROM ONLY (t) x;")).toEqual([{ kind: "table", only: true, name: ["t"], alias: "x" }]);
+    expect(from("SELECT * FROM a JOIN ONLY b ON true;")[0].right).toEqual({
+      kind: "table",
+      only: true,
+      name: ["b"],
+      alias: null,
+    });
+    expect((firstStmt("UPDATE t SET a = 1 FROM ONLY u WHERE t.a = u.a;") as any).from).toEqual([
+      { kind: "table", only: true, name: ["u"], alias: null },
+    ]);
+  });
+
+  it("omits `columns` and `only` when neither is written", () => {
+    // Both are spread in only when present, so every pre-existing FROM item —
+    // and its row in the parity golden — keeps its shape.
+    for (const item of [
+      ...from("SELECT * FROM t x TABLESAMPLE system (1);"),
+      ...from("SELECT * FROM (SELECT 1) s;"),
+      ...from("SELECT * FROM f(1) g;"),
+    ]) {
+      expect("columns" in item).toBe(false);
+      expect("only" in item).toBe(false);
+    }
+  });
+
+  it("still reads a bare `t (a, b)` as a table-function call", () => {
+    // With no alias ahead of it, the list would be indistinguishable from a
+    // call's argument list — and PG resolves it the same way, as a call to `t`.
+    expect(from("SELECT * FROM t (a, b);")).toEqual([
+      { kind: "function", call: call("t", [name("a"), name("b")]), alias: null },
+    ]);
+  });
+
+  it("keeps a nested-paren FROM subquery a subquery", () => {
+    // A `(` that opens a FROM item stays a query however deeply it nests, and
+    // the alias clause — list included — follows the outermost `)`.
+    expect(from("SELECT * FROM ((SELECT 1) UNION (SELECT 2)) x;")).toEqual([
+      {
+        kind: "subquery",
+        query: {
+          kind: "setOp",
+          op: "union",
+          left: sel({ columns: [col(num(1))] }),
+          right: sel({ columns: [col(num(2))] }),
+        },
+        alias: "x",
+      },
+    ]);
+    expect(from("SELECT * FROM ((SELECT 1)) x;")).toEqual([
+      { kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "x" },
+    ]);
+    expect(from("SELECT * FROM ((SELECT 1)) x (a);")).toEqual([
+      { kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "x", columns: ["a"] },
+    ]);
+  });
+
+  it("takes no name away: `only` was already reserved", () => {
+    // ONLY is matched by value, and it was in RESERVED long before this rule
+    // existed — so it was never usable as a bare name or alias. Quoted, it is a
+    // name exactly as before.
+    expect(from('SELECT * FROM "only";')).toEqual([tableFrom(["only"])]);
+    expect(from('SELECT * FROM t AS "only" ("only");')).toEqual([
+      { kind: "table", name: ["t"], alias: "only", columns: ["only"] },
+    ]);
+    expect(() => sqlLite.parse("SELECT * FROM t only;")).toThrow(/Expected ";" but found "only"/);
+  });
+
+  it("rejects an empty or malformed alias list and a misplaced or malformed ONLY", () => {
+    // PG's list names at least one column.
+    expect(() => sqlLite.parse("SELECT * FROM t x ();")).toThrow(/Expected a name but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM t x (a,);")).toThrow(/Expected a name but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM t x (a b);")).toThrow(/Expected "\)" but found "b"/);
+    expect(() => sqlLite.parse("SELECT * FROM t x (a) (b);")).toThrow(/but found "\("/);
+    // The list needs an alias ahead of it on a subquery too, and comes before
+    // TABLESAMPLE, never after it.
+    expect(() => sqlLite.parse("SELECT * FROM (SELECT 1) (a);")).toThrow(/but found "\("/);
+    expect(() => sqlLite.parse("SELECT * FROM t TABLESAMPLE system (1) x (a);")).toThrow(/but found "x"/);
+    // A function's typed column-definition list is out of scope: it is not a
+    // name list, so the type word is where it stops.
+    expect(() => sqlLite.parse("SELECT * FROM f() AS g (n int);")).toThrow(/Expected "\)" but found "int"/);
+    // ONLY takes a table name — not a subquery, a function or nothing at all —
+    // and cannot follow LATERAL.
+    expect(() => sqlLite.parse("SELECT * FROM ONLY;")).toThrow(/Expected a name but found ";"/);
+    expect(() => sqlLite.parse("SELECT * FROM ONLY (SELECT 1) s;")).toThrow(/Expected a name but found "select"/);
+    expect(() => sqlLite.parse("SELECT * FROM ONLY f(1);")).toThrow(/but found "\("/);
+    expect(() => sqlLite.parse("SELECT * FROM ONLY (t x);")).toThrow(/Expected "\)" but found "x"/);
+    expect(() => sqlLite.parse("SELECT * FROM LATERAL ONLY t;")).toThrow(/Expected a name but found "only"/);
+  });
+});
+
 describe("SQL-lite VALUES query", () => {
   it("parses a standalone VALUES statement", () => {
     expect(firstStmt("VALUES (1, 2), (3, 4);")).toEqual({
