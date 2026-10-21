@@ -338,7 +338,7 @@ describe("SQL-lite ALTER TABLE (Phase 6 actions)", () => {
 
   it("rejects an unknown ALTER TABLE action", () => {
     expect(() => sqlLite.parse("ALTER TABLE t frobnicate;")).toThrow(
-      /Expected "add", "drop", "alter", "rename", "owner" or "replica"/,
+      /Expected "add", "drop", "alter", "rename", "owner", "replica", "set", "reset", "validate", "enable", "disable", "cluster", "attach" or "detach" but found "frobnicate"/,
     );
   });
 });
@@ -6837,6 +6837,199 @@ describe("SQL-lite COPY", () => {
     expect(bad("COPY t FROM STDIN WITH CSV HEADER;")).toThrow(/Expected "\(" but found "csv"/);
     expect(bad("COPY t () FROM STDIN;")).toThrow(/Expected a name but found "\)"/);
     expect(bad("COPY t FROM STDIN ();")).toThrow(/Expected an option name but found "\)"/);
+  });
+});
+
+// --- the remaining ALTER TABLE actions ---
+
+describe("SQL-lite remaining ALTER TABLE actions", () => {
+  const alter = (text: string) => firstStmt(text) as any;
+  const action = (src: string) => {
+    const { actions } = alter(`ALTER TABLE t ${src};`);
+    expect(actions).toHaveLength(1);
+    return actions[0];
+  };
+  const fails = (text: string) => () => sqlLite.parse(text);
+  const opt = (name: string, value: unknown = null) => ({ name, value });
+
+  it("parses SET SCHEMA, SET TABLESPACE and SET WITHOUT CLUSTER", () => {
+    expect(alter("ALTER TABLE IF EXISTS s.t SET SCHEMA archive;")).toEqual({
+      kind: "alterTable",
+      ifExists: true,
+      name: ["s", "t"],
+      actions: [{ kind: "setSchema", schema: "archive" }],
+    });
+    expect(action("SET TABLESPACE fast")).toEqual({ kind: "setTablespace", tablespace: "fast" });
+    expect(action("SET WITHOUT CLUSTER")).toEqual({ kind: "setWithoutCluster" });
+  });
+
+  it("parses SET (…) and RESET (…) through the storage-parameter list", () => {
+    expect(action("SET (fillfactor = 70, toast.autovacuum_enabled = false, x)")).toEqual({
+      kind: "setOptions",
+      options: [
+        opt("fillfactor", num(70)),
+        { namespace: "toast", ...opt("autovacuum_enabled", { kind: "bool", value: false }) },
+        opt("x"),
+      ],
+    });
+    expect(action("RESET (fillfactor, toast.autovacuum_enabled)")).toEqual({
+      kind: "resetOptions",
+      options: [opt("fillfactor"), { namespace: "toast", ...opt("autovacuum_enabled") }],
+    });
+  });
+
+  it("parses DROP CONSTRAINT and VALIDATE CONSTRAINT", () => {
+    const drop = { kind: "dropConstraint", ifExists: true, name: "c", behavior: "cascade" };
+    expect(action("DROP CONSTRAINT IF EXISTS c CASCADE")).toEqual(drop);
+    expect(action("DROP CONSTRAINT c RESTRICT")).toEqual({ ...drop, ifExists: false, behavior: "restrict" });
+    expect(action("DROP CONSTRAINT c")).toEqual({ ...drop, ifExists: false, behavior: null });
+    // IF stays usable as a constraint name, and a quoted "constraint" as a column.
+    expect(action("DROP CONSTRAINT if")).toEqual({ ...drop, ifExists: false, name: "if", behavior: null });
+    expect(action('DROP "constraint"')).toEqual({ kind: "dropColumn", name: "constraint" });
+    expect(action("VALIDATE CONSTRAINT c")).toEqual({ kind: "validateConstraint", name: "c" });
+  });
+
+  it("parses ENABLE / DISABLE TRIGGER with a name, ALL or USER", () => {
+    expect(action("ENABLE TRIGGER audit")).toEqual({
+      kind: "enableTrigger",
+      mode: null,
+      trigger: { kind: "name", name: "audit" },
+    });
+    const enable = (mode: string | null, trigger: unknown) => ({ kind: "enableTrigger", mode, trigger });
+    expect(action("ENABLE TRIGGER ALL")).toEqual(enable(null, { kind: "all" }));
+    expect(action("ENABLE TRIGGER USER")).toEqual(enable(null, { kind: "user" }));
+    expect(action("ENABLE REPLICA TRIGGER r")).toEqual(enable("replica", { kind: "name", name: "r" }));
+    expect(action("ENABLE ALWAYS TRIGGER g")).toEqual(enable("always", { kind: "name", name: "g" }));
+    expect(action("DISABLE TRIGGER ALL")).toEqual({ kind: "disableTrigger", trigger: { kind: "all" } });
+    // A quoted "all" is a trigger's name.
+    expect(action('DISABLE TRIGGER "all"')).toEqual({ kind: "disableTrigger", trigger: { kind: "name", name: "all" } });
+  });
+
+  it("parses CLUSTER ON", () => {
+    expect(action("CLUSTER ON t_pkey")).toEqual({ kind: "clusterOn", index: "t_pkey" });
+  });
+
+  it("parses ATTACH PARTITION with each bound and DETACH PARTITION with each mode", () => {
+    expect(action("ATTACH PARTITION s.p FOR VALUES FROM (1) TO (10)")).toEqual({
+      kind: "attachPartition",
+      partition: ["s", "p"],
+      bound: { kind: "range", from: [num(1)], to: [num(10)] },
+    });
+    expect(action("ATTACH PARTITION p FOR VALUES IN ('a', 'b')").bound).toEqual({
+      kind: "list",
+      values: [str("a"), str("b")],
+    });
+    expect(action("ATTACH PARTITION p FOR VALUES WITH (MODULUS 4, REMAINDER 1)").bound).toEqual({
+      kind: "hash",
+      modulus: 4,
+      remainder: 1,
+    });
+    expect(action("ATTACH PARTITION p DEFAULT").bound).toEqual({ kind: "default" });
+    expect(action("DETACH PARTITION s.p")).toEqual({ kind: "detachPartition", partition: ["s", "p"], mode: null });
+    expect(action("DETACH PARTITION p CONCURRENTLY").mode).toBe("concurrently");
+    expect(action("DETACH PARTITION p FINALIZE").mode).toBe("finalize");
+  });
+
+  it("composes with the other actions in one comma-separated list", () => {
+    const { actions } = alter(
+      "ALTER TABLE t SET TABLESPACE fast, DROP CONSTRAINT c, ADD a int, DISABLE TRIGGER ALL, CLUSTER ON i, " +
+        "SET (fillfactor = 70), RESET (x), VALIDATE CONSTRAINT k, ENABLE ALWAYS TRIGGER g, SET WITHOUT CLUSTER;",
+    );
+    expect(actions.map((a: any) => a.kind)).toEqual([
+      "setTablespace",
+      "dropConstraint",
+      "addColumn",
+      "disableTrigger",
+      "clusterOn",
+      "setOptions",
+      "resetOptions",
+      "validateConstraint",
+      "enableTrigger",
+      "setWithoutCluster",
+    ]);
+  });
+
+  it("spans the whole statement", () => {
+    const [stmt] = sqlLite.parse("ALTER TABLE t ATTACH PARTITION p DEFAULT;") as Record<string, any>[];
+    expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 40 } });
+  });
+
+  it("keeps the new ALTER TABLE words unreserved as names", () => {
+    const words = [
+      "attach",
+      "detach",
+      "partition",
+      "concurrently",
+      "finalize",
+      "cluster",
+      "validate",
+      "enable",
+      "disable",
+      "replica",
+      "always",
+      "trigger",
+      "tablespace",
+      "schema",
+      "without",
+      "reset",
+    ];
+    const columns = words.map((w) => `${w} int`).join(", ");
+    expect(firstStmt(`CREATE TABLE t (${columns});`).items.map((i: any) => i.name)).toEqual(words);
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    // …as the columns ADD and DROP take, and as the names the actions take.
+    const added = alter(`ALTER TABLE t ${words.map((w) => `ADD ${w} int`).join(", ")};`).actions;
+    expect(added.map((a: any) => a.column.name)).toEqual(words);
+    const dropped = alter(`ALTER TABLE t ${words.map((w) => `DROP ${w}`).join(", ")};`).actions;
+    expect(dropped.map((a: any) => a.name)).toEqual(words);
+    expect(alter("ALTER TABLE attach DETACH PARTITION finalize;")).toMatchObject({
+      name: ["attach"],
+      actions: [{ partition: ["finalize"], mode: null }],
+    });
+    expect(
+      alter("ALTER TABLE cluster CLUSTER ON validate, ENABLE TRIGGER always, DISABLE TRIGGER replica;"),
+    ).toMatchObject({
+      name: ["cluster"],
+      actions: [{ index: "validate" }, { mode: null, trigger: { name: "always" } }, { trigger: { name: "replica" } }],
+    });
+    expect(action("SET TABLESPACE tablespace")).toEqual({ kind: "setTablespace", tablespace: "tablespace" });
+    expect(action("SET SCHEMA schema")).toEqual({ kind: "setSchema", schema: "schema" });
+    expect(action("ATTACH PARTITION detach DEFAULT").partition).toEqual(["detach"]);
+  });
+
+  it("rejects a malformed action and the standalone ones beside another", () => {
+    expect(fails("ALTER TABLE t SET frob;")).toThrow(
+      /Expected "\(", "schema", "tablespace" or "without" but found "frob" \(1:18\)/,
+    );
+    // PG's SET WITHOUT OIDS and ENABLE RULE are valid there but not parsed here.
+    expect(fails("ALTER TABLE t SET WITHOUT OIDS;")).toThrow(/Expected "cluster" but found "oids"/);
+    expect(fails("ALTER TABLE t ENABLE RULE r;")).toThrow(/Expected "replica", "always" or "trigger" but found "rule"/);
+    expect(fails("ALTER TABLE t DISABLE TRIGGER;")).toThrow(/Expected "all", "user" or a name but found ";"/);
+    expect(fails("ALTER TABLE t ENABLE TRIGGER select;")).toThrow(
+      /Expected "all", "user" or a name but found "select"/,
+    );
+    expect(fails("ALTER TABLE t ENABLE REPLICA IDENTITY;")).toThrow(/Expected "trigger" but found "identity"/);
+    // REPLICA and ALWAYS take a trigger's name only, as in PG.
+    expect(fails("ALTER TABLE t ENABLE REPLICA TRIGGER ALL;")).toThrow(/Expected a name but found "all"/);
+    expect(fails("ALTER TABLE t ENABLE ALWAYS TRIGGER USER;")).toThrow(/Expected a name but found "user"/);
+    expect(fails("ALTER TABLE t DISABLE REPLICA TRIGGER x;")).toThrow(/Expected "trigger" but found "replica"/);
+    expect(fails("ALTER TABLE t DROP CONSTRAINT;")).toThrow(/Expected a name but found ";"/);
+    expect(fails("ALTER TABLE t VALIDATE c;")).toThrow(/Expected "constraint" but found "c"/);
+    expect(fails("ALTER TABLE t CLUSTER i;")).toThrow(/Expected "on" but found "i"/);
+    expect(fails("ALTER TABLE t ATTACH PARTITION p;")).toThrow(/Expected "for values" or "default" but found ";"/);
+    expect(fails("ALTER TABLE t DETACH PARTITION p FORCE;")).toThrow(/Expected ";" but found "force"/);
+    expect(fails("ALTER TABLE t RESET (fillfactor = 70);")).toThrow(/RESET must not include values for parameters/);
+    expect(fails("ALTER TABLE t SET ();")).toThrow(/Expected an option name but found "\)"/);
+    expect(fails("ALTER TABLE t ADD a int, SET SCHEMA s;")).toThrow(
+      /SET SCHEMA cannot be combined with other ALTER TABLE actions \(1:25\)/,
+    );
+    expect(fails("ALTER TABLE t ATTACH PARTITION p DEFAULT, OWNER TO r;")).toThrow(
+      /ATTACH PARTITION cannot be combined with other ALTER TABLE actions \(1:14\)/,
+    );
+    expect(fails("ALTER TABLE t DETACH PARTITION p, DETACH PARTITION q;")).toThrow(
+      /DETACH PARTITION cannot be combined with other ALTER TABLE actions \(1:14\)/,
+    );
   });
 });
 

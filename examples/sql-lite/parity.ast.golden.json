@@ -12136,6 +12136,282 @@
     ]
   },
   {
+    "source": "ALTER TABLE t DROP CONSTRAINT IF EXISTS c CASCADE, VALIDATE CONSTRAINT k, SET TABLESPACE fast, SET WITHOUT CLUSTER;",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "ifExists": false,
+        "name": [
+          "t"
+        ],
+        "actions": [
+          {
+            "kind": "dropConstraint",
+            "ifExists": true,
+            "name": "c",
+            "behavior": "cascade"
+          },
+          {
+            "kind": "validateConstraint",
+            "name": "k"
+          },
+          {
+            "kind": "setTablespace",
+            "tablespace": "fast"
+          },
+          {
+            "kind": "setWithoutCluster"
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 114
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE t ENABLE REPLICA TRIGGER audit, ENABLE TRIGGER ALL, DISABLE TRIGGER USER, CLUSTER ON t_pkey, SET (fillfactor = 70), RESET (x);",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "ifExists": false,
+        "name": [
+          "t"
+        ],
+        "actions": [
+          {
+            "kind": "enableTrigger",
+            "mode": "replica",
+            "trigger": {
+              "kind": "name",
+              "name": "audit"
+            }
+          },
+          {
+            "kind": "enableTrigger",
+            "mode": null,
+            "trigger": {
+              "kind": "all"
+            }
+          },
+          {
+            "kind": "disableTrigger",
+            "trigger": {
+              "kind": "user"
+            }
+          },
+          {
+            "kind": "clusterOn",
+            "index": "t_pkey"
+          },
+          {
+            "kind": "setOptions",
+            "options": [
+              {
+                "name": "fillfactor",
+                "value": {
+                  "kind": "number",
+                  "value": 70,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 123
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 125
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 110
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 125
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "kind": "resetOptions",
+            "options": [
+              {
+                "name": "x",
+                "value": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 135
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 136
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 137
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE s.t SET SCHEMA archive;",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "ifExists": false,
+        "name": [
+          "s",
+          "t"
+        ],
+        "actions": [
+          {
+            "kind": "setSchema",
+            "schema": "archive"
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 34
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10);",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "ifExists": false,
+        "name": [
+          "t"
+        ],
+        "actions": [
+          {
+            "kind": "attachPartition",
+            "partition": [
+              "p"
+            ],
+            "bound": {
+              "kind": "range",
+              "from": [
+                {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 50
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 51
+                    }
+                  }
+                }
+              ],
+              "to": [
+                {
+                  "kind": "number",
+                  "value": 10,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 57
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 59
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 33
+                },
+                "end": {
+                  "row": 1,
+                  "col": 60
+                }
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 60
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE t DETACH PARTITION p CONCURRENTLY;",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "ifExists": false,
+        "name": [
+          "t"
+        ],
+        "actions": [
+          {
+            "kind": "detachPartition",
+            "partition": [
+              "p"
+            ],
+            "mode": "concurrently"
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 45
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "ALTER SCHEMA s RENAME TO s2;",
     "ast": [
       {
