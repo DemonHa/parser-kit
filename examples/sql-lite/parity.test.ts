@@ -169,6 +169,9 @@ const SUPPLEMENTAL = [
   "DEALLOCATE PREPARE my_stmt;",
   "INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;",
   "CREATE TABLE t (flags bit DEFAULT B'1011', mask bit DEFAULT X'ff', label text DEFAULT U&'\\0041');",
+  // Index columns with an operator class, ordering and NULLS placement, and an
+  // index's storage parameters.
+  "CREATE UNIQUE INDEX i ON t USING btree (lower(a) text_pattern_ops DESC NULLS LAST, b NULLS FIRST, c ASC) INCLUDE (d) WITH (fillfactor = 70, deduplicate_items = off) WHERE d > 0;",
   // --- EXCLUDE table constraints ---
   "CREATE TABLE t (r tsrange, EXCLUDE USING gist (r WITH &&) INCLUDE (r) WHERE (r IS NOT NULL) DEFERRABLE);",
   "ALTER TABLE t ADD CONSTRAINT no_overlap EXCLUDE (a WITH =, b WITH <>), ADD exclude text;",

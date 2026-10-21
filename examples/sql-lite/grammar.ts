@@ -365,6 +365,18 @@ export type RelationOptionValue =
   | { kind: "optionList"; items: RelationOptionScalar[]; span: Span };
 export type RelationOption = { namespace?: string; name: string; value: RelationOptionValue | null; span: Span };
 
+// One element of CREATE INDEX's column list: PG's `index_elem`, an expression
+// followed by `[opclass [(parameter, …)]] [ASC | DESC] [NULLS {FIRST | LAST}]`.
+// A COLLATE clause stays on `expr`, as it does everywhere else. Every key but
+// `expr` is present only when its clause is written.
+export type IndexColumn = {
+  expr: Expr;
+  opclass?: string[];
+  opclassOptions?: RelationOption[];
+  dir?: "asc" | "desc";
+  nulls?: "first" | "last";
+};
+
 export type AlterAction =
   | { kind: "addColumn"; ifNotExists: boolean; column: ColumnDef }
   | { kind: "dropColumn"; name: string }
@@ -652,6 +664,8 @@ export type Stmt =
       modifiers?: string[];
       span: Span;
     }
+  // `options` (WITH (…)) is present only when written; the older `include` and
+  // `where` keys stay null when absent.
   | {
       kind: "createIndex";
       unique: boolean;
@@ -660,8 +674,9 @@ export type Stmt =
       name: string | null;
       table: string[];
       using: string | null;
-      columns: Expr[];
+      columns: IndexColumn[];
       include: string[] | null;
+      options?: RelationOption[];
       where: Expr | null;
       span: Span;
     }
@@ -2990,6 +3005,46 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
   };
 }
 
+// `NULLS FIRST | NULLS LAST`. Only a `nulls` with one of the two after it starts
+// the clause, so `nulls` alone stays an operator-class name, as in PG.
+function isNullsOrder(ctx: ParseContext<SqlTokenType>): boolean {
+  const after = ctx.peekAhead(1);
+  return ctx.is("ident", "nulls") && after?.type === "ident" && (after.value === "first" || after.value === "last");
+}
+
+const nullsPosition = oneOf(kw("first"), kw("last")).map((n) => n.value as "first" | "last");
+
+// One index column (see IndexColumn). A local rule rather than an edit to
+// exprList, which other statements share. The operator class is any unreserved
+// or quoted name after the expression: `asc` and `desc` are reserved, so they
+// can never be read as one, and `nulls` is not one only when FIRST or LAST
+// follows it (see isNullsOrder).
+const indexColumn = custom<IndexColumn, SqlTokenType>(
+  (ctx) => {
+    const expr = ctx.parse(expression);
+    const tok = ctx.peek();
+    const hasOpclass =
+      tok !== null &&
+      (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value) && !isNullsOrder(ctx)));
+    const opclass = hasOpclass ? ctx.parse(qualName) : null;
+    const opclassOptions = opclass !== null && ctx.is("punc", "(") ? ctx.parse(relationOptions) : null;
+    const dir = ctx.eat("ident", "asc") !== null ? "asc" : ctx.eat("ident", "desc") !== null ? "desc" : null;
+    let nulls: "first" | "last" | null = null;
+    if (ctx.eat("ident", "nulls") !== null) {
+      nulls = ctx.parse(nullsPosition);
+    }
+    return {
+      expr,
+      ...(opclass !== null && { opclass }),
+      ...(opclassOptions !== null && { opclassOptions }),
+      ...(dir !== null && { dir }),
+      ...(nulls !== null && { nulls }),
+    };
+  },
+  { expected: expression.expected(), first: expression.first() },
+);
+const indexColumns = delimited(P("("), P(")"), P(","), indexColumn, { interleaved: true });
+
 const createIndexRest = seq(
   field(
     "unique",
@@ -3012,12 +3067,15 @@ const createIndexRest = seq(
   skip(kw("on")),
   field("table", qualName),
   field("using", optional(seq(skip(kw("using")), field("m", nameWord)).map((s) => s.m))),
-  field("columns", exprList),
+  field("columns", indexColumns),
   // `INCLUDE (col, …)` covering columns — plain names, kept null when absent.
   field("include", optional(seq(skip(kw("include")), field("cols", columnList)).map((s) => s.cols))),
+  // `WITH (storage_parameter = value, …)`, omitted when absent. `with` is
+  // reserved, so it cannot be the start of anything else here.
+  field("options", optional(seq(skip(kw("with")), field("o", relationOptions)).map((s) => s.o))),
   field("where", optional(seq(skip(kw("where")), field("e", expression)).map((s) => s.e))),
 ).map(
-  ({ unique, concurrently, ifNotExists, name, table, using, columns, include, where }, span): Stmt => ({
+  ({ unique, concurrently, ifNotExists, name, table, using, columns, include, options, where }, span): Stmt => ({
     kind: "createIndex",
     unique,
     concurrently,
@@ -3027,6 +3085,7 @@ const createIndexRest = seq(
     using,
     columns,
     include,
+    ...(options !== null && { options }),
     where,
     span,
   }),
