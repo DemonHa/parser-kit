@@ -801,6 +801,30 @@ export type Prepare = {
 };
 // EXECUTE name [(expr, …)] — `args` is null when the list is omitted.
 export type Execute = { kind: "execute"; name: string; args: Expr[] | null; span: Span };
+// PG's eight table-level lock modes, camelCased from their keyword spelling.
+export type LockMode =
+  | "accessShare"
+  | "rowShare"
+  | "rowExclusive"
+  | "shareUpdateExclusive"
+  | "share"
+  | "shareRowExclusive"
+  | "exclusive"
+  | "accessExclusive";
+// LOCK [TABLE] [ONLY] name [*] [, …] [IN mode MODE] [NOWAIT]. ONLY is per table;
+// a trailing `*` spells the default (descendants included) and is not recorded.
+// `mode` is null when IN … MODE is omitted (PG then takes ACCESS EXCLUSIVE).
+export type LockTarget = { name: string[]; only: boolean };
+export type Lock = {
+  kind: "lock";
+  tables: LockTarget[];
+  mode: LockMode | null;
+  nowait: boolean;
+  span: Span;
+};
+// CALL name ( [arg, …] ) — the argument list is always written, possibly empty.
+// Not kind "call", which is the expression node (whose `name` is joined).
+export type CallProcedure = { kind: "callProcedure"; name: string[]; args: Expr[]; span: Span };
 
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
@@ -924,6 +948,8 @@ export type Stmt =
   | Deallocate
   | Prepare
   | Execute
+  | Lock
+  | CallProcedure
   // A top-level query or DML statement is a statement too.
   | Query
   | Insert
@@ -5906,6 +5932,12 @@ function parseFromCall(ctx: ParseContext<SqlTokenType>): Expr {
 // from `start`, which tableRef passes so a plain item's span keeps covering a
 // leading LATERAL.
 function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[], start: Position): Expr {
+  const args = parseCallArgList(ctx);
+  return { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
+}
+// `( [functionArg, …] )` — a call's argument list, possibly empty, without the
+// modifiers a SELECT-list call takes. Shared by FROM calls and CALL.
+function parseCallArgList(ctx: ParseContext<SqlTokenType>): Expr[] {
   if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
   ctx.next(); // "("
   const args: Expr[] = [];
@@ -5914,7 +5946,7 @@ function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[],
     while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(functionArg));
   }
   expectClose(ctx);
-  return { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
+  return args;
 }
 
 // `WITH ORDINALITY` after a table function. Keyed on the word pair, since a
@@ -6681,6 +6713,88 @@ const executeStmt = custom<Stmt, SqlTokenType>(
   { expected: '"execute"', first: [{ type: "ident", value: "execute" }] },
 );
 
+// --- LOCK and CALL ---
+// Both lead words stay UNRESERVED, matched by value, as do the lock-mode words.
+
+// One LOCK target: PG's relation_expr — `[ONLY] name [*]` or `ONLY (name)`.
+// `only` and `table` are reserved, so neither can begin a name.
+const lockTarget = custom<LockTarget, SqlTokenType>(
+  (ctx) => {
+    const only = ctx.eat("ident", "only") !== null;
+    if (only && ctx.eat("punc", "(") !== null) {
+      const name = ctx.parse(qualName);
+      expectClose(ctx);
+      return { name, only };
+    }
+    const name = ctx.parse(qualName);
+    if (!only) ctx.eat("op", "*");
+    return { name, only };
+  },
+  { expected: '"only" or a name', first: [{ type: "ident", value: "only" }, ...nameWord.first()] },
+);
+
+// The mode words share leads (SHARE / SHARE UPDATE EXCLUSIVE / SHARE ROW
+// EXCLUSIVE; ROW SHARE / ROW EXCLUSIVE), and phrase() cannot roll back, so the
+// ladder is walked by hand. Every branch is decided by the token in hand, so a
+// half-written mode (`SHARE ROW MODE`) fails at the word that breaks it.
+function parseLockMode(ctx: ParseContext<SqlTokenType>): LockMode {
+  const either = (share: LockMode, exclusive: LockMode): LockMode => {
+    if (ctx.eat("ident", "share") !== null) return share;
+    if (ctx.eat("ident", "exclusive") !== null) return exclusive;
+    return ctx.croak(`Expected ${quoteList(["share", "exclusive"])} but found ${describeFound(ctx.peek())}`);
+  };
+  if (ctx.eat("ident", "access") !== null) return either("accessShare", "accessExclusive");
+  if (ctx.eat("ident", "row") !== null) return either("rowShare", "rowExclusive");
+  if (ctx.eat("ident", "exclusive") !== null) return "exclusive";
+  if (ctx.eat("ident", "share") === null) {
+    return ctx.croak(
+      `Expected ${quoteList(["access", "row", "share", "exclusive"])} but found ${describeFound(ctx.peek())}`,
+    );
+  }
+  if (ctx.eat("ident", "update") !== null) {
+    ctx.parse(kw("exclusive"));
+    return "shareUpdateExclusive";
+  }
+  if (ctx.eat("ident", "row") !== null) {
+    ctx.parse(kw("exclusive"));
+    return "shareRowExclusive";
+  }
+  if (!ctx.is("ident", "mode")) {
+    return ctx.croak(`Expected ${quoteList(["update", "row", "mode"])} but found ${describeFound(ctx.peek())}`);
+  }
+  return "share";
+}
+
+const lockStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("lock"));
+    ctx.eat("ident", "table"); // optional TABLE noise word
+    const tables = ctx.parse(sepBy(lockTarget, P(",")));
+    let mode: LockMode | null = null;
+    if (ctx.eat("ident", "in") !== null) {
+      mode = parseLockMode(ctx);
+      ctx.parse(kw("mode"));
+    }
+    const nowait = ctx.eat("ident", "nowait") !== null;
+    return { kind: "lock", tables, mode, nowait, span: ctx.spanFrom(start) };
+  },
+  { expected: '"lock"', first: [{ type: "ident", value: "lock" }] },
+);
+
+// CALL's arguments are a FROM call's — functionArg, not expression, so
+// `p(a => 1)` takes named arguments — and, as for a call, the list may be empty.
+const callStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("call"));
+    const name = ctx.parse(qualName);
+    const args = parseCallArgList(ctx);
+    return { kind: "callProcedure", name, args, span: ctx.spanFrom(start) };
+  },
+  { expected: '"call"', first: [{ type: "ident", value: "call" }] },
+);
+
 // First-sets: the DDL and utility rules each dispatch on their own lead keyword;
 // dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
 //
@@ -6689,7 +6803,17 @@ const executeStmt = custom<Stmt, SqlTokenType>(
 // oneOf's first() is a flatMap, and the inner groups catch collisions within a
 // family — and the composed `expected` is overridden by describe() anyway.
 const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt);
-const utilityStmt = oneOf(grantStmt, transactionStmt, sessionStmt, doStmt, deallocateStmt, prepareStmt, executeStmt);
+const utilityStmt = oneOf(
+  grantStmt,
+  transactionStmt,
+  sessionStmt,
+  doStmt,
+  deallocateStmt,
+  prepareStmt,
+  executeStmt,
+  lockStmt,
+  callStmt,
+);
 const statementBody = oneOf(ddlStmt, utilityStmt, dmlStatement).describe("a statement");
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.
 const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
