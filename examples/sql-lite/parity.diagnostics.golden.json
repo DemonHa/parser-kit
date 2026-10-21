@@ -1746,5 +1746,63 @@
         }
       }
     ]
+  },
+  {
+    "source": "SELECT * FROM (a);\nSELECT 15;",
+    "errors": [
+      {
+        "message": "Expected a join but found \")\" (1:16)",
+        "end": {
+          "row": 1,
+          "col": 17
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 15,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 9
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 9
+          }
+        }
+      }
+    ]
   }
 ]

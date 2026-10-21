@@ -4078,6 +4078,360 @@
     ]
   },
   {
+    "source": "SELECT * FROM ((a JOIN b ON true) j JOIN c USING (id)) AS x (p, q), ((SELECT 1) UNION (SELECT 2)) s;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "join",
+            "joinType": "inner",
+            "left": {
+              "kind": "join",
+              "joinType": "inner",
+              "left": {
+                "kind": "table",
+                "name": [
+                  "a"
+                ],
+                "alias": null
+              },
+              "right": {
+                "kind": "table",
+                "name": [
+                  "b"
+                ],
+                "alias": null
+              },
+              "on": {
+                "kind": "bool",
+                "value": true,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 28
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 32
+                  }
+                }
+              },
+              "using": null,
+              "alias": "j"
+            },
+            "right": {
+              "kind": "table",
+              "name": [
+                "c"
+              ],
+              "alias": null
+            },
+            "on": null,
+            "using": [
+              "id"
+            ],
+            "alias": "x",
+            "columns": [
+              "p",
+              "q"
+            ]
+          },
+          {
+            "kind": "subquery",
+            "query": {
+              "kind": "setOp",
+              "op": "union",
+              "left": {
+                "kind": "select",
+                "with_": null,
+                "recursive": false,
+                "distinct": false,
+                "columns": [
+                  {
+                    "expr": {
+                      "kind": "number",
+                      "value": 1,
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 77
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 78
+                        }
+                      }
+                    },
+                    "alias": null
+                  }
+                ],
+                "from": null,
+                "where": null,
+                "groupBy": null,
+                "having": null,
+                "window": null,
+                "orderBy": null,
+                "limit": null,
+                "offset": null,
+                "locking": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 70
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 78
+                  }
+                }
+              },
+              "right": {
+                "kind": "select",
+                "with_": null,
+                "recursive": false,
+                "distinct": false,
+                "columns": [
+                  {
+                    "expr": {
+                      "kind": "number",
+                      "value": 2,
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 94
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 95
+                        }
+                      }
+                    },
+                    "alias": null
+                  }
+                ],
+                "from": null,
+                "where": null,
+                "groupBy": null,
+                "having": null,
+                "window": null,
+                "orderBy": null,
+                "limit": null,
+                "offset": null,
+                "locking": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 87
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 95
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 70
+                },
+                "end": {
+                  "row": 1,
+                  "col": 96
+                }
+              }
+            },
+            "alias": "s"
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 99
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT * FROM ROWS FROM (f(1), g()) WITH ORDINALITY AS r (a, b, n), unnest(arr) WITH ORDINALITY u;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "rowsFrom",
+            "calls": [
+              {
+                "kind": "call",
+                "name": "f",
+                "args": [
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 27
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 28
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 25
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 29
+                  }
+                }
+              },
+              {
+                "kind": "call",
+                "name": "g",
+                "args": [],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 31
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 34
+                  }
+                }
+              }
+            ],
+            "alias": "r",
+            "columns": [
+              "a",
+              "b",
+              "n"
+            ],
+            "ordinality": true
+          },
+          {
+            "kind": "function",
+            "call": {
+              "kind": "call",
+              "name": "unnest",
+              "args": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "arr"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 75
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 78
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 68
+                },
+                "end": {
+                  "row": 1,
+                  "col": 79
+                }
+              }
+            },
+            "alias": "u",
+            "ordinality": true
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 97
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "SELECT -a, NOT b FROM t;",
     "ast": [
       {

@@ -52,7 +52,8 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // named-argument notation is accepted in argument position, `f(a => 1)`.
 //
 // The SELECT surface also carries the remaining query clauses: LATERAL /
-// table-function / TABLESAMPLE / ONLY FROM items, each alias optionally followed
+// table-function / ROWS FROM / TABLESAMPLE / ONLY FROM items, WITH ORDINALITY,
+// parenthesised joins (`(a JOIN b ON …) AS j`), each alias optionally followed
 // by a column-alias list (`t AS x (a, b)`), VALUES as a standalone query and
 // table source, FETCH FIRST … ROWS, FOR UPDATE/SHARE locking, SELECT … INTO a
 // new (optionally TEMP / UNLOGGED) table, and GROUP BY [ALL | DISTINCT] over
@@ -860,8 +861,22 @@ export type FromItem =
   // `lateral` is present (and true) only for a `LATERAL (subquery)`.
   | { kind: "subquery"; query: Query; alias: string | null; columns?: string[]; lateral?: boolean }
   // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
-  // is the underlying `call` expression node.
-  | { kind: "function"; call: Expr; alias: string | null; columns?: string[]; lateral?: boolean }
+  // is the underlying `call` expression node. `ordinality` is present (and
+  // true) only for `WITH ORDINALITY`, as on a `rowsFrom` item.
+  | { kind: "function"; call: Expr; alias: string | null; columns?: string[]; lateral?: boolean; ordinality?: boolean }
+  // `ROWS FROM (f(…), g(…))` — several table functions zipped side by side,
+  // optionally LATERAL. `calls` are the underlying `call` expression nodes.
+  | {
+      kind: "rowsFrom";
+      calls: Expr[];
+      alias: string | null;
+      columns?: string[];
+      lateral?: boolean;
+      ordinality?: boolean;
+    }
+  // `alias` and `columns` are present only on a parenthesised join that carries
+  // an alias clause — `(a JOIN b ON …) AS x (c, d)`. A parenthesised join
+  // without one is the bare join node: the parentheses only group.
   | {
       kind: "join";
       joinType: FromItemJoinType;
@@ -869,6 +884,8 @@ export type FromItem =
       right: FromItem;
       on: Expr | null;
       using: string[] | null;
+      alias?: string;
+      columns?: string[];
     };
 
 // `using` is PG's sort-operator spelling (`ORDER BY a USING <`), which stands
@@ -4902,16 +4919,176 @@ function tableTail(ctx: ParseContext<SqlTokenType>, name: string[], only: boolea
   };
 }
 
-// A single FROM entry: a (LATERAL) subquery, a (LATERAL) table function, or a
-// table name — optionally ONLY — with an optional TABLESAMPLE. A leading `(` is
-// always a subquery (parenthesised joins are out of scope); after a dotted name,
-// a `(` opens a table-function call. `lateral` and `only` are reserved, so a
-// preceding table never eats either as an alias. ONLY takes only a table name,
-// bare or parenthesised (`ONLY (t)`) — PG's `relation_expr` — so a `(` right
-// after the word is that name's parenthesis, never a subquery, and no call
-// parenthesis is read after the name. The `only`/`columns`/`lateral`/
-// `tablesample` keys are omitted when absent so ordinary items keep their prior
-// shape.
+// A table-function call in FROM — `name(arg, …)`, positioned on the name.
+function parseFromCall(ctx: ParseContext<SqlTokenType>): Expr {
+  const start = ctx.position();
+  const nameParts = ctx.parse(qualName);
+  return parseFromCallArgs(ctx, nameParts, start);
+}
+// The argument list of a FROM call whose name is read. The call's span runs
+// from `start`, which tableRef passes so a plain item's span keeps covering a
+// leading LATERAL.
+function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[], start: Position): Expr {
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const args: Expr[] = [];
+  if (!ctx.is("punc", ")")) {
+    args.push(ctx.parse(functionArg));
+    while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(functionArg));
+  }
+  expectClose(ctx);
+  return { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
+}
+
+// `WITH ORDINALITY` after a table function. Keyed on the word pair, since a
+// bare `with` after a FROM item can also open an enclosing materialized view's
+// `WITH [NO] DATA`; `ordinality` itself stays unreserved.
+const eatOrdinality = (ctx: ParseContext<SqlTokenType>): boolean => {
+  if (!ctx.is("ident", "with")) return false;
+  const after = ctx.peekAhead(1);
+  if (after === null || after.type !== "ident" || after.value !== "ordinality") return false;
+  ctx.next(); // "with"
+  ctx.next(); // "ordinality"
+  return true;
+};
+
+// `ROWS FROM (f(…), …) [WITH ORDINALITY] [alias clause]`, positioned on `rows`.
+function parseRowsFrom(ctx: ParseContext<SqlTokenType>, lateral: boolean): FromItem {
+  ctx.next(); // "rows"
+  ctx.next(); // "from"
+  ctx.next(); // "("
+  const calls: Expr[] = [parseFromCall(ctx)];
+  while (ctx.eat("punc", ",") !== null) calls.push(parseFromCall(ctx));
+  expectClose(ctx);
+  const ordinality = eatOrdinality(ctx);
+  const { alias, columns } = parseAliasClause(ctx);
+  return {
+    kind: "rowsFrom",
+    calls,
+    alias,
+    ...(columns !== null && { columns }),
+    ...(lateral && { lateral: true }),
+    ...(ordinality && { ordinality: true }),
+  };
+}
+
+// `rows` is unreserved, so it opens ROWS FROM only ahead of `from (` — a table
+// named `rows` is never followed by the reserved `from`.
+const startsRowsFrom = (ctx: ParseContext<SqlTokenType>): boolean => {
+  if (!ctx.is("ident", "rows")) return false;
+  const from = ctx.peekAhead(1);
+  const open = ctx.peekAhead(2);
+  return from?.type === "ident" && from.value === "from" && open?.type === "punc" && open.value === "(";
+};
+
+// `(query) [alias clause]`, positioned on the `(` — a FROM subquery, LATERAL
+// or not.
+function parseParenSubquery(ctx: ParseContext<SqlTokenType>, lateral: boolean): FromItem {
+  ctx.next(); // "("
+  const q = ctx.parse(query);
+  expectClose(ctx);
+  const { alias, columns } = parseAliasClause(ctx);
+  return { kind: "subquery", query: q, alias, ...(columns !== null && { columns }), ...(lateral && { lateral: true }) };
+}
+
+const QUERY_WORDS: ReadonlySet<string> = new Set(["select", "with", "values"]);
+// The reserved words a FROM item can open with.
+const FROM_LEAD_WORDS: ReadonlySet<string> = new Set(["lateral", "only"]);
+// The words that continue a parenthesised query in PG — set-ops and the
+// trailing clauses of `select_with_parens`. All reserved, so never an alias.
+const QUERY_TAIL_WORDS: ReadonlySet<string> = new Set([
+  "union",
+  "intersect",
+  "except",
+  "order",
+  "limit",
+  "offset",
+  "fetch",
+  "for",
+]);
+
+const isPuncToken = (tok: Token<SqlTokenType> | null, value: string): boolean =>
+  tok?.type === "punc" && tok.value === value;
+
+// Whether a run of `depth` `(` ahead of a query word opens a query (see
+// parenFromItem). A level whose `)` never arrives before the statement's `;`
+// reads as a query, keeping the query reading's error.
+function parenRunIsQuery(ctx: ParseContext<SqlTokenType>, depth: number): boolean {
+  const closeAt: number[] = [];
+  const open: number[] = [];
+  for (let i = 0, tok = ctx.peekAhead(0); tok !== null; tok = ctx.peekAhead(++i)) {
+    if (isPuncToken(tok, ";")) break;
+    if (isPuncToken(tok, "(")) open.push(i);
+    else if (isPuncToken(tok, ")")) {
+      const at = open.pop();
+      if (at === undefined) break;
+      if (at < depth) closeAt[at] = i;
+      if (at === 0) break;
+    }
+  }
+  if (closeAt[0] === undefined) return true;
+  for (let level = depth - 1; level >= 1; level--) {
+    const close = closeAt[level];
+    if (close === undefined) return true;
+    const after = ctx.peekAhead(close + 1);
+    if (after !== null && !isPuncToken(after, ")") && !(after.type === "ident" && QUERY_TAIL_WORDS.has(after.value))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// A `(` in FROM opens either a subquery or a parenthesised join, and a run of
+// them can stack either way: `((SELECT 1) UNION (SELECT 2)) x` is a subquery,
+// `((SELECT 1) s JOIN t ON …)` a join. So the dispatch scans past the run: with
+// no query word (select/with/values, all reserved) after it, only a join can
+// follow. With one, the innermost group is a query, and each enclosing group is
+// one too only while the group it holds is a query followed by `)`, a set-op
+// word or a trailing query clause — anything else there follows a FROM item,
+// which makes it and every group around it a join. One bracket-matching pass
+// finds each level's closing `)`. A token scan rather than a tryParse, which
+// would re-read every nested level on the fallback (exponential in the nesting)
+// and leave its failures behind for preferFarthest to report. A run ahead of a
+// token that starts neither a query nor a FROM item — not a name, or a reserved
+// word other than `lateral`/`only` — goes to the query reading, for its error.
+function parenFromItem(ctx: ParseContext<SqlTokenType>): FromItem {
+  let depth = 1;
+  while (isPuncToken(ctx.peekAhead(depth), "(")) depth++;
+  const word = ctx.peekAhead(depth);
+  if (word?.type === "ident" && QUERY_WORDS.has(word.value)) {
+    if (depth === 1 || parenRunIsQuery(ctx, depth)) return parseParenSubquery(ctx, false);
+  } else if (
+    word === null ||
+    (word.type !== "qident" &&
+      (word.type !== "ident" || (RESERVED.has(word.value) && !FROM_LEAD_WORDS.has(word.value))))
+  ) {
+    return parseParenSubquery(ctx, false);
+  }
+  ctx.next(); // "("
+  const inner = ctx.parse(joinTail);
+  // PG's `joined_table`: the parentheses must hold a join, and one that is not
+  // itself aliased — `((a JOIN b) x)` is rejected, as PG rejects it.
+  if (inner.kind !== "join") ctx.croak(`Expected a join but found ${describeFound(ctx.peek())}`);
+  if (inner.alias !== undefined) {
+    ctx.croak(`Expected a join without an alias but found ${describeFound(ctx.peek())}`);
+  }
+  expectClose(ctx);
+  const { alias, columns } = parseAliasClause(ctx);
+  if (alias === null) return inner;
+  return { ...inner, alias, ...(columns !== null && { columns }) };
+}
+
+// A single FROM entry: a (LATERAL) subquery, a (LATERAL) table function or ROWS
+// FROM, a parenthesised join, or a table name — optionally ONLY — with an
+// optional TABLESAMPLE. A leading `(` is a subquery or a parenthesised join (see
+// parenFromItem); after a dotted name, a `(` opens a table-function call.
+// `lateral` and `only` are reserved, so a preceding table never eats either as
+// an alias. ONLY takes only a table name, bare or parenthesised (`ONLY (t)`) —
+// PG's `relation_expr` — so a `(` right after the word is that name's
+// parenthesis, never a subquery, and no call parenthesis is read after the
+// name. LATERAL takes no parenthesised join, so its `(` is always a subquery.
+// The `only`/`columns`/`lateral`/`tablesample`/`ordinality` keys are omitted
+// when absent so ordinary items keep their prior shape.
 const tableRef = custom<FromItem, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -4924,30 +5101,22 @@ const tableRef = custom<FromItem, SqlTokenType>(
       return tableTail(ctx, nameParts, true);
     }
     if (ctx.is("punc", "(")) {
-      ctx.next(); // "("
-      const q = ctx.parse(query);
-      expectClose(ctx);
+      return lateral ? parseParenSubquery(ctx, true) : parenFromItem(ctx);
+    }
+    if (startsRowsFrom(ctx)) return parseRowsFrom(ctx, lateral);
+    const nameParts = ctx.parse(qualName);
+    if (ctx.is("punc", "(")) {
+      const call = parseFromCallArgs(ctx, nameParts, start);
+      const ordinality = eatOrdinality(ctx);
       const { alias, columns } = parseAliasClause(ctx);
       return {
-        kind: "subquery",
-        query: q,
+        kind: "function",
+        call,
         alias,
         ...(columns !== null && { columns }),
         ...(lateral && { lateral: true }),
+        ...(ordinality && { ordinality: true }),
       };
-    }
-    const nameParts = ctx.parse(qualName);
-    if (ctx.is("punc", "(")) {
-      ctx.next(); // "("
-      const args: Expr[] = [];
-      if (!ctx.is("punc", ")")) {
-        args.push(ctx.parse(functionArg));
-        while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(functionArg));
-      }
-      expectClose(ctx);
-      const call: Expr = { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
-      const { alias, columns } = parseAliasClause(ctx);
-      return { kind: "function", call, alias, ...(columns !== null && { columns }), ...(lateral && { lateral: true }) };
     }
     if (lateral) {
       return ctx.croak(`Expected a subquery or function after "lateral" but found ${describeFound(ctx.peek())}`);
