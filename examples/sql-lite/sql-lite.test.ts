@@ -4198,3 +4198,185 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
     );
   });
 });
+
+// --- parenthesised joins, ROWS FROM and WITH ORDINALITY ---
+
+describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
+  const from = (src: string) => (firstStmt(src) as any).from;
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+  const bool = (value: boolean) => ({ kind: "bool", value });
+  const join = (left: unknown, right: unknown, extra: Record<string, unknown> = {}) => ({
+    kind: "join",
+    joinType: "inner",
+    left,
+    right,
+    on: bool(true),
+    using: null,
+    ...extra,
+  });
+
+  it("parses a parenthesised join, bare and aliased", () => {
+    const ab = join(tableFrom(["a"]), tableFrom(["b"]));
+    // The parentheses only group: unaliased, the item is the join node itself.
+    expect(from("SELECT * FROM (a JOIN b ON true);")).toEqual([ab]);
+    expect(from("SELECT * FROM (a JOIN b ON true) AS x;")).toEqual([{ ...ab, alias: "x" }]);
+    expect(from("SELECT * FROM (a JOIN b ON true) x (c, d);")).toEqual([{ ...ab, alias: "x", columns: ["c", "d"] }]);
+    // A parenthesised join is an operand of further joins, on either side.
+    expect(from("SELECT * FROM (a JOIN b ON true) JOIN c ON true;")).toEqual([join(ab, tableFrom(["c"]))]);
+    expect(from("SELECT * FROM c LEFT JOIN (a JOIN b ON true) ON true;")).toEqual([
+      join(tableFrom(["c"]), ab, { joinType: "left" }),
+    ]);
+  });
+
+  it("parses nested parenthesised joins", () => {
+    const ab = join(tableFrom(["a"]), tableFrom(["b"]));
+    expect(from("SELECT * FROM ((a JOIN b ON true));")).toEqual([ab]);
+    expect(from("SELECT * FROM ((a JOIN b ON true) j JOIN c ON true);")).toEqual([
+      join({ ...ab, alias: "j" }, tableFrom(["c"])),
+    ]);
+    // A subquery on the left of a parenthesised join — a run of `(` ahead of a
+    // query word that opens a join, however many groups wrap it.
+    expect(from("SELECT * FROM ((SELECT 1) s JOIN b ON true);")).toEqual([
+      join({ kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "s" }, tableFrom(["b"])),
+    ]);
+    expect(from("SELECT * FROM ((VALUES (1)) v JOIN b ON true) j;")[0]).toMatchObject({
+      kind: "join",
+      left: { kind: "subquery", query: { kind: "values" }, alias: "v" },
+      alias: "j",
+    });
+  });
+
+  it("reads a wrapped join whose left side is a subquery as a join", () => {
+    const sb = join({ kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "s" }, tableFrom(["b"]));
+    expect(from("SELECT * FROM (((SELECT 1) s JOIN b ON true));")).toEqual([sb]);
+    expect(from("SELECT * FROM ((((SELECT 1)) s JOIN b ON true)) x;")).toEqual([{ ...sb, alias: "x" }]);
+    expect(from("SELECT * FROM (((VALUES (1)) v JOIN b ON true));")[0]).toMatchObject({
+      kind: "join",
+      left: { kind: "subquery", query: { kind: "values" }, alias: "v" },
+    });
+  });
+
+  it("decides a deep nesting by a scan, without re-reading each level", () => {
+    // Each level wraps the last in `((SELECT * FROM …) s JOIN b ON true)`; a
+    // backtracking dispatch re-parsed every level on its fallback, doubling the
+    // work per level.
+    let item = "t";
+    for (let i = 0; i < 24; i++) item = `((SELECT * FROM ${item}) s JOIN b ON true)`;
+    // An exponential dispatch would run past the test timeout.
+    expect(from(`SELECT * FROM ${item};`)[0].kind).toBe("join");
+  });
+
+  it("keeps nested-paren FROM subqueries subqueries", () => {
+    expect(from("SELECT * FROM ((SELECT 1) UNION (SELECT 2)) x;")).toEqual([
+      {
+        kind: "subquery",
+        query: {
+          kind: "setOp",
+          op: "union",
+          left: sel({ columns: [col(num(1))] }),
+          right: sel({ columns: [col(num(2))] }),
+        },
+        alias: "x",
+      },
+    ]);
+    expect(from("SELECT * FROM ((SELECT 1)) x;")).toEqual([
+      { kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "x" },
+    ]);
+    expect(from("SELECT * FROM (((VALUES (1)))) v JOIN b ON true;")[0].left).toMatchObject({
+      kind: "subquery",
+      query: { kind: "values" },
+      alias: "v",
+    });
+  });
+
+  it("parses WITH ORDINALITY on a table function", () => {
+    expect(from("SELECT * FROM unnest(a) WITH ORDINALITY;")).toEqual([
+      { kind: "function", call: call("unnest", [name("a")]), alias: null, ordinality: true },
+    ]);
+    expect(from("SELECT * FROM unnest(a) WITH ORDINALITY AS u (x, n);")).toEqual([
+      { kind: "function", call: call("unnest", [name("a")]), alias: "u", columns: ["x", "n"], ordinality: true },
+    ]);
+    expect(from("SELECT * FROM t, LATERAL unnest(t.a) WITH ORDINALITY u;")[1]).toEqual({
+      kind: "function",
+      call: call("unnest", [name("t", "a")]),
+      alias: "u",
+      lateral: true,
+      ordinality: true,
+    });
+  });
+
+  it("parses ROWS FROM", () => {
+    expect(from("SELECT * FROM ROWS FROM (f(1), g());")).toEqual([
+      { kind: "rowsFrom", calls: [call("f", [num(1)]), call("g")], alias: null },
+    ]);
+    expect(from("SELECT * FROM ROWS FROM (s.f()) WITH ORDINALITY AS r (a, n);")).toEqual([
+      { kind: "rowsFrom", calls: [call("s.f")], alias: "r", columns: ["a", "n"], ordinality: true },
+    ]);
+    expect(from("SELECT * FROM t CROSS JOIN LATERAL ROWS FROM (f(t.a)) r;")[0].right).toEqual({
+      kind: "rowsFrom",
+      calls: [call("f", [name("t", "a")])],
+      alias: "r",
+      lateral: true,
+    });
+  });
+
+  it("leaves a WITH that is not WITH ORDINALITY to the enclosing statement", () => {
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv AS SELECT * FROM f() WITH NO DATA;")).toMatchObject({
+      withData: false,
+    });
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv AS SELECT * FROM f() WITH ORDINALITY WITH NO DATA;")).toMatchObject({
+      query: { from: [{ kind: "function", ordinality: true }] },
+      withData: false,
+    });
+  });
+
+  it("keeps rows and ordinality unreserved as names and aliases", () => {
+    expect(from("SELECT * FROM rows;")).toEqual([tableFrom(["rows"])]);
+    expect(from("SELECT * FROM rows ordinality JOIN b ON true;")[0].left).toEqual(tableFrom(["rows"], "ordinality"));
+    expect(from("SELECT * FROM rows (1) AS rows (ordinality);")).toEqual([
+      { kind: "function", call: call("rows", [num(1)]), alias: "rows", columns: ["ordinality"] },
+    ]);
+    expect(from("SELECT * FROM f() ordinality;")).toEqual([{ kind: "function", call: call("f"), alias: "ordinality" }]);
+    expect(firstStmt("CREATE TABLE rows (ordinality int);")).toMatchObject({
+      name: ["rows"],
+      items: [{ name: "ordinality" }],
+    });
+    expect((firstStmt("SELECT ordinality, rows FROM t;") as any).columns).toEqual([
+      col(name("ordinality")),
+      col(name("rows")),
+    ]);
+  });
+
+  it("spans each ROWS FROM call from its own name", () => {
+    const [stmt] = sqlLite.parse("SELECT * FROM LATERAL ROWS FROM (f(1), s.g()) WITH ORDINALITY;") as any[];
+    const spans = stmt.from[0].calls.map((c: any) => [c.span.start.col, c.span.end.col]);
+    expect(spans).toEqual([
+      [33, 37],
+      [39, 44],
+    ]);
+  });
+
+  it("rejects malformed parenthesised joins and ROWS FROM", () => {
+    // PG's parentheses hold a join, and one that is not itself aliased.
+    expect(() => sqlLite.parse("SELECT * FROM (a);")).toThrow(/Expected a join but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM ((a JOIN b ON true) x);")).toThrow(
+      /Expected a join without an alias but found "\)"/,
+    );
+    expect(() => sqlLite.parse("SELECT * FROM (a JOIN b ON true;")).toThrow(/Expected "\)" but found ";"/);
+    expect(() => sqlLite.parse("SELECT * FROM ((SELECT 1);")).toThrow(/Expected "\)" but found ";"/);
+    // A `(` ahead of a token that opens neither keeps the query reading's error.
+    expect(() => sqlLite.parse("SELECT * FROM (1);")).toThrow(/Expected "select" or "values" or "\(" but found "1"/);
+    expect(() => sqlLite.parse("SELECT * FROM (;")).toThrow(/Expected "select" or "values" or "\(" but found ";"/);
+    expect(() => sqlLite.parse("SELECT * FROM ((TABLE t)) x;")).toThrow(
+      /Expected "select" or "values" or "\(" but found "table"/,
+    );
+    // A trailing query clause continues a query, which sql-lite reads no ORDER
+    // BY after when parenthesised; the run still takes the query reading.
+    expect(() => sqlLite.parse("SELECT * FROM ((SELECT 1) ORDER BY 1) x;")).toThrow(/Expected "\)" but found "order"/);
+    // LATERAL takes no parenthesised join, as in PG: its `(` is a subquery.
+    expect(() => sqlLite.parse("SELECT * FROM LATERAL (a JOIN b ON true);")).toThrow(/Expected "select"/);
+    expect(() => sqlLite.parse("SELECT * FROM ROWS FROM ();")).toThrow(/Expected a name but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM ROWS FROM (f);")).toThrow(/Expected "\(" but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM t WITH ORDINALITY;")).toThrow(/Expected ";" but found "with"/);
+  });
+});

@@ -41,6 +41,9 @@ const SUPPLEMENTAL = [
   // Column-alias lists after an alias, on each leaf item kind, and ONLY.
   "SELECT * FROM ONLY t AS x (a, b) TABLESAMPLE system (10), (VALUES (1, 2)) AS v (c, d);",
   "SELECT * FROM generate_series(1, 3) g (n) JOIN ONLY (s.u) ON true, LATERAL (SELECT 1) l (one);",
+  // Parenthesised joins, nested-paren subqueries, ROWS FROM and WITH ORDINALITY.
+  "SELECT * FROM ((a JOIN b ON true) j JOIN c USING (id)) AS x (p, q), ((SELECT 1) UNION (SELECT 2)) s;",
+  "SELECT * FROM ROWS FROM (f(1), g()) WITH ORDINALITY AS r (a, b, n), unnest(arr) WITH ORDINALITY u;",
   // --- the expression grammar: pratt levels and the special-call dispatch ---
   "SELECT -a, NOT b FROM t;",
   "SELECT +a, -2 ^ 2, a ^ b ^ c, a % b, a::int ^ 2 FROM t;",
@@ -272,6 +275,9 @@ const MALFORMED = [
   // A failure inside a LIKE item recovers like one inside a column: the
   // element-list siblings around it survive.
   "CREATE TABLE t (id int, LIKE src INCLUDING everything, ok text);\nSELECT 12;",
+  // A `(` in FROM ahead of no query word is read as a parenthesised join, so a
+  // lone table in parentheses fails at its `)`.
+  "SELECT * FROM (a);\nSELECT 13;",
 ];
 
 // Record a throw rather than propagating it, so one bad case doesn't abort the
