@@ -330,7 +330,38 @@ export type LikeOption = {
 // is in source order and empty when none is written.
 export type LikeTable = { kind: "likeTable"; table: string[]; options: LikeOption[]; span: Span };
 
-export type TableItem = ColumnDef | TableConstraint | LikeTable;
+// A column of a `PARTITION OF parent (…)` element list: no type (the parent
+// fixes it), only constraints. `withOptions` is present only when the optional
+// `WITH OPTIONS` noise words are written.
+export type ColumnOptions = {
+  kind: "columnOptions";
+  name: string;
+  withOptions?: true;
+  constraints: ColConstraint[];
+  span: Span;
+};
+
+export type TableItem = ColumnDef | TableConstraint | LikeTable | ColumnOptions;
+
+// One key of `PARTITION BY strategy (key, …)`: a column (a `name` node), a
+// function call, or a parenthesised expression, then an optional collation and
+// operator class. Both are omitted when absent.
+export type PartitionKey = { expr: Expr; collate?: string[]; opclass?: string[]; span: Span };
+export type PartitionSpec = { strategy: "range" | "list" | "hash"; keys: PartitionKey[]; span: Span };
+
+// A range bound's datum: an expression, or MINVALUE / MAXVALUE. PG reads those
+// two as column references and picks them out afterwards — quoted or not — so
+// this does too, and the words stay names everywhere else.
+export type PartitionRangeDatum = Expr | { kind: "minvalue" | "maxvalue"; span: Span };
+
+// `FOR VALUES …` / `DEFAULT` — what a `PARTITION OF parent` table holds.
+export type PartitionBound =
+  | { kind: "range"; from: PartitionRangeDatum[]; to: PartitionRangeDatum[]; span: Span }
+  | { kind: "list"; values: Expr[]; span: Span }
+  | { kind: "hash"; modulus: number; remainder: number; span: Span }
+  | { kind: "default"; span: Span };
+
+export type PartitionOf = { parent: string[]; bound: PartitionBound };
 
 // One `[namespace.]name [[=] value]` entry of a parenthesised option list — the
 // storage parameters of `CREATE TABLE … WITH (…)`, and the shape PG reuses for
@@ -619,14 +650,19 @@ export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
   // UNLOGGED family). Omitted, not null, when there are none — and no word
   // qualifies yet (see CREATE_PREFIX_WORDS), so today it is always absent.
-  // The four clauses after the element list follow the same rule: each key is
+  // The clauses after the element list follow the same rule: each key is
   // present only when its clause is written (see parseTableClauses).
+  // `partitionOf` marks a `PARTITION OF parent … FOR VALUES …` table, whose
+  // `items` are `columnOptions` and table constraints — empty when it writes no
+  // element list.
   | {
       kind: "createTable";
       ifNotExists: boolean;
       name: string[];
       items: TableItem[];
+      partitionOf?: PartitionOf;
       inherits?: string[][];
+      partitionBy?: PartitionSpec;
       options?: RelationOption[];
       onCommit?: "preserveRows" | "deleteRows" | "drop";
       tablespace?: string;
@@ -2765,17 +2801,18 @@ const relationOptions = custom<RelationOption[], SqlTokenType>(
 
 // The storage clauses, in the fixed order PG's CreateStmt gives them: `[WITH
 // (option, …)] [ON COMMIT {PRESERVE ROWS | DELETE ROWS | DROP}] [TABLESPACE
-// name]`. CREATE TABLE takes them after its element list (and after INHERITS,
-// below), CREATE TABLE AS ahead of its AS. Written out of order they are an
-// error, as in PG. Every key is set only when its clause is written, so a table
-// with none of them keeps exactly the node it had before they existed.
+// name]`. CREATE TABLE takes them last — after its element list, INHERITS and
+// PARTITION BY (below), or after a partition's bound and PARTITION BY — and
+// CREATE TABLE AS ahead of its AS. Written out of order they are an error, as
+// in PG. Every key is set only when its clause is written, so a table with none
+// of them keeps exactly the node it had before they existed.
 //
-// The lead words take no name away: `with` and `on` are reserved, and in either
-// position nothing else but `;` or `AS` could follow. PG accepts ON COMMIT on
-// any table in its grammar and rejects it on a permanent one only in analysis;
-// this parser has no analysis pass, so it accepts it everywhere.
+// The lead words take no name away: `with` and `on` are reserved, and in any of
+// these positions nothing else but `;` or `AS` could follow. PG accepts ON
+// COMMIT on any table in its grammar and rejects it on a permanent one only in
+// analysis; this parser has no analysis pass, so it accepts it everywhere.
 type StorageClauses = Pick<CreateTableAs, "options" | "onCommit" | "tablespace">;
-type TableClauses = Pick<Extract<Stmt, { kind: "createTable" }>, "inherits"> & StorageClauses;
+type TableClauses = Pick<Extract<Stmt, { kind: "createTable" }>, "inherits" | "partitionBy"> & StorageClauses;
 
 const onCommitAction = oneOf(
   kwseq("preserve", "rows").map(() => "preserveRows" as const),
@@ -2794,9 +2831,221 @@ function parseStorageClauses(ctx: ParseContext<SqlTokenType>): StorageClauses {
   return clauses;
 }
 
-// `[INHERITS (parent, …)]` and then the storage clauses — what this grammar
-// takes after a table's element list. PG also allows `PARTITION BY …` and
-// `USING method` between INHERITS and WITH; neither is parsed yet.
+// --- declarative partitioning ---
+//
+// Every word here is matched by value where no name could stand — past a
+// table's name or its element list's `)`, or inside a clause already begun —
+// so none of them is reserved, and each stays a name everywhere else.
+
+// PG reads the strategy as a ColId and compares it ignoring case, so a quoted
+// `"RANGE"` names it too.
+const PARTITION_STRATEGIES = ["range", "list", "hash"] as const;
+
+function partitionStrategy(ctx: ParseContext<SqlTokenType>): PartitionSpec["strategy"] {
+  const tok = ctx.peek();
+  const word = tok?.type === "ident" || tok?.type === "qident" ? tok.value.toLowerCase() : null;
+  const strategy = PARTITION_STRATEGIES.find((s) => s === word);
+  if (strategy === undefined) {
+    return ctx.croak(`Expected ${quoteList([...PARTITION_STRATEGIES])} but found ${describeFound(tok)}`);
+  }
+  ctx.next();
+  return strategy;
+}
+
+// The expression forms PG's `part_elem` takes unparenthesised: a column (its
+// ColId, so one part) or a function call, the special-syntax ones (EXTRACT,
+// CURRENT_DATE, …) included, as PG's func_expr_windowless includes them. CAST
+// is one of those too, but its node is a `::` cast's as well, so partitionKey
+// tells the two apart by the lead word instead.
+const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
+  "name",
+  "call",
+  "extract",
+  "substring",
+  "position",
+  "trim",
+  "overlay",
+  "sqlValueFunction",
+]);
+
+// `column | func(…) | (expr)`, then `[COLLATE collation] [opclass]`. A bare key
+// goes through the full expression rule, whose COLLATE postfix takes the
+// collation; it is lifted off the node here, since in PG it belongs to the key,
+// not the expression. Anything else unparenthesised — `a + b`, `t.a`, `a::int`
+// — is PG's syntax error, and so is it here. A `CAST(…)` key is a cast node led
+// by `cast` whose operand starts after it: `CAST(a AS int)::text` is led by
+// `cast` too, but its outer cast's operand starts where it does.
+function partitionKey(ctx: ParseContext<SqlTokenType>): PartitionKey {
+  const start = ctx.position();
+  let expr: Expr;
+  let collate: string[] | null = null;
+  if (ctx.is("punc", "(")) {
+    expr = ctx.parse(parenExpr);
+    if (ctx.eat("ident", "collate") !== null) collate = ctx.parse(qualName);
+  } else {
+    const castCall = ctx.is("ident", "cast");
+    expr = ctx.parse(expression);
+    if (expr.kind === "collate") {
+      collate = expr.collation;
+      expr = expr.expr;
+    }
+    const bare =
+      expr.kind === "cast"
+        ? castCall &&
+          (expr.expr.span.start.row !== expr.span.start.row || expr.expr.span.start.col !== expr.span.start.col)
+        : BARE_PARTITION_KEYS.has(expr.kind) && !(expr.kind === "name" && expr.parts.length > 1);
+    if (!bare) {
+      return ctx.croak("a partition key expression must be parenthesised", start, ctx.lastEnd());
+    }
+  }
+  // An opclass is a name, so a reserved word (a stray `DESC`, say) is left for
+  // the list's own "Expected …" rather than read as one.
+  const next = ctx.peek();
+  const opclass =
+    next?.type === "qident" || (next?.type === "ident" && !RESERVED.has(next.value)) ? ctx.parse(qualName) : null;
+  return { expr, ...(collate && { collate }), ...(opclass && { opclass }), span: ctx.spanFrom(start) };
+}
+
+// `[PARTITION BY {RANGE | LIST | HASH} (key, …)]`. `partition` can only lead
+// this clause here: after the element list (or a partition's bound) nothing
+// but a clause or `;` follows.
+function parsePartitionBy(ctx: ParseContext<SqlTokenType>): Pick<TableClauses, "partitionBy"> {
+  if (!ctx.is("ident", "partition")) return {};
+  const start = ctx.position();
+  ctx.parse(kwseq("partition", "by"));
+  const strategy = partitionStrategy(ctx);
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const keys: PartitionKey[] = [];
+  do {
+    keys.push(partitionKey(ctx));
+  } while (ctx.eat("punc", ",") !== null);
+  expectClose(ctx);
+  // PG's analysis-time check, made here as hashBound's are.
+  if (strategy === "list" && keys.length > 1) {
+    ctx.croak('cannot use "list" partition strategy with more than one column', start, ctx.lastEnd());
+  }
+  return { partitionBy: { strategy, keys, span: ctx.spanFrom(start) } };
+}
+
+// `(datum, …)` of a range bound. MINVALUE / MAXVALUE are read the way PG reads
+// them: as a one-part column reference, recognised by name afterwards. As in
+// PG's validateInfiniteBounds, only the same word may follow either one.
+function rangeDatums(ctx: ParseContext<SqlTokenType>): PartitionRangeDatum[] {
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const datums: PartitionRangeDatum[] = [];
+  do {
+    const e = ctx.parse(expression);
+    const word = e.kind === "name" && e.parts.length === 1 ? e.parts[0] : null;
+    const datum: PartitionRangeDatum = word === "minvalue" || word === "maxvalue" ? { kind: word, span: e.span } : e;
+    const prev = datums[datums.length - 1];
+    if ((prev?.kind === "minvalue" || prev?.kind === "maxvalue") && datum.kind !== prev.kind) {
+      const label = prev.kind.toUpperCase();
+      ctx.croak(`every bound following ${label} must also be ${label}`, e.span.start, e.span.end);
+    }
+    datums.push(datum);
+  } while (ctx.eat("punc", ",") !== null);
+  expectClose(ctx);
+  return datums;
+}
+
+// `WITH (MODULUS n, REMAINDER m)` — read as a generic option list, then held to
+// what PG's PartitionBoundSpec action enforces for a hash bound: both names,
+// each once, nothing else. The value checks, `remainder < modulus` among them, are PG's
+// analysis-time ones; with no analysis pass, this is the only place they can be
+// made. PG takes each value as an unsigned int4 literal; the option list keeps
+// only the number, so `4.0` and `4e0` pass for 4 here, but the int4 range holds.
+const INT4_MAX = 2 ** 31 - 1;
+
+function hashBound(ctx: ParseContext<SqlTokenType>, start: Position): PartitionBound {
+  const options = ctx.parse(relationOptions);
+  const seen: { modulus?: number; remainder?: number } = {};
+  for (const opt of options) {
+    const label = opt.namespace !== undefined ? `${opt.namespace}.${opt.name}` : opt.name;
+    if (opt.namespace !== undefined || (opt.name !== "modulus" && opt.name !== "remainder")) {
+      return ctx.croak(`unrecognized hash partition bound specification "${label}"`, opt.span.start, opt.span.end);
+    }
+    if (seen[opt.name] !== undefined) {
+      return ctx.croak(`${opt.name} for hash partition provided more than once`, opt.span.start, opt.span.end);
+    }
+    const value = opt.value?.kind === "number" ? opt.value.value : null;
+    // What stands in for PG's Iconst syntax is checked here, in source order;
+    // a zero modulus is an analysis-time error, so it waits for the loop's end.
+    if (value === null || !Number.isInteger(value) || value < 0) {
+      const bound = opt.name === "modulus" ? "greater than zero" : "greater than or equal to zero";
+      return ctx.croak(
+        `${opt.name} for hash partition must be an integer value ${bound}`,
+        opt.span.start,
+        opt.span.end,
+      );
+    }
+    if (value > INT4_MAX) {
+      return ctx.croak(`${opt.name} for hash partition is out of range for type integer`, opt.span.start, opt.span.end);
+    }
+    seen[opt.name] = value + 0; // `-0` is 0
+  }
+  for (const key of ["modulus", "remainder"] as const) {
+    if (seen[key] === undefined) ctx.croak(`${key} for hash partition must be specified`, start, ctx.lastEnd());
+  }
+  if (seen.modulus === 0) {
+    ctx.croak("modulus for hash partition must be an integer value greater than zero", start, ctx.lastEnd());
+  }
+  if (seen.remainder! >= seen.modulus!) {
+    ctx.croak("remainder for hash partition must be less than modulus", start, ctx.lastEnd());
+  }
+  return { kind: "hash", modulus: seen.modulus!, remainder: seen.remainder!, span: ctx.spanFrom(start) };
+}
+
+// `FOR VALUES {IN (…) | FROM (…) TO (…) | WITH (…)} | DEFAULT`. The WITH here
+// is the bound's own, read before any storage clause could claim it.
+function parsePartitionBound(ctx: ParseContext<SqlTokenType>): PartitionBound {
+  const start = ctx.position();
+  if (ctx.eat("ident", "default") !== null) return { kind: "default", span: ctx.spanFrom(start) };
+  if (!ctx.is("ident", "for")) {
+    return ctx.croak(`Expected ${quoteList(["for values", "default"])} but found ${describeFound(ctx.peek())}`);
+  }
+  ctx.parse(kwseq("for", "values"));
+  if (ctx.eat("ident", "in") !== null) {
+    if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+    ctx.next(); // "("
+    const values: Expr[] = [];
+    do {
+      values.push(ctx.parse(expression));
+    } while (ctx.eat("punc", ",") !== null);
+    expectClose(ctx);
+    return { kind: "list", values, span: ctx.spanFrom(start) };
+  }
+  if (ctx.eat("ident", "from") !== null) {
+    const from = rangeDatums(ctx);
+    ctx.parse(kw("to"));
+    return { kind: "range", from, to: rangeDatums(ctx), span: ctx.spanFrom(start) };
+  }
+  if (ctx.eat("ident", "with") !== null) return hashBound(ctx, start);
+  return ctx.croak(`Expected ${quoteList(["in", "from", "with"])} but found ${describeFound(ctx.peek())}`);
+}
+
+// A `PARTITION OF` element: a table constraint, or a column the parent already
+// types, given `[WITH OPTIONS]` and constraints only. Dispatched as tableItem
+// is — the constraint's lead words first, any other name a column.
+const columnOptions = custom<ColumnOptions, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const name = ctx.parse(nameWord);
+    // `with` is reserved and leads no column constraint, so it can only be this.
+    const withOptions = ctx.is("ident", "with");
+    if (withOptions) ctx.parse(kwseq("with", "options"));
+    const constraints = ctx.parse(many(columnConstraint));
+    return { kind: "columnOptions", name, ...(withOptions && { withOptions }), constraints, span: ctx.spanFrom(start) };
+  },
+  { expected: nameWord.expected(), first: nameWord.first() },
+);
+
+const partitionItem = oneOf(tableConstraint, columnOptions);
+
+// `[INHERITS (parent, …)] [PARTITION BY …]` and then the storage clauses — what
+// this grammar takes after a table's element list. PG also allows `USING
+// method` between PARTITION BY and WITH; that is not parsed yet.
 function parseTableClauses(ctx: ParseContext<SqlTokenType>): TableClauses {
   const clauses: TableClauses = {};
   if (ctx.eat("ident", "inherits") !== null) {
@@ -2809,7 +3058,7 @@ function parseTableClauses(ctx: ParseContext<SqlTokenType>): TableClauses {
     expectClose(ctx);
     clauses.inherits = parents;
   }
-  return { ...clauses, ...parseStorageClauses(ctx) };
+  return { ...clauses, ...parsePartitionBy(ctx), ...parseStorageClauses(ctx) };
 }
 
 // A CTAS column-name list `(a, b) [storage clauses] AS` — bare names, ending in
@@ -2853,6 +3102,37 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
       query: q,
       withData: parseWithData(ctx),
       ...storage,
+      ...(modifiers.length > 0 && { modifiers }),
+      span: ctx.spanFrom(start),
+    };
+  }
+  // `CREATE TABLE name PARTITION OF parent [(items)] bound [PARTITION BY …]
+  // [storage clauses]`. The element list is optional, and INHERITS is not
+  // allowed, as in PG.
+  if (ctx.is("ident", "partition")) {
+    ctx.parse(kwseq("partition", "of"));
+    const parent = ctx.parse(qualName);
+    // Unlike the classic form's, this list may not be empty: `()` croaks as the
+    // missing first item.
+    // The peek goes through peekOrReport, and only on a `(`: lexing is lazy, and
+    // a bad first item must reach delimited()'s recovery rather than escape it.
+    const close = ctx.is("punc", "(") ? peekOrReport(ctx, 1) : null;
+    if (close?.type === "punc" && close.value === ")") {
+      ctx.next(); // "("
+      ctx.parse(partitionItem);
+    }
+    const items = ctx.is("punc", "(")
+      ? ctx.parse(delimited(P("("), P(")"), P(","), partitionItem, { interleaved: true, recover: true }))
+      : [];
+    const partitionOf = { parent, bound: parsePartitionBound(ctx) };
+    return {
+      kind: "createTable",
+      ifNotExists,
+      name,
+      items,
+      partitionOf,
+      ...parsePartitionBy(ctx),
+      ...parseStorageClauses(ctx),
       ...(modifiers.length > 0 && { modifiers }),
       span: ctx.spanFrom(start),
     };
