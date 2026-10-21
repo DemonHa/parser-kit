@@ -287,7 +287,13 @@ export type ColConstraint =
   | ({ kind: "primaryKey"; span: Span } & ConstraintAttrs)
   | ({ kind: "unique"; span: Span } & ConstraintAttrs)
   | ({ kind: "references"; table: string[]; columns: string[] | null; span: Span } & ForeignKeyTail & ConstraintAttrs)
-  | { kind: "check"; expr: Expr; span: Span };
+  | { kind: "check"; expr: Expr; span: Span }
+  // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(sequence options)]`;
+  // `options` is present only when the parenthesised list is.
+  | { kind: "identity"; generated: "always" | "by default"; options?: SequenceOption[]; span: Span }
+  // `GENERATED ALWAYS AS (expr) STORED` — a stored generated column.
+  | { kind: "generated"; expr: Expr; span: Span }
+  | { kind: "collate"; collation: string[]; span: Span };
 
 export type ColumnDef = {
   kind: "column";
@@ -2675,6 +2681,61 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
       const start = ctx.position();
       ctx.parse(kw("check"));
       return { kind: "check", expr: ctx.parse(parenExpr), span: ctx.spanFrom(start) };
+    },
+  },
+  // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(options)]` or `GENERATED
+  // ALWAYS AS (expr) STORED`. The handler owns all of its lookahead, so one key
+  // covers both forms. As in PG, BY DEFAULT is only for identity columns, and
+  // STORED is required (PG 18's VIRTUAL and bare form are not parsed); PG's
+  // identity-only `SEQUENCE NAME` option is not parsed yet. GENERATED, ALWAYS,
+  // IDENTITY and STORED stay unreserved: they are matched only here, in a
+  // column's constraint list.
+  generated: {
+    parse: (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw("generated"));
+      const whenStart = ctx.position();
+      let generated: "always" | "by default";
+      if (ctx.eat("ident", "always") !== null) {
+        generated = "always";
+      } else if (ctx.is("ident", "by")) {
+        ctx.parse(kwseq("by", "default"));
+        generated = "by default";
+      } else {
+        return ctx.croak(`Expected ${quoteList(["always", "by default"])} but found ${describeFound(ctx.peek())}`);
+      }
+      const whenEnd = ctx.lastEnd();
+      ctx.parse(kw("as"));
+      if (ctx.eat("ident", "identity") !== null) {
+        if (ctx.eat("punc", "(") === null) return { kind: "identity", generated, span: ctx.spanFrom(start) };
+        // At least one option, as in PG: an empty `IDENTITY ()` is an error.
+        const options = parseSequenceOptions(ctx);
+        if (options.length === 0) ctx.croak(`Expected a sequence option but found ${describeFound(ctx.peek())}`);
+        expectClose(ctx);
+        return { kind: "identity", generated, options, span: ctx.spanFrom(start) };
+      }
+      if (!ctx.is("punc", "(")) {
+        return ctx.croak(`Expected ${quoteList(["identity", "("])} but found ${describeFound(ctx.peek())}`);
+      }
+      const expr = ctx.parse(parenExpr);
+      ctx.parse(kw("stored"));
+      // Judged once the clause is whole and pinned to the BY DEFAULT, as PG does.
+      if (generated !== "always") {
+        return ctx.croak("for a generated column, GENERATED ALWAYS must be specified", whenStart, whenEnd);
+      }
+      return { kind: "generated", expr, span: ctx.spanFrom(start) };
+    },
+  },
+  // Column-level `COLLATE name`. `collate` is reserved, so it cannot be a type
+  // word and, straight after the type, it can only be this. After a DEFAULT,
+  // though, the expression's COLLATE postfix takes it first: `DEFAULT 'a'
+  // COLLATE "C"` collates the default, where PG (whose DEFAULT operand has no
+  // COLLATE) would collate the column. Write the COLLATE before the DEFAULT.
+  collate: {
+    parse: (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw("collate"));
+      return { kind: "collate", collation: ctx.parse(qualName), span: ctx.spanFrom(start) };
     },
   },
 };
