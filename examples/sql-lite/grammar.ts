@@ -1264,10 +1264,10 @@ const columnRef = custom<Expr, SqlTokenType>(
         // so parses exactly as it did before the keyword form existed. That
         // includes the modifiers every call here accepts (DISTINCT, ORDER BY,
         // OVER, …), which PG would reject on OVERLAY's comma form — no narrower
-        // than this grammar is for any other call. `placing` is reserved, so no first argument
-        // can end in one — before this check, it was a syntax error here, and
-        // it still is after a `*` or a named argument, which PG's keyword form
-        // does not take either.
+        // than this grammar is for any other call. `placing` is reserved, so
+        // no first argument can end in one — before this check, it was a
+        // syntax error here, and it still is after a `*` or a named argument,
+        // which PG's keyword form does not take either.
         const value = args[0]!;
         if (
           bareLead &&
