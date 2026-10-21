@@ -2780,7 +2780,10 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
   });
 
   it("reads a typed literal only when the whole spelling is followed by a string", () => {
-    // A quoted lead is an ordinary name, as it is in typeRef.
+    // A quoted lead is an ordinary name, as it is in typeRef. That is a
+    // deliberate narrowing: PG's general `type 'string'` form also takes a
+    // quoted or qualified type name (`"char" 'a'`), which this grammar does not
+    // implement — only the three bare datetime words lead a literal here.
     expect(() => sqlLite.parse(`SELECT "date" 'x';`)).toThrow(/Expected ";" but found "x"/);
     // So is a lead whose tail is not followed by a string — no word is taken.
     expect(() => sqlLite.parse("SELECT timestamp with time zone FROM t;")).toThrow(/Expected ";" but found "with"/);
@@ -2790,6 +2793,12 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
       'Unexpected character "é" (1:27)',
       'Expected ";" but found "with" (1:12)',
     ]);
+    // The token after a bare lead is read exactly as a name reads it, so a lex
+    // error there costs the statement as it always did, for every lead.
+    expect(sqlLite.diagnose("SELECT date é FROM;").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "é" (1:12)',
+    ]);
+    expect(sqlLite.diagnose("SELECT a FROM t WHERE date é;\nSELECT 1;").ast).toHaveLength(1);
     // PG writes the precision before the tail, never after it.
     expect(() => sqlLite.parse("SELECT timestamp with time zone(3) 'x';")).toThrow(/Expected ";" but found "with"/);
     // Nor does it take anything but an integer one.

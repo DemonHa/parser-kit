@@ -41,9 +41,8 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // / nested recovery. The expression sublanguage also covers the PG special forms
 // — CAST / EXTRACT / SUBSTRING / POSITION / TRIM / OVERLAY, ARRAY[…] / ROW(…),
 // array subscripts & slices, INTERVAL and DATE / TIME / TIMESTAMP literals, the
-// niladic keyword functions (CURRENT_DATE, CURRENT_USER, …), and COLLATE / AT
-// TIME ZONE postfixes —
-// plus window functions: `fn(…) [WITHIN GROUP (ORDER BY …)] [IGNORE|RESPECT
+// niladic keyword functions (CURRENT_DATE, CURRENT_USER, …), and the COLLATE /
+// AT TIME ZONE postfixes — plus window functions: `fn(…) [WITHIN GROUP (ORDER BY …)] [IGNORE|RESPECT
 // NULLS] [FILTER (WHERE …)] [OVER (…) | OVER name]`, with named windows via a
 // `WINDOW w AS (…)` clause. Calls also carry the aggregate modifiers that live
 // *inside* the argument list — `count(DISTINCT x)`, `array_agg(a ORDER BY b)` —
@@ -1568,25 +1567,26 @@ const TYPED_LITERAL_LEADS: ReadonlySet<string> = new Set(["date", "time", "times
 // type with an array suffix or a trailing arg list is never a literal's.
 //
 // The token straight after the lead is peeked plainly, as INTERVAL's is, and so
-// is a `(n)` behind it together with the token past its `)`: the name or call
-// these otherwise become peeks all of them anyway, so a lex error there
-// surfaces exactly as it always did. Everything further out is lookahead the
-// old parse need not have done, and goes through peekOrReport — under
-// diagnose() the syntax error that follows (`SELECT time with time zone é;`
-// still reports `with`) is kept.
+// is a `(n)` behind it together with the two tokens past its `)`: the name or
+// call these otherwise become peeks all of them anyway (a call's modifier checks
+// read two past its `)`), so a lex error there surfaces exactly as it always
+// did. Everything further out is lookahead the old parse need not have done,
+// and goes through peekOrReport — under diagnose() the syntax error that
+// follows (`SELECT time with time zone é;` still reports `with`) is kept.
 function startsTypedLiteral(ctx: ParseContext<SqlTokenType>): boolean {
   const lead = ctx.peek();
   if (lead === null || lead.type !== "ident" || !TYPED_LITERAL_LEADS.has(lead.value)) return false;
   const isPunc = (ahead: Token<SqlTokenType> | null, value: string) =>
     ahead !== null && ahead.type === "punc" && ahead.value === value;
+  const next = ctx.peekAhead(1);
   let offset = 1;
   if (
     ARGS_BEFORE_TAIL.has(lead.value) &&
-    isPunc(ctx.peekAhead(1), "(") &&
+    isPunc(next, "(") &&
     isIntegerConstant(ctx.peekAhead(2)) &&
     isPunc(ctx.peekAhead(3), ")")
   ) {
-    ctx.peekAhead(4); // the token a call's modifier checks read past its ")"
+    ctx.peekAhead(5);
     offset = 4;
   }
   offset += findTypeTail(ctx, lead.value, offset)?.length ?? 0;
