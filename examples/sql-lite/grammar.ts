@@ -50,17 +50,20 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // in argument position, `f(a => 1)`.
 //
 // The SELECT surface also carries the remaining query clauses: LATERAL /
-// table-function / TABLESAMPLE FROM items, VALUES as a standalone query and
+// table-function / TABLESAMPLE / ONLY FROM items, each alias optionally followed
+// by a column-alias list (`t AS x (a, b)`), VALUES as a standalone query and
 // table source, FETCH FIRST … ROWS, FOR UPDATE/SHARE locking, SELECT … INTO a
 // new (optionally TEMP / UNLOGGED) table, and GROUP BY [ALL | DISTINCT] over
 // ROLLUP / CUBE / GROUPING SETS and the empty grouping `()`. A WITH prefix may
 // lead any DML statement (`WITH … INSERT/UPDATE/DELETE`), and a CTE body may
 // itself be data-modifying (`WITH x AS (DELETE … RETURNING …) …`).
 //
-// Out of scope (v1): column-alias lists on FROM items (`t (a, b)`). Ordinary
-// aggregates (no OVER / FILTER / WITHIN GROUP / IGNORE-RESPECT NULLS) still
-// parse as plain function calls, carrying their DISTINCT / ORDER BY modifiers on
-// the call node itself.
+// A column-alias list is read only after an alias: a bare `FROM t (a, b)` is a
+// call to a table function `t`, which is how PG reads it too. Out of scope (v1):
+// a function's column-definition list (`f() AS g (n int)`). Ordinary aggregates
+// (no OVER / FILTER / WITHIN GROUP / IGNORE-RESPECT NULLS) still parse as plain
+// function calls, carrying their DISTINCT / ORDER BY modifiers on the call node
+// itself.
 
 // --- AST ---
 // Recursive nodes (Expr) are declared by hand, exactly as js-lite does; the
@@ -203,12 +206,16 @@ export type WindowFrameBound =
   | { kind: "unboundedFollowing" };
 
 // A frame clause: a mode plus one bound, or a `BETWEEN start AND end` pair
-// (`end` null for the single-bound `ROWS start` shorthand).
+// (`end` null for the single-bound `ROWS start` shorthand). `exclude` is the
+// optional `EXCLUDE …` tail, present only when written — `noOthers` is the
+// explicit spelling of the default, kept distinct from an absent clause.
 export type WindowFrame = {
   mode: "rows" | "range" | "groups";
   start: WindowFrameBound;
   end: WindowFrameBound | null;
+  exclude?: WindowFrameExclusion;
 };
+export type WindowFrameExclusion = "currentRow" | "group" | "ties" | "noOthers";
 
 // A window specification, shared by inline `OVER (…)`, bare `OVER name`, and the
 // `WINDOW w AS (…)` clause. `name` is the optional referenced base window; the
@@ -668,14 +675,19 @@ export type FromItemJoinType = "inner" | "left" | "right" | "full" | "cross";
 // `TABLESAMPLE method (arg, …) [REPEATABLE (seed)]` on a table FROM item.
 export type TableSample = { method: string; args: Expr[]; repeatable: Expr | null };
 
+// `columns` is the column-alias list that may follow an alias — `t AS x (a, b)`
+// renames t's first two columns — on any of the three leaf items. Like `only`,
+// `lateral` and `tablesample`, it is present only when written, so an item
+// without one keeps its prior shape.
 export type FromItem =
-  // `tablesample` is present only when a TABLESAMPLE clause follows.
-  | { kind: "table"; name: string[]; alias: string | null; tablesample?: TableSample }
+  // `only` is present (and true) only for `ONLY t`, which excludes inheritance
+  // children; `tablesample` only when a TABLESAMPLE clause follows.
+  | { kind: "table"; name: string[]; alias: string | null; columns?: string[]; tablesample?: TableSample; only?: true }
   // `lateral` is present (and true) only for a `LATERAL (subquery)`.
-  | { kind: "subquery"; query: Query; alias: string | null; lateral?: boolean }
+  | { kind: "subquery"; query: Query; alias: string | null; columns?: string[]; lateral?: boolean }
   // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
   // is the underlying `call` expression node.
-  | { kind: "function"; call: Expr; alias: string | null; lateral?: boolean }
+  | { kind: "function"; call: Expr; alias: string | null; columns?: string[]; lateral?: boolean }
   | {
       kind: "join";
       joinType: FromItemJoinType;
@@ -685,11 +697,40 @@ export type FromItem =
       using: string[] | null;
     };
 
-export type OrderItem = { expr: Expr; dir: "asc" | "desc" | null; nulls: "first" | "last" | null };
+// `using` is PG's sort-operator spelling (`ORDER BY a USING <`), which stands
+// in place of ASC/DESC — so `dir` is null whenever it is set. The key is present
+// only when the clause is written; a plain item keeps its three keys.
+export type OrderItem = {
+  expr: Expr;
+  dir: "asc" | "desc" | null;
+  using?: string;
+  nulls: "first" | "last" | null;
+};
+
+// `SEARCH {DEPTH | BREADTH} FIRST BY col, … SET seq_col` on a CTE: `by` lists the
+// ordering columns, `set` names the sequence column the clause adds.
+export type CteSearch = { order: "depth" | "breadth"; by: string[]; set: string };
+
+// `CYCLE col, … SET mark_col [TO value DEFAULT default] USING path_col` on a
+// CTE. `mark` holds the TO / DEFAULT pair, which PG takes together or not at all
+// (omitted, the mark column is a boolean); null when it is not written.
+export type CteCycle = { columns: string[]; set: string; mark: { to: Expr; default: Expr } | null; using: string };
 
 // A CTE body is a query or a data-modifying statement (kept in the `query` field
-// for both, so plain `WITH … SELECT` output is unchanged).
-export type Cte = { name: string; columns: string[] | null; query: Query | Insert | Update | Delete };
+// for both, so plain `WITH … SELECT` output is unchanged). `materialized`
+// (`true` = MATERIALIZED, `false` = NOT MATERIALIZED), `search` and `cycle` are
+// present only when written, so a CTE without them keeps its original shape.
+// PG's grammar admits SEARCH / CYCLE on any CTE; parse analysis rejects them
+// unless that CTE is actually recursive (it refers to itself under WITH
+// RECURSIVE), so they are recorded wherever written.
+export type Cte = {
+  name: string;
+  columns: string[] | null;
+  materialized?: boolean;
+  query: Query | Insert | Update | Delete;
+  search?: CteSearch;
+  cycle?: CteCycle;
+};
 
 export type OnConflict = {
   target: string[] | null;
@@ -1100,17 +1141,33 @@ function parseFrameBound(ctx: ParseContext<SqlTokenType>): WindowFrameBound {
   return { kind: "following", offset };
 }
 
-// `{ROWS|RANGE|GROUPS} bound` or `… BETWEEN start AND end`. Entered positioned on
-// the mode word.
+// The frame exclusion after `EXCLUDE`. `group` is reserved and `current`/`row`/
+// `ties`/`no`/`others` are not, but nothing else can follow `EXCLUDE` here, so
+// all four forms are matched by value with no guard.
+const frameExclusion = oneOf(
+  kwseq("current", "row").map((): WindowFrameExclusion => "currentRow"),
+  kw("group").map((): WindowFrameExclusion => "group"),
+  kw("ties").map((): WindowFrameExclusion => "ties"),
+  kwseq("no", "others").map((): WindowFrameExclusion => "noOthers"),
+);
+
+// `{ROWS|RANGE|GROUPS} bound` or `… BETWEEN start AND end`, then an optional
+// `EXCLUDE …`. Entered positioned on the mode word. A bound always ends on a
+// keyword (`preceding`/`following`/`row`), so an `exclude` after it cannot be
+// part of an offset expression — the unreserved word is safe to commit on.
 function parseFrame(ctx: ParseContext<SqlTokenType>): WindowFrame {
   const mode = ctx.next()!.value as "rows" | "range" | "groups";
+  let start: WindowFrameBound;
+  let end: WindowFrameBound | null = null;
   if (ctx.eat("ident", "between") !== null) {
-    const start = parseFrameBound(ctx);
+    start = parseFrameBound(ctx);
     ctx.parse(kw("and"));
-    const end = parseFrameBound(ctx);
-    return { mode, start, end };
+    end = parseFrameBound(ctx);
+  } else {
+    start = parseFrameBound(ctx);
   }
-  return { mode, start: parseFrameBound(ctx), end: null };
+  const exclude = ctx.eat("ident", "exclude") !== null ? ctx.parse(frameExclusion) : null;
+  return { mode, start, end, ...(exclude && { exclude }) };
 }
 
 // A window specification: a bare `name` reference, or a parenthesised inline spec
@@ -3550,9 +3607,33 @@ const namedWindowDef = seq(field("name", nameWord), skip(kw("as")), field("spec"
 );
 const windowClause = seq(skip(kw("window")), field("defs", sepBy(namedWindowDef, P(",")))).map((s) => s.defs);
 
+// The operator after `USING`: any operator token except `=>`, which PG lexes
+// as its own named-argument token rather than an operator (see `functionArg`).
+// PG's `OPERATOR(schema.op)` spelling is deliberately not taken — no other
+// position in this grammar parses it either.
+const sortOperator = custom<string, SqlTokenType>(
+  (ctx) => {
+    const tok = ctx.peek();
+    if (tok === null || tok.type !== "op" || tok.value === "=>") {
+      return ctx.croak(`Expected an operator but found ${describeFound(tok)}`);
+    }
+    ctx.next();
+    return tok.value;
+  },
+  { expected: "an operator", first: [{ type: "op" }] },
+);
+
+// ASC / DESC, or PG's `USING op` (`ORDER BY a USING <`) — one optional slot,
+// since PG's sortby takes either but never both. `using` is reserved, so no
+// valid input has it after a sort key for the slot to steal.
+const sortOrder = oneOf(
+  kw("asc").map(() => ({ dir: "asc" as const, using: null })),
+  kw("desc").map(() => ({ dir: "desc" as const, using: null })),
+  seq(skip(kw("using")), field("op", sortOperator)).map((s) => ({ dir: null, using: s.op })),
+);
 const orderItem = seq(
   field("expr", expression),
-  field("dir", optional(oneOf(kw("asc"), kw("desc")).map((n) => n.value as "asc" | "desc"))),
+  field("order", optional(sortOrder)),
   field(
     "nulls",
     optional(
@@ -3565,7 +3646,14 @@ const orderItem = seq(
       ).map((s) => s.n),
     ),
   ),
-).map(({ expr, dir, nulls }): OrderItem => ({ expr, dir: dir ?? null, nulls: nulls ?? null }));
+).map(
+  ({ expr, order, nulls }): OrderItem => ({
+    expr,
+    dir: order?.dir ?? null,
+    ...(order?.using && { using: order.using }),
+    nulls: nulls ?? null,
+  }),
+);
 const orderByClause = seq(skip(kwseq("order", "by")), field("items", sepBy(orderItem, P(",")))).map((s) => s.items);
 
 // DISTINCT / DISTINCT ON (…) / ALL. Succeeds consuming nothing (→ false) so it
@@ -3691,22 +3779,69 @@ function parseTableSample(ctx: ParseContext<SqlTokenType>): TableSample {
   return { method, args, repeatable };
 }
 
+// `[AS] alias [(column, …)]` — PG's `alias_clause`. The column list is read only
+// once an alias has been read: PG's grammar has no alias-less spelling of it,
+// and a bare `t (a, b)` is a table-function call (see tableRef). Unlike the
+// shared `columnList`, the list must name at least one column, as PG's does.
+const aliasColumns = sepBy(nameWord, P(","));
+function parseAliasClause(ctx: ParseContext<SqlTokenType>): { alias: string | null; columns: string[] | null } {
+  const alias = ctx.parse(asAlias);
+  if (alias === null || !ctx.is("punc", "(")) return { alias, columns: null };
+  ctx.next(); // "("
+  const columns = ctx.parse(aliasColumns);
+  expectClose(ctx);
+  return { alias, columns };
+}
+
+// The rest of a table FROM item once its name is read: the alias clause, then an
+// optional TABLESAMPLE — PG's order, so an alias list always comes before the
+// sample (`t [AS] x (a) TABLESAMPLE …`).
+function tableTail(ctx: ParseContext<SqlTokenType>, name: string[], only: boolean): FromItem {
+  const { alias, columns } = parseAliasClause(ctx);
+  const tablesample = ctx.is("ident", "tablesample") ? parseTableSample(ctx) : null;
+  return {
+    kind: "table",
+    name,
+    alias,
+    ...(columns !== null && { columns }),
+    ...(tablesample !== null && { tablesample }),
+    ...(only && { only: true }),
+  };
+}
+
 // A single FROM entry: a (LATERAL) subquery, a (LATERAL) table function, or a
-// table name with an optional TABLESAMPLE. A leading `(` is always a subquery
-// (parenthesised joins are out of scope); after a dotted name, a `(` opens a
-// table-function call. `lateral` is reserved, so a preceding table never eats it
-// as an alias. The `lateral`/`tablesample` keys are omitted when absent so
-// ordinary table/subquery items keep their prior shape.
+// table name — optionally ONLY — with an optional TABLESAMPLE. A leading `(` is
+// always a subquery (parenthesised joins are out of scope); after a dotted name,
+// a `(` opens a table-function call. `lateral` and `only` are reserved, so a
+// preceding table never eats either as an alias. ONLY takes only a table name,
+// bare or parenthesised (`ONLY (t)`) — PG's `relation_expr` — so a `(` right
+// after the word is that name's parenthesis, never a subquery, and no call
+// parenthesis is read after the name. The `only`/`columns`/`lateral`/
+// `tablesample` keys are omitted when absent so ordinary items keep their prior
+// shape.
 const tableRef = custom<FromItem, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
     const lateral = ctx.eat("ident", "lateral") !== null;
+    const only = !lateral && ctx.eat("ident", "only") !== null;
+    if (only) {
+      const parenthesised = ctx.eat("punc", "(") !== null;
+      const nameParts = ctx.parse(qualName);
+      if (parenthesised) expectClose(ctx);
+      return tableTail(ctx, nameParts, true);
+    }
     if (ctx.is("punc", "(")) {
       ctx.next(); // "("
       const q = ctx.parse(query);
       expectClose(ctx);
-      const alias = ctx.parse(asAlias);
-      return { kind: "subquery", query: q, alias, ...(lateral && { lateral: true }) };
+      const { alias, columns } = parseAliasClause(ctx);
+      return {
+        kind: "subquery",
+        query: q,
+        alias,
+        ...(columns !== null && { columns }),
+        ...(lateral && { lateral: true }),
+      };
     }
     const nameParts = ctx.parse(qualName);
     if (ctx.is("punc", "(")) {
@@ -3718,15 +3853,13 @@ const tableRef = custom<FromItem, SqlTokenType>(
       }
       expectClose(ctx);
       const call: Expr = { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
-      const alias = ctx.parse(asAlias);
-      return { kind: "function", call, alias, ...(lateral && { lateral: true }) };
+      const { alias, columns } = parseAliasClause(ctx);
+      return { kind: "function", call, alias, ...(columns !== null && { columns }), ...(lateral && { lateral: true }) };
     }
     if (lateral) {
       return ctx.croak(`Expected a subquery or function after "lateral" but found ${describeFound(ctx.peek())}`);
     }
-    const alias = ctx.parse(asAlias);
-    const tablesample = ctx.is("ident", "tablesample") ? parseTableSample(ctx) : null;
-    return { kind: "table", name: nameParts, alias, ...(tablesample !== null && { tablesample }) };
+    return tableTail(ctx, nameParts, false);
   },
   {
     expected: "a table reference",
@@ -3903,14 +4036,64 @@ const cteBody = custom<Query | Insert | Update | Delete, SqlTokenType>(
     ],
   },
 );
+// PG's `opt_materialized`, between AS and the body's `(`. Nothing but `(` could
+// follow AS before, so neither word takes anything away from a name.
+const cteMaterialized = oneOf(
+  kw("materialized").map(() => true),
+  kwseq("not", "materialized").map(() => false),
+);
+// The CTE's trailing clauses come after the body's `)`, where only `,` or the
+// statement the WITH leads could follow before — and neither `search` nor
+// `cycle` begins a statement — so they too are matched by value with no guard.
+// The new words (`search`, `depth`, `breadth`, `cycle`) stay ordinary names
+// everywhere else; `set` / `to` / `default` / `using` were already reserved.
+const cteSearch = seq(
+  skip(kw("search")),
+  field(
+    "order",
+    oneOf(kw("depth"), kw("breadth")).map((n) => n.value as "depth" | "breadth"),
+  ),
+  skip(kwseq("first", "by")),
+  field("by", sepBy(nameWord, P(","))),
+  skip(kw("set")),
+  field("set", nameWord),
+).map(({ order, by, set }): CteSearch => ({ order, by, set }));
+// The mark values are PG's `AexprConst`: a literal, never an expression. The
+// typed-literal forms of AexprConst (`DATE '…'`, `INTERVAL '…'`) are not
+// accepted here.
+const cycleMarkValue = oneOf(numberLit, stringLit, bitStringLit, hexStringLit, boolLit, nullLit).describe("a constant");
+const cteCycle = seq(
+  skip(kw("cycle")),
+  field("columns", sepBy(nameWord, P(","))),
+  skip(kw("set")),
+  field("set", nameWord),
+  field(
+    "mark",
+    optional(seq(skip(kw("to")), field("to", cycleMarkValue), skip(kw("default")), field("default", cycleMarkValue))),
+  ),
+  skip(kw("using")),
+  field("using", nameWord),
+).map(({ columns, set, mark, using }): CteCycle => ({ columns, set, mark: mark ?? null, using }));
 const cte = seq(
   field("name", nameWord),
   field("columns", optional(columnList)),
   skip(kw("as")),
+  field("materialized", optional(cteMaterialized)),
   skip(punc("(")),
   field("query", cteBody),
   skip(punc(")")),
-).map(({ name, columns, query: q }): Cte => ({ name, columns: columns ?? null, query: q }));
+  field("search", optional(cteSearch)),
+  field("cycle", optional(cteCycle)),
+).map(
+  ({ name, columns, materialized, query: q, search, cycle }): Cte => ({
+    name,
+    columns: columns ?? null,
+    ...(materialized !== null && { materialized }),
+    query: q,
+    ...(search && { search }),
+    ...(cycle && { cycle }),
+  }),
+);
 const withPrefix = seq(
   skip(kw("with")),
   field(

@@ -38,6 +38,9 @@ const SUPPLEMENTAL = [
   "SELECT 1 FROM a LEFT JOIN b USING (id) CROSS JOIN c;",
   "SELECT * FROM a CROSS JOIN LATERAL unnest(a.tags) t;",
   "SELECT * FROM t AS x TABLESAMPLE bernoulli (10) REPEATABLE (5);",
+  // Column-alias lists after an alias, on each leaf item kind, and ONLY.
+  "SELECT * FROM ONLY t AS x (a, b) TABLESAMPLE system (10), (VALUES (1, 2)) AS v (c, d);",
+  "SELECT * FROM generate_series(1, 3) g (n) JOIN ONLY (s.u) ON true, LATERAL (SELECT 1) l (one);",
   // --- the expression grammar: pratt levels and the special-call dispatch ---
   "SELECT -a, NOT b FROM t;",
   "SELECT +a, -2 ^ 2, a ^ b ^ c, a % b, a::int ^ 2 FROM t;",
@@ -79,6 +82,11 @@ const SUPPLEMENTAL = [
   "SELECT sum(x) OVER (RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM t;",
   "SELECT sum(x) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) FROM t;",
   "SELECT sum(x) OVER (ROWS 5 PRECEDING) FROM t;",
+  // EXCLUDE is a frame key present only when written; the rows above pin its omission.
+  "SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM t;",
+  "SELECT sum(x) OVER (GROUPS 1 PRECEDING EXCLUDE TIES), sum(x) OVER (RANGE CURRENT ROW EXCLUDE NO OTHERS) FROM t;",
+  // USING is an order-item key present only when written; `c DESC` pins its omission.
+  "SELECT a FROM t ORDER BY a USING <, b USING > NULLS FIRST, c DESC;",
   "SELECT a FROM t GROUP BY CUBE (a, b), ROLLUP (c), GROUPING SETS ((a), ());",
   "SELECT a FROM t GROUP BY DISTINCT a, ();",
   "SELECT a, count(*) INTO TABLE reports.summary FROM t GROUP BY ALL a;",
@@ -86,6 +94,10 @@ const SUPPLEMENTAL = [
   "SELECT 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;",
   "SELECT 1 UNION VALUES (2);",
   "SELECT * FROM t FOR NO KEY UPDATE FOR KEY SHARE SKIP LOCKED;",
+  // CTE materialization and the recursive-CTE SEARCH / CYCLE tails, each a key
+  // the CTE node carries only when written (the plain-CTE corpus rows pin the omission).
+  "WITH a AS MATERIALIZED (SELECT 1), b AS NOT MATERIALIZED (SELECT 2) SELECT * FROM a, b;",
+  "WITH RECURSIVE t (id) AS (SELECT 1) SEARCH BREADTH FIRST BY id SET ord CYCLE id SET is_cycle TO 'Y' DEFAULT 'N' USING path SELECT * FROM t;",
   // --- statement families and clause tails the benchmark corpus misses ---
   "ALTER TABLE t ADD COLUMN age int;",
   "ALTER TABLE t ADD CONSTRAINT pk PRIMARY KEY (id);",
