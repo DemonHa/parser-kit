@@ -3240,11 +3240,12 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
 // keyword-keyed dispatch maps rather than restating them. What follows pins the
 // parts of that no other test and neither golden covers. The comma-form croaks
 // are already pinned — ALTER's action list above, the OR-REPLACE target list in
-// the CREATE TABLE AS block — and stay there, one copy each, so that adding an
+// the CREATE VIEW block — and stay there, one copy each, so that adding an
 // action or a replaceable target is still a one-line test edit.
 
 describe("SQL-lite keyword dispatch maps", () => {
   const rawFirst = (text: string) => sqlLite.parse(text)[0] as Record<string, any>;
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
 
   it("names the keyword-led CREATE targets in the join form", () => {
     expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
@@ -3269,6 +3270,25 @@ describe("SQL-lite keyword dispatch maps", () => {
     expect(() => sqlLite.parse("CREATE TABLE t (id int REFERENCES p ON DELETE constructor);")).toThrow(
       /Expected "no action" or "restrict"/,
     );
+    // The same holds for the special-call and GRANT … ALL … IN SCHEMA records:
+    // such a callee is an ordinary function, and such a word is not a plural.
+    expect((firstStmt("SELECT constructor(1), __proto__(1) FROM t;") as any).columns).toEqual([
+      col(call("constructor", [num(1)])),
+      col(call("__proto__", [num(1)])),
+    ]);
+    expect(sqlLite.diagnose("SELECT __proto__(1) FROM t;").errors).toEqual([]);
+    // Like the dispatch maps, the plural must also be a bare word: quoted, or a
+    // string, it is no keyword.
+    for (const plural of ["constructor", '"tables"', "'tables'"]) {
+      expect(() => sqlLite.parse(`GRANT SELECT ON ALL ${plural} IN SCHEMA s TO u;`)).toThrow(
+        /Expected a name but found "all"/,
+      );
+    }
+    expect((firstStmt("GRANT SELECT ON ALL TABLES IN SCHEMA s TO u;") as any).on).toEqual({
+      objectType: "table",
+      names: [],
+      inSchema: [["s"]],
+    });
   });
 
   // stripSpans hides this everywhere else in the file: the keyword-led targets
@@ -3824,6 +3844,7 @@ describe("SQL-lite CREATE TABLE storage options, LIKE and INHERITS", () => {
       "commit",
       "preserve",
       "rows",
+      "drop",
       "comments",
       "compression",
       "constraints",
