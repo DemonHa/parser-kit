@@ -171,11 +171,11 @@ describe("SQL-lite statements", () => {
   it("parses CREATE [UNIQUE] INDEX with expressions and a partial WHERE", () => {
     const plain = firstStmt("CREATE INDEX idx_email ON users (email);");
     expect(plain).toMatchObject({ kind: "createIndex", unique: false, name: "idx_email", table: ["users"] });
-    expect((plain as any).columns).toEqual([name("email")]);
+    expect((plain as any).columns).toEqual([{ expr: name("email") }]);
 
     const partial = firstStmt("CREATE UNIQUE INDEX ON users (lower(email)) WHERE active;");
     expect(partial).toMatchObject({ kind: "createIndex", unique: true, name: null });
-    expect((partial as any).columns).toEqual([{ kind: "call", name: "lower", args: [name("email")] }]);
+    expect((partial as any).columns).toEqual([{ expr: { kind: "call", name: "lower", args: [name("email")] } }]);
     expect((partial as any).where).toEqual(name("active"));
     // The Phase 6 extras default off / absent on a plain index.
     expect(plain).toMatchObject({ concurrently: false, ifNotExists: false, include: null });
@@ -191,7 +191,7 @@ describe("SQL-lite statements", () => {
       table: ["users"],
       include: ["name", "id"],
     });
-    expect((idx as any).columns).toEqual([name("email")]);
+    expect((idx as any).columns).toEqual([{ expr: name("email") }]);
   });
 
   it("parses CREATE TYPE ... AS ENUM", () => {
@@ -4195,6 +4195,79 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
     expect(create("CHECK (c > 0) DEFERRABLE")).toThrow(/Expected "," but found "deferrable"/);
     expect(() => sqlLite.parse("CREATE TABLE t (c int, CHECK (c > 0) INITIALLY DEFERRED);")).toThrow(
       /Expected "," but found "initially"/,
+    );
+  });
+});
+
+// --- index column options and storage parameters ---
+
+describe("SQL-lite index column options and storage parameters", () => {
+  const index = (tail: string) => firstStmt(`CREATE INDEX i ON t ${tail};`) as any;
+  const columns = (list: string) => index(`(${list})`).columns;
+  const lower = (arg: unknown) => ({ kind: "call", name: "lower", args: [arg] });
+
+  it("parses an operator class, ASC / DESC and NULLS FIRST / LAST per column", () => {
+    expect(columns("a text_pattern_ops DESC NULLS LAST, b ASC, c NULLS FIRST, d")).toEqual([
+      { expr: name("a"), opclass: ["text_pattern_ops"], dir: "desc", nulls: "last" },
+      { expr: name("b"), dir: "asc" },
+      { expr: name("c"), nulls: "first" },
+      { expr: name("d") },
+    ]);
+    // An expression column takes them too, and the class may be qualified or quoted.
+    expect(columns('lower(a) pg_catalog.text_pattern_ops, b "My Ops" DESC')).toEqual([
+      { expr: lower(name("a")), opclass: ["pg_catalog", "text_pattern_ops"] },
+      { expr: name("b"), opclass: ["My Ops"], dir: "desc" },
+    ]);
+  });
+
+  it("keeps COLLATE on the expression and takes operator-class parameters", () => {
+    expect(columns('a COLLATE "C" varchar_pattern_ops')).toEqual([
+      { expr: { kind: "collate", expr: name("a"), collation: ["C"] }, opclass: ["varchar_pattern_ops"] },
+    ]);
+    expect(columns("a gist_trgm_ops (siglen = 32) DESC")).toEqual([
+      {
+        expr: name("a"),
+        opclass: ["gist_trgm_ops"],
+        opclassOptions: [{ name: "siglen", value: num(32) }],
+        dir: "desc",
+      },
+    ]);
+  });
+
+  it("parses WITH (storage parameters) between INCLUDE and WHERE", () => {
+    const idx = index("USING gin (a) INCLUDE (b) WITH (fastupdate = off, gin_pending_list_limit = 128) WHERE a > 0");
+    expect(idx).toMatchObject({ using: "gin", include: ["b"], where: bin(">", name("a"), num(0)) });
+    expect(idx.options).toEqual([
+      { name: "fastupdate", value: name("off") },
+      { name: "gin_pending_list_limit", value: num(128) },
+    ]);
+    // Omitted, the key is absent rather than null.
+    expect("options" in index("(a)")).toBe(false);
+  });
+
+  it("leaves nulls, first and last usable as names", () => {
+    // As columns, as an operator class, and `nulls` alone with no FIRST/LAST after it.
+    expect(columns("nulls, first, last")).toEqual([
+      { expr: name("nulls") },
+      { expr: name("first") },
+      { expr: name("last") },
+    ]);
+    expect(columns("first nulls")).toEqual([{ expr: name("first"), opclass: ["nulls"] }]);
+    expect(columns("nulls nulls first")).toEqual([{ expr: name("nulls"), nulls: "first" }]);
+    expect(columns("a nulls nulls last")).toEqual([{ expr: name("a"), opclass: ["nulls"], nulls: "last" }]);
+    expect(columns("a last DESC")).toEqual([{ expr: name("a"), opclass: ["last"], dir: "desc" }]);
+    expect(firstStmt("SELECT nulls, first, last FROM t;")).toEqual(
+      sel({ columns: [col(name("nulls")), col(name("first")), col(name("last"))], from: [tableFrom(["t"])] }),
+    );
+  });
+
+  it("rejects a malformed column option or storage parameter list", () => {
+    expect(() => sqlLite.parse("CREATE INDEX i ON t (a DESC NULLS);")).toThrow(
+      /Expected "first" or "last" but found "\)"/,
+    );
+    expect(() => sqlLite.parse("CREATE INDEX i ON t (a DESC ASC);")).toThrow(/Expected "," but found "asc"/);
+    expect(() => sqlLite.parse("CREATE INDEX i ON t (a) WITH fillfactor = 70;")).toThrow(
+      /Expected "\(" but found "fillfactor"/,
     );
   });
 });
