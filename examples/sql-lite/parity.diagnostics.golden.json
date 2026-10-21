@@ -941,5 +941,339 @@
         }
       }
     ]
+  },
+  {
+    "source": "CREATE TABLE t (a int UNIQUE, é int);\nSELECT 9;",
+    "errors": [
+      {
+        "message": "Unexpected character \"é\" (1:30)",
+        "end": {
+          "row": 1,
+          "col": 31
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "a",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 21
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "unique",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 22
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 28
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 28
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 36
+          }
+        }
+      },
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 9,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (a int UNIQUE NOT é);\nSELECT 10;",
+    "errors": [
+      {
+        "message": "Unexpected character \"é\" (1:33)",
+        "end": {
+          "row": 1,
+          "col": 34
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 35
+          }
+        }
+      },
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 10,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 9
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 9
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (a int, UNIQUE (a) é, b int);\nSELECT 11;",
+    "errors": [
+      {
+        "message": "Unexpected character \"é\" (1:34)",
+        "end": {
+          "row": 1,
+          "col": 35
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "a",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 21
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 21
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "b",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 39
+                },
+                "end": {
+                  "row": 1,
+                  "col": 42
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 37
+              },
+              "end": {
+                "row": 1,
+                "col": 42
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 43
+          }
+        }
+      },
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 11,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 9
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 9
+          }
+        }
+      }
+    ]
   }
 ]
