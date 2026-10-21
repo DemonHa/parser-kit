@@ -192,13 +192,31 @@ export type WindowSpec = {
 // A `WINDOW name AS (spec)` entry from a SELECT's WINDOW clause.
 export type NamedWindow = { name: string; spec: WindowSpec };
 
+// The `[NOT] DEFERRABLE` / `INITIALLY DEFERRED | IMMEDIATE` attributes PG allows
+// on a UNIQUE, PRIMARY KEY or foreign-key constraint, column- or table-level.
+// Each key is omitted entirely when its clause is absent — so a missing
+// `deferrable` is PG's default, not NOT DEFERRABLE, and `initially: "deferred"`
+// alone still means deferrable, as INITIALLY DEFERRED implies it.
+export type ConstraintAttrs = { deferrable?: boolean; initially?: "deferred" | "immediate" };
+
+export type RefAction = "no action" | "restrict" | "cascade" | "set null" | "set default";
+
+// What follows `REFERENCES t [(cols)]`. `onDelete` predates the rest, so it is
+// always present (null when absent); `match` and `onUpdate` are omitted when
+// absent.
+export type ForeignKeyTail = {
+  match?: "full" | "partial" | "simple";
+  onDelete: RefAction | null;
+  onUpdate?: RefAction;
+};
+
 export type ColConstraint =
   | { kind: "notNull"; span: Span }
   | { kind: "nullable"; span: Span }
   | { kind: "default"; expr: Expr; span: Span }
-  | { kind: "primaryKey"; span: Span }
-  | { kind: "unique"; span: Span }
-  | { kind: "references"; table: string[]; columns: string[] | null; onDelete: string | null; span: Span }
+  | ({ kind: "primaryKey"; span: Span } & ConstraintAttrs)
+  | ({ kind: "unique"; span: Span } & ConstraintAttrs)
+  | ({ kind: "references"; table: string[]; columns: string[] | null; span: Span } & ForeignKeyTail & ConstraintAttrs)
   | { kind: "check"; expr: Expr; span: Span };
 
 export type ColumnDef = {
@@ -210,18 +228,18 @@ export type ColumnDef = {
 };
 
 export type TableConstraint =
-  | { kind: "primaryKey"; name: string | null; columns: string[]; span: Span }
-  | { kind: "unique"; name: string | null; columns: string[]; span: Span }
+  | ({ kind: "primaryKey"; name: string | null; columns: string[]; span: Span } & ConstraintAttrs)
+  | ({ kind: "unique"; name: string | null; columns: string[]; span: Span } & ConstraintAttrs)
   | { kind: "check"; name: string | null; expr: Expr; span: Span }
-  | {
+  | ({
       kind: "foreignKey";
       name: string | null;
       columns: string[];
       refTable: string[];
       refColumns: string[] | null;
-      onDelete: string | null;
       span: Span;
-    };
+    } & ForeignKeyTail &
+      ConstraintAttrs);
 
 export type TableItem = ColumnDef | TableConstraint;
 
@@ -1796,15 +1814,17 @@ const bExprRule = pratt<Expr, SqlTokenType>({
 });
 
 // --- keyword dispatch maps ---
-// Four rules below (column constraints, table constraints, ALTER TABLE actions
-// and the CREATE targets) all answer the same question — "which keyword leads
-// here?" — and all grow one entry at a time. Each keeps that answer in a plain
-// record keyed by the lead word instead of an `oneOf` chain or a ladder of
-// `if`s, so extending one is a single entry and the `expected` string is
-// *derived* from the record rather than restated alongside it.
+// Five rules below (column constraints, a foreign key's referential actions,
+// table constraints, ALTER TABLE actions and the CREATE targets) all answer the
+// same question — "which keyword leads here?" — and all grow one entry at a
+// time. Each keeps that answer in a plain record keyed by the lead word instead
+// of an `oneOf` chain or a ladder of `if`s, so extending one is a single entry
+// and the `expected` string is *derived* from the record rather than restated
+// alongside it.
 //
-// Dispatch peeks; every handler consumes its own lead word and captures its own
-// `start`, so the nodes keep opening their spans on the keyword.
+// Dispatch peeks; every handler consumes its own lead word, and every one that
+// builds a node captures its own `start`, so the nodes keep opening their spans
+// on the keyword.
 type DispatchEntry<T, A extends unknown[]> = {
   // How this branch names itself in an "Expected …" message. Defaults to the
   // quoted key, so it is spelled out only where the two differ — a multi-word
@@ -1868,13 +1888,138 @@ function dispatch<T, A extends unknown[]>(
 
 const columnList = delimited(P("("), P(")"), P(","), nameWord, { interleaved: true });
 
-const onDeleteAction = seq(
-  skip(kwseq("on", "delete")),
-  field("action", oneOf(kw("cascade"), kw("restrict"), kwseq("set", "null"))),
-).map(({ action }) => action.value);
-
 const optColumnList = optional(columnList);
-const optOnDelete = optional(onDeleteAction);
+
+// A foreign key's referential actions. `set` leads two of them, so these could
+// not be oneOf branches (their first sets would overlap); the map lets the `set`
+// entry read the word after it instead.
+const setActionTarget = oneOf(kw("null"), kw("default"));
+const REF_ACTIONS: DispatchMap<RefAction> = {
+  no: {
+    expected: '"no action"',
+    parse: (ctx) => {
+      ctx.parse(kwseq("no", "action"));
+      return "no action";
+    },
+  },
+  restrict: {
+    parse: (ctx) => {
+      ctx.parse(kw("restrict"));
+      return "restrict";
+    },
+  },
+  cascade: {
+    parse: (ctx) => {
+      ctx.parse(kw("cascade"));
+      return "cascade";
+    },
+  },
+  set: {
+    expected: '"set null" or "set default"',
+    parse: (ctx) => {
+      ctx.parse(kw("set"));
+      return ctx.parse(setActionTarget).value === "null" ? "set null" : "set default";
+    },
+  },
+};
+
+// The join form although dispatch() croaks by hand: it is what the oneOf this
+// replaced produced, and it spells out the two-word actions in full.
+const REF_ACTION_EXPECTED = joinExpected(REF_ACTIONS);
+
+// PARTIAL is accepted on purpose: PG's grammar rejects it ("MATCH PARTIAL not
+// yet implemented"), but that is a missing executor feature, not a syntax rule.
+const matchType = oneOf(kw("full"), kw("partial"), kw("simple"));
+
+// `[MATCH FULL | PARTIAL | SIMPLE]`, then ON DELETE and ON UPDATE in either
+// order, each at most once — PG's `key_match key_actions`. The two ON clauses
+// share one loop rather than being two `optional(phrase)`s: phrase() commits on
+// `on` with no rollback, so whichever came first would croak on the other's
+// verb. A repeated verb croaks naming the one still open, as PG rejects it too;
+// once both are filled the loop stops, and a third ON is left to the caller.
+function parseForeignKeyTail(ctx: ParseContext<SqlTokenType>): ForeignKeyTail {
+  const match =
+    ctx.eat("ident", "match") !== null ? (ctx.parse(matchType).value as "full" | "partial" | "simple") : null;
+  let onDelete: RefAction | null = null;
+  let onUpdate: RefAction | null = null;
+  while ((onDelete === null || onUpdate === null) && ctx.is("ident", "on")) {
+    ctx.next(); // ON
+    if (onDelete === null && ctx.eat("ident", "delete") !== null) {
+      onDelete = dispatch(REF_ACTIONS, REF_ACTION_EXPECTED, ctx);
+    } else if (onUpdate === null && ctx.eat("ident", "update") !== null) {
+      onUpdate = dispatch(REF_ACTIONS, REF_ACTION_EXPECTED, ctx);
+    } else {
+      const open = [...(onDelete === null ? ["delete"] : []), ...(onUpdate === null ? ["update"] : [])];
+      return ctx.croak(`Expected ${quoteList(open)} but found ${describeFound(ctx.peek())}`);
+    }
+  }
+  return { ...(match && { match }), onDelete, ...(onUpdate && { onUpdate }) };
+}
+
+const initiallyWhen = oneOf(kw("deferred"), kw("immediate"));
+
+// True when the cursor sits on `NOT DEFERRABLE`. Lexing is lazy, so the peek
+// past `not` is taken only on a `not`: peeking on every token would raise the
+// lex error of a token two on from inside the constraint handler, and
+// diagnose() would drop the constraint — and the column — over a character the
+// column never reaches. After a `not` in a column constraint there is nothing
+// to save: NOT NULL would raise the same error on the same token. (At table
+// level the tail meets a bad token inside the constraint rather than between
+// items, so diagnose() keeps the table around it.)
+function atNotDeferrable(ctx: ParseContext<SqlTokenType>): boolean {
+  if (!ctx.is("ident", "not")) return false;
+  const next = ctx.peekAhead(1);
+  return next !== null && next.type === "ident" && next.value === "deferrable";
+}
+
+// `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. Only
+// UNIQUE, PRIMARY KEY and foreign keys read this tail, so PG's "misplaced
+// DEFERRABLE clause" (`a int NOT NULL DEFERRABLE`) never parses.
+//
+// `not` is shared with a following column constraint's NOT NULL, so it is taken
+// here only when `deferrable` comes next; a bare `ctx.eat("not")` would steal
+// `a int UNIQUE NOT NULL`.
+//
+// A second clause of either kind is still read, rather than falling out of the
+// loop to be misread as the start of the next constraint, and is then judged as
+// PG judges it — which differs by level. A column constraint's attributes are
+// separate list items checked after parsing (`transformConstraintAttrs`), where
+// any repeat is an error. A table constraint's are one `ConstraintAttributeSpec`
+// checked in its grammar action, which lets an identical repeat
+// through and reports only a contradiction. Both levels reject a constraint that
+// can never be deferred starting out deferred; the column check looks for a
+// repeat first, the table check for that case first, and so do these.
+function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column" | "table"): ConstraintAttrs {
+  let deferrable: boolean | null = null;
+  let initially: "deferred" | "immediate" | null = null;
+  while (true) {
+    const start = ctx.position();
+    const negated = atNotDeferrable(ctx);
+    let repeated: string;
+    let conflicting: boolean;
+    if (negated || ctx.is("ident", "deferrable")) {
+      ctx.parse(negated ? kwseq("not", "deferrable") : kw("deferrable"));
+      repeated = "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed";
+      conflicting = deferrable !== null && (level === "column" || deferrable === negated);
+      deferrable = !negated;
+    } else if (ctx.eat("ident", "initially") !== null) {
+      const when = ctx.parse(initiallyWhen).value as "deferred" | "immediate";
+      repeated = "multiple INITIALLY IMMEDIATE/DEFERRED clauses not allowed";
+      conflicting = initially !== null && (level === "column" || initially !== when);
+      initially = when;
+    } else {
+      break;
+    }
+    const neverDeferred = deferrable === false && initially === "deferred";
+    if (conflicting && (level === "column" || !neverDeferred)) {
+      return ctx.croak(level === "column" ? repeated : "conflicting constraint properties", start, ctx.lastEnd());
+    }
+    if (neverDeferred) {
+      return ctx.croak("constraint declared INITIALLY DEFERRED must be DEFERRABLE", start, ctx.lastEnd());
+    }
+  }
+  return { ...(deferrable !== null && { deferrable }), ...(initially && { initially }) };
+}
 
 const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
   not: {
@@ -1904,14 +2049,16 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kwseq("primary", "key"));
-      return { kind: "primaryKey", span: ctx.spanFrom(start) };
+      const attrs = parseConstraintAttrs(ctx, "column");
+      return { kind: "primaryKey", ...attrs, span: ctx.spanFrom(start) };
     },
   },
   unique: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("unique"));
-      return { kind: "unique", span: ctx.spanFrom(start) };
+      const attrs = parseConstraintAttrs(ctx, "column");
+      return { kind: "unique", ...attrs, span: ctx.spanFrom(start) };
     },
   },
   references: {
@@ -1920,8 +2067,9 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
       ctx.parse(kw("references"));
       const table = ctx.parse(qualName);
       const columns = ctx.parse(optColumnList);
-      const onDelete = ctx.parse(optOnDelete);
-      return { kind: "references", table, columns, onDelete, span: ctx.spanFrom(start) };
+      const tail = parseForeignKeyTail(ctx);
+      const attrs = parseConstraintAttrs(ctx, "column");
+      return { kind: "references", table, columns, ...tail, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   check: {
@@ -1949,14 +2097,18 @@ const TABLE_CONSTRAINTS: DispatchMap<TableConstraint> = {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kwseq("primary", "key"));
-      return { kind: "primaryKey", name: null, columns: ctx.parse(columnList), span: ctx.spanFrom(start) };
+      const columns = ctx.parse(columnList);
+      const attrs = parseConstraintAttrs(ctx, "table");
+      return { kind: "primaryKey", name: null, columns, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   unique: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("unique"));
-      return { kind: "unique", name: null, columns: ctx.parse(columnList), span: ctx.spanFrom(start) };
+      const columns = ctx.parse(columnList);
+      const attrs = parseConstraintAttrs(ctx, "table");
+      return { kind: "unique", name: null, columns, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   check: {
@@ -1975,14 +2127,16 @@ const TABLE_CONSTRAINTS: DispatchMap<TableConstraint> = {
       ctx.parse(kw("references"));
       const refTable = ctx.parse(qualName);
       const refColumns = ctx.parse(optColumnList);
-      const onDelete = ctx.parse(optOnDelete);
+      const tail = parseForeignKeyTail(ctx);
+      const attrs = parseConstraintAttrs(ctx, "table");
       return {
         kind: "foreignKey",
         name: null,
         columns,
         refTable,
         refColumns,
-        onDelete,
+        ...tail,
+        ...attrs,
         span: ctx.spanFrom(start),
       };
     },
