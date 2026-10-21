@@ -169,6 +169,9 @@ const SUPPLEMENTAL = [
   "DEALLOCATE PREPARE my_stmt;",
   "INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;",
   "CREATE TABLE t (flags bit DEFAULT B'1011', mask bit DEFAULT X'ff', label text DEFAULT U&'\\0041');",
+  // --- EXCLUDE table constraints ---
+  "CREATE TABLE t (r tsrange, EXCLUDE USING gist (r WITH &&) INCLUDE (r) WHERE (r IS NOT NULL) DEFERRABLE);",
+  "ALTER TABLE t ADD CONSTRAINT no_overlap EXCLUDE (a WITH =, b WITH <>), ADD exclude text;",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind

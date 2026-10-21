@@ -15073,6 +15073,277 @@
     ]
   },
   {
+    "source": "CREATE TABLE t (r tsrange, EXCLUDE USING gist (r WITH &&) INCLUDE (r) WHERE (r IS NOT NULL) DEFERRABLE);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "r",
+            "dataType": {
+              "name": "tsrange",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 25
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 25
+              }
+            }
+          },
+          {
+            "kind": "exclude",
+            "name": null,
+            "using": "gist",
+            "elements": [
+              {
+                "expr": {
+                  "kind": "name",
+                  "parts": [
+                    "r"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 47
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 48
+                    }
+                  }
+                },
+                "operator": "&&",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 47
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 56
+                  }
+                }
+              }
+            ],
+            "include": [
+              "r"
+            ],
+            "where": {
+              "kind": "is",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "r"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 77
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 78
+                  }
+                }
+              },
+              "negated": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 77
+                },
+                "end": {
+                  "row": 1,
+                  "col": 90
+                }
+              }
+            },
+            "deferrable": true,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 27
+              },
+              "end": {
+                "row": 1,
+                "col": 102
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 103
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE t ADD CONSTRAINT no_overlap EXCLUDE (a WITH =, b WITH <>), ADD exclude text;",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "ifExists": false,
+        "name": [
+          "t"
+        ],
+        "actions": [
+          {
+            "kind": "addConstraint",
+            "name": "no_overlap",
+            "constraint": {
+              "kind": "exclude",
+              "name": null,
+              "using": null,
+              "elements": [
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "a"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 49
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 50
+                      }
+                    }
+                  },
+                  "operator": "=",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 49
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 57
+                    }
+                  }
+                },
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "b"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 59
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 60
+                      }
+                    }
+                  },
+                  "operator": "<>",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 59
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 68
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 40
+                },
+                "end": {
+                  "row": 1,
+                  "col": 69
+                }
+              }
+            }
+          },
+          {
+            "kind": "addColumn",
+            "ifNotExists": false,
+            "column": {
+              "kind": "column",
+              "name": "exclude",
+              "dataType": {
+                "name": "text",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 83
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 87
+                  }
+                }
+              },
+              "constraints": [],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 75
+                },
+                "end": {
+                  "row": 1,
+                  "col": 87
+                }
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 87
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {
