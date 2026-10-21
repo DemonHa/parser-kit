@@ -96,6 +96,12 @@ const SUPPLEMENTAL = [
   "ALTER TABLE t REPLICA IDENTITY USING INDEX t_pkey;",
   "CREATE TABLE t (id int NOT NULL DEFAULT 0, u text UNIQUE, parent int REFERENCES p (id) ON DELETE CASCADE, CHECK (id > 0));",
   "CREATE TABLE t (a int NULL, b int, FOREIGN KEY (b) REFERENCES p (id));",
+  // LIKE as a table item and the clauses after the element list, each a key the
+  // node carries only when written — against the rows above, which write none.
+  "CREATE TABLE t (LIKE app.src INCLUDING DEFAULTS EXCLUDING INDEXES, id int) INHERITS (p, app.q);",
+  "CREATE TABLE t (id int) WITH (fillfactor = 70, autovacuum_enabled, x -1, y = 'z') ON COMMIT DELETE ROWS TABLESPACE ts;",
+  "CREATE TABLE t (id int) WITH (toast.autovacuum_enabled = false, force_quote *, force_null (a, 'b'));",
+  "CREATE TABLE t (a, b) WITH (fillfactor = 70) ON COMMIT DROP TABLESPACE ts AS SELECT 1, 2 WITH NO DATA;",
   "CREATE TABLE snap AS SELECT id, name FROM users;",
   "CREATE SEQUENCE s MINVALUE -100 NO CYCLE OWNED BY NONE;",
   "CREATE SEQUENCE IF NOT EXISTS s AS bigint INCREMENT BY 2 MINVALUE 1 NO MAXVALUE START WITH 10 CACHE 5 CYCLE OWNED BY t.id;",
@@ -217,6 +223,9 @@ const MALFORMED = [
   // type, the bad character is the statement's only error, and the column
   // definition around it recovers into the AST whole.
   "CREATE TABLE t (c interval day é);\nSELECT 8;",
+  // A failure inside a LIKE item recovers like one inside a column: the
+  // element-list siblings around it survive.
+  "CREATE TABLE t (id int, LIKE src INCLUDING everything, ok text);\nSELECT 9;",
 ];
 
 // Record a throw rather than propagating it, so one bad case doesn't abort the
