@@ -2165,18 +2165,20 @@
         "using": null,
         "columns": [
           {
-            "kind": "name",
-            "parts": [
-              "email"
-            ],
-            "span": {
-              "start": {
-                "row": 1,
-                "col": 33
-              },
-              "end": {
-                "row": 1,
-                "col": 38
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "email"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 33
+                },
+                "end": {
+                  "row": 1,
+                  "col": 38
+                }
               }
             }
           }
@@ -2211,34 +2213,36 @@
         "using": null,
         "columns": [
           {
-            "kind": "call",
-            "name": "lower",
-            "args": [
-              {
-                "kind": "name",
-                "parts": [
-                  "email"
-                ],
-                "span": {
-                  "start": {
-                    "row": 1,
-                    "col": 36
-                  },
-                  "end": {
-                    "row": 1,
-                    "col": 41
+            "expr": {
+              "kind": "call",
+              "name": "lower",
+              "args": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "email"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 36
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 41
+                    }
                   }
                 }
-              }
-            ],
-            "span": {
-              "start": {
-                "row": 1,
-                "col": 30
-              },
-              "end": {
-                "row": 1,
-                "col": 42
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 30
+                },
+                "end": {
+                  "row": 1,
+                  "col": 42
+                }
               }
             }
           }
@@ -4068,6 +4072,360 @@
           "end": {
             "row": 1,
             "col": 93
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT * FROM ((a JOIN b ON true) j JOIN c USING (id)) AS x (p, q), ((SELECT 1) UNION (SELECT 2)) s;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "join",
+            "joinType": "inner",
+            "left": {
+              "kind": "join",
+              "joinType": "inner",
+              "left": {
+                "kind": "table",
+                "name": [
+                  "a"
+                ],
+                "alias": null
+              },
+              "right": {
+                "kind": "table",
+                "name": [
+                  "b"
+                ],
+                "alias": null
+              },
+              "on": {
+                "kind": "bool",
+                "value": true,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 28
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 32
+                  }
+                }
+              },
+              "using": null,
+              "alias": "j"
+            },
+            "right": {
+              "kind": "table",
+              "name": [
+                "c"
+              ],
+              "alias": null
+            },
+            "on": null,
+            "using": [
+              "id"
+            ],
+            "alias": "x",
+            "columns": [
+              "p",
+              "q"
+            ]
+          },
+          {
+            "kind": "subquery",
+            "query": {
+              "kind": "setOp",
+              "op": "union",
+              "left": {
+                "kind": "select",
+                "with_": null,
+                "recursive": false,
+                "distinct": false,
+                "columns": [
+                  {
+                    "expr": {
+                      "kind": "number",
+                      "value": 1,
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 77
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 78
+                        }
+                      }
+                    },
+                    "alias": null
+                  }
+                ],
+                "from": null,
+                "where": null,
+                "groupBy": null,
+                "having": null,
+                "window": null,
+                "orderBy": null,
+                "limit": null,
+                "offset": null,
+                "locking": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 70
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 78
+                  }
+                }
+              },
+              "right": {
+                "kind": "select",
+                "with_": null,
+                "recursive": false,
+                "distinct": false,
+                "columns": [
+                  {
+                    "expr": {
+                      "kind": "number",
+                      "value": 2,
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 94
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 95
+                        }
+                      }
+                    },
+                    "alias": null
+                  }
+                ],
+                "from": null,
+                "where": null,
+                "groupBy": null,
+                "having": null,
+                "window": null,
+                "orderBy": null,
+                "limit": null,
+                "offset": null,
+                "locking": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 87
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 95
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 70
+                },
+                "end": {
+                  "row": 1,
+                  "col": 96
+                }
+              }
+            },
+            "alias": "s"
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 99
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT * FROM ROWS FROM (f(1), g()) WITH ORDINALITY AS r (a, b, n), unnest(arr) WITH ORDINALITY u;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "rowsFrom",
+            "calls": [
+              {
+                "kind": "call",
+                "name": "f",
+                "args": [
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 27
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 28
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 25
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 29
+                  }
+                }
+              },
+              {
+                "kind": "call",
+                "name": "g",
+                "args": [],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 31
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 34
+                  }
+                }
+              }
+            ],
+            "alias": "r",
+            "columns": [
+              "a",
+              "b",
+              "n"
+            ],
+            "ordinality": true
+          },
+          {
+            "kind": "function",
+            "call": {
+              "kind": "call",
+              "name": "unnest",
+              "args": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "arr"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 75
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 78
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 68
+                },
+                "end": {
+                  "row": 1,
+                  "col": 79
+                }
+              }
+            },
+            "alias": "u",
+            "ordinality": true
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 97
           }
         }
       }
@@ -13001,6 +13359,734 @@
     ]
   },
   {
+    "source": "CREATE TABLE m (a int, b text) INHERITS (p) PARTITION BY RANGE (a, lower(b) COLLATE \"C\" text_pattern_ops, (a + 1)) WITH (fillfactor = 70) TABLESPACE ts;",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "m"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "a",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 21
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 21
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "b",
+            "dataType": {
+              "name": "text",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 25
+                },
+                "end": {
+                  "row": 1,
+                  "col": 29
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 23
+              },
+              "end": {
+                "row": 1,
+                "col": 29
+              }
+            }
+          }
+        ],
+        "inherits": [
+          [
+            "p"
+          ]
+        ],
+        "partitionBy": {
+          "strategy": "range",
+          "keys": [
+            {
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "a"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 64
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 65
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 64
+                },
+                "end": {
+                  "row": 1,
+                  "col": 65
+                }
+              }
+            },
+            {
+              "expr": {
+                "kind": "call",
+                "name": "lower",
+                "args": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "b"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 73
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 74
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 67
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 75
+                  }
+                }
+              },
+              "collate": [
+                "C"
+              ],
+              "opclass": [
+                "text_pattern_ops"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 67
+                },
+                "end": {
+                  "row": 1,
+                  "col": 104
+                }
+              }
+            },
+            {
+              "expr": {
+                "kind": "binary",
+                "op": "+",
+                "left": {
+                  "kind": "name",
+                  "parts": [
+                    "a"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 107
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 108
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 111
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 112
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 107
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 112
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 106
+                },
+                "end": {
+                  "row": 1,
+                  "col": 113
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 44
+            },
+            "end": {
+              "row": 1,
+              "col": 114
+            }
+          }
+        },
+        "options": [
+          {
+            "name": "fillfactor",
+            "value": {
+              "kind": "number",
+              "value": 70,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 134
+                },
+                "end": {
+                  "row": 1,
+                  "col": 136
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 121
+              },
+              "end": {
+                "row": 1,
+                "col": 136
+              }
+            }
+          }
+        ],
+        "tablespace": "ts",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 151
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE m_lo PARTITION OF m FOR VALUES FROM (0, MINVALUE) TO (100, MAXVALUE);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "m_lo"
+        ],
+        "items": [],
+        "partitionOf": {
+          "parent": [
+            "m"
+          ],
+          "bound": {
+            "kind": "range",
+            "from": [
+              {
+                "kind": "number",
+                "value": 0,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 50
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 51
+                  }
+                }
+              },
+              {
+                "kind": "minvalue",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 53
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 61
+                  }
+                }
+              }
+            ],
+            "to": [
+              {
+                "kind": "number",
+                "value": 100,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 67
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 70
+                  }
+                }
+              },
+              {
+                "kind": "maxvalue",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 72
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 80
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 33
+              },
+              "end": {
+                "row": 1,
+                "col": 81
+              }
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 81
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE m_ab PARTITION OF m (a WITH OPTIONS NOT NULL, b DEFAULT 'x', CONSTRAINT k CHECK (a > 0)) FOR VALUES IN ('a', 'b') PARTITION BY HASH (a);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "m_ab"
+        ],
+        "items": [
+          {
+            "kind": "columnOptions",
+            "name": "a",
+            "withOptions": true,
+            "constraints": [
+              {
+                "kind": "notNull",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 49
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 57
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 34
+              },
+              "end": {
+                "row": 1,
+                "col": 57
+              }
+            }
+          },
+          {
+            "kind": "columnOptions",
+            "name": "b",
+            "constraints": [
+              {
+                "kind": "default",
+                "expr": {
+                  "kind": "string",
+                  "value": "x",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 70
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 71
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 61
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 71
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 59
+              },
+              "end": {
+                "row": 1,
+                "col": 71
+              }
+            }
+          },
+          {
+            "kind": "check",
+            "name": "k",
+            "expr": {
+              "kind": "binary",
+              "op": ">",
+              "left": {
+                "kind": "name",
+                "parts": [
+                  "a"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 94
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 95
+                  }
+                }
+              },
+              "right": {
+                "kind": "number",
+                "value": 0,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 98
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 99
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 94
+                },
+                "end": {
+                  "row": 1,
+                  "col": 99
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 87
+              },
+              "end": {
+                "row": 1,
+                "col": 100
+              }
+            }
+          }
+        ],
+        "partitionOf": {
+          "parent": [
+            "m"
+          ],
+          "bound": {
+            "kind": "list",
+            "values": [
+              {
+                "kind": "string",
+                "value": "a",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 118
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 119
+                  }
+                }
+              },
+              {
+                "kind": "string",
+                "value": "b",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 123
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 124
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 102
+              },
+              "end": {
+                "row": 1,
+                "col": 126
+              }
+            }
+          }
+        },
+        "partitionBy": {
+          "strategy": "hash",
+          "keys": [
+            {
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "a"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 146
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 147
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 146
+                },
+                "end": {
+                  "row": 1,
+                  "col": 147
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 127
+            },
+            "end": {
+              "row": 1,
+              "col": 148
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 148
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE m_h0 PARTITION OF m FOR VALUES WITH (MODULUS 4, REMAINDER 0) WITH (fillfactor = 70) ON COMMIT DROP;",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "m_h0"
+        ],
+        "items": [],
+        "partitionOf": {
+          "parent": [
+            "m"
+          ],
+          "bound": {
+            "kind": "hash",
+            "modulus": 4,
+            "remainder": 0,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 33
+              },
+              "end": {
+                "row": 1,
+                "col": 73
+              }
+            }
+          }
+        },
+        "options": [
+          {
+            "name": "fillfactor",
+            "value": {
+              "kind": "number",
+              "value": 70,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 93
+                },
+                "end": {
+                  "row": 1,
+                  "col": 95
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 80
+              },
+              "end": {
+                "row": 1,
+                "col": 95
+              }
+            }
+          }
+        ],
+        "onCommit": "drop",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 111
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE IF NOT EXISTS m_rest PARTITION OF app.m DEFAULT;",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": true,
+        "name": [
+          "m_rest"
+        ],
+        "items": [],
+        "partitionOf": {
+          "parent": [
+            "app",
+            "m"
+          ],
+          "bound": {
+            "kind": "default",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 53
+              },
+              "end": {
+                "row": 1,
+                "col": 60
+              }
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 60
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE TABLE t (a int REFERENCES p (id) MATCH FULL ON UPDATE CASCADE ON DELETE SET DEFAULT DEFERRABLE INITIALLY DEFERRED NOT NULL, b int UNIQUE NOT DEFERRABLE, CONSTRAINT fk FOREIGN KEY (b) REFERENCES p ON DELETE NO ACTION ON UPDATE SET NULL INITIALLY IMMEDIATE, PRIMARY KEY (a) DEFERRABLE);",
     "ast": [
       {
@@ -13923,18 +15009,20 @@
         "using": null,
         "columns": [
           {
-            "kind": "name",
-            "parts": [
-              "email"
-            ],
-            "span": {
-              "start": {
-                "row": 1,
-                "col": 54
-              },
-              "end": {
-                "row": 1,
-                "col": 59
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "email"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 54
+                },
+                "end": {
+                  "row": 1,
+                  "col": 59
+                }
               }
             }
           }
@@ -15389,6 +16477,487 @@
           "end": {
             "row": 1,
             "col": 96
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE UNIQUE INDEX i ON t USING btree (lower(a) text_pattern_ops DESC NULLS LAST, b NULLS FIRST, c ASC) INCLUDE (d) WITH (fillfactor = 70, deduplicate_items = off) WHERE d > 0;",
+    "ast": [
+      {
+        "kind": "createIndex",
+        "unique": true,
+        "concurrently": false,
+        "ifNotExists": false,
+        "name": "i",
+        "table": [
+          "t"
+        ],
+        "using": "btree",
+        "columns": [
+          {
+            "expr": {
+              "kind": "call",
+              "name": "lower",
+              "args": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "a"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 46
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 47
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 40
+                },
+                "end": {
+                  "row": 1,
+                  "col": 48
+                }
+              }
+            },
+            "opclass": [
+              "text_pattern_ops"
+            ],
+            "dir": "desc",
+            "nulls": "last"
+          },
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "b"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 83
+                },
+                "end": {
+                  "row": 1,
+                  "col": 84
+                }
+              }
+            },
+            "nulls": "first"
+          },
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "c"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 98
+                },
+                "end": {
+                  "row": 1,
+                  "col": 99
+                }
+              }
+            },
+            "dir": "asc"
+          }
+        ],
+        "include": [
+          "d"
+        ],
+        "options": [
+          {
+            "name": "fillfactor",
+            "value": {
+              "kind": "number",
+              "value": 70,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 136
+                },
+                "end": {
+                  "row": 1,
+                  "col": 138
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 123
+              },
+              "end": {
+                "row": 1,
+                "col": 138
+              }
+            }
+          },
+          {
+            "name": "deduplicate_items",
+            "value": {
+              "kind": "name",
+              "parts": [
+                "off"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 160
+                },
+                "end": {
+                  "row": 1,
+                  "col": 163
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 140
+              },
+              "end": {
+                "row": 1,
+                "col": 163
+              }
+            }
+          }
+        ],
+        "where": {
+          "kind": "binary",
+          "op": ">",
+          "left": {
+            "kind": "name",
+            "parts": [
+              "d"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 171
+              },
+              "end": {
+                "row": 1,
+                "col": 172
+              }
+            }
+          },
+          "right": {
+            "kind": "number",
+            "value": 0,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 175
+              },
+              "end": {
+                "row": 1,
+                "col": 176
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 171
+            },
+            "end": {
+              "row": 1,
+              "col": 176
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 176
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (r tsrange, EXCLUDE USING gist (r WITH &&) INCLUDE (r) WHERE (r IS NOT NULL) DEFERRABLE);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "r",
+            "dataType": {
+              "name": "tsrange",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 25
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 25
+              }
+            }
+          },
+          {
+            "kind": "exclude",
+            "name": null,
+            "using": "gist",
+            "elements": [
+              {
+                "expr": {
+                  "kind": "name",
+                  "parts": [
+                    "r"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 47
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 48
+                    }
+                  }
+                },
+                "operator": "&&",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 47
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 56
+                  }
+                }
+              }
+            ],
+            "include": [
+              "r"
+            ],
+            "where": {
+              "kind": "is",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "r"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 77
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 78
+                  }
+                }
+              },
+              "negated": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 77
+                },
+                "end": {
+                  "row": 1,
+                  "col": 90
+                }
+              }
+            },
+            "deferrable": true,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 27
+              },
+              "end": {
+                "row": 1,
+                "col": 102
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 103
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE t ADD CONSTRAINT no_overlap EXCLUDE (a WITH =, b WITH <>), ADD exclude text;",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "ifExists": false,
+        "name": [
+          "t"
+        ],
+        "actions": [
+          {
+            "kind": "addConstraint",
+            "name": "no_overlap",
+            "constraint": {
+              "kind": "exclude",
+              "name": null,
+              "using": null,
+              "elements": [
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "a"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 49
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 50
+                      }
+                    }
+                  },
+                  "operator": "=",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 49
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 57
+                    }
+                  }
+                },
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "b"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 59
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 60
+                      }
+                    }
+                  },
+                  "operator": "<>",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 59
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 68
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 40
+                },
+                "end": {
+                  "row": 1,
+                  "col": 69
+                }
+              }
+            }
+          },
+          {
+            "kind": "addColumn",
+            "ifNotExists": false,
+            "column": {
+              "kind": "column",
+              "name": "exclude",
+              "dataType": {
+                "name": "text",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 83
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 87
+                  }
+                }
+              },
+              "constraints": [],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 75
+                },
+                "end": {
+                  "row": 1,
+                  "col": 87
+                }
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 87
           }
         }
       }
