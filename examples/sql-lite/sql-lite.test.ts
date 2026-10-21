@@ -6176,3 +6176,84 @@ describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
     expect(bad("CREATE PROCEDURE p() NOT LEAKPROOF;")).toThrow(/Expected ";" but found "not"/);
   });
 });
+
+// --- LOCK and CALL ---
+
+describe("SQL-lite LOCK and CALL", () => {
+  const target = (parts: string[], only = false) => ({ name: parts, only });
+  const modeOf = (mode: string) => firstStmt(`LOCK t IN ${mode} MODE;`).mode;
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses LOCK with and without TABLE, ONLY, `*`, a mode and NOWAIT", () => {
+    expect(firstStmt("LOCK t;")).toEqual({ kind: "lock", tables: [target(["t"])], mode: null, nowait: false });
+    expect(firstStmt("LOCK TABLE ONLY s.t, u *, ONLY (v) IN EXCLUSIVE MODE NOWAIT;")).toEqual({
+      kind: "lock",
+      tables: [target(["s", "t"], true), target(["u"]), target(["v"], true)],
+      mode: "exclusive",
+      nowait: true,
+    });
+    expect(firstStmt("LOCK TABLE t NOWAIT;")).toMatchObject({ mode: null, nowait: true });
+  });
+
+  it("parses all eight lock modes, the ones sharing a lead word included", () => {
+    expect(modeOf("ACCESS SHARE")).toBe("accessShare");
+    expect(modeOf("ROW SHARE")).toBe("rowShare");
+    expect(modeOf("ROW EXCLUSIVE")).toBe("rowExclusive");
+    expect(modeOf("SHARE UPDATE EXCLUSIVE")).toBe("shareUpdateExclusive");
+    expect(modeOf("SHARE")).toBe("share");
+    expect(modeOf("SHARE ROW EXCLUSIVE")).toBe("shareRowExclusive");
+    expect(modeOf("EXCLUSIVE")).toBe("exclusive");
+    expect(modeOf("ACCESS EXCLUSIVE")).toBe("accessExclusive");
+  });
+
+  it("parses CALL with an empty, positional or named argument list", () => {
+    expect(firstStmt("CALL p();")).toEqual({ kind: "callProcedure", name: ["p"], args: [] });
+    expect(firstStmt("CALL s.p(1, 'a' || b, c => 2);")).toEqual({
+      kind: "callProcedure",
+      name: ["s", "p"],
+      args: [num(1), bin("||", str("a"), name("b")), { kind: "namedArg", name: "c", value: num(2) }],
+    });
+  });
+
+  it("leaves SELECT's FOR SHARE / FOR UPDATE NOWAIT locking clauses untouched", () => {
+    expect(firstStmt("SELECT * FROM t FOR SHARE FOR UPDATE NOWAIT;").locking).toEqual([
+      { strength: "share", of: [], wait: null },
+      { strength: "update", of: [], wait: "nowait" },
+    ]);
+  });
+
+  it("keeps lock, call and the lock-mode words unreserved", () => {
+    const words = ["lock", "call", "access", "row", "share", "update", "exclusive", "mode", "nowait"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM lock;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["lock"])] }),
+    );
+    expect(firstStmt("CREATE TABLE call (share int, mode text);").items.map((i: any) => i.name)).toEqual([
+      "share",
+      "mode",
+    ]);
+    // …and as the names the two statements take.
+    expect(firstStmt("LOCK nowait, mode NOWAIT;")).toEqual({
+      kind: "lock",
+      tables: [target(["nowait"]), target(["mode"])],
+      mode: null,
+      nowait: true,
+    });
+    expect(firstStmt("CALL lock(share => 1);")).toMatchObject({ kind: "callProcedure", name: ["lock"] });
+  });
+
+  it("rejects a half-written lock mode, a missing MODE and a CALL without parentheses", () => {
+    expect(bad("LOCK t IN SHARE ROW MODE;")).toThrow(/Expected "exclusive" but found "mode" \(1:20\)/);
+    expect(bad("LOCK t IN ROW MODE;")).toThrow(/Expected "share" or "exclusive" but found "mode"/);
+    expect(bad("LOCK t IN SHARE UPDATE MODE;")).toThrow(/Expected "exclusive" but found "mode"/);
+    expect(bad("LOCK t IN UPDATE MODE;")).toThrow(
+      /Expected "access", "row", "share" or "exclusive" but found "update"/,
+    );
+    expect(bad("LOCK t IN SHARE;")).toThrow(/Expected "update", "row" or "mode" but found ";"/);
+    expect(bad("LOCK t IN EXCLUSIVE;")).toThrow(/Expected "mode" but found ";"/);
+    expect(bad("LOCK ONLY t *;")).toThrow(/Expected ";" but found "\*" \(1:12\)/);
+    expect(bad("LOCK ONLY (t;")).toThrow(/Expected "\)" but found ";" \(1:12\)/);
+    expect(bad("LOCK;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CALL p;")).toThrow(/Expected "\(" but found ";" \(1:6\)/);
+    expect(bad("CALL p(1;")).toThrow(/Expected "\)" but found ";" \(1:8\)/);
+  });
+});

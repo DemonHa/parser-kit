@@ -244,6 +244,12 @@ const SUPPLEMENTAL = [
   "CREATE ROLE admin WITH LOGIN NOSUPERUSER CREATEDB CONNECTION LIMIT 5 ENCRYPTED PASSWORD 'pw' VALID UNTIL '2030-01-01' IN ROLE staff ADMIN bob;",
   "CREATE USER bob PASSWORD NULL NOINHERIT ROLE a, b;",
   "CREATE OR REPLACE PROCEDURE p(IN a integer, b text DEFAULT 'x') LANGUAGE plpgsql SECURITY DEFINER AS $$BEGIN NULL; END$$;",
+  // --- LOCK and CALL ---
+  "LOCK TABLE ONLY s.t, u *, ONLY (v) IN SHARE ROW EXCLUSIVE MODE NOWAIT;",
+  "LOCK t IN ACCESS SHARE MODE;",
+  "LOCK t;",
+  "CALL s.p(1, 'a', b => 2);",
+  "CALL p();",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind
