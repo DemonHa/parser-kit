@@ -22773,6 +22773,844 @@
     ]
   },
   {
+    "source": "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED AND s.gone THEN DELETE WHEN MATCHED THEN UPDATE SET a = s.a WHEN NOT MATCHED THEN INSERT (id, a) VALUES (s.id, DEFAULT) WHEN NOT MATCHED BY SOURCE THEN DO NOTHING;",
+    "ast": [
+      {
+        "kind": "merge",
+        "table": [
+          "t"
+        ],
+        "alias": null,
+        "source": {
+          "kind": "table",
+          "name": [
+            "s"
+          ],
+          "alias": null
+        },
+        "on": {
+          "kind": "binary",
+          "op": "=",
+          "left": {
+            "kind": "name",
+            "parts": [
+              "t",
+              "id"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 24
+              },
+              "end": {
+                "row": 1,
+                "col": 28
+              }
+            }
+          },
+          "right": {
+            "kind": "name",
+            "parts": [
+              "s",
+              "id"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 31
+              },
+              "end": {
+                "row": 1,
+                "col": 35
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 24
+            },
+            "end": {
+              "row": 1,
+              "col": 35
+            }
+          }
+        },
+        "when": [
+          {
+            "match": "matched",
+            "condition": {
+              "kind": "name",
+              "parts": [
+                "s",
+                "gone"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 53
+                },
+                "end": {
+                  "row": 1,
+                  "col": 59
+                }
+              }
+            },
+            "action": {
+              "kind": "delete"
+            }
+          },
+          {
+            "match": "matched",
+            "condition": null,
+            "action": {
+              "kind": "update",
+              "set": [
+                {
+                  "column": "a",
+                  "value": {
+                    "kind": "name",
+                    "parts": [
+                      "s",
+                      "a"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 105
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 108
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "match": "notMatched",
+            "condition": null,
+            "action": {
+              "kind": "insert",
+              "columns": [
+                "id",
+                "a"
+              ],
+              "source": {
+                "kind": "values",
+                "rows": [
+                  [
+                    {
+                      "kind": "name",
+                      "parts": [
+                        "s",
+                        "id"
+                      ],
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 154
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 158
+                        }
+                      }
+                    },
+                    {
+                      "kind": "default",
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 160
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 167
+                        }
+                      }
+                    }
+                  ]
+                ]
+              }
+            }
+          },
+          {
+            "match": "notMatchedBySource",
+            "condition": null,
+            "action": {
+              "kind": "nothing"
+            }
+          }
+        ],
+        "returning": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 211
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "WITH q AS (SELECT 1 AS id) MERGE INTO ONLY s.t AS x USING (SELECT * FROM q) AS v (id) ON x.id = v.id WHEN NOT MATCHED BY TARGET AND v.id > 0 THEN INSERT (id) OVERRIDING SYSTEM VALUE VALUES (v.id) WHEN NOT MATCHED BY SOURCE THEN UPDATE SET a = 0 RETURNING x.id, *;",
+    "ast": [
+      {
+        "kind": "merge",
+        "table": [
+          "s",
+          "t"
+        ],
+        "only": true,
+        "alias": "x",
+        "source": {
+          "kind": "subquery",
+          "query": {
+            "kind": "select",
+            "with_": null,
+            "recursive": false,
+            "distinct": false,
+            "columns": [
+              {
+                "expr": {
+                  "kind": "star",
+                  "table": null,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 66
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 67
+                    }
+                  }
+                },
+                "alias": null
+              }
+            ],
+            "from": [
+              {
+                "kind": "table",
+                "name": [
+                  "q"
+                ],
+                "alias": null
+              }
+            ],
+            "where": null,
+            "groupBy": null,
+            "having": null,
+            "window": null,
+            "orderBy": null,
+            "limit": null,
+            "offset": null,
+            "locking": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 59
+              },
+              "end": {
+                "row": 1,
+                "col": 74
+              }
+            }
+          },
+          "alias": "v",
+          "columns": [
+            "id"
+          ]
+        },
+        "on": {
+          "kind": "binary",
+          "op": "=",
+          "left": {
+            "kind": "name",
+            "parts": [
+              "x",
+              "id"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 89
+              },
+              "end": {
+                "row": 1,
+                "col": 93
+              }
+            }
+          },
+          "right": {
+            "kind": "name",
+            "parts": [
+              "v",
+              "id"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 96
+              },
+              "end": {
+                "row": 1,
+                "col": 100
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 89
+            },
+            "end": {
+              "row": 1,
+              "col": 100
+            }
+          }
+        },
+        "when": [
+          {
+            "match": "notMatched",
+            "condition": {
+              "kind": "binary",
+              "op": ">",
+              "left": {
+                "kind": "name",
+                "parts": [
+                  "v",
+                  "id"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 132
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 136
+                  }
+                }
+              },
+              "right": {
+                "kind": "number",
+                "value": 0,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 139
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 140
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 132
+                },
+                "end": {
+                  "row": 1,
+                  "col": 140
+                }
+              }
+            },
+            "action": {
+              "kind": "insert",
+              "columns": [
+                "id"
+              ],
+              "overriding": "system",
+              "source": {
+                "kind": "values",
+                "rows": [
+                  [
+                    {
+                      "kind": "name",
+                      "parts": [
+                        "v",
+                        "id"
+                      ],
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 190
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 194
+                        }
+                      }
+                    }
+                  ]
+                ]
+              }
+            }
+          },
+          {
+            "match": "notMatchedBySource",
+            "condition": null,
+            "action": {
+              "kind": "update",
+              "set": [
+                {
+                  "column": "a",
+                  "value": {
+                    "kind": "number",
+                    "value": 0,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 243
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 244
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "returning": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "x",
+                "id"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 255
+                },
+                "end": {
+                  "row": 1,
+                  "col": 259
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 261
+                },
+                "end": {
+                  "row": 1,
+                  "col": 262
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 27
+          },
+          "end": {
+            "row": 1,
+            "col": 262
+          }
+        },
+        "with_": [
+          {
+            "name": "q",
+            "columns": null,
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 18
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 19
+                      }
+                    }
+                  },
+                  "alias": "id"
+                }
+              ],
+              "from": null,
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 11
+                },
+                "end": {
+                  "row": 1,
+                  "col": 25
+                }
+              }
+            }
+          }
+        ],
+        "recursive": false
+      }
+    ]
+  },
+  {
+    "source": "MERGE INTO t x USING a JOIN b ON a.id = b.id ON x.id = a.id WHEN MATCHED THEN DO NOTHING WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;",
+    "ast": [
+      {
+        "kind": "merge",
+        "table": [
+          "t"
+        ],
+        "alias": "x",
+        "source": {
+          "kind": "join",
+          "joinType": "inner",
+          "left": {
+            "kind": "table",
+            "name": [
+              "a"
+            ],
+            "alias": null
+          },
+          "right": {
+            "kind": "table",
+            "name": [
+              "b"
+            ],
+            "alias": null
+          },
+          "on": {
+            "kind": "binary",
+            "op": "=",
+            "left": {
+              "kind": "name",
+              "parts": [
+                "a",
+                "id"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 33
+                },
+                "end": {
+                  "row": 1,
+                  "col": 37
+                }
+              }
+            },
+            "right": {
+              "kind": "name",
+              "parts": [
+                "b",
+                "id"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 40
+                },
+                "end": {
+                  "row": 1,
+                  "col": 44
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 33
+              },
+              "end": {
+                "row": 1,
+                "col": 44
+              }
+            }
+          },
+          "using": null
+        },
+        "on": {
+          "kind": "binary",
+          "op": "=",
+          "left": {
+            "kind": "name",
+            "parts": [
+              "x",
+              "id"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 48
+              },
+              "end": {
+                "row": 1,
+                "col": 52
+              }
+            }
+          },
+          "right": {
+            "kind": "name",
+            "parts": [
+              "a",
+              "id"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 55
+              },
+              "end": {
+                "row": 1,
+                "col": 59
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 48
+            },
+            "end": {
+              "row": 1,
+              "col": 59
+            }
+          }
+        },
+        "when": [
+          {
+            "match": "matched",
+            "condition": null,
+            "action": {
+              "kind": "nothing"
+            }
+          },
+          {
+            "match": "notMatched",
+            "condition": null,
+            "action": {
+              "kind": "insert",
+              "columns": null,
+              "source": {
+                "kind": "defaultValues"
+              }
+            }
+          }
+        ],
+        "returning": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 132
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "WITH m AS (MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE RETURNING t.id) SELECT * FROM m;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": [
+          {
+            "name": "m",
+            "columns": null,
+            "query": {
+              "kind": "merge",
+              "table": [
+                "t"
+              ],
+              "alias": null,
+              "source": {
+                "kind": "table",
+                "name": [
+                  "s"
+                ],
+                "alias": null
+              },
+              "on": {
+                "kind": "binary",
+                "op": "=",
+                "left": {
+                  "kind": "name",
+                  "parts": [
+                    "t",
+                    "id"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 35
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 39
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "name",
+                  "parts": [
+                    "s",
+                    "id"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 42
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 46
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 35
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 46
+                  }
+                }
+              },
+              "when": [
+                {
+                  "match": "matched",
+                  "condition": null,
+                  "action": {
+                    "kind": "delete"
+                  }
+                }
+              ],
+              "returning": [
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "t",
+                      "id"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 82
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 86
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 11
+                },
+                "end": {
+                  "row": 1,
+                  "col": 86
+                }
+              }
+            }
+          }
+        ],
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 95
+                },
+                "end": {
+                  "row": 1,
+                  "col": 96
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "m"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 88
+          },
+          "end": {
+            "row": 1,
+            "col": 103
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {

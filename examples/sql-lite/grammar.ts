@@ -33,7 +33,7 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // (enum, composite, RANGE) / [MATERIALIZED] VIEW / SEQUENCE / DOMAIN, ALTER
 // TABLE, DROP family, TRUNCATE, COMMENT ON — plus a DML core — SELECT (with
 // WITH / DISTINCT / joins / WHERE / GROUP BY / HAVING / ORDER BY / LIMIT /
-// OFFSET / UNION-INTERSECT-EXCEPT) and INSERT / UPDATE / DELETE with
+// OFFSET / UNION-INTERSECT-EXCEPT) and INSERT / UPDATE / DELETE / MERGE with
 // RETURNING — over the scalar expression sublanguage that DEFAULT / CHECK /
 // index / WHERE clauses share. It is the end-to-end test for the PG-grade kit
 // features: escaped/prefixed/dollar strings, PG numbers, bind parameters, the
@@ -58,8 +58,9 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // table source, FETCH FIRST … ROWS, FOR UPDATE/SHARE locking, SELECT … INTO a
 // new (optionally TEMP / UNLOGGED) table, and GROUP BY [ALL | DISTINCT] over
 // ROLLUP / CUBE / GROUPING SETS and the empty grouping `()`. A WITH prefix may
-// lead any DML statement (`WITH … INSERT/UPDATE/DELETE`), and a CTE body may
-// itself be data-modifying (`WITH x AS (DELETE … RETURNING …) …`).
+// lead any DML statement (`WITH … INSERT/UPDATE/DELETE/MERGE`), and a CTE body
+// may itself be data-modifying (`WITH x AS (DELETE … RETURNING …) …`). MERGE
+// takes every PG 17 WHEN form, NOT MATCHED BY SOURCE and RETURNING included.
 //
 // A column-alias list is read only after an alias: a bare `FROM t (a, b)` is a
 // call to a table function `t`, which is how PG reads it too. Out of scope (v1):
@@ -832,7 +833,7 @@ export type Prepare = {
   kind: "prepare";
   name: string;
   types: ColType[] | null;
-  query: Query | Insert | Update | Delete;
+  query: Preparable;
   span: Span;
 };
 // EXECUTE name [(expr, …)] — `args` is null when the list is omitted.
@@ -850,6 +851,7 @@ export type LockMode =
 // LOCK [TABLE] [ONLY] name [*] [, …] [IN mode MODE] [NOWAIT]. ONLY is per table;
 // a trailing `*` spells the default (descendants included) and is not recorded.
 // `mode` is null when IN … MODE is omitted (PG then takes ACCESS EXCLUSIVE).
+// A MERGE target is read by the same rule (relationExpr).
 export type LockTarget = { name: string[]; only: boolean };
 export type Lock = {
   kind: "lock";
@@ -899,7 +901,7 @@ export type MaintenanceTarget = { name: string[]; columns: string[] | null };
 export type Explain = {
   kind: "explain";
   options: RelationOption[];
-  statement: Query | Insert | Update | Delete | CreateTableAs | CreateView | DeclareCursor | Execute;
+  statement: Preparable | CreateTableAs | CreateView | DeclareCursor | Execute;
   span: Span;
 };
 // `ANALYZE [(option, …) | VERBOSE] [target, …]` and `VACUUM [(option, …) |
@@ -928,7 +930,7 @@ export type Copy = {
   kind: "copy";
   table: string[] | null;
   columns: string[] | null;
-  query: Query | Insert | Update | Delete | null;
+  query: Preparable | null;
   direction: "from" | "to";
   location: CopyLocation;
   options: RelationOption[] | null;
@@ -1076,7 +1078,8 @@ export type Stmt =
   | Query
   | Insert
   | Update
-  | Delete;
+  | Delete
+  | Merge;
 
 // --- DML AST (the `{ kind }` idiom, mutually recursive with Expr via lazy) ---
 
@@ -1232,7 +1235,7 @@ export type Cte = {
   name: string;
   columns: string[] | null;
   materialized?: boolean;
-  query: Query | Insert | Update | Delete;
+  query: Preparable;
   search?: CteSearch;
   cycle?: CteCycle;
 };
@@ -1257,7 +1260,7 @@ export type DefaultValue = { kind: "default"; span: Span };
 // Which value wins for an identity column: `OVERRIDING {SYSTEM | USER} VALUE`.
 export type InsertOverriding = "system" | "user";
 
-// The three DML statements each accept a leading `WITH …` prefix. `with_` /
+// The DML statements (MERGE too) each accept a leading `WITH …` prefix. `with_` /
 // `recursive` are present only when one attaches (like FromItem's optional
 // `lateral`), so WITH-less DML keeps its original AST shape. INSERT's `alias`
 // (`INSERT INTO t AS a`) and `overriding` follow the same rule.
@@ -1302,6 +1305,54 @@ export type Delete = {
   recursive?: boolean;
   span: Span;
 };
+
+// What a MERGE WHEN clause does. INSERT's `source` is INSERT's own union,
+// narrowed to the two forms MERGE admits: one VALUES row (`rows` then holds
+// exactly one) or DEFAULT VALUES. `overriding` is present only when written, as
+// on Insert.
+export type MergeAction =
+  | { kind: "update"; set: Assignment[] }
+  | { kind: "delete" }
+  | { kind: "nothing" }
+  | {
+      kind: "insert";
+      columns: string[] | null;
+      overriding?: InsertOverriding;
+      source: Extract<Insert["source"], { kind: "values" | "defaultValues" }>;
+    };
+
+// `WHEN [NOT] MATCHED [BY {SOURCE | TARGET}] [AND condition] THEN action`.
+// `NOT MATCHED` and `NOT MATCHED BY TARGET` are one form, `notMatched`. The
+// parser admits INSERT only for `notMatched`, and UPDATE and DELETE only for
+// the other two forms, as PG does.
+export type MergeWhen = {
+  match: "matched" | "notMatched" | "notMatchedBySource";
+  condition: Expr | null;
+  action: MergeAction;
+};
+
+// `[WITH …] MERGE INTO [ONLY] target [[AS] alias] USING source ON condition
+// when_clause … [RETURNING …]`. `source` is a FROM item, joins included, as
+// PG's table_ref is. `only` is present only when written and `with_` /
+// `recursive` only when a WITH prefix attaches, as on Insert; `when` is never
+// empty.
+export type Merge = {
+  kind: "merge";
+  table: string[];
+  only?: true;
+  alias: string | null;
+  source: FromItem;
+  on: Expr;
+  when: MergeWhen[];
+  returning: SelectItem[] | null;
+  with_?: Cte[];
+  recursive?: boolean;
+  span: Span;
+};
+
+// The statements PG's PreparableStmt admits, as far as sql-lite parses them:
+// what PREPARE, EXPLAIN and COPY (…) take as their query.
+export type Preparable = Query | Insert | Update | Delete | Merge;
 
 // --- reserved words (grammar data, not lexer config) ---
 // PG's reserved set: these may not be a bare column/table/type name — only via a
@@ -5890,6 +5941,23 @@ const asAlias = custom<string | null, SqlTokenType>(
   { expected: "an alias", first: [{ type: "ident" }, { type: "qident" }] },
 );
 
+// PG's relation_expr, a LOCK or MERGE target — `[ONLY] name [*]` or `ONLY (name)`.
+// `only` and `table` are reserved, so neither can begin a name.
+const relationExpr = custom<LockTarget, SqlTokenType>(
+  (ctx) => {
+    const only = ctx.eat("ident", "only") !== null;
+    if (only && ctx.eat("punc", "(") !== null) {
+      const name = ctx.parse(qualName);
+      expectClose(ctx);
+      return { name, only };
+    }
+    const name = ctx.parse(qualName);
+    if (!only) ctx.eat("op", "*");
+    return { name, only };
+  },
+  { expected: '"only" or a name', first: [{ type: "ident", value: "only" }, ...nameWord.first()] },
+);
+
 const eq = token("op", { values: ["="] });
 const assignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(
   ({ column, value }): Assignment => ({ column, value }),
@@ -6540,21 +6608,23 @@ const selectCore = seq(
 );
 
 // A CTE body is a full query or a data-modifying statement. Dispatch on the
-// leading keyword (INSERT/UPDATE/DELETE take their dedicated rules); anything
-// else — SELECT / VALUES / `(` / a nested WITH — is an ordinary query.
-const cteBody = custom<Query | Insert | Update | Delete, SqlTokenType>(
+// leading keyword (INSERT/UPDATE/DELETE/MERGE take their dedicated rules);
+// anything else — SELECT / VALUES / `(` / a nested WITH — is an ordinary query.
+const cteBody = custom<Preparable, SqlTokenType>(
   (ctx) => {
     if (ctx.is("ident", "insert")) return ctx.parse(insertStmt);
     if (ctx.is("ident", "update")) return ctx.parse(updateStmt);
     if (ctx.is("ident", "delete")) return ctx.parse(deleteStmt);
+    if (ctx.is("ident", "merge")) return ctx.parse(mergeStmt);
     return ctx.parse(query);
   },
   {
-    expected: "a query, INSERT, UPDATE or DELETE",
+    expected: "a query, INSERT, UPDATE, DELETE or MERGE",
     first: [
       { type: "ident", value: "insert" },
       { type: "ident", value: "update" },
       { type: "ident", value: "delete" },
+      { type: "ident", value: "merge" },
       { type: "ident", value: "with" },
       { type: "ident", value: "select" },
       { type: "ident", value: "values" },
@@ -6630,16 +6700,17 @@ const withPrefix = seq(
 ).map(({ recursive, ctes }) => ({ recursive, ctes }));
 
 // Attach a parsed WITH prefix to the statement it leads: for a set-op query the
-// CTEs bind to the leftmost SELECT; an INSERT/UPDATE/DELETE takes them directly.
+// CTEs bind to the leftmost SELECT; an INSERT/UPDATE/DELETE/MERGE takes them
+// directly.
 // A bare VALUES query has nowhere to hang CTEs, so croak rather than drop them.
 const attachWith = (
   ctx: ParseContext<SqlTokenType>,
-  node: Query | Insert | Update | Delete,
+  node: Preparable,
   w: { recursive: boolean; ctes: Cte[] },
 ): void => {
-  let target: Query | Insert | Update | Delete = node;
+  let target: Preparable = node;
   while (target.kind === "setOp") target = target.left;
-  if (target.kind === "values") ctx.croak("WITH must attach to a SELECT, INSERT, UPDATE or DELETE");
+  if (target.kind === "values") ctx.croak("WITH must attach to a SELECT, INSERT, UPDATE, DELETE or MERGE");
   target.with_ = w.ctes;
   target.recursive = w.recursive;
 };
@@ -6776,6 +6847,9 @@ const overridingClause = seq(
 const insertColumns = optional(attempt(columnList));
 const insertOverriding = optional(overridingClause);
 type InsertRest = Pick<Insert, "columns" | "overriding" | "source">;
+// The forms still open where a source should start, as an `Expected …` prefix.
+const insertRestOpen = (columns: string[] | null, overriding: InsertOverriding | null): string =>
+  overriding !== null ? "" : columns === null ? '"default values" or "overriding" or ' : '"overriding" or ';
 const insertRest = custom<InsertRest, SqlTokenType>(
   (ctx) => {
     if (ctx.is("ident", "default")) return { columns: null, source: ctx.parse(defaultValues) };
@@ -6784,8 +6858,7 @@ const insertRest = custom<InsertRest, SqlTokenType>(
     const columns = ctx.parse(insertColumns) ?? null;
     const overriding = ctx.parse(insertOverriding) ?? null;
     if (!matchesFirst(ctx.peek(), insertSourceFirst)) {
-      const open =
-        overriding !== null ? "" : columns === null ? '"default values" or "overriding" or ' : '"overriding" or ';
+      const open = insertRestOpen(columns, overriding);
       return ctx.croak(`Expected ${open}"values" or a query but found ${describeFound(ctx.peek())}`);
     }
     const source = ctx.parse(insertSource);
@@ -6896,18 +6969,123 @@ const deleteStmt = seq(
   }),
 );
 
+// --- MERGE ---
+//
+// `merge`, `matched`, `by`, `source`, `target` and `nothing` stay UNRESERVED,
+// matched by value: each is read only where a keyword is the sole option (the
+// lead word, past WHEN or NOT, past BY, past DO). The pieces are INSERT's and
+// UPDATE's own: setAssignments, INSERT's DEFAULT VALUES, OVERRIDING and VALUES
+// row rules, and the FROM machinery for the source.
+
+const mergeUpdate = seq(skip(kw("update")), field("set", setAssignments)).map(
+  ({ set }): MergeAction => ({ kind: "update", set }),
+);
+const mergeColumns = optional(columnList);
+
+// PG's merge_insert: `INSERT [(cols)] [OVERRIDING … VALUE] VALUES (row)` or
+// `INSERT DEFAULT VALUES`. Unlike INSERT's, the source is one row, never a
+// query, so a `(` here is always the column list.
+const mergeInsert = custom<MergeAction, SqlTokenType>(
+  (ctx) => {
+    ctx.parse(kw("insert"));
+    if (ctx.is("ident", "default")) return { kind: "insert", columns: null, source: ctx.parse(defaultValues) };
+    const columns = ctx.parse(mergeColumns) ?? null;
+    const overriding = ctx.parse(insertOverriding) ?? null;
+    if (ctx.eat("ident", "values") === null) {
+      const open = insertRestOpen(columns, overriding);
+      return ctx.croak(`Expected ${open}"values" but found ${describeFound(ctx.peek())}`);
+    }
+    const row = ctx.parse(insertValuesRow);
+    return { kind: "insert", columns, ...(overriding && { overriding }), source: { kind: "values", rows: [row] } };
+  },
+  { expected: '"insert"', first: [{ type: "ident", value: "insert" }] },
+);
+
+// The action after THEN, by the WHEN form: a NOT MATCHED row has no target row
+// to UPDATE or DELETE, and only it can INSERT one.
+function mergeAction(ctx: ParseContext<SqlTokenType>, match: MergeWhen["match"]): MergeAction {
+  if (ctx.is("ident", "do")) {
+    ctx.parse(kwseq("do", "nothing"));
+    return { kind: "nothing" };
+  }
+  if (match === "notMatched") {
+    if (ctx.is("ident", "insert")) return ctx.parse(mergeInsert);
+    return ctx.croak(`Expected "insert" or "do nothing" but found ${describeFound(ctx.peek())}`);
+  }
+  if (ctx.is("ident", "update")) return ctx.parse(mergeUpdate);
+  if (ctx.eat("ident", "delete") !== null) return { kind: "delete" };
+  return ctx.croak(`Expected "update" or "delete" or "do nothing" but found ${describeFound(ctx.peek())}`);
+}
+
+const mergeWhen = custom<MergeWhen, SqlTokenType>(
+  (ctx) => {
+    ctx.parse(kw("when"));
+    let match: MergeWhen["match"] = "matched";
+    if (ctx.eat("ident", "not") !== null) {
+      ctx.parse(kw("matched"));
+      match = "notMatched";
+      if (ctx.eat("ident", "by") !== null) {
+        if (ctx.eat("ident", "source") !== null) match = "notMatchedBySource";
+        else if (ctx.eat("ident", "target") === null) {
+          return ctx.croak(`Expected "source" or "target" but found ${describeFound(ctx.peek())}`);
+        }
+      }
+    } else if (ctx.eat("ident", "matched") === null) {
+      return ctx.croak(`Expected "matched" or "not" but found ${describeFound(ctx.peek())}`);
+    }
+    const condition = ctx.eat("ident", "and") !== null ? ctx.parse(expression) : null;
+    ctx.parse(kw("then"));
+    return { match, condition, action: mergeAction(ctx, match) };
+  },
+  { expected: '"when"', first: [{ type: "ident", value: "when" }] },
+);
+const mergeWhens = many(mergeWhen);
+const mergeReturning = optional(returningClause);
+
+// `MERGE INTO target [[AS] alias] USING source ON condition when_clause …`.
+// `using` and `on` are reserved, so neither alias reader takes them; the source
+// is a FROM item with its joins (joinTail), whose own ON belongs to a join.
+const mergeStmt = custom<Merge, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kwseq("merge", "into"));
+    const target = ctx.parse(relationExpr);
+    const alias = ctx.parse(asAlias);
+    ctx.parse(kw("using"));
+    const source = ctx.parse(joinTail);
+    ctx.parse(kw("on"));
+    const on = ctx.parse(expression);
+    if (!ctx.is("ident", "when")) return ctx.croak(`Expected "when" but found ${describeFound(ctx.peek())}`);
+    const when = ctx.parse(mergeWhens);
+    const returning = ctx.parse(mergeReturning) ?? null;
+    return {
+      kind: "merge",
+      table: target.name,
+      ...(target.only && { only: true as const }),
+      alias,
+      source,
+      on,
+      when,
+      returning,
+      span: ctx.spanFrom(start),
+    };
+  },
+  { expected: '"merge"', first: [{ type: "ident", value: "merge" }] },
+);
+
 // A DML statement, optionally led by a WITH prefix: `[WITH …]
-// SELECT|VALUES|(…)|INSERT|UPDATE|DELETE`. The CTE list can precede any of these,
+// SELECT|VALUES|(…)|INSERT|UPDATE|DELETE|MERGE`. The CTE list can precede any of these,
 // so it must be consumed before dispatch, then attached to the head statement.
 // The no-WITH query path goes straight to setOpQuery (queryRule's own WITH
 // handling would be redundant here).
 const dmlStatement = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const w = ctx.is("ident", "with") ? ctx.parse(withPrefix) : null;
-    let node: Query | Insert | Update | Delete;
+    let node: Preparable;
     if (ctx.is("ident", "insert")) node = ctx.parse(insertStmt);
     else if (ctx.is("ident", "update")) node = ctx.parse(updateStmt);
     else if (ctx.is("ident", "delete")) node = ctx.parse(deleteStmt);
+    else if (ctx.is("ident", "merge")) node = ctx.parse(mergeStmt);
     else node = ctx.parse(setOpQuery);
     if (w !== null) attachWith(ctx, node, w);
     return node;
@@ -6919,6 +7097,7 @@ const dmlStatement = custom<Stmt, SqlTokenType>(
       { type: "ident", value: "insert" },
       { type: "ident", value: "update" },
       { type: "ident", value: "delete" },
+      { type: "ident", value: "merge" },
       { type: "ident", value: "select" },
       { type: "ident", value: "values" },
       { type: "punc", value: "(" },
@@ -6942,12 +7121,12 @@ function optParenList<T>(ctx: ParseContext<SqlTokenType>, list: Rule<T[], SqlTok
   return items;
 }
 
-// PG's PreparableStmt: a query or INSERT/UPDATE/DELETE, each with an optional
-// WITH prefix — exactly dmlStatement's first set (PG's MERGE and `TABLE name`
-// aside, which sql-lite doesn't parse; PREPARE should take them once it does).
+// PG's PreparableStmt: a query or INSERT/UPDATE/DELETE/MERGE, each with an
+// optional WITH prefix — exactly dmlStatement's first set (PG's `TABLE name`
+// aside, which sql-lite doesn't parse; PREPARE should take it once it does).
 // Checked up front so a DDL or utility body reports what PREPARE accepts rather
 // than dmlStatement's generic "a statement" (which CREATE TABLE is).
-const PREPARABLE = "a SELECT, VALUES, INSERT, UPDATE or DELETE statement";
+const PREPARABLE = "a SELECT, VALUES, INSERT, UPDATE, DELETE or MERGE statement";
 const PREPARABLE_FIRST = dmlStatement.first();
 const prepareStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
@@ -7049,7 +7228,7 @@ const vacuumStmt = custom<Stmt, SqlTokenType>(
 // (the same set as PREPARE's), CREATE TABLE AS, CREATE MATERIALIZED VIEW,
 // DECLARE (a cursor), or EXECUTE.
 const EXPLAINABLE =
-  "a SELECT, VALUES, INSERT, UPDATE, DELETE, CREATE TABLE AS, CREATE MATERIALIZED VIEW, DECLARE or EXECUTE statement";
+  "a SELECT, VALUES, INSERT, UPDATE, DELETE, MERGE, CREATE TABLE AS, CREATE MATERIALIZED VIEW, DECLARE or EXECUTE statement";
 function explainable(ctx: ParseContext<SqlTokenType>): Explain["statement"] {
   if (ctx.is("ident", "execute")) return ctx.parse(executeStmt) as Execute;
   if (ctx.is("ident", "declare")) return ctx.parse(declareCursorStmt) as DeclareCursor;
@@ -7069,7 +7248,7 @@ function explainable(ctx: ParseContext<SqlTokenType>): Explain["statement"] {
   if (!matchesFirst(ctx.peek(), PREPARABLE_FIRST)) {
     return ctx.croak(`Expected ${EXPLAINABLE} but found ${describeFound(ctx.peek())}`);
   }
-  return ctx.parse(dmlStatement) as Query | Insert | Update | Delete;
+  return ctx.parse(dmlStatement) as Preparable;
 }
 
 // A `(` after EXPLAIN opens the option list unless a query follows it: PG reads
@@ -7097,23 +7276,6 @@ const explainStmt = custom<Stmt, SqlTokenType>(
 
 // --- LOCK and CALL ---
 // Both lead words stay UNRESERVED, matched by value, as do the lock-mode words.
-
-// One LOCK target: PG's relation_expr — `[ONLY] name [*]` or `ONLY (name)`.
-// `only` and `table` are reserved, so neither can begin a name.
-const lockTarget = custom<LockTarget, SqlTokenType>(
-  (ctx) => {
-    const only = ctx.eat("ident", "only") !== null;
-    if (only && ctx.eat("punc", "(") !== null) {
-      const name = ctx.parse(qualName);
-      expectClose(ctx);
-      return { name, only };
-    }
-    const name = ctx.parse(qualName);
-    if (!only) ctx.eat("op", "*");
-    return { name, only };
-  },
-  { expected: '"only" or a name', first: [{ type: "ident", value: "only" }, ...nameWord.first()] },
-);
 
 // The mode words share leads (SHARE / SHARE UPDATE EXCLUSIVE / SHARE ROW
 // EXCLUSIVE; ROW SHARE / ROW EXCLUSIVE), and phrase() cannot roll back, so the
@@ -7152,7 +7314,7 @@ const lockStmt = custom<Stmt, SqlTokenType>(
     const start = ctx.position();
     ctx.parse(kw("lock"));
     ctx.eat("ident", "table"); // optional TABLE noise word
-    const tables = ctx.parse(sepBy(lockTarget, P(",")));
+    const tables = ctx.parse(sepBy(relationExpr, P(",")));
     let mode: LockMode | null = null;
     if (ctx.eat("ident", "in") !== null) {
       mode = parseLockMode(ctx);
@@ -7368,7 +7530,8 @@ const copyStmt = custom<Stmt, SqlTokenType>(
 );
 
 // First-sets: the DDL and utility rules each dispatch on their own lead keyword;
-// dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
+// dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`/
+// `merge`.
 //
 // Three named groups rather than one flat list, so each family has its own place
 // to grow. Nesting is dispatch- and validation-equivalent to the flat form —
