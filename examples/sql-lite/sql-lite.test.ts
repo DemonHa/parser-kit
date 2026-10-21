@@ -5007,3 +5007,155 @@ describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
     );
   });
 });
+
+// --- INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT ---
+
+describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT", () => {
+  const insert = (src: string) => firstStmt(`INSERT INTO ${src};`) as any;
+  const rows = (src: string) => insert(src).source.rows;
+  const conflict = (src: string) => insert(`t VALUES (1) ON CONFLICT ${src}`).onConflict;
+  const DEFAULT = { kind: "default" };
+
+  it("parses DEFAULT VALUES, with an alias and the tail clauses", () => {
+    expect(insert("t DEFAULT VALUES")).toEqual({
+      kind: "insert",
+      table: ["t"],
+      columns: null,
+      source: { kind: "defaultValues" },
+      onConflict: null,
+      returning: null,
+    });
+    expect(insert("s.t AS x DEFAULT VALUES ON CONFLICT DO NOTHING RETURNING x.id")).toEqual({
+      kind: "insert",
+      table: ["s", "t"],
+      alias: "x",
+      columns: null,
+      source: { kind: "defaultValues" },
+      onConflict: { target: null, action: { kind: "nothing" } },
+      returning: [col(name("x", "id"))],
+    });
+  });
+
+  it("takes DEFAULT as a VALUES row item, in any row and position", () => {
+    expect(rows("t (a, b) VALUES (DEFAULT, 1), (2, DEFAULT)")).toEqual([
+      [DEFAULT, num(1)],
+      [num(2), DEFAULT],
+    ]);
+    expect(rows("t VALUES (default)")).toEqual([[DEFAULT]]);
+    // The row item carries its own span.
+    const [item] = (sqlLite.parse("INSERT INTO t VALUES (DEFAULT);")[0] as any).source.rows[0];
+    expect(item.span).toMatchObject({ start: { row: 1, col: 22 }, end: { row: 1, col: 29 } });
+  });
+
+  it("parses INSERT INTO t AS alias ahead of the column list and source", () => {
+    expect(insert("t AS x (a) VALUES (1) ON CONFLICT (a) DO UPDATE SET a = x.a")).toEqual({
+      kind: "insert",
+      table: ["t"],
+      alias: "x",
+      columns: ["a"],
+      source: { kind: "values", rows: [[num(1)]] },
+      onConflict: {
+        target: ["a"],
+        action: { kind: "update", set: [{ column: "a", value: name("x", "a") }], where: null },
+      },
+      returning: null,
+    });
+    expect(insert("t AS x SELECT 1")).toMatchObject({ alias: "x", source: { kind: "select" } });
+    expect(insert('t AS "Q" (SELECT 1)')).toMatchObject({ alias: "Q", columns: null, source: { kind: "select" } });
+  });
+
+  it("parses OVERRIDING SYSTEM | USER VALUE before any source", () => {
+    expect(insert("t (a) OVERRIDING SYSTEM VALUE VALUES (1)")).toEqual({
+      kind: "insert",
+      table: ["t"],
+      columns: ["a"],
+      overriding: "system",
+      source: { kind: "values", rows: [[num(1)]] },
+      onConflict: null,
+      returning: null,
+    });
+    expect(insert("t OVERRIDING USER VALUE SELECT * FROM u")).toMatchObject({
+      columns: null,
+      overriding: "user",
+      source: { kind: "select" },
+    });
+    expect(insert("t AS x OVERRIDING user value (SELECT 1)")).toMatchObject({ alias: "x", overriding: "user" });
+  });
+
+  it("parses ON CONFLICT ON CONSTRAINT with either action", () => {
+    expect(conflict("ON CONSTRAINT t_pkey DO NOTHING")).toEqual({
+      target: null,
+      constraint: "t_pkey",
+      action: { kind: "nothing" },
+    });
+    expect(conflict('ON CONSTRAINT "T Key" DO UPDATE SET a = 2 WHERE t.a > 0')).toEqual({
+      target: null,
+      constraint: "T Key",
+      action: { kind: "update", set: [{ column: "a", value: num(2) }], where: bin(">", name("t", "a"), num(0)) },
+    });
+  });
+
+  it("omits the new keys entirely when their clauses are absent", () => {
+    const node = insert("t (a) VALUES (1) ON CONFLICT (a) DO NOTHING");
+    expect(node).not.toHaveProperty("alias");
+    expect(node).not.toHaveProperty("overriding");
+    expect(node.onConflict).not.toHaveProperty("constraint");
+    expect(conflict("DO NOTHING")).not.toHaveProperty("constraint");
+  });
+
+  it("keeps the OVERRIDING words unreserved as names and aliases", () => {
+    // `overriding`, `system` and `value` are matched by value only; `user`,
+    // `default`, `on`, `constraint` and `as` were already reserved, and
+    // `conflict` was already matched by value before this clause.
+    const words = ["overriding", "system", "value", "conflict"];
+    expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(name(w))));
+    expect((firstStmt("SELECT a AS overriding, b value FROM system;") as any).columns).toEqual([
+      col(name("a"), "overriding"),
+      col(name("b"), "value"),
+    ]);
+    // …as the table, its alias, the columns and the constraint name.
+    expect(insert("overriding AS system (value, conflict) OVERRIDING SYSTEM VALUE VALUES (1, 2)")).toMatchObject({
+      table: ["overriding"],
+      alias: "system",
+      columns: ["value", "conflict"],
+      overriding: "system",
+    });
+    expect(conflict("ON CONSTRAINT overriding DO NOTHING")).toMatchObject({ constraint: "overriding" });
+    expect(conflict("ON CONSTRAINT conflict DO NOTHING")).toMatchObject({ constraint: "conflict" });
+  });
+
+  it("rejects the misplaced and malformed forms", () => {
+    const parse = (src: string) => () => sqlLite.parse(`INSERT INTO ${src};`);
+    // DEFAULT VALUES stands alone, as in PG's insert_rest; the message lists
+    // every form still open where the source was expected.
+    expect(parse("t (a) DEFAULT VALUES")).toThrow(
+      /Expected "overriding" or "values" or a query but found "default" \(1:18\)/,
+    );
+    expect(parse("t OVERRIDING SYSTEM VALUE DEFAULT VALUES")).toThrow(
+      /Expected "values" or a query but found "default" \(1:38\)/,
+    );
+    expect(parse("t AS x (a) DEFAULT VALUES")).toThrow(/found "default" \(1:23\)/);
+    expect(parse("t frob")).toThrow(
+      /Expected "default values" or "overriding" or "values" or a query but found "frob"/,
+    );
+    expect(parse("t DEFAULT")).toThrow(/Expected "values" but found ";"/);
+    // DEFAULT is a whole row item, never an operand.
+    expect(parse("t VALUES (DEFAULT + 1)")).toThrow(/Expected "," but found "\+"/);
+    // …and only in INSERT's own bare VALUES rows. A VALUES query rejects it
+    // as PG does; a parenthesised VALUES source and SET's right-hand side are
+    // limits of this grammar, which PG would accept.
+    expect(() => sqlLite.parse("SELECT * FROM (VALUES (DEFAULT)) v;")).toThrow(/Expected a name but found "default"/);
+    expect(() => sqlLite.parse("INSERT INTO t (VALUES (DEFAULT));")).toThrow(/Expected a name but found "default"/);
+    expect(() => sqlLite.parse("UPDATE t SET a = DEFAULT;")).toThrow(/Expected a name but found "default"/);
+    // The alias needs its AS, and AS needs a name.
+    expect(parse("t x VALUES (1)")).toThrow(/found "x" \(1:14\)/);
+    // (An empty quoted alias is still an alias, not a missing one.)
+    expect(insert('t AS "" VALUES (1)')).toHaveProperty("alias", "");
+    expect(parse("t AS VALUES (1)")).toThrow(/Expected a name but found "values"/);
+    expect(parse("t OVERRIDING frob VALUE VALUES (1)")).toThrow(/Expected "system" or "user" but found "frob"/);
+    expect(parse("t OVERRIDING USER VALUES (1)")).toThrow(/Expected "value" but found "values"/);
+    expect(parse("t VALUES (1) ON CONFLICT ON frob DO NOTHING")).toThrow(/Expected "constraint" but found "frob"/);
+    expect(parse("t VALUES (1) ON CONFLICT ON CONSTRAINT DO NOTHING")).toThrow(/Expected a name but found "do"/);
+    expect(parse("t VALUES (1) ON CONFLICT ON CONSTRAINT c (a) DO NOTHING")).toThrow(/Expected "do" but found "\("/);
+  });
+});
