@@ -19607,6 +19607,412 @@
     ]
   },
   {
+    "source": "CREATE OR REPLACE VIEW v (a, b) WITH (security_barrier, security_invoker = true) AS SELECT a, now()::timestamp FROM t WITH CHECK OPTION;",
+    "ast": [
+      {
+        "kind": "createView",
+        "materialized": false,
+        "orReplace": true,
+        "ifNotExists": false,
+        "name": [
+          "v"
+        ],
+        "columns": [
+          "a",
+          "b"
+        ],
+        "query": {
+          "kind": "select",
+          "with_": null,
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "a"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 91
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 92
+                  }
+                }
+              },
+              "alias": null
+            },
+            {
+              "expr": {
+                "kind": "cast",
+                "expr": {
+                  "kind": "call",
+                  "name": "now",
+                  "args": [],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 94
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 99
+                    }
+                  }
+                },
+                "type": {
+                  "name": "timestamp",
+                  "args": [],
+                  "array": false,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 101
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 110
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 94
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 110
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "from": [
+            {
+              "kind": "table",
+              "name": [
+                "t"
+              ],
+              "alias": null
+            }
+          ],
+          "where": null,
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": null,
+          "limit": null,
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 84
+            },
+            "end": {
+              "row": 1,
+              "col": 117
+            }
+          }
+        },
+        "withData": null,
+        "options": [
+          {
+            "name": "security_barrier",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 38
+              },
+              "end": {
+                "row": 1,
+                "col": 54
+              }
+            }
+          },
+          {
+            "name": "security_invoker",
+            "value": {
+              "kind": "bool",
+              "value": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 75
+                },
+                "end": {
+                  "row": 1,
+                  "col": 79
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 56
+              },
+              "end": {
+                "row": 1,
+                "col": 79
+              }
+            }
+          }
+        ],
+        "checkOption": "cascaded",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 135
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE VIEW v AS SELECT a FROM t WITH LOCAL CHECK OPTION;",
+    "ast": [
+      {
+        "kind": "createView",
+        "materialized": false,
+        "orReplace": false,
+        "ifNotExists": false,
+        "name": [
+          "v"
+        ],
+        "columns": null,
+        "query": {
+          "kind": "select",
+          "with_": null,
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "a"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 24
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 25
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "from": [
+            {
+              "kind": "table",
+              "name": [
+                "t"
+              ],
+              "alias": null
+            }
+          ],
+          "where": null,
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": null,
+          "limit": null,
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 17
+            },
+            "end": {
+              "row": 1,
+              "col": 32
+            }
+          }
+        },
+        "withData": null,
+        "checkOption": "local",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 56
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE MATERIALIZED VIEW mv WITH (fillfactor = 70) AS SELECT now()::timestamp WITH NO DATA;",
+    "ast": [
+      {
+        "kind": "createView",
+        "materialized": true,
+        "orReplace": false,
+        "ifNotExists": false,
+        "name": [
+          "mv"
+        ],
+        "columns": null,
+        "query": {
+          "kind": "select",
+          "with_": null,
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "cast",
+                "expr": {
+                  "kind": "call",
+                  "name": "now",
+                  "args": [],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 61
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 66
+                    }
+                  }
+                },
+                "type": {
+                  "name": "timestamp",
+                  "args": [],
+                  "array": false,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 68
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 77
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 61
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 77
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "from": null,
+          "where": null,
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": null,
+          "limit": null,
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 54
+            },
+            "end": {
+              "row": 1,
+              "col": 77
+            }
+          }
+        },
+        "withData": false,
+        "options": [
+          {
+            "name": "fillfactor",
+            "value": {
+              "kind": "number",
+              "value": 70,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 47
+                },
+                "end": {
+                  "row": 1,
+                  "col": 49
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 34
+              },
+              "end": {
+                "row": 1,
+                "col": 49
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 90
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "REFRESH MATERIALIZED VIEW CONCURRENTLY s.mv WITH DATA;",
+    "ast": [
+      {
+        "kind": "refreshMaterializedView",
+        "concurrently": true,
+        "name": [
+          "s",
+          "mv"
+        ],
+        "withData": true,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 53
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {
