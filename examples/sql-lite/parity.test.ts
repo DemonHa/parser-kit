@@ -303,6 +303,13 @@ const SUPPLEMENTAL = [
   "UPDATE t SET (a, b) = (1, DEFAULT), c = 3, (d, e) = ROW(c + 1, DEFAULT) WHERE id = 1;",
   "UPDATE t SET (a, b) = (SELECT x, y FROM u WHERE u.id = t.id), (c) = ROW(2) RETURNING a;",
   "INSERT INTO t VALUES (1, 2) ON CONFLICT (id) DO UPDATE SET (a, b) = (excluded.a, DEFAULT), c = 4;",
+  // --- MERGE: every WHEN form and action, INSERT's DEFAULT VALUES / OVERRIDING
+  // forms, ONLY, aliases, a joined and a subquery source, WITH and RETURNING ---
+  "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED AND s.gone THEN DELETE WHEN MATCHED THEN UPDATE SET a = s.a WHEN NOT MATCHED THEN INSERT (id, a) VALUES (s.id, DEFAULT) WHEN NOT MATCHED BY SOURCE THEN DO NOTHING;",
+  "WITH q AS (SELECT 1 AS id) MERGE INTO ONLY s.t AS x USING (SELECT * FROM q) AS v (id) ON x.id = v.id WHEN NOT MATCHED BY TARGET AND v.id > 0 THEN INSERT (id) OVERRIDING SYSTEM VALUE VALUES (v.id) WHEN NOT MATCHED BY SOURCE THEN UPDATE SET a = 0 RETURNING x.id, *;",
+  "MERGE INTO t x USING a JOIN b ON a.id = b.id ON x.id = a.id WHEN MATCHED THEN DO NOTHING WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;",
+  "WITH m AS (MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE RETURNING t.id) SELECT * FROM m;",
+  "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET (a, b) = (s.a, DEFAULT), c = s.c WHEN NOT MATCHED BY SOURCE THEN UPDATE SET (a) = (SELECT 0);",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind

@@ -2817,7 +2817,7 @@ describe("SQL-lite data-modifying CTEs", () => {
 
   it("croaks when a WITH prefix leads a bare VALUES query", () => {
     expect(() => sqlLite.parse("WITH c AS (SELECT 1) VALUES (1);")).toThrow(
-      /WITH must attach to a SELECT, INSERT, UPDATE or DELETE/,
+      /WITH must attach to a SELECT, INSERT, UPDATE, DELETE or MERGE/,
     );
   });
 });
@@ -5624,7 +5624,7 @@ describe("SQL-lite PREPARE and EXECUTE", () => {
 
   it("rejects a non-preparable body, a missing AS and an empty list", () => {
     expect(bad("PREPARE p AS CREATE TABLE t (a int);")).toThrow(
-      /Expected a SELECT, VALUES, INSERT, UPDATE or DELETE statement but found "create" \(1:13\)/,
+      /Expected a SELECT, VALUES, INSERT, UPDATE, DELETE or MERGE statement but found "create" \(1:13\)/,
     );
     expect(bad("PREPARE p AS EXECUTE q;")).toThrow(/statement but found "execute"/);
     expect(bad("PREPARE p AS;")).toThrow(/statement but found ";"/);
@@ -6078,7 +6078,7 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
 
   it("rejects malformed EXPLAIN, ANALYZE and VACUUM", () => {
     expect(bad("EXPLAIN;")).toThrow(
-      /Expected a SELECT, VALUES, INSERT, UPDATE, DELETE, CREATE TABLE AS, CREATE MATERIALIZED VIEW, DECLARE or EXECUTE/,
+      /Expected a SELECT, VALUES, INSERT, UPDATE, DELETE, MERGE, CREATE TABLE AS, CREATE MATERIALIZED VIEW, DECLARE or EXECUTE/,
     );
     expect(bad("EXPLAIN DROP TABLE t;")).toThrow(/or EXECUTE statement but found "drop" \(1:8\)/);
     expect(bad("EXPLAIN EXPLAIN SELECT 1;")).toThrow(/statement but found "explain"/);
@@ -6829,7 +6829,7 @@ describe("SQL-lite COPY", () => {
     expect(bad("COPY (SELECT 1) FROM 'f';")).toThrow(/Expected "to" but found "from" \(1:16\)/);
     expect(bad("COPY t 'f';")).toThrow(/Expected "from" or "to" but found "f"/);
     expect(bad("COPY (CREATE TABLE t (a int)) TO STDOUT;")).toThrow(
-      /Expected a SELECT, VALUES, INSERT, UPDATE or DELETE statement but found "create"/,
+      /Expected a SELECT, VALUES, INSERT, UPDATE, DELETE or MERGE statement but found "create"/,
     );
     expect(bad("COPY (SELECT 1) (a) TO STDOUT;")).toThrow(/Expected "to" but found "\("/);
     expect(bad("COPY t FROM PROGRAM gzip;")).toThrow(/Expected a string but found "gzip"/);
@@ -7117,5 +7117,233 @@ describe("SQL-lite multi-column UPDATE assignments", () => {
     expect(bad("UPDATE t SET (a, b) = (1, 2) OVERLAPS (3, 4);")).toThrow(/Expected ";" but found "overlaps"/);
     expect(bad("UPDATE t SET (a, b) = (SELECT 1, 2) + 1;")).toThrow(/Expected ";" but found "\+"/);
     expect(bad("UPDATE t SET = 1;")).toThrow(/Expected "\(" or a name but found "="/);
+  });
+});
+
+// --- MERGE ---
+
+describe("SQL-lite MERGE", () => {
+  const merge = (over: Record<string, unknown>) => ({
+    kind: "merge",
+    table: ["t"],
+    alias: null,
+    source: tableFrom(["s"]),
+    on: bin("=", name("t", "id"), name("s", "id")),
+    when: [],
+    returning: null,
+    ...over,
+  });
+  const when = (match: string, action: unknown, condition: unknown = null) => ({ match, condition, action });
+  const nothing = { kind: "nothing" };
+  const head = "MERGE INTO t USING s ON t.id = s.id";
+  const whenOf = (src: string) => firstStmt(`${head} ${src};`).when;
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses each WHEN form with each of its actions", () => {
+    expect(
+      firstStmt(
+        `${head} WHEN MATCHED AND s.gone THEN DELETE WHEN MATCHED THEN UPDATE SET a = s.a, b = 2 ` +
+          "WHEN NOT MATCHED THEN INSERT (id, a) VALUES (s.id, DEFAULT) WHEN NOT MATCHED BY SOURCE THEN DO NOTHING;",
+      ),
+    ).toEqual(
+      merge({
+        when: [
+          when("matched", { kind: "delete" }, name("s", "gone")),
+          when("matched", {
+            kind: "update",
+            set: [
+              { column: "a", value: name("s", "a") },
+              { column: "b", value: num(2) },
+            ],
+          }),
+          when("notMatched", {
+            kind: "insert",
+            columns: ["id", "a"],
+            source: { kind: "values", rows: [[name("s", "id"), { kind: "default" }]] },
+          }),
+          when("notMatchedBySource", nothing),
+        ],
+      }),
+    );
+    expect(whenOf("WHEN MATCHED THEN DO NOTHING WHEN NOT MATCHED BY TARGET AND s.a > 0 THEN DO NOTHING")).toEqual([
+      when("matched", nothing),
+      when("notMatched", nothing, bin(">", name("s", "a"), num(0))),
+    ]);
+    expect(
+      whenOf("WHEN NOT MATCHED BY SOURCE AND t.a THEN UPDATE SET a = 0 WHEN NOT MATCHED BY SOURCE THEN DELETE"),
+    ).toEqual([
+      when("notMatchedBySource", { kind: "update", set: [{ column: "a", value: num(0) }] }, name("t", "a")),
+      when("notMatchedBySource", { kind: "delete" }),
+    ]);
+  });
+
+  it("takes UPDATE's multi-column assignments, under either UPDATE form", () => {
+    const row = (items: unknown[]) => ({ kind: "row", items, implicit: true });
+    expect(whenOf("WHEN MATCHED THEN UPDATE SET (a, b) = (s.a, DEFAULT), c = 1")[0].action).toEqual({
+      kind: "update",
+      set: [
+        { columns: ["a", "b"], value: row([name("s", "a"), { kind: "default" }]) },
+        { column: "c", value: num(1) },
+      ],
+    });
+    expect(whenOf("WHEN NOT MATCHED BY SOURCE THEN UPDATE SET (a) = ROW(0)")[0].action.set).toEqual([
+      { columns: ["a"], value: { kind: "row", items: [num(0)] } },
+    ]);
+  });
+
+  it("parses INSERT's DEFAULT VALUES, OVERRIDING and bare VALUES forms", () => {
+    const actionOf = (src: string) => whenOf(`WHEN NOT MATCHED THEN INSERT ${src}`)[0].action;
+    expect(actionOf("DEFAULT VALUES")).toEqual({ kind: "insert", columns: null, source: { kind: "defaultValues" } });
+    expect(actionOf("(id) OVERRIDING SYSTEM VALUE VALUES (s.id)")).toEqual({
+      kind: "insert",
+      columns: ["id"],
+      overriding: "system",
+      source: { kind: "values", rows: [[name("s", "id")]] },
+    });
+    expect(actionOf("OVERRIDING USER VALUE VALUES (1, 2)")).toMatchObject({ columns: null, overriding: "user" });
+    expect(actionOf("VALUES (DEFAULT)")).toEqual({
+      kind: "insert",
+      columns: null,
+      source: { kind: "values", rows: [[{ kind: "default" }]] },
+    });
+  });
+
+  it("reads ONLY, aliases, any FROM item as the source, a WITH prefix and RETURNING", () => {
+    expect(
+      firstStmt(
+        "WITH q AS (SELECT 1) MERGE INTO ONLY s.t AS x USING (SELECT * FROM u) AS v (id) ON x.id = v.id " +
+          "WHEN MATCHED THEN DELETE RETURNING x.id, *;",
+      ),
+    ).toEqual(
+      merge({
+        table: ["s", "t"],
+        only: true,
+        alias: "x",
+        source: {
+          kind: "subquery",
+          query: sel({ columns: [col(star())], from: [tableFrom(["u"])] }),
+          alias: "v",
+          columns: ["id"],
+        },
+        on: bin("=", name("x", "id"), name("v", "id")),
+        when: [when("matched", { kind: "delete" })],
+        returning: [col(name("x", "id")), col(star())],
+        with_: [{ name: "q", columns: null, query: sel({ columns: [col(num(1))] }) }],
+        recursive: false,
+      }),
+    );
+    const mergeOf = (src: string) => firstStmt(`MERGE INTO ${src} WHEN MATCHED THEN DELETE;`);
+    expect(mergeOf("ONLY (t) x USING s y ON true")).toMatchObject({ only: true, alias: "x", source: { alias: "y" } });
+    expect(mergeOf("t * USING s ON true")).not.toHaveProperty("only");
+    // The source's own joins take their ON first; the MERGE's ON follows.
+    expect(mergeOf("t USING a JOIN b ON a.id = b.id ON t.id = a.id")).toMatchObject({
+      source: {
+        kind: "join",
+        left: tableFrom(["a"]),
+        right: tableFrom(["b"]),
+        on: bin("=", name("a", "id"), name("b", "id")),
+      },
+      on: bin("=", name("t", "id"), name("a", "id")),
+    });
+    expect(mergeOf("t USING generate_series(1, 3) AS g (id) ON t.id = g.id").source).toMatchObject({
+      kind: "function",
+      alias: "g",
+      columns: ["id"],
+    });
+    expect(mergeOf("t USING (VALUES (1)) AS v (id) ON t.id = v.id").source).toMatchObject({
+      kind: "subquery",
+      query: { kind: "values" },
+    });
+  });
+
+  it("is a preparable statement: PREPARE, EXPLAIN and COPY take it", () => {
+    const body = `${head} WHEN MATCHED THEN DO NOTHING`;
+    expect(firstStmt(`PREPARE p AS ${body};`).query).toMatchObject({ kind: "merge" });
+    expect(firstStmt(`EXPLAIN ${body};`).statement).toMatchObject({ kind: "merge" });
+    expect(firstStmt(`COPY (${body} RETURNING *) TO STDOUT;`).query).toMatchObject({ kind: "merge" });
+  });
+
+  it("is a data-modifying CTE body", () => {
+    expect(firstStmt(`WITH x AS (${head} WHEN MATCHED THEN DELETE RETURNING t.id) SELECT * FROM x;`)).toMatchObject({
+      kind: "select",
+      with_: [{ name: "x", query: { kind: "merge", returning: [col(name("t", "id"))] } }],
+    });
+  });
+
+  it("keeps merge, matched, by, source, target and nothing unreserved", () => {
+    const words = ["merge", "matched", "by", "source", "target", "nothing"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM merge;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["merge"])] }),
+    );
+    expect(
+      firstStmt(`CREATE TABLE target (${words.map((w) => `${w} int`).join(", ")});`).items.map((i: any) => i.name),
+    ).toEqual(words);
+    // …and as the names MERGE itself takes.
+    expect(
+      firstStmt(
+        "MERGE INTO merge matched USING source target ON matched.by = target.by " +
+          "WHEN NOT MATCHED THEN INSERT (nothing, source) VALUES (target.nothing, target.source);",
+      ),
+    ).toEqual(
+      merge({
+        table: ["merge"],
+        alias: "matched",
+        source: tableFrom(["source"], "target"),
+        on: bin("=", name("matched", "by"), name("target", "by")),
+        when: [
+          when("notMatched", {
+            kind: "insert",
+            columns: ["nothing", "source"],
+            source: { kind: "values", rows: [[name("target", "nothing"), name("target", "source")]] },
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("rejects an action its WHEN form does not take, and a malformed head or tail", () => {
+    expect(bad(`${head} WHEN MATCHED THEN INSERT VALUES (1);`)).toThrow(
+      /Expected "update" or "delete" or "do nothing" but found "insert" \(1:54\)/,
+    );
+    expect(bad(`${head} WHEN NOT MATCHED BY SOURCE THEN INSERT DEFAULT VALUES;`)).toThrow(
+      /Expected "update" or "delete" or "do nothing" but found "insert"/,
+    );
+    expect(bad(`${head} WHEN NOT MATCHED THEN UPDATE SET a = 1;`)).toThrow(
+      /Expected "insert" or "do nothing" but found "update"/,
+    );
+    expect(bad(`${head} WHEN NOT MATCHED BY TARGET THEN DELETE;`)).toThrow(
+      /Expected "insert" or "do nothing" but found "delete"/,
+    );
+    expect(bad("MERGE INTO t USING s WHEN MATCHED THEN DELETE;")).toThrow(/Expected "on" but found "when" \(1:21\)/);
+    expect(bad("MERGE t USING s ON true WHEN MATCHED THEN DELETE;")).toThrow(/Expected "into" but found "t"/);
+    expect(bad(`${head};`)).toThrow(/Expected "when" but found ";"/);
+    expect(bad(`${head} WHEN THEN DELETE;`)).toThrow(/Expected "matched" or "not" but found "then"/);
+    expect(bad(`${head} WHEN NOT MATCHED BY x THEN DO NOTHING;`)).toThrow(
+      /Expected "source" or "target" but found "x"/,
+    );
+    expect(bad(`${head} WHEN MATCHED DELETE;`)).toThrow(/Expected "then" but found "delete"/);
+    expect(bad(`${head} WHEN MATCHED THEN DO;`)).toThrow(/Expected "nothing" but found ";"/);
+    // MERGE's UPDATE takes no WHERE; its INSERT one VALUES row, and no query.
+    expect(bad(`${head} WHEN MATCHED THEN UPDATE SET a = 1 WHERE b;`)).toThrow(/Expected ";" but found "where"/);
+    expect(bad(`${head} WHEN NOT MATCHED THEN INSERT VALUES (1), (2);`)).toThrow(/Expected ";" but found ","/);
+    expect(bad(`${head} WHEN NOT MATCHED THEN INSERT SELECT 1;`)).toThrow(
+      /Expected "default values" or "overriding" or "values" but found "select"/,
+    );
+    expect(bad(`${head} WHEN NOT MATCHED THEN INSERT (a) DEFAULT VALUES;`)).toThrow(
+      /Expected "overriding" or "values" but found "default"/,
+    );
+    expect(bad(`${head} WHEN NOT MATCHED THEN INSERT OVERRIDING SYSTEM VALUE DEFAULT VALUES;`)).toThrow(
+      /Expected "values" but found "default"/,
+    );
+    expect(bad(`${head} WHEN NOT MATCHED THEN INSERT;`)).toThrow(
+      /Expected "default values" or "overriding" or "values" but found ";"/,
+    );
+    expect(bad("MERGE INTO t AS USING s ON true WHEN MATCHED THEN DELETE;")).toThrow(
+      /Expected an alias but found "using"/,
+    );
+    // A malformed MERGE fails inside the statement that holds it.
+    expect(bad("COPY (MERGE INTO t USING s WHEN MATCHED THEN DELETE) TO STDOUT;")).toThrow(
+      /Expected "on" but found "when" \(1:27\)/,
+    );
   });
 });
