@@ -443,7 +443,7 @@ export type AlterAction =
 // The trigger an ENABLE / DISABLE TRIGGER names: one by name, or ALL / USER.
 export type AlterTriggerTarget = { kind: "all" | "user" } | { kind: "name"; name: string };
 
-// The actions of ALTER {SCHEMA | DOMAIN | TYPE | INDEX}. `rename` is the object's
+// The actions of the ALTER targets other than TABLE. `rename` is the object's
 // own (ALTER TABLE's is `renameTable`); a domain's `addConstraint` keeps its name
 // inside `constraint`, not beside it as ALTER TABLE's does.
 type AlterRenameTo = { kind: "rename"; to: string };
@@ -3165,14 +3165,18 @@ const columnDef = seq(
   field("constraints", many(columnConstraint)),
 ).map(({ name, dataType, constraints }, span): ColumnDef => ({ kind: "column", name, dataType, constraints, span }));
 
-// A table item led by `exclude`: an EXCLUDE constraint when the lookahead says
-// so, else a column called `exclude`. Decided by peeking rather than by
-// `attempt`, so a malformed EXCLUDE reports its own error — a backtrack would
-// drop it, and a lex error inside it for good, then blame the column instead.
-const excludeItem = custom<ExcludeConstraint | ColumnDef, SqlTokenType>(
-  (ctx) => (atExcludeConstraint(ctx) ? ctx.parse(excludeBody) : ctx.parse(columnDef)),
-  { expected: '"exclude"', first: [{ type: "ident", value: "exclude" }] },
-);
+// An element led by `exclude`: an EXCLUDE constraint when the lookahead says
+// so, else `column` — the column definition of a table body, or the column
+// options of a PARTITION OF list — for a column called `exclude`. Decided by
+// peeking rather than by `attempt`, so a malformed EXCLUDE reports its own error
+// — a backtrack would drop it, and a lex error inside it for good, then blame
+// the column instead.
+const excludeOr = <T>(column: Rule<T, SqlTokenType>) =>
+  custom<ExcludeConstraint | T, SqlTokenType>(
+    (ctx) => (atExcludeConstraint(ctx) ? ctx.parse(excludeBody) : ctx.parse(column)),
+    { expected: '"exclude"', first: [{ type: "ident", value: "exclude" }] },
+  );
+const excludeItem = excludeOr(columnDef);
 
 // The properties a LIKE option may copy, in the order PG's TableLikeOption
 // lists them — which is also the order the "Expected …" message names them in.
@@ -3587,7 +3591,7 @@ const columnOptions = custom<ColumnOptions, SqlTokenType>(
   { expected: nameWord.expected(), first: nameWord.first() },
 );
 
-const partitionItem = oneOf(tableConstraint, columnOptions);
+const partitionItem = oneOf(tableConstraint, excludeOr(columnOptions), columnOptions);
 
 // `[INHERITS (parent, …)] [PARTITION BY …]` and then the storage clauses — what
 // this grammar takes after a table's element list. PG also allows `USING
@@ -3976,7 +3980,8 @@ function parseIfNotExists(ctx: ParseContext<SqlTokenType>): boolean {
 }
 
 // A role: a name, or one of the CURRENT_ / SESSION_ pseudo-roles, which are
-// reserved and so matched by value ahead of `nameWord` (as parseGrantee does).
+// reserved and so matched by value ahead of `nameWord`. OWNER TO and GRANT's
+// grantees take it too.
 const ROLE_KEYWORDS: ReadonlySet<string> = new Set(["current_user", "current_role", "session_user"]);
 function parseRoleSpec(ctx: ParseContext<SqlTokenType>): string {
   const tok = ctx.peek();
@@ -4140,14 +4145,15 @@ const ROLE_FLAGS: ReadonlySet<string> = new Set([
   "bypassrls",
 ]);
 
-// PG's SignedIconst: an integer constant with an optional sign.
-function parseSignedInt(ctx: ParseContext<SqlTokenType>): number {
+// PG's SignedIconst: an integer constant with an optional sign of its own —
+// CREATE ROLE's CONNECTION LIMIT, and a cursor's FETCH / MOVE count, which
+// names itself `what` in the croak.
+const isSign = (tok: Token<SqlTokenType> | null): boolean =>
+  tok !== null && tok.type === "op" && (tok.value === "-" || tok.value === "+");
+function parseSignedInt(ctx: ParseContext<SqlTokenType>, what = "an integer"): number {
+  const sign = isSign(ctx.peek()) ? ctx.next()!.value : null;
   const tok = ctx.peek();
-  const sign = tok?.type === "op" && (tok.value === "-" || tok.value === "+") ? tok.value : null;
-  if (!isIntegerConstant(sign === null ? tok : ctx.peekAhead(1))) {
-    return ctx.croak(`Expected an integer but found ${describeFound(sign === null ? tok : ctx.peekAhead(1))}`);
-  }
-  if (sign !== null) ctx.next();
+  if (!isIntegerConstant(tok)) return ctx.croak(`Expected ${what} but found ${describeFound(tok)}`);
   const value = Number(ctx.next()!.value);
   return sign === "-" ? -value : value;
 }
@@ -4273,8 +4279,9 @@ const ARG_MODES: ReadonlySet<string> = new Set(["in", "out", "inout", "variadic"
 
 // One `[mode] [name] type [DEFAULT expr]` argument. See `FunctionArg` for the
 // mode/name recovery heuristic.
-// `allowDefault` is false for DROP, whose signatures name types only: PG
-// refuses a default there, so one is croaked at its own DEFAULT / `=`.
+// `allowDefault` is false for a reference to an existing routine (DROP, ALTER),
+// whose signature names types only: PG refuses a default there, so one is
+// croaked at its own DEFAULT / `=`.
 function parseFunctionArg(ctx: ParseContext<SqlTokenType>, allowDefault = true): FunctionArg {
   let mode: FunctionArg["mode"] = null;
   const cur = ctx.peek();
@@ -4310,7 +4317,7 @@ function parseFunctionArg(ctx: ParseContext<SqlTokenType>, allowDefault = true):
   const type = ctx.parse(typeRef);
   let defaultValue: Expr | null = null;
   if (!allowDefault && (ctx.is("ident", "default") || ctx.is("op", "="))) {
-    ctx.croak(`A DROP signature takes no argument defaults, but found ${describeFound(ctx.peek())}`);
+    ctx.croak(`A routine reference takes no argument defaults, but found ${describeFound(ctx.peek())}`);
   }
   if (ctx.eat("ident", "default") !== null || ctx.eat("op", "=") !== null) {
     defaultValue = ctx.parse(expression);
@@ -4319,7 +4326,7 @@ function parseFunctionArg(ctx: ParseContext<SqlTokenType>, allowDefault = true):
 }
 
 // The parenthesised argument signature — possibly empty `()`. CREATE takes
-// argument defaults; DROP's `dropFunctionArgs` does not.
+// argument defaults; DROP's and ALTER's `refFunctionArgs` does not.
 const signatureArgs = (allowDefault: boolean) =>
   delimited(
     P("("),
@@ -4332,7 +4339,7 @@ const signatureArgs = (allowDefault: boolean) =>
     { interleaved: true },
   );
 const functionArgs = signatureArgs(true);
-const dropFunctionArgs = signatureArgs(false);
+const refFunctionArgs = signatureArgs(false);
 
 // `RETURNS [SETOF] type` | `RETURNS TABLE (col type, …)`, or null when absent.
 function parseFunctionReturns(ctx: ParseContext<SqlTokenType>): FunctionReturns | null {
@@ -4536,7 +4543,7 @@ function parseAggregateBody(ctx: ParseContext<SqlTokenType>, start: Position, or
 }
 
 // An aggregate's `( * )` or `( type, … )` signature, its `(` not yet consumed.
-// DROP passes its default-free `dropFunctionArgs` as `args`.
+// DROP and ALTER pass the default-free `refFunctionArgs` as `args`.
 function parseAggregateSignature(ctx: ParseContext<SqlTokenType>, args = functionArgs): DropSignature {
   if (ctx.is("punc", "(") && ctx.peekAhead(1)?.type === "op" && ctx.peekAhead(1)?.value === "*") {
     ctx.next(); // "("
@@ -4546,6 +4553,35 @@ function parseAggregateSignature(ctx: ParseContext<SqlTokenType>, args = functio
   }
   return { star: false, args: ctx.parse(args) };
 }
+
+type RoutineRef = { name: string[]; signature: DropSignature | null };
+
+// A function or procedure name, with its argument list when one is written:
+// how DROP and ALTER name an existing routine, so its argument types take no
+// defaults (see refFunctionArgs).
+const routineRef = custom<RoutineRef, SqlTokenType>(
+  (ctx) => {
+    const name = ctx.parse(qualName);
+    const signature = ctx.is("punc", "(") ? { star: false, args: ctx.parse(refFunctionArgs) } : null;
+    return { name, signature };
+  },
+  { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
+);
+
+// An aggregate name and its required `(*)` / `(type, …)` signature, which PG
+// never lets be empty: a zero-argument aggregate is spelled `(*)`.
+const aggregateRef = custom<{ name: string[]; signature: DropSignature }, SqlTokenType>(
+  (ctx) => {
+    const name = ctx.parse(qualName);
+    const close = ctx.peekAhead(1);
+    if (ctx.is("punc", "(") && close?.type === "punc" && close.value === ")") {
+      ctx.next(); // "("
+      ctx.croak(`Expected "*" or a function argument but found ${describeFound(close)}`);
+    }
+    return { name, signature: parseAggregateSignature(ctx, refFunctionArgs) };
+  },
+  { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
+);
 
 // One trigger event: INSERT / DELETE / TRUNCATE, or UPDATE with an optional
 // `OF col, …` list. Event words stay unreserved and are matched by value.
@@ -4743,22 +4779,20 @@ const createStmt = custom<Stmt, SqlTokenType>(
   { expected: '"create"', first: [{ type: "ident", value: "create" }] },
 );
 
-// `[IF NOT EXISTS] column-def`, the tail of `ADD [COLUMN]`. Decided by peeking
-// rather than by `attempt`, so a column that happens to be called `if` costs no
-// backtrack: `not` is reserved, so an unquoted one can never be the type of such
-// a column. The `ident` test is what keeps a quoted `"not"`, which can, out.
+// `[IF NOT EXISTS] column-def`, the tail of `ADD [COLUMN]`. IF NOT EXISTS is
+// peeked by parseIfNotExists rather than tried by `attempt`, so a column that
+// happens to be called `if` costs no backtrack: `not` is reserved, so an
+// unquoted one can never be the type of such a column.
 function parseAddColumn(ctx: ParseContext<SqlTokenType>): AlterAction {
-  const next = ctx.peekAhead(1);
-  const ifNotExists = ctx.is("ident", "if") && next?.type === "ident" && next.value === "not";
-  if (ifNotExists) ctx.parse(kwseq("if", "not", "exists"));
-  return { kind: "addColumn", ifNotExists, column: ctx.parse(columnDef) };
+  return { kind: "addColumn", ifNotExists: parseIfNotExists(ctx), column: ctx.parse(columnDef) };
 }
 
 // `OWNER TO role` — ALTER TABLE's action, and the same words on every other
-// ALTER target that has an owner.
+// ALTER target that has an owner. The new owner is a role spec, as CREATE
+// SCHEMA's AUTHORIZATION and CREATE TABLESPACE's OWNER are.
 function parseOwnerTo(ctx: ParseContext<SqlTokenType>): AlterOwnerTo {
   ctx.parse(kwseq("owner", "to"));
-  return { kind: "ownerTo", owner: ctx.parse(nameWord) };
+  return { kind: "ownerTo", owner: parseRoleSpec(ctx) };
 }
 
 // `DROP CONSTRAINT [IF EXISTS] name [CASCADE | RESTRICT]` once its CONSTRAINT
@@ -5387,17 +5421,16 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
   function: {
     parse: (ctx, start) => {
       ctx.next(); // FUNCTION
-      const name = ctx.parse(qualName);
-      const args = ctx.is("punc", "(") ? ctx.parse(functionArgs) : null;
+      const { name, signature } = ctx.parse(routineRef);
       const action = dispatch(FUNCTION_ACTIONS, FUNCTION_ACTION_EXPECTED, ctx);
-      return { kind: "alterFunction", name, args, action, span: ctx.spanFrom(start) };
+      return { kind: "alterFunction", name, args: signature?.args ?? null, action, span: ctx.spanFrom(start) };
     },
   },
   aggregate: {
     parse: (ctx, start) => {
       ctx.next(); // AGGREGATE
-      const name = ctx.parse(qualName);
-      const { star, args } = parseAggregateSignature(ctx);
+      const { name, signature } = ctx.parse(aggregateRef);
+      const { star, args } = signature;
       const action = dispatch(AGGREGATE_ACTIONS, AGGREGATE_ACTION_EXPECTED, ctx);
       return { kind: "alterAggregate", name, star, args, action, span: ctx.spanFrom(start) };
     },
@@ -5482,33 +5515,6 @@ const listDrop = (
     return dropNode(ctx, start, objectType, { concurrently, ifExists, names, behavior });
   },
 });
-
-type RoutineRef = { name: string[]; signature: DropSignature | null };
-
-// A function or procedure name, with its argument list when one is written.
-const routineRef = custom<RoutineRef, SqlTokenType>(
-  (ctx) => {
-    const name = ctx.parse(qualName);
-    const signature = ctx.is("punc", "(") ? { star: false, args: ctx.parse(dropFunctionArgs) } : null;
-    return { name, signature };
-  },
-  { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
-);
-
-// An aggregate name and its required `(*)` / `(type, …)` signature, which PG
-// never lets be empty: a zero-argument aggregate is spelled `(*)`.
-const aggregateRef = custom<{ name: string[]; signature: DropSignature }, SqlTokenType>(
-  (ctx) => {
-    const name = ctx.parse(qualName);
-    const close = ctx.peekAhead(1);
-    if (ctx.is("punc", "(") && close?.type === "punc" && close.value === ")") {
-      ctx.next(); // "("
-      ctx.croak(`Expected "*" or a function argument but found ${describeFound(close)}`);
-    }
-    return { name, signature: parseAggregateSignature(ctx, dropFunctionArgs) };
-  },
-  { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
-);
 
 // `DROP {FUNCTION|PROCEDURE|AGGREGATE} [IF EXISTS] name [(args)][, …]
 // [CASCADE|RESTRICT]`; `signatures` runs parallel to `names`.
@@ -5728,17 +5734,11 @@ function parseGrantObject(ctx: ParseContext<SqlTokenType>): GrantObject {
   return { objectType, names: commaList(ctx, (c) => c.parse(qualName)), inSchema: null };
 }
 
-// A single grantee: `[GROUP] role`, PUBLIC, or a CURRENT_/SESSION_ pseudo-role
-// (those are reserved words, so they are matched by value before `nameWord`).
-const GRANTEE_KEYWORDS: ReadonlySet<string> = new Set(["public", "current_user", "current_role", "session_user"]);
+// A single grantee: `[GROUP] role`, PUBLIC, or a role spec (see parseRoleSpec).
 function parseGrantee(ctx: ParseContext<SqlTokenType>): string {
   ctx.eat("ident", "group"); // optional GROUP noise word
-  const cur = ctx.peek();
-  if (cur !== null && cur.type === "ident" && GRANTEE_KEYWORDS.has(cur.value)) {
-    ctx.next();
-    return cur.value;
-  }
-  return ctx.parse(nameWord);
+  if (ctx.eat("ident", "public") !== null) return "public";
+  return parseRoleSpec(ctx);
 }
 
 // The shared `{privileges | ALL} [ON object] {TO|FROM} grantees` middle of
@@ -7356,18 +7356,10 @@ const declareCursorStmt = custom<Stmt, SqlTokenType>(
   { expected: '"declare"', first: [{ type: "ident", value: "declare" }] },
 );
 
-// PG's SignedIconst: an integer constant with an optional sign of its own.
-const isSign = (tok: Token<SqlTokenType> | null): boolean =>
-  tok !== null && tok.type === "op" && (tok.value === "-" || tok.value === "+");
+// A count: parseSignedInt's SignedIconst, as PG's fetch_args takes it.
 const startsCount = (ctx: ParseContext<SqlTokenType>): boolean =>
   ctx.is("number") || (isSign(ctx.peek()) && ctx.peekAhead(1)?.type === "number");
-function signedCount(ctx: ParseContext<SqlTokenType>): number {
-  const sign = isSign(ctx.peek()) ? ctx.next()!.value : null;
-  const tok = ctx.peek();
-  if (!isIntegerConstant(tok)) return ctx.croak(`Expected an integer count but found ${describeFound(tok)}`);
-  const value = Number(ctx.next()!.value);
-  return sign === "-" ? -value : value;
-}
+const signedCount = (ctx: ParseContext<SqlTokenType>): number => parseSignedInt(ctx, "an integer count");
 
 const DIRECTION_WORDS: ReadonlySet<string> = new Set([
   "next",

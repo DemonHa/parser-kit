@@ -4172,6 +4172,19 @@ describe("SQL-lite declarative partitioning", () => {
     ]);
   });
 
+  it("takes a bare EXCLUDE constraint in a PARTITION OF element list", () => {
+    expect(
+      stmt("CREATE TABLE p PARTITION OF m (a NOT NULL, EXCLUDE USING gist (a WITH &&)) FOR VALUES IN (1);").items,
+    ).toEqual([
+      { kind: "columnOptions", name: "a", constraints: [{ kind: "notNull" }] },
+      { kind: "exclude", name: null, using: "gist", elements: [{ expr: name("a"), operator: "&&" }] },
+    ]);
+    // Without the lookahead, `exclude` is still a column the parent types.
+    expect(stmt("CREATE TABLE p PARTITION OF m (exclude WITH OPTIONS NOT NULL) DEFAULT;").items).toEqual([
+      { kind: "columnOptions", name: "exclude", withOptions: true, constraints: [{ kind: "notNull" }] },
+    ]);
+  });
+
   it("composes with INHERITS and the storage clauses in PG's order", () => {
     expect(
       stmt(
@@ -5019,6 +5032,18 @@ describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
     expect(action("ALTER SCHEMA s OWNER TO r;")).toEqual({ kind: "ownerTo", owner: "r" });
   });
 
+  it("takes a CURRENT_ / SESSION_ pseudo-role as the new owner, as CREATE does", () => {
+    for (const role of ["current_user", "current_role", "session_user"]) {
+      const owner = { kind: "ownerTo", owner: role };
+      for (const target of ["SCHEMA s", "DOMAIN d", "TYPE x", "FUNCTION f", "AGGREGATE a(*)", "SEQUENCE q"]) {
+        expect(action(`ALTER ${target} OWNER TO ${role};`)).toEqual(owner);
+      }
+      for (const target of ["TABLE t", "VIEW v", "MATERIALIZED VIEW m"]) {
+        expect(alter(`ALTER ${target} OWNER TO ${role};`).actions).toEqual([owner]);
+      }
+    }
+  });
+
   it("parses the ALTER DOMAIN default, NOT NULL and constraint actions", () => {
     const domain = (src: string) => action(`ALTER DOMAIN d ${src};`);
     expect(alter("ALTER DOMAIN s.d SET DEFAULT 1;")).toEqual({
@@ -5334,6 +5359,13 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
     expect(fails("ALTER FUNCTION f NOT NULL;")).toThrow(/Expected "leakproof" but found "null"/);
     expect(fails("ALTER FUNCTION f IMMUTABLE SET SCHEMA s;")).toThrow(/Expected "to" or "=" but found "s"/);
     expect(fails("ALTER AGGREGATE a RENAME TO b;")).toThrow(/Expected "\(" but found "rename"/);
+    // A signature names an existing routine, as DROP's does: no argument
+    // defaults, and no empty aggregate list (a zero-argument one is `(*)`).
+    expect(fails("ALTER FUNCTION f(a int = 1) RENAME TO g;")).toThrow(
+      /takes no argument defaults, but found "=" \(1:23\)/,
+    );
+    expect(fails("ALTER AGGREGATE a(x int DEFAULT 1) OWNER TO r;")).toThrow(/takes no argument defaults/);
+    expect(fails("ALTER AGGREGATE a() OWNER TO r;")).toThrow(/Expected "\*" or a function argument but found "\)"/);
     expect(fails("ALTER AGGREGATE a(*) IMMUTABLE;")).toThrow(
       /Expected "rename", "owner" or "set" but found "immutable"/,
     );
@@ -6456,7 +6488,7 @@ describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
     expect(bad("CREATE ROLE r CONNECTION 5;")).toThrow(/Expected "limit" but found "5"/);
     expect(bad("CREATE ROLE r CONNECTION LIMIT many;")).toThrow(/Expected an integer but found "many"/);
     expect(bad("CREATE ROLE r CONNECTION LIMIT 1.5;")).toThrow(/Expected an integer but found "1.5"/);
-    expect(bad("CREATE ROLE r CONNECTION LIMIT - x;")).toThrow(/Expected an integer but found "x"/);
+    expect(bad("CREATE ROLE r CONNECTION LIMIT - x;")).toThrow(/Expected an integer but found "x" \(1:33\)/);
     expect(bad("CREATE ROLE r ENCRYPTED PASSWORD NULL;")).toThrow(/found "null"/);
     expect(bad("CREATE ROLE r PASSWORD pw;")).toThrow(/found "pw"/);
     expect(bad("CREATE ROLE r VALID '2030-01-01';")).toThrow(/Expected "until" but found/);
