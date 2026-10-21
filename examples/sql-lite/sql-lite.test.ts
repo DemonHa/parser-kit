@@ -696,7 +696,7 @@ describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
 
   it("rejects OR REPLACE before a non-replaceable object", () => {
     expect(() => sqlLite.parse("CREATE OR REPLACE TABLE t (id int);")).toThrow(
-      /Expected "view", "materialized", "function", "aggregate" or "trigger"/,
+      /Expected "view", "materialized", "function", "procedure", "aggregate" or "trigger"/,
     );
   });
 });
@@ -3392,7 +3392,7 @@ describe("SQL-lite keyword dispatch maps", () => {
 
   it("names the keyword-led CREATE targets in the join form", () => {
     expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
-      /Expected "table" or "unique" or "type" or "sequence" or "domain" or "database" or "schema" or "extension" or "tablespace" but found "frobnicate"/,
+      /Expected "table" or "unique" or "type" or "sequence" or "domain" or "database" or "schema" or "extension" or "tablespace" or "role" or "user" but found "frobnicate"/,
     );
   });
 
@@ -5937,6 +5937,167 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
   });
 });
 
+// --- cursors: DECLARE, FETCH, MOVE and CLOSE ---
+
+describe("SQL-lite cursors", () => {
+  const declare = (over: Record<string, unknown>) => ({
+    kind: "declare",
+    name: "c",
+    binary: false,
+    sensitivity: null,
+    scroll: null,
+    hold: null,
+    query: sel({ columns: [col(num(1))] }),
+    ...over,
+  });
+  const directionOf = (src: string) => firstStmt(`FETCH ${src};`).direction;
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses a bare DECLARE … CURSOR FOR query", () => {
+    expect(firstStmt("DECLARE c CURSOR FOR SELECT 1;")).toEqual(declare({}));
+  });
+
+  it("parses every cursor option, in any order, and WITH / WITHOUT HOLD", () => {
+    expect(firstStmt("DECLARE c BINARY INSENSITIVE NO SCROLL CURSOR WITH HOLD FOR SELECT 1;")).toEqual(
+      declare({ binary: true, sensitivity: "insensitive", scroll: false, hold: true }),
+    );
+    expect(firstStmt("DECLARE c SCROLL ASENSITIVE BINARY CURSOR WITHOUT HOLD FOR SELECT 1;")).toEqual(
+      declare({ binary: true, sensitivity: "asensitive", scroll: true, hold: false }),
+    );
+    // A repeated option is accepted, as PG's grammar does.
+    expect(firstStmt("DECLARE c SCROLL SCROLL BINARY BINARY CURSOR FOR SELECT 1;")).toEqual(
+      declare({ binary: true, scroll: true }),
+    );
+  });
+
+  it("takes a full query as the body, FETCH FIRST and a WITH prefix included", () => {
+    expect(firstStmt("DECLARE c CURSOR FOR SELECT 1 FETCH FIRST 2 ROWS ONLY;").query).toEqual(
+      sel({ columns: [col(num(1))], limit: num(2) }),
+    );
+    expect(firstStmt("DECLARE c CURSOR FOR VALUES (1);").query.kind).toBe("values");
+    expect(firstStmt("DECLARE c CURSOR FOR (SELECT 1) UNION SELECT 2;").query).toMatchObject({ kind: "setOp" });
+    expect(firstStmt("DECLARE c CURSOR FOR WITH x AS (SELECT 1) SELECT * FROM x;").query).toMatchObject({
+      kind: "select",
+      with_: [{ name: "x" }],
+    });
+    // The body owns no `;` of its own: the statement after it parses separately.
+    expect(parse("DECLARE c CURSOR FOR SELECT 1; FETCH c; CLOSE c;").map((s) => s.kind)).toEqual([
+      "declare",
+      "fetch",
+      "close",
+    ]);
+  });
+
+  it("parses every FETCH direction, signed counts included", () => {
+    expect(directionOf("c")).toBeNull();
+    for (const word of ["next", "prior", "first", "last"])
+      expect(directionOf(`${word} FROM c`)).toEqual({ kind: word });
+    expect(directionOf("ALL IN c")).toEqual({ kind: "all" });
+    expect(directionOf("ABSOLUTE -1 FROM c")).toEqual({ kind: "absolute", count: -1 });
+    expect(directionOf("RELATIVE +2 c")).toEqual({ kind: "relative", count: 2 });
+    expect(directionOf("5 FROM c")).toEqual({ kind: "count", count: 5 });
+    expect(directionOf("-5 c")).toEqual({ kind: "count", count: -5 });
+    expect(directionOf("FORWARD 5 FROM c")).toEqual({ kind: "forward", count: 5 });
+    expect(directionOf("FORWARD FROM c")).toEqual({ kind: "forward", count: null });
+    expect(directionOf("FORWARD c")).toEqual({ kind: "forward", count: null });
+    expect(directionOf("BACKWARD ALL IN c")).toEqual({ kind: "backward", count: "all" });
+    expect(directionOf("BACKWARD -3 c")).toEqual({ kind: "backward", count: -3 });
+    // FROM / IN is optional and dropped.
+    expect(firstStmt("FETCH IN c;")).toEqual({ kind: "fetch", direction: null, cursor: "c" });
+  });
+
+  it("reads a lone direction word as the cursor name", () => {
+    expect(firstStmt("FETCH next;")).toEqual({ kind: "fetch", direction: null, cursor: "next" });
+    expect(firstStmt("FETCH forward;")).toEqual({ kind: "fetch", direction: null, cursor: "forward" });
+    expect(firstStmt("MOVE absolute;")).toEqual({ kind: "move", direction: null, cursor: "absolute" });
+    expect(firstStmt("FETCH next next;")).toEqual({ kind: "fetch", direction: { kind: "next" }, cursor: "next" });
+    expect(firstStmt("FETCH forward FROM forward;")).toEqual({
+      kind: "fetch",
+      direction: { kind: "forward", count: null },
+      cursor: "forward",
+    });
+  });
+
+  it("parses MOVE with the same directions, and CLOSE", () => {
+    expect(firstStmt("MOVE c;")).toEqual({ kind: "move", direction: null, cursor: "c" });
+    expect(firstStmt("MOVE LAST IN c;")).toEqual({ kind: "move", direction: { kind: "last" }, cursor: "c" });
+    expect(firstStmt("MOVE BACKWARD 2 FROM c;")).toEqual({
+      kind: "move",
+      direction: { kind: "backward", count: 2 },
+      cursor: "c",
+    });
+    expect(firstStmt("CLOSE c;")).toEqual({ kind: "close", name: "c" });
+    expect(firstStmt('CLOSE "C";')).toEqual({ kind: "close", name: "C" });
+    expect(firstStmt("CLOSE ALL;")).toEqual({ kind: "close", name: null });
+    // A quoted word is always a name.
+    expect(firstStmt('CLOSE "all";')).toEqual({ kind: "close", name: "all" });
+  });
+
+  it("leaves SELECT's FETCH FIRST / NEXT clause untouched", () => {
+    expect(firstStmt("SELECT a FROM t FETCH FIRST 3 ROWS ONLY;")).toEqual(
+      sel({ columns: [col(name("a"))], from: [tableFrom(["t"])], limit: num(3) }),
+    );
+    expect(firstStmt("SELECT a FROM t OFFSET 1 ROWS FETCH NEXT ROW WITH TIES;").offset).toEqual(num(1));
+  });
+
+  it("keeps the cursor words unreserved", () => {
+    const words = [
+      "declare",
+      "move",
+      "close",
+      "cursor",
+      "scroll",
+      "hold",
+      "binary",
+      "insensitive",
+      "asensitive",
+      "without",
+      "prior",
+      "next",
+      "absolute",
+      "relative",
+      "forward",
+      "backward",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM cursor;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["cursor"])] }),
+    );
+    expect(firstStmt(`CREATE TABLE close (${words.map((w) => `${w} int`).join(", ")});`).items.length).toBe(
+      words.length,
+    );
+    // …and as the cursor names the statements take.
+    expect(firstStmt("DECLARE scroll SCROLL CURSOR FOR SELECT 1;")).toMatchObject({ name: "scroll", scroll: true });
+    expect(firstStmt("CLOSE cursor;")).toEqual({ kind: "close", name: "cursor" });
+    // `fetch` was already reserved for SELECT's clause, as in PG, and stays so.
+    expect(bad("SELECT fetch FROM t;")).toThrow(/Expected a name but found "fetch"/);
+  });
+
+  it("rejects contradictory options, a non-query body and malformed directions", () => {
+    expect(bad("DECLARE c SCROLL NO SCROLL CURSOR FOR SELECT 1;")).toThrow(
+      /cannot specify both SCROLL and NO SCROLL \(1:17\)/,
+    );
+    expect(bad("DECLARE c INSENSITIVE ASENSITIVE CURSOR FOR SELECT 1;")).toThrow(
+      /cannot specify both ASENSITIVE and INSENSITIVE \(1:22\)/,
+    );
+    expect(bad("DECLARE c NO CURSOR FOR SELECT 1;")).toThrow(/Expected "scroll" but found "cursor"/);
+    expect(bad("DECLARE c FOR SELECT 1;")).toThrow(/Expected "cursor" but found "for"/);
+    expect(bad("DECLARE c CURSOR WITH FOR SELECT 1;")).toThrow(/Expected "hold" but found "for"/);
+    expect(bad("DECLARE c CURSOR SELECT 1;")).toThrow(/Expected "for" but found "select"/);
+    expect(bad("DECLARE c CURSOR FOR CREATE TABLE t (a int);")).toThrow(/Expected a query but found "create" \(1:21\)/);
+    expect(bad("DECLARE c CURSOR FOR INSERT INTO t VALUES (1);")).toThrow(/Expected a query but found "insert"/);
+    expect(bad("FETCH RELATIVE c;")).toThrow(/Expected an integer count but found "c"/);
+    expect(bad("FETCH 1.5 c;")).toThrow(/Expected an integer count but found "1.5"/);
+    expect(bad("FETCH 99999999999 c;")).toThrow(/Expected an integer count but found "99999999999"/);
+    expect(bad('FETCH "next" FROM c;')).toThrow(/Expected ";" but found "from" \(1:13\)/);
+    expect(bad("MOVE ABSOLUTE FROM c;")).toThrow(/Expected an integer count but found "from"/);
+    expect(bad("MOVE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("FETCH FORWARD 5;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("FETCH ALL;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("FETCH s.c;")).toThrow(/Expected ";" but found "\."/);
+    expect(bad("CLOSE;")).toThrow(/Expected a name but found ";"/);
+  });
+});
+
 // --- TEMPORARY, UNLOGGED and scoped CREATE TABLE ---
 
 describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
@@ -6012,6 +6173,249 @@ describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
     expect(bad("CREATE OR REPLACE TEMP VIEW v AS SELECT 1;")).toThrow(/Expected "view", "materialized"/);
     expect(bad("CREATE TEMP;")).toThrow(/Expected "table" but found ";"/);
     expect(bad("CREATE GLOBAL")).toThrow(/Expected "temp" or "temporary" but found end of input/);
+  });
+});
+
+// --- CREATE ROLE, USER and PROCEDURE ---
+
+describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
+  const flag = (flagName: string, value = true) => ({ kind: "flag", name: flagName, value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses CREATE ROLE and CREATE USER with no options", () => {
+    expect(firstStmt("CREATE ROLE r;")).toEqual({ kind: "createRole", user: false, name: "r", options: [] });
+    expect(firstStmt('CREATE USER "Bob" WITH;')).toEqual({ kind: "createRole", user: true, name: "Bob", options: [] });
+  });
+
+  it("parses every role attribute and its NO spelling", () => {
+    const words = ["superuser", "createdb", "createrole", "inherit", "login", "replication", "bypassrls"];
+    const on = words.join(" ");
+    const off = words.map((word) => `no${word}`).join(" ");
+    expect(firstStmt(`CREATE ROLE r WITH ${on};`).options).toEqual(words.map((word) => flag(word)));
+    expect(firstStmt(`CREATE USER u ${off.toUpperCase()};`).options).toEqual(words.map((word) => flag(word, false)));
+  });
+
+  it("parses CONNECTION LIMIT, PASSWORD, VALID UNTIL and the role lists, in written order", () => {
+    expect(
+      firstStmt(
+        "CREATE ROLE r LOGIN CONNECTION LIMIT -1 ENCRYPTED PASSWORD 'pw' VALID UNTIL '2030-01-01' " +
+          "IN ROLE a, b ROLE c ADMIN d, CURRENT_USER NOLOGIN;",
+      ).options,
+    ).toEqual([
+      flag("login"),
+      { kind: "connectionLimit", limit: -1 },
+      { kind: "password", encrypted: true, password: "pw" },
+      { kind: "validUntil", timestamp: "2030-01-01" },
+      { kind: "inRole", roles: ["a", "b"] },
+      { kind: "role", roles: ["c"] },
+      { kind: "admin", roles: ["d", "current_user"] },
+      flag("login", false),
+    ]);
+    expect(firstStmt("CREATE USER u PASSWORD NULL CONNECTION LIMIT 10;").options).toEqual([
+      { kind: "password", encrypted: false, password: null },
+      { kind: "connectionLimit", limit: 10 },
+    ]);
+    expect(firstStmt("CREATE ROLE r CONNECTION LIMIT +5;").options).toEqual([{ kind: "connectionLimit", limit: 5 }]);
+    expect(firstStmt("CREATE USER u PASSWORD 'x';").options).toEqual([
+      { kind: "password", encrypted: false, password: "x" },
+    ]);
+    // PG's legacy IN GROUP and USER spellings fold into IN ROLE and ROLE.
+    expect(firstStmt("CREATE ROLE r IN GROUP a USER b, c;").options).toEqual([
+      { kind: "inRole", roles: ["a"] },
+      { kind: "role", roles: ["b", "c"] },
+    ]);
+  });
+
+  it("parses CREATE [OR REPLACE] PROCEDURE over CREATE FUNCTION's signature and options", () => {
+    expect(
+      firstStmt(
+        "CREATE OR REPLACE PROCEDURE app.p(IN a integer, INOUT b double precision DEFAULT 1, text) " +
+          "LANGUAGE plpgsql SECURITY DEFINER SET search_path = app AS $$BEGIN NULL; END$$;",
+      ),
+    ).toEqual({
+      kind: "createProcedure",
+      orReplace: true,
+      name: ["app", "p"],
+      args: [
+        { mode: "in", name: "a", type: ct("integer"), defaultValue: null },
+        { mode: "inout", name: "b", type: ct("double precision"), defaultValue: num(1) },
+        { mode: null, name: null, type: ct("text"), defaultValue: null },
+      ],
+      options: [
+        { kind: "language", name: "plpgsql" },
+        { kind: "security", external: false, definer: true },
+        { kind: "set", parameter: "search_path", value: { kind: "list", values: [name("app")] } },
+        { kind: "as", parts: ["BEGIN NULL; END"] },
+      ],
+    });
+    expect(firstStmt("CREATE PROCEDURE p() AS 'obj', 'sym' LANGUAGE c EXTERNAL SECURITY INVOKER;")).toEqual({
+      kind: "createProcedure",
+      orReplace: false,
+      name: ["p"],
+      args: [],
+      options: [
+        { kind: "as", parts: ["obj", "sym"] },
+        { kind: "language", name: "c" },
+        { kind: "security", external: true, definer: false },
+      ],
+    });
+  });
+
+  it("spans ROLE and USER from their keyword and PROCEDURE from CREATE", () => {
+    for (const src of ["CREATE TABLE t (id int);", "CREATE ROLE r LOGIN;", "CREATE USER u IN ROLE a, b;"]) {
+      const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+      expect(stmt!.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: src.length - 1 } });
+    }
+    const src = "CREATE OR REPLACE PROCEDURE p() AS 'SELECT 1' LANGUAGE sql;";
+    const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+    expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: src.length - 1 } });
+  });
+
+  it("keeps the new CREATE words unreserved as names", () => {
+    const words = [
+      "role",
+      "procedure",
+      "superuser",
+      "nosuperuser",
+      "createdb",
+      "createrole",
+      "inherit",
+      "login",
+      "nocreatedb",
+      "nocreaterole",
+      "noinherit",
+      "nologin",
+      "replication",
+      "noreplication",
+      "nobypassrls",
+      "bypassrls",
+      "encrypted",
+      "password",
+      "valid",
+      "until",
+      "admin",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM role;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    const cols = words.map((word) => `${word} text`).join(", ");
+    expect(firstStmt(`CREATE TABLE procedure (${cols});`).items.map((i: any) => i.name)).toEqual(words);
+    // …and as the names these statements create and list.
+    expect(firstStmt("CREATE ROLE role ROLE login, admin ADMIN password;")).toMatchObject({
+      name: "role",
+      options: [
+        { kind: "role", roles: ["login", "admin"] },
+        { kind: "admin", roles: ["password"] },
+      ],
+    });
+    expect(firstStmt("CREATE USER login LOGIN;")).toMatchObject({ name: "login", options: [flag("login")] });
+    expect(firstStmt("CREATE PROCEDURE procedure(role text) LANGUAGE sql AS '';")).toMatchObject({
+      name: ["procedure"],
+      args: [{ name: "role" }],
+    });
+  });
+
+  it("rejects malformed CREATE ROLE, USER and PROCEDURE", () => {
+    expect(bad("CREATE ROLE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CREATE USER user;")).toThrow(/Expected a name but found "user"/);
+    expect(bad("CREATE ROLE r frobnicate;")).toThrow(/Expected ";" but found "frobnicate"/);
+    expect(bad("CREATE ROLE r CONNECTION 5;")).toThrow(/Expected "limit" but found "5"/);
+    expect(bad("CREATE ROLE r CONNECTION LIMIT many;")).toThrow(/Expected an integer but found "many"/);
+    expect(bad("CREATE ROLE r CONNECTION LIMIT 1.5;")).toThrow(/Expected an integer but found "1.5"/);
+    expect(bad("CREATE ROLE r CONNECTION LIMIT - x;")).toThrow(/Expected an integer but found "x"/);
+    expect(bad("CREATE ROLE r ENCRYPTED PASSWORD NULL;")).toThrow(/found "null"/);
+    expect(bad("CREATE ROLE r PASSWORD pw;")).toThrow(/found "pw"/);
+    expect(bad("CREATE ROLE r VALID '2030-01-01';")).toThrow(/Expected "until" but found/);
+    expect(bad("CREATE ROLE r IN SCHEMA g;")).toThrow(/Expected "role" or "group" but found "schema"/);
+    expect(bad("CREATE ROLE r ADMIN;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CREATE ROLE r ROLE a,;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CREATE OR REPLACE ROLE r;")).toThrow(/Expected "view", "materialized"/);
+    expect(bad("CREATE PROCEDURE p;")).toThrow(/Expected "\(" but found ";"/);
+    // A procedure returns nothing, and takes none of a function's call traits.
+    expect(bad("CREATE PROCEDURE p() RETURNS int LANGUAGE sql AS '';")).toThrow(/Expected ";" but found "returns"/);
+    expect(bad("CREATE PROCEDURE p() LANGUAGE sql IMMUTABLE AS '';")).toThrow(/Expected ";" but found "immutable"/);
+    expect(bad("CREATE PROCEDURE p() NOT LEAKPROOF;")).toThrow(/Expected ";" but found "not"/);
+  });
+});
+
+// --- LOCK and CALL ---
+
+describe("SQL-lite LOCK and CALL", () => {
+  const target = (parts: string[], only = false) => ({ name: parts, only });
+  const modeOf = (mode: string) => firstStmt(`LOCK t IN ${mode} MODE;`).mode;
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses LOCK with and without TABLE, ONLY, `*`, a mode and NOWAIT", () => {
+    expect(firstStmt("LOCK t;")).toEqual({ kind: "lock", tables: [target(["t"])], mode: null, nowait: false });
+    expect(firstStmt("LOCK TABLE ONLY s.t, u *, ONLY (v) IN EXCLUSIVE MODE NOWAIT;")).toEqual({
+      kind: "lock",
+      tables: [target(["s", "t"], true), target(["u"]), target(["v"], true)],
+      mode: "exclusive",
+      nowait: true,
+    });
+    expect(firstStmt("LOCK TABLE t NOWAIT;")).toMatchObject({ mode: null, nowait: true });
+  });
+
+  it("parses all eight lock modes, the ones sharing a lead word included", () => {
+    expect(modeOf("ACCESS SHARE")).toBe("accessShare");
+    expect(modeOf("ROW SHARE")).toBe("rowShare");
+    expect(modeOf("ROW EXCLUSIVE")).toBe("rowExclusive");
+    expect(modeOf("SHARE UPDATE EXCLUSIVE")).toBe("shareUpdateExclusive");
+    expect(modeOf("SHARE")).toBe("share");
+    expect(modeOf("SHARE ROW EXCLUSIVE")).toBe("shareRowExclusive");
+    expect(modeOf("EXCLUSIVE")).toBe("exclusive");
+    expect(modeOf("ACCESS EXCLUSIVE")).toBe("accessExclusive");
+  });
+
+  it("parses CALL with an empty, positional or named argument list", () => {
+    expect(firstStmt("CALL p();")).toEqual({ kind: "callProcedure", name: ["p"], args: [] });
+    expect(firstStmt("CALL s.p(1, 'a' || b, c => 2);")).toEqual({
+      kind: "callProcedure",
+      name: ["s", "p"],
+      args: [num(1), bin("||", str("a"), name("b")), { kind: "namedArg", name: "c", value: num(2) }],
+    });
+  });
+
+  it("leaves SELECT's FOR SHARE / FOR UPDATE NOWAIT locking clauses untouched", () => {
+    expect(firstStmt("SELECT * FROM t FOR SHARE FOR UPDATE NOWAIT;").locking).toEqual([
+      { strength: "share", of: [], wait: null },
+      { strength: "update", of: [], wait: "nowait" },
+    ]);
+  });
+
+  it("keeps lock, call and the lock-mode words unreserved", () => {
+    const words = ["lock", "call", "access", "row", "share", "update", "exclusive", "mode", "nowait"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM lock;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["lock"])] }),
+    );
+    expect(firstStmt("CREATE TABLE call (share int, mode text);").items.map((i: any) => i.name)).toEqual([
+      "share",
+      "mode",
+    ]);
+    // …and as the names the two statements take.
+    expect(firstStmt("LOCK nowait, mode NOWAIT;")).toEqual({
+      kind: "lock",
+      tables: [target(["nowait"]), target(["mode"])],
+      mode: null,
+      nowait: true,
+    });
+    expect(firstStmt("CALL lock(share => 1);")).toMatchObject({ kind: "callProcedure", name: ["lock"] });
+  });
+
+  it("rejects a half-written lock mode, a missing MODE and a CALL without parentheses", () => {
+    expect(bad("LOCK t IN SHARE ROW MODE;")).toThrow(/Expected "exclusive" but found "mode" \(1:20\)/);
+    expect(bad("LOCK t IN ROW MODE;")).toThrow(/Expected "share" or "exclusive" but found "mode"/);
+    expect(bad("LOCK t IN SHARE UPDATE MODE;")).toThrow(/Expected "exclusive" but found "mode"/);
+    expect(bad("LOCK t IN UPDATE MODE;")).toThrow(
+      /Expected "access", "row", "share" or "exclusive" but found "update"/,
+    );
+    expect(bad("LOCK t IN SHARE;")).toThrow(/Expected "update", "row" or "mode" but found ";"/);
+    expect(bad("LOCK t IN EXCLUSIVE;")).toThrow(/Expected "mode" but found ";"/);
+    expect(bad("LOCK ONLY t *;")).toThrow(/Expected ";" but found "\*" \(1:12\)/);
+    expect(bad("LOCK ONLY (t;")).toThrow(/Expected "\)" but found ";" \(1:12\)/);
+    expect(bad("LOCK;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CALL p;")).toThrow(/Expected "\(" but found ";" \(1:6\)/);
+    expect(bad("CALL p(1;")).toThrow(/Expected "\)" but found ";" \(1:8\)/);
   });
 });
 
