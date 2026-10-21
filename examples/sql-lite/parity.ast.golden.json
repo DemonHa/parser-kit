@@ -17336,6 +17336,525 @@
     ]
   },
   {
+    "source": "DECLARE c BINARY INSENSITIVE NO SCROLL CURSOR WITH HOLD FOR SELECT id FROM t ORDER BY id FETCH FIRST 10 ROWS ONLY;",
+    "ast": [
+      {
+        "kind": "declare",
+        "name": "c",
+        "binary": true,
+        "sensitivity": "insensitive",
+        "scroll": false,
+        "hold": true,
+        "query": {
+          "kind": "select",
+          "with_": null,
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "id"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 67
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 69
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "from": [
+            {
+              "kind": "table",
+              "name": [
+                "t"
+              ],
+              "alias": null
+            }
+          ],
+          "where": null,
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": [
+            {
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "id"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 86
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 88
+                  }
+                }
+              },
+              "dir": null,
+              "nulls": null
+            }
+          ],
+          "limit": {
+            "kind": "number",
+            "value": 10,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 101
+              },
+              "end": {
+                "row": 1,
+                "col": 103
+              }
+            }
+          },
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 60
+            },
+            "end": {
+              "row": 1,
+              "col": 113
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 113
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "DECLARE c2 SCROLL ASENSITIVE CURSOR WITHOUT HOLD FOR WITH x AS (SELECT 1) SELECT * FROM x;",
+    "ast": [
+      {
+        "kind": "declare",
+        "name": "c2",
+        "binary": false,
+        "sensitivity": "asensitive",
+        "scroll": true,
+        "hold": false,
+        "query": {
+          "kind": "select",
+          "with_": [
+            {
+              "name": "x",
+              "columns": null,
+              "query": {
+                "kind": "select",
+                "with_": null,
+                "recursive": false,
+                "distinct": false,
+                "columns": [
+                  {
+                    "expr": {
+                      "kind": "number",
+                      "value": 1,
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 71
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 72
+                        }
+                      }
+                    },
+                    "alias": null
+                  }
+                ],
+                "from": null,
+                "where": null,
+                "groupBy": null,
+                "having": null,
+                "window": null,
+                "orderBy": null,
+                "limit": null,
+                "offset": null,
+                "locking": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 64
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 72
+                  }
+                }
+              }
+            }
+          ],
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "star",
+                "table": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 81
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 82
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "from": [
+            {
+              "kind": "table",
+              "name": [
+                "x"
+              ],
+              "alias": null
+            }
+          ],
+          "where": null,
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": null,
+          "limit": null,
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 74
+            },
+            "end": {
+              "row": 1,
+              "col": 89
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 89
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "FETCH NEXT FROM c;",
+    "ast": [
+      {
+        "kind": "fetch",
+        "direction": {
+          "kind": "next"
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 17
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "FETCH PRIOR IN c;",
+    "ast": [
+      {
+        "kind": "fetch",
+        "direction": {
+          "kind": "prior"
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 16
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "FETCH ABSOLUTE -1 FROM c;",
+    "ast": [
+      {
+        "kind": "fetch",
+        "direction": {
+          "kind": "absolute",
+          "count": -1
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 24
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "FETCH RELATIVE 2 c;",
+    "ast": [
+      {
+        "kind": "fetch",
+        "direction": {
+          "kind": "relative",
+          "count": 2
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 18
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "FETCH 5 FROM c;",
+    "ast": [
+      {
+        "kind": "fetch",
+        "direction": {
+          "kind": "count",
+          "count": 5
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 14
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "FETCH ALL IN c;",
+    "ast": [
+      {
+        "kind": "fetch",
+        "direction": {
+          "kind": "all"
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 14
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "FETCH FORWARD 3 FROM c;",
+    "ast": [
+      {
+        "kind": "fetch",
+        "direction": {
+          "kind": "forward",
+          "count": 3
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 22
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "FETCH BACKWARD ALL FROM c;",
+    "ast": [
+      {
+        "kind": "fetch",
+        "direction": {
+          "kind": "backward",
+          "count": "all"
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 25
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "FETCH c;",
+    "ast": [
+      {
+        "kind": "fetch",
+        "direction": null,
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 7
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "MOVE LAST IN c;",
+    "ast": [
+      {
+        "kind": "move",
+        "direction": {
+          "kind": "last"
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 14
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "MOVE FORWARD FROM c;",
+    "ast": [
+      {
+        "kind": "move",
+        "direction": {
+          "kind": "forward",
+          "count": null
+        },
+        "cursor": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 19
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CLOSE c;",
+    "ast": [
+      {
+        "kind": "close",
+        "name": "c",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 7
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CLOSE ALL;",
+    "ast": [
+      {
+        "kind": "close",
+        "name": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 9
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;",
     "ast": [
       {
