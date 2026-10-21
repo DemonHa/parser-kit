@@ -48,17 +48,20 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // and PG's named-argument notation is accepted in argument position, `f(a => 1)`.
 //
 // The SELECT surface also carries the remaining query clauses: LATERAL /
-// table-function / TABLESAMPLE FROM items, VALUES as a standalone query and
+// table-function / TABLESAMPLE / ONLY FROM items, each alias optionally followed
+// by a column-alias list (`t AS x (a, b)`), VALUES as a standalone query and
 // table source, FETCH FIRST … ROWS, FOR UPDATE/SHARE locking, SELECT … INTO a
 // new (optionally TEMP / UNLOGGED) table, and GROUP BY [ALL | DISTINCT] over
 // ROLLUP / CUBE / GROUPING SETS and the empty grouping `()`. A WITH prefix may
 // lead any DML statement (`WITH … INSERT/UPDATE/DELETE`), and a CTE body may
 // itself be data-modifying (`WITH x AS (DELETE … RETURNING …) …`).
 //
-// Out of scope (v1): column-alias lists on FROM items (`t (a, b)`). Ordinary
-// aggregates (no OVER / FILTER / WITHIN GROUP / IGNORE-RESPECT NULLS) still
-// parse as plain function calls, carrying their DISTINCT / ORDER BY modifiers on
-// the call node itself.
+// A column-alias list is read only after an alias: a bare `FROM t (a, b)` is a
+// call to a table function `t`, which is how PG reads it too. Out of scope (v1):
+// a function's column-definition list (`f() AS g (n int)`). Ordinary aggregates
+// (no OVER / FILTER / WITHIN GROUP / IGNORE-RESPECT NULLS) still parse as plain
+// function calls, carrying their DISTINCT / ORDER BY modifiers on the call node
+// itself.
 
 // --- AST ---
 // Recursive nodes (Expr) are declared by hand, exactly as js-lite does; the
@@ -637,14 +640,19 @@ export type FromItemJoinType = "inner" | "left" | "right" | "full" | "cross";
 // `TABLESAMPLE method (arg, …) [REPEATABLE (seed)]` on a table FROM item.
 export type TableSample = { method: string; args: Expr[]; repeatable: Expr | null };
 
+// `columns` is the column-alias list that may follow an alias — `t AS x (a, b)`
+// renames t's first two columns — on any of the three leaf items. Like `only`,
+// `lateral` and `tablesample`, it is present only when written, so an item
+// without one keeps its prior shape.
 export type FromItem =
-  // `tablesample` is present only when a TABLESAMPLE clause follows.
-  | { kind: "table"; name: string[]; alias: string | null; tablesample?: TableSample }
+  // `only` is present (and true) only for `ONLY t`, which excludes inheritance
+  // children; `tablesample` only when a TABLESAMPLE clause follows.
+  | { kind: "table"; name: string[]; alias: string | null; columns?: string[]; tablesample?: TableSample; only?: true }
   // `lateral` is present (and true) only for a `LATERAL (subquery)`.
-  | { kind: "subquery"; query: Query; alias: string | null; lateral?: boolean }
+  | { kind: "subquery"; query: Query; alias: string | null; columns?: string[]; lateral?: boolean }
   // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
   // is the underlying `call` expression node.
-  | { kind: "function"; call: Expr; alias: string | null; lateral?: boolean }
+  | { kind: "function"; call: Expr; alias: string | null; columns?: string[]; lateral?: boolean }
   | {
       kind: "join";
       joinType: FromItemJoinType;
@@ -3525,22 +3533,69 @@ function parseTableSample(ctx: ParseContext<SqlTokenType>): TableSample {
   return { method, args, repeatable };
 }
 
+// `[AS] alias [(column, …)]` — PG's `alias_clause`. The column list is read only
+// once an alias has been read: PG's grammar has no alias-less spelling of it,
+// and a bare `t (a, b)` is a table-function call (see tableRef). Unlike the
+// shared `columnList`, the list must name at least one column, as PG's does.
+const aliasColumns = sepBy(nameWord, P(","));
+function parseAliasClause(ctx: ParseContext<SqlTokenType>): { alias: string | null; columns: string[] | null } {
+  const alias = ctx.parse(asAlias);
+  if (alias === null || !ctx.is("punc", "(")) return { alias, columns: null };
+  ctx.next(); // "("
+  const columns = ctx.parse(aliasColumns);
+  expectClose(ctx);
+  return { alias, columns };
+}
+
+// The rest of a table FROM item once its name is read: the alias clause, then an
+// optional TABLESAMPLE — PG's order, so an alias list always comes before the
+// sample (`t [AS] x (a) TABLESAMPLE …`).
+function tableTail(ctx: ParseContext<SqlTokenType>, name: string[], only: boolean): FromItem {
+  const { alias, columns } = parseAliasClause(ctx);
+  const tablesample = ctx.is("ident", "tablesample") ? parseTableSample(ctx) : null;
+  return {
+    kind: "table",
+    name,
+    alias,
+    ...(columns !== null && { columns }),
+    ...(tablesample !== null && { tablesample }),
+    ...(only && { only: true }),
+  };
+}
+
 // A single FROM entry: a (LATERAL) subquery, a (LATERAL) table function, or a
-// table name with an optional TABLESAMPLE. A leading `(` is always a subquery
-// (parenthesised joins are out of scope); after a dotted name, a `(` opens a
-// table-function call. `lateral` is reserved, so a preceding table never eats it
-// as an alias. The `lateral`/`tablesample` keys are omitted when absent so
-// ordinary table/subquery items keep their prior shape.
+// table name — optionally ONLY — with an optional TABLESAMPLE. A leading `(` is
+// always a subquery (parenthesised joins are out of scope); after a dotted name,
+// a `(` opens a table-function call. `lateral` and `only` are reserved, so a
+// preceding table never eats either as an alias. ONLY takes only a table name,
+// bare or parenthesised (`ONLY (t)`) — PG's `relation_expr` — so a `(` right
+// after the word is that name's parenthesis, never a subquery, and no call
+// parenthesis is read after the name. The `only`/`columns`/`lateral`/
+// `tablesample` keys are omitted when absent so ordinary items keep their prior
+// shape.
 const tableRef = custom<FromItem, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
     const lateral = ctx.eat("ident", "lateral") !== null;
+    const only = !lateral && ctx.eat("ident", "only") !== null;
+    if (only) {
+      const parenthesised = ctx.eat("punc", "(") !== null;
+      const nameParts = ctx.parse(qualName);
+      if (parenthesised) expectClose(ctx);
+      return tableTail(ctx, nameParts, true);
+    }
     if (ctx.is("punc", "(")) {
       ctx.next(); // "("
       const q = ctx.parse(query);
       expectClose(ctx);
-      const alias = ctx.parse(asAlias);
-      return { kind: "subquery", query: q, alias, ...(lateral && { lateral: true }) };
+      const { alias, columns } = parseAliasClause(ctx);
+      return {
+        kind: "subquery",
+        query: q,
+        alias,
+        ...(columns !== null && { columns }),
+        ...(lateral && { lateral: true }),
+      };
     }
     const nameParts = ctx.parse(qualName);
     if (ctx.is("punc", "(")) {
@@ -3552,15 +3607,13 @@ const tableRef = custom<FromItem, SqlTokenType>(
       }
       expectClose(ctx);
       const call: Expr = { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
-      const alias = ctx.parse(asAlias);
-      return { kind: "function", call, alias, ...(lateral && { lateral: true }) };
+      const { alias, columns } = parseAliasClause(ctx);
+      return { kind: "function", call, alias, ...(columns !== null && { columns }), ...(lateral && { lateral: true }) };
     }
     if (lateral) {
       return ctx.croak(`Expected a subquery or function after "lateral" but found ${describeFound(ctx.peek())}`);
     }
-    const alias = ctx.parse(asAlias);
-    const tablesample = ctx.is("ident", "tablesample") ? parseTableSample(ctx) : null;
-    return { kind: "table", name: nameParts, alias, ...(tablesample !== null && { tablesample }) };
+    return tableTail(ctx, nameParts, false);
   },
   {
     expected: "a table reference",

@@ -38,6 +38,9 @@ const SUPPLEMENTAL = [
   "SELECT 1 FROM a LEFT JOIN b USING (id) CROSS JOIN c;",
   "SELECT * FROM a CROSS JOIN LATERAL unnest(a.tags) t;",
   "SELECT * FROM t AS x TABLESAMPLE bernoulli (10) REPEATABLE (5);",
+  // Column-alias lists after an alias, on each leaf item kind, and ONLY.
+  "SELECT * FROM ONLY t AS x (a, b) TABLESAMPLE system (10), (VALUES (1, 2)) AS v (c, d);",
+  "SELECT * FROM generate_series(1, 3) g (n) JOIN ONLY (s.u) ON true, LATERAL (SELECT 1) l (one);",
   // --- the expression grammar: pratt levels and the special-call dispatch ---
   "SELECT -a, NOT b FROM t;",
   "SELECT +a, -2 ^ 2, a ^ b ^ c, a % b, a::int ^ 2 FROM t;",
