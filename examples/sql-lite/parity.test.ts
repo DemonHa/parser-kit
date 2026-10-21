@@ -205,6 +205,23 @@ const SUPPLEMENTAL = [
   "PREPARE ins AS WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x RETURNING id;",
   "EXECUTE q (1, 2.5, now());",
   "EXECUTE ins;",
+  // Cursors: DECLARE with every option word and both HOLD forms, FETCH / MOVE
+  // across the direction forms (signed counts included), and CLOSE.
+  "DECLARE c BINARY INSENSITIVE NO SCROLL CURSOR WITH HOLD FOR SELECT id FROM t ORDER BY id FETCH FIRST 10 ROWS ONLY;",
+  "DECLARE c2 SCROLL ASENSITIVE CURSOR WITHOUT HOLD FOR WITH x AS (SELECT 1) SELECT * FROM x;",
+  "FETCH NEXT FROM c;",
+  "FETCH PRIOR IN c;",
+  "FETCH ABSOLUTE -1 FROM c;",
+  "FETCH RELATIVE 2 c;",
+  "FETCH 5 FROM c;",
+  "FETCH ALL IN c;",
+  "FETCH FORWARD 3 FROM c;",
+  "FETCH BACKWARD ALL FROM c;",
+  "FETCH c;",
+  "MOVE LAST IN c;",
+  "MOVE FORWARD FROM c;",
+  "CLOSE c;",
+  "CLOSE ALL;",
   "INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;",
   "CREATE TABLE t (flags bit DEFAULT B'1011', mask bit DEFAULT X'ff', label text DEFAULT U&'\\0041');",
   // Index columns with an operator class, ordering and NULLS placement, and an
@@ -240,6 +257,10 @@ const SUPPLEMENTAL = [
   "CREATE UNLOGGED TABLE IF NOT EXISTS s.t (id int, note text);",
   "CREATE GLOBAL TEMPORARY TABLE t (id int);",
   "CREATE LOCAL TEMP TABLE snap AS SELECT 1 AS one;",
+  // --- CREATE ROLE, USER and PROCEDURE ---
+  "CREATE ROLE admin WITH LOGIN NOSUPERUSER CREATEDB CONNECTION LIMIT 5 ENCRYPTED PASSWORD 'pw' VALID UNTIL '2030-01-01' IN ROLE staff ADMIN bob;",
+  "CREATE USER bob PASSWORD NULL NOINHERIT ROLE a, b;",
+  "CREATE OR REPLACE PROCEDURE p(IN a integer, b text DEFAULT 'x') LANGUAGE plpgsql SECURITY DEFINER AS $$BEGIN NULL; END$$;",
   // --- LOCK and CALL ---
   "LOCK TABLE ONLY s.t, u *, ONLY (v) IN SHARE ROW EXCLUSIVE MODE NOWAIT;",
   "LOCK t IN ACCESS SHARE MODE;",

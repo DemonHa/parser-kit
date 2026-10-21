@@ -606,6 +606,24 @@ export type CreateTablespace = {
   span: Span;
 };
 
+// One `CREATE ROLE` option, in written order. A `flag` folds each attribute's
+// `NO`-prefixed spelling into `value: false`; `password` is null for `PASSWORD
+// NULL`, and `encrypted` marks the (PG-ignored) `ENCRYPTED` noise word.
+export type RoleOption =
+  | {
+      kind: "flag";
+      name: "superuser" | "createdb" | "createrole" | "inherit" | "login" | "replication" | "bypassrls";
+      value: boolean;
+    }
+  | { kind: "connectionLimit"; limit: number }
+  | { kind: "password"; encrypted: boolean; password: string | null }
+  | { kind: "validUntil"; timestamp: string }
+  | { kind: "inRole" | "role" | "admin"; roles: string[] };
+
+// `CREATE {ROLE|USER} name [[WITH] option …]`. `user` marks the USER spelling,
+// which PG reads as ROLE with LOGIN defaulted on.
+export type CreateRole = { kind: "createRole"; user: boolean; name: string; options: RoleOption[]; span: Span };
+
 // `CREATE TABLE [IF NOT EXISTS] name [(cols)] AS query [WITH [NO] DATA]` — the
 // query-backed table. Distinct kind from `createTable` so its `query` payload is
 // unmistakable. `columns` is the optional output-column-name list.
@@ -679,6 +697,18 @@ export type CreateFunction = {
   name: string[];
   args: FunctionArg[];
   returns: FunctionReturns | null;
+  options: FunctionOption[];
+  span: Span;
+};
+
+// `CREATE [OR REPLACE] PROCEDURE name (args) option*` — a function with no
+// RETURNS, whose options are those of CREATE FUNCTION's that PG also admits on
+// a procedure (LANGUAGE, AS, [EXTERNAL] SECURITY and SET).
+export type CreateProcedure = {
+  kind: "createProcedure";
+  orReplace: boolean;
+  name: string[];
+  args: FunctionArg[];
   options: FunctionOption[];
   span: Span;
 };
@@ -832,6 +862,32 @@ export type Lock = {
 // Not kind "call", which is the expression node (whose `name` is joined).
 export type CallProcedure = { kind: "callProcedure"; name: string[]; args: Expr[]; span: Span };
 
+// DECLARE name [option …] CURSOR [{WITH | WITHOUT} HOLD] FOR query. The options
+// come in any order, as in PG: `binary` is false when BINARY is absent;
+// `sensitivity`, `scroll` (false for NO SCROLL) and `hold` (false for WITHOUT
+// HOLD) are null when their words are absent.
+export type DeclareCursor = {
+  kind: "declare";
+  name: string;
+  binary: boolean;
+  sensitivity: "asensitive" | "insensitive" | null;
+  scroll: boolean | null;
+  hold: boolean | null;
+  query: Query;
+  span: Span;
+};
+// A FETCH / MOVE direction. A bare count is `count`; FORWARD / BACKWARD's
+// `count` is null when neither a count nor ALL follows the word.
+export type CursorDirection =
+  | { kind: "next" | "prior" | "first" | "last" | "all" }
+  | { kind: "absolute" | "relative" | "count"; count: number }
+  | { kind: "forward" | "backward"; count: number | "all" | null };
+// {FETCH | MOVE} [direction] [{FROM | IN}] cursor — `direction` is null when
+// omitted; the FROM / IN noise word is dropped.
+export type CursorFetch = { kind: "fetch" | "move"; direction: CursorDirection | null; cursor: string; span: Span };
+// CLOSE {name | ALL} — `name` is null for CLOSE ALL.
+export type CloseCursor = { kind: "close"; name: string | null; span: Span };
+
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
   // UNLOGGED family, see parseTempPrefix), in source order. Omitted, not null,
@@ -879,8 +935,10 @@ export type Stmt =
   | CreateSchema
   | CreateExtension
   | CreateTablespace
+  | CreateRole
   | CreateTableAs
   | CreateFunction
+  | CreateProcedure
   | CreateAggregate
   | CreateTrigger
   // `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`; `withData`
@@ -959,6 +1017,9 @@ export type Stmt =
   | Execute
   | Lock
   | CallProcedure
+  | DeclareCursor
+  | CursorFetch
+  | CloseCursor
   // A top-level query or DML statement is a statement too.
   | Query
   | Insert
@@ -3994,6 +4055,88 @@ function createTablespaceRest(ctx: ParseContext<SqlTokenType>): Stmt {
   return { kind: "createTablespace", name, owner, location: tok.value, options, span: ctx.spanFrom(start) };
 }
 
+// The single-word role attributes. Each is negated by its `NO`-prefixed
+// spelling (`NOLOGIN`), which PG lexes as one word too.
+const ROLE_FLAGS: ReadonlySet<string> = new Set([
+  "superuser",
+  "createdb",
+  "createrole",
+  "inherit",
+  "login",
+  "replication",
+  "bypassrls",
+]);
+
+// PG's SignedIconst: an integer constant with an optional sign.
+function parseSignedInt(ctx: ParseContext<SqlTokenType>): number {
+  const tok = ctx.peek();
+  const sign = tok?.type === "op" && (tok.value === "-" || tok.value === "+") ? tok.value : null;
+  if (!isIntegerConstant(sign === null ? tok : ctx.peekAhead(1))) {
+    return ctx.croak(`Expected an integer but found ${describeFound(sign === null ? tok : ctx.peekAhead(1))}`);
+  }
+  if (sign !== null) ctx.next();
+  const value = Number(ctx.next()!.value);
+  return sign === "-" ? -value : value;
+}
+
+// One CREATE ROLE option, or null when the next token leads none. Every option
+// word is matched by value and stays unreserved (bar `in`, `group`, `limit`,
+// `null` and `user`, reserved already); the list has no delimiter, so it simply
+// runs until a word leads no option. PG's legacy spellings `IN GROUP` and
+// `USER` read as `IN ROLE` and `ROLE`; its SYSID is not taken.
+function parseRoleOption(ctx: ParseContext<SqlTokenType>): RoleOption | null {
+  const tok = ctx.peek();
+  if (tok === null || tok.type !== "ident") return null;
+  const flag = tok.value.startsWith("no") ? tok.value.slice(2) : tok.value;
+  if (ROLE_FLAGS.has(flag)) {
+    ctx.next();
+    return { kind: "flag", name: flag as Extract<RoleOption, { kind: "flag" }>["name"], value: flag === tok.value };
+  }
+  switch (tok.value) {
+    case "connection":
+      ctx.parse(kwseq("connection", "limit"));
+      return { kind: "connectionLimit", limit: parseSignedInt(ctx) };
+    case "encrypted":
+      // PG takes no `ENCRYPTED PASSWORD NULL`: only a bare PASSWORD may be null.
+      ctx.parse(kwseq("encrypted", "password"));
+      return { kind: "password", encrypted: true, password: ctx.parse(strValue) };
+    case "password":
+      ctx.next();
+      return { kind: "password", encrypted: false, password: ctx.eat("ident", "null") ? null : ctx.parse(strValue) };
+    case "valid":
+      ctx.parse(kwseq("valid", "until"));
+      return { kind: "validUntil", timestamp: ctx.parse(strValue) };
+    case "in":
+      ctx.next();
+      if (ctx.eat("ident", "role") === null && ctx.eat("ident", "group") === null) {
+        return ctx.croak(`Expected ${quoteList(["role", "group"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return { kind: "inRole", roles: commaList(ctx, parseRoleSpec) };
+    case "role":
+    case "user":
+      ctx.next();
+      return { kind: "role", roles: commaList(ctx, parseRoleSpec) };
+    case "admin":
+      ctx.next();
+      return { kind: "admin", roles: commaList(ctx, parseRoleSpec) };
+    default:
+      return null;
+  }
+}
+
+// `CREATE {ROLE|USER} name [[WITH] option …]` — the lead word is consumed here,
+// as every PLAIN_CREATE handler's is.
+function createRoleRest(ctx: ParseContext<SqlTokenType>, user: boolean): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw(user ? "user" : "role"));
+  const name = ctx.parse(nameWord);
+  // `with` is reserved, so it can only open the list.
+  ctx.eat("ident", "with");
+  const options: RoleOption[] = [];
+  for (let option = parseRoleOption(ctx); option !== null; option = parseRoleOption(ctx)) options.push(option);
+  return { kind: "createRole", user, name, options, span: ctx.spanFrom(start) };
+}
+
 // `WITH [CASCADED | LOCAL] CHECK OPTION` after a plain view's query, or null.
 // The query leaves a trailing WITH alone (see parseWithData), and nothing else
 // can follow it there, so a WITH commits; the word after it is peeked first,
@@ -4252,6 +4395,21 @@ function parseFunctionBody(ctx: ParseContext<SqlTokenType>, start: Position, orR
   return { kind: "createFunction", orReplace, name, args, returns, options, span: ctx.spanFrom(start) };
 }
 
+// The option words of parseFunctionOptions that PG also admits on a procedure
+// (its TRANSFORM and RESET are not parsed for a function either). The rest
+// (volatility, strictness, COST, ROWS, …) describe a value-returning call, so
+// the loop stops before them and the statement then croaks on the word.
+const PROCEDURE_OPTIONS: ReadonlySet<string> = new Set(["language", "as", "external", "security", "set"]);
+
+// `CREATE [OR REPLACE] PROCEDURE` — `PROCEDURE` consumed by the caller. As
+// FUNCTION's body, with no RETURNS.
+function parseProcedureBody(ctx: ParseContext<SqlTokenType>, start: Position, orReplace: boolean): Stmt {
+  const name = ctx.parse(qualName);
+  const args = ctx.parse(functionArgs);
+  const options = parseFunctionOptions(ctx, PROCEDURE_OPTIONS);
+  return { kind: "createProcedure", orReplace, name, args, options, span: ctx.spanFrom(start) };
+}
+
 // `( NAME [= value] , … )` — the aggregate definition list. `value` is a type/
 // function-name (typeRef) or a literal (string/number), or null for a bare flag.
 function parseAggregateOptions(ctx: ParseContext<SqlTokenType>): AggregateOption[] {
@@ -4428,6 +4586,8 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   schema: { parse: createSchemaRest },
   extension: { parse: createExtensionRest },
   tablespace: { parse: createTablespaceRest },
+  role: { parse: (ctx) => createRoleRest(ctx, false) },
+  user: { parse: (ctx) => createRoleRest(ctx, true) },
 };
 
 // REPLACEABLE_CREATE dispatch CONSUMES the lead word: these bodies are entered
@@ -4442,6 +4602,7 @@ const REPLACEABLE_CREATE: DispatchMap<Stmt, [Position, boolean]> = {
     },
   },
   function: { parse: (ctx, start, orReplace) => parseFunctionBody(ctx, start, orReplace) },
+  procedure: { parse: (ctx, start, orReplace) => parseProcedureBody(ctx, start, orReplace) },
   aggregate: { parse: (ctx, start, orReplace) => parseAggregateBody(ctx, start, orReplace) },
   trigger: { parse: (ctx, start, orReplace) => parseTriggerBody(ctx, start, orReplace) },
 };
@@ -4474,12 +4635,12 @@ for (const target of SCHEMA_REPLACEABLE_TARGETS) {
 }
 
 // After CREATE: an optional `OR REPLACE`, then one of the objects that permit it
-// (VIEW / MATERIALIZED VIEW / FUNCTION / AGGREGATE / TRIGGER) — or, with no such
-// prefix, one of the remaining keyword-led targets (TABLE / [UNIQUE] INDEX /
-// TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION / TABLESPACE), TABLE
-// alone taking the TEMP / UNLOGGED prefix. `OR REPLACE` before a non-replaceable
-// object croaks, as does a prefix before anything but TABLE — PG's TEMP VIEW and
-// TEMP SEQUENCE are not parsed.
+// (VIEW / MATERIALIZED VIEW / FUNCTION / PROCEDURE / AGGREGATE / TRIGGER) — or,
+// with no such prefix, one of the remaining keyword-led targets (TABLE /
+// [UNIQUE] INDEX / TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION /
+// TABLESPACE / ROLE / USER), TABLE alone taking the TEMP / UNLOGGED prefix. `OR
+// REPLACE` before a non-replaceable object croaks, as does a prefix before
+// anything but TABLE — PG's TEMP VIEW and TEMP SEQUENCE are not parsed.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -6845,6 +7006,146 @@ const callStmt = custom<Stmt, SqlTokenType>(
   { expected: '"call"', first: [{ type: "ident", value: "call" }] },
 );
 
+// --- cursors: DECLARE / FETCH / MOVE / CLOSE ---
+//
+// Every lead and option word stays UNRESERVED, matched by value — `fetch`
+// aside, which is already reserved (as in PG) for the SELECT clause. The cursor
+// name is a plain name, as PG's is, and the body is a full query.
+
+// The cursor options between the name and CURSOR, in any order. A repeated
+// option is accepted, as PG's grammar does; a contradictory pair is an error,
+// as PG's parse analysis makes it. That analysis's other checks (WITH HOLD,
+// SCROLL or INSENSITIVE beside FOR UPDATE/SHARE; a data-modifying CTE in the
+// body) are not mirrored.
+function cursorOptions(ctx: ParseContext<SqlTokenType>): Pick<DeclareCursor, "binary" | "sensitivity" | "scroll"> {
+  let binary = false;
+  let sensitivity: DeclareCursor["sensitivity"] = null;
+  let scroll: boolean | null = null;
+  while (true) {
+    const start = ctx.position();
+    if (ctx.eat("ident", "binary") !== null) binary = true;
+    else if (ctx.is("ident", ["asensitive", "insensitive"])) {
+      const word = ctx.next()!.value as "asensitive" | "insensitive";
+      if (sensitivity !== null && sensitivity !== word) {
+        return ctx.croak("cannot specify both ASENSITIVE and INSENSITIVE", start, ctx.lastEnd());
+      }
+      sensitivity = word;
+    } else if (ctx.is("ident", ["scroll", "no"])) {
+      const on = ctx.next()!.value === "scroll";
+      if (!on) ctx.parse(kw("scroll"));
+      if (scroll !== null && scroll !== on) {
+        return ctx.croak("cannot specify both SCROLL and NO SCROLL", start, ctx.lastEnd());
+      }
+      scroll = on;
+    } else return { binary, sensitivity, scroll };
+  }
+}
+
+const QUERY_FIRST = query.first();
+const declareCursorStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("declare"));
+    const name = ctx.parse(nameWord);
+    const options = cursorOptions(ctx);
+    ctx.parse(kw("cursor"));
+    let hold: boolean | null = null;
+    if (ctx.is("ident", ["with", "without"])) {
+      hold = ctx.next()!.value === "with";
+      ctx.parse(kw("hold"));
+    }
+    ctx.parse(kw("for"));
+    // Checked up front, as PREPARE's body is, so a non-query body reports what
+    // DECLARE accepts rather than setOpQuery's narrower first set (no `with`).
+    // PG's `TABLE name` body aside, which sql-lite doesn't parse yet.
+    if (!matchesFirst(ctx.peek(), QUERY_FIRST)) {
+      return ctx.croak(`Expected a query but found ${describeFound(ctx.peek())}`);
+    }
+    const body = ctx.parse(query);
+    return { kind: "declare", name, ...options, hold, query: body, span: ctx.spanFrom(start) };
+  },
+  { expected: '"declare"', first: [{ type: "ident", value: "declare" }] },
+);
+
+// PG's SignedIconst: an integer constant with an optional sign of its own.
+const isSign = (tok: Token<SqlTokenType> | null): boolean =>
+  tok !== null && tok.type === "op" && (tok.value === "-" || tok.value === "+");
+const startsCount = (ctx: ParseContext<SqlTokenType>): boolean =>
+  ctx.is("number") || (isSign(ctx.peek()) && ctx.peekAhead(1)?.type === "number");
+function signedCount(ctx: ParseContext<SqlTokenType>): number {
+  const sign = isSign(ctx.peek()) ? ctx.next()!.value : null;
+  const tok = ctx.peek();
+  if (!isIntegerConstant(tok)) return ctx.croak(`Expected an integer count but found ${describeFound(tok)}`);
+  const value = Number(ctx.next()!.value);
+  return sign === "-" ? -value : value;
+}
+
+const DIRECTION_WORDS: ReadonlySet<string> = new Set([
+  "next",
+  "prior",
+  "first",
+  "last",
+  "absolute",
+  "relative",
+  "forward",
+  "backward",
+]);
+
+// The optional direction. Every direction word is also a legal cursor name, so
+// one is the direction only when something follows it: `FETCH next;` reads from
+// a cursor named `next` (PG's LR parse settles it the same way), while `FETCH
+// next FROM c` and `FETCH next c` take the direction. `all` is reserved, so it
+// is never the name.
+function cursorDirection(ctx: ParseContext<SqlTokenType>): CursorDirection | null {
+  if (startsCount(ctx)) return { kind: "count", count: signedCount(ctx) };
+  if (ctx.eat("ident", "all") !== null) return { kind: "all" };
+  const tok = ctx.peek();
+  if (tok?.type !== "ident" || !DIRECTION_WORDS.has(tok.value)) return null;
+  const after = ctx.peekAhead(1);
+  if (after === null || (after.type === "punc" && after.value === ";")) return null;
+  ctx.next();
+  switch (tok.value) {
+    case "absolute":
+    case "relative":
+      return { kind: tok.value, count: signedCount(ctx) };
+    case "forward":
+    case "backward": {
+      let count: number | "all" | null = null;
+      if (ctx.eat("ident", "all") !== null) count = "all";
+      else if (startsCount(ctx)) count = signedCount(ctx);
+      return { kind: tok.value, count };
+    }
+    default:
+      return { kind: tok.value as "next" | "prior" | "first" | "last" };
+  }
+}
+
+// FETCH and MOVE share PG's fetch_args.
+const cursorFetchStmt = (lead: "fetch" | "move") =>
+  custom<Stmt, SqlTokenType>(
+    (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw(lead));
+      const direction = cursorDirection(ctx);
+      ctx.eat("ident", ["from", "in"]); // optional FROM / IN noise word
+      const cursor = ctx.parse(nameWord);
+      return { kind: lead, direction, cursor, span: ctx.spanFrom(start) };
+    },
+    { expected: `"${lead}"`, first: [{ type: "ident", value: lead }] },
+  );
+const fetchStmt = cursorFetchStmt("fetch");
+const moveStmt = cursorFetchStmt("move");
+
+const closeStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("close"));
+    const name = ctx.eat("ident", "all") !== null ? null : ctx.parse(nameWord);
+    return { kind: "close", name, span: ctx.spanFrom(start) };
+  },
+  { expected: '"close"', first: [{ type: "ident", value: "close" }] },
+);
+
 // First-sets: the DDL and utility rules each dispatch on their own lead keyword;
 // dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
 //
@@ -6863,6 +7164,10 @@ const utilityStmt = oneOf(
   executeStmt,
   lockStmt,
   callStmt,
+  declareCursorStmt,
+  fetchStmt,
+  moveStmt,
+  closeStmt,
 );
 const statementBody = oneOf(ddlStmt, utilityStmt, dmlStatement).describe("a statement");
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.
