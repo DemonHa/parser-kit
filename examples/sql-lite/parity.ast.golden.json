@@ -18542,6 +18542,968 @@
     ]
   },
   {
+    "source": "EXPLAIN SELECT * FROM t;",
+    "ast": [
+      {
+        "kind": "explain",
+        "options": [],
+        "statement": {
+          "kind": "select",
+          "with_": null,
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "star",
+                "table": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 15
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 16
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "from": [
+            {
+              "kind": "table",
+              "name": [
+                "t"
+              ],
+              "alias": null
+            }
+          ],
+          "where": null,
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": null,
+          "limit": null,
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 8
+            },
+            "end": {
+              "row": 1,
+              "col": 23
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 23
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "EXPLAIN ANALYZE VERBOSE WITH x AS (SELECT 1) DELETE FROM t USING x;",
+    "ast": [
+      {
+        "kind": "explain",
+        "options": [
+          {
+            "name": "analyze",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 8
+              },
+              "end": {
+                "row": 1,
+                "col": 15
+              }
+            }
+          },
+          {
+            "name": "verbose",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 23
+              }
+            }
+          }
+        ],
+        "statement": {
+          "kind": "delete",
+          "table": [
+            "t"
+          ],
+          "alias": null,
+          "using": [
+            {
+              "kind": "table",
+              "name": [
+                "x"
+              ],
+              "alias": null
+            }
+          ],
+          "where": null,
+          "returning": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 45
+            },
+            "end": {
+              "row": 1,
+              "col": 66
+            }
+          },
+          "with_": [
+            {
+              "name": "x",
+              "columns": null,
+              "query": {
+                "kind": "select",
+                "with_": null,
+                "recursive": false,
+                "distinct": false,
+                "columns": [
+                  {
+                    "expr": {
+                      "kind": "number",
+                      "value": 1,
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 42
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 43
+                        }
+                      }
+                    },
+                    "alias": null
+                  }
+                ],
+                "from": null,
+                "where": null,
+                "groupBy": null,
+                "having": null,
+                "window": null,
+                "orderBy": null,
+                "limit": null,
+                "offset": null,
+                "locking": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 35
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 43
+                  }
+                }
+              }
+            }
+          ],
+          "recursive": false
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 66
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "EXPLAIN (ANALYZE, COSTS off, BUFFERS true, WAL 1, FORMAT JSON) (SELECT 1) UNION SELECT 2;",
+    "ast": [
+      {
+        "kind": "explain",
+        "options": [
+          {
+            "name": "analyze",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 9
+              },
+              "end": {
+                "row": 1,
+                "col": 16
+              }
+            }
+          },
+          {
+            "name": "costs",
+            "value": {
+              "kind": "name",
+              "parts": [
+                "off"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 24
+                },
+                "end": {
+                  "row": 1,
+                  "col": 27
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 18
+              },
+              "end": {
+                "row": 1,
+                "col": 27
+              }
+            }
+          },
+          {
+            "name": "buffers",
+            "value": {
+              "kind": "bool",
+              "value": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 37
+                },
+                "end": {
+                  "row": 1,
+                  "col": 41
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 29
+              },
+              "end": {
+                "row": 1,
+                "col": 41
+              }
+            }
+          },
+          {
+            "name": "wal",
+            "value": {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 47
+                },
+                "end": {
+                  "row": 1,
+                  "col": 48
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 43
+              },
+              "end": {
+                "row": 1,
+                "col": 48
+              }
+            }
+          },
+          {
+            "name": "format",
+            "value": {
+              "kind": "name",
+              "parts": [
+                "json"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 57
+                },
+                "end": {
+                  "row": 1,
+                  "col": 61
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 50
+              },
+              "end": {
+                "row": 1,
+                "col": 61
+              }
+            }
+          }
+        ],
+        "statement": {
+          "kind": "setOp",
+          "op": "union",
+          "left": {
+            "kind": "select",
+            "with_": null,
+            "recursive": false,
+            "distinct": false,
+            "columns": [
+              {
+                "expr": {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 71
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 72
+                    }
+                  }
+                },
+                "alias": null
+              }
+            ],
+            "from": null,
+            "where": null,
+            "groupBy": null,
+            "having": null,
+            "window": null,
+            "orderBy": null,
+            "limit": null,
+            "offset": null,
+            "locking": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 64
+              },
+              "end": {
+                "row": 1,
+                "col": 72
+              }
+            }
+          },
+          "right": {
+            "kind": "select",
+            "with_": null,
+            "recursive": false,
+            "distinct": false,
+            "columns": [
+              {
+                "expr": {
+                  "kind": "number",
+                  "value": 2,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 87
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 88
+                    }
+                  }
+                },
+                "alias": null
+              }
+            ],
+            "from": null,
+            "where": null,
+            "groupBy": null,
+            "having": null,
+            "window": null,
+            "orderBy": null,
+            "limit": null,
+            "offset": null,
+            "locking": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 80
+              },
+              "end": {
+                "row": 1,
+                "col": 88
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 64
+            },
+            "end": {
+              "row": 1,
+              "col": 88
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 88
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "EXPLAIN (VERBOSE) CREATE TABLE t (a) AS SELECT 1 WITH NO DATA;",
+    "ast": [
+      {
+        "kind": "explain",
+        "options": [
+          {
+            "name": "verbose",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 9
+              },
+              "end": {
+                "row": 1,
+                "col": 16
+              }
+            }
+          }
+        ],
+        "statement": {
+          "kind": "createTableAs",
+          "ifNotExists": false,
+          "name": [
+            "t"
+          ],
+          "columns": [
+            "a"
+          ],
+          "query": {
+            "kind": "select",
+            "with_": null,
+            "recursive": false,
+            "distinct": false,
+            "columns": [
+              {
+                "expr": {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 47
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 48
+                    }
+                  }
+                },
+                "alias": null
+              }
+            ],
+            "from": null,
+            "where": null,
+            "groupBy": null,
+            "having": null,
+            "window": null,
+            "orderBy": null,
+            "limit": null,
+            "offset": null,
+            "locking": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 40
+              },
+              "end": {
+                "row": 1,
+                "col": 48
+              }
+            }
+          },
+          "withData": false,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 25
+            },
+            "end": {
+              "row": 1,
+              "col": 61
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 61
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "EXPLAIN (SELECT 1);",
+    "ast": [
+      {
+        "kind": "explain",
+        "options": [],
+        "statement": {
+          "kind": "select",
+          "with_": null,
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 16
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 17
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "from": null,
+          "where": null,
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": null,
+          "limit": null,
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 9
+            },
+            "end": {
+              "row": 1,
+              "col": 17
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 18
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "EXPLAIN ANALYSE EXECUTE q (1);",
+    "ast": [
+      {
+        "kind": "explain",
+        "options": [
+          {
+            "name": "analyse",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 8
+              },
+              "end": {
+                "row": 1,
+                "col": 15
+              }
+            }
+          }
+        ],
+        "statement": {
+          "kind": "execute",
+          "name": "q",
+          "args": [
+            {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 27
+                },
+                "end": {
+                  "row": 1,
+                  "col": 28
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 16
+            },
+            "end": {
+              "row": 1,
+              "col": 29
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 29
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ANALYZE;",
+    "ast": [
+      {
+        "kind": "analyze",
+        "options": [],
+        "tables": [],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 7
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ANALYZE VERBOSE t (a, b), s.u;",
+    "ast": [
+      {
+        "kind": "analyze",
+        "options": [
+          {
+            "name": "verbose",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 8
+              },
+              "end": {
+                "row": 1,
+                "col": 15
+              }
+            }
+          }
+        ],
+        "tables": [
+          {
+            "name": [
+              "t"
+            ],
+            "columns": [
+              "a",
+              "b"
+            ]
+          },
+          {
+            "name": [
+              "s",
+              "u"
+            ],
+            "columns": null
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 29
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ANALYZE (SKIP_LOCKED) t;",
+    "ast": [
+      {
+        "kind": "analyze",
+        "options": [
+          {
+            "name": "skip_locked",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 9
+              },
+              "end": {
+                "row": 1,
+                "col": 20
+              }
+            }
+          }
+        ],
+        "tables": [
+          {
+            "name": [
+              "t"
+            ],
+            "columns": null
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 23
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "VACUUM FULL FREEZE VERBOSE ANALYZE t (a);",
+    "ast": [
+      {
+        "kind": "vacuum",
+        "options": [
+          {
+            "name": "full",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 7
+              },
+              "end": {
+                "row": 1,
+                "col": 11
+              }
+            }
+          },
+          {
+            "name": "freeze",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 12
+              },
+              "end": {
+                "row": 1,
+                "col": 18
+              }
+            }
+          },
+          {
+            "name": "verbose",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 19
+              },
+              "end": {
+                "row": 1,
+                "col": 26
+              }
+            }
+          },
+          {
+            "name": "analyze",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 27
+              },
+              "end": {
+                "row": 1,
+                "col": 34
+              }
+            }
+          }
+        ],
+        "tables": [
+          {
+            "name": [
+              "t"
+            ],
+            "columns": [
+              "a"
+            ]
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 40
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "VACUUM (PARALLEL 4, INDEX_CLEANUP auto) a, b;",
+    "ast": [
+      {
+        "kind": "vacuum",
+        "options": [
+          {
+            "name": "parallel",
+            "value": {
+              "kind": "number",
+              "value": 4,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 17
+                },
+                "end": {
+                  "row": 1,
+                  "col": 18
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 8
+              },
+              "end": {
+                "row": 1,
+                "col": 18
+              }
+            }
+          },
+          {
+            "name": "index_cleanup",
+            "value": {
+              "kind": "name",
+              "parts": [
+                "auto"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 34
+                },
+                "end": {
+                  "row": 1,
+                  "col": 38
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 20
+              },
+              "end": {
+                "row": 1,
+                "col": 38
+              }
+            }
+          }
+        ],
+        "tables": [
+          {
+            "name": [
+              "a"
+            ],
+            "columns": null
+          },
+          {
+            "name": [
+              "b"
+            ],
+            "columns": null
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 44
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {
