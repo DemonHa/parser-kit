@@ -1692,6 +1692,186 @@ describe("SQL-lite FROM items: LATERAL, table functions, TABLESAMPLE", () => {
   });
 });
 
+// --- FROM-item column-alias lists and ONLY ---
+
+describe("SQL-lite FROM-item column-alias lists and ONLY", () => {
+  const from = (src: string) => (firstStmt(src) as any).from;
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+
+  it("reads a column-alias list after a table alias, with or without AS", () => {
+    expect(from("SELECT * FROM t AS x (a, b);")).toEqual([
+      { kind: "table", name: ["t"], alias: "x", columns: ["a", "b"] },
+    ]);
+    // The alias has been consumed before the `(`, so the AS-less spelling is
+    // no harder to read than the AS one.
+    expect(from("SELECT * FROM t x (a, b);")).toEqual([
+      { kind: "table", name: ["t"], alias: "x", columns: ["a", "b"] },
+    ]);
+    // A quoted column alias keeps its case, as any quoted name does.
+    expect(from('SELECT * FROM s.t AS x ("A", b);')).toEqual([
+      { kind: "table", name: ["s", "t"], alias: "x", columns: ["A", "b"] },
+    ]);
+  });
+
+  it("reads the list on subquery, VALUES and table-function items too", () => {
+    expect(from("SELECT * FROM (VALUES (1, 2)) AS v (a, b);")).toEqual([
+      {
+        kind: "subquery",
+        query: { kind: "values", rows: [[num(1), num(2)]], orderBy: null, limit: null, offset: null },
+        alias: "v",
+        columns: ["a", "b"],
+      },
+    ]);
+    expect(from("SELECT * FROM (SELECT 1) s (a);")).toEqual([
+      { kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "s", columns: ["a"] },
+    ]);
+    expect(from("SELECT * FROM generate_series(1, 3) AS g (n);")).toEqual([
+      { kind: "function", call: call("generate_series", [num(1), num(3)]), alias: "g", columns: ["n"] },
+    ]);
+    expect(from("SELECT * FROM a, LATERAL unnest(a.tags) u (tag);")).toEqual([
+      tableFrom(["a"]),
+      { kind: "function", call: call("unnest", [name("a", "tags")]), alias: "u", columns: ["tag"], lateral: true },
+    ]);
+    expect(from("SELECT * FROM a, LATERAL (SELECT 1) l (one);")[1]).toEqual({
+      kind: "subquery",
+      query: sel({ columns: [col(num(1))] }),
+      alias: "l",
+      columns: ["one"],
+      lateral: true,
+    });
+  });
+
+  it("puts the list before TABLESAMPLE and reads it wherever a FROM item appears", () => {
+    // PG's order is `relation_expr alias_clause tablesample_clause`.
+    expect(from("SELECT * FROM t AS x (a) TABLESAMPLE system (10);")).toEqual([
+      {
+        kind: "table",
+        name: ["t"],
+        alias: "x",
+        columns: ["a"],
+        tablesample: { method: "system", args: [num(10)], repeatable: null },
+      },
+    ]);
+    expect(from("SELECT * FROM a x (p) JOIN b y (q) USING (p);")).toEqual([
+      {
+        kind: "join",
+        joinType: "inner",
+        left: { kind: "table", name: ["a"], alias: "x", columns: ["p"] },
+        right: { kind: "table", name: ["b"], alias: "y", columns: ["q"] },
+        on: null,
+        using: ["p"],
+      },
+    ]);
+    // FROM items reach DELETE … USING, CTE bodies and set-op arms through the
+    // same rule.
+    expect((firstStmt("DELETE FROM t USING u AS x (b) WHERE t.a = x.b;") as any).using).toEqual([
+      { kind: "table", name: ["u"], alias: "x", columns: ["b"] },
+    ]);
+    expect((firstStmt("WITH c AS (SELECT * FROM t x (a)) SELECT 1;") as any).with_[0].query.from).toEqual([
+      { kind: "table", name: ["t"], alias: "x", columns: ["a"] },
+    ]);
+    expect((firstStmt("SELECT 1 UNION SELECT * FROM u y (b);") as any).right.from).toEqual([
+      { kind: "table", name: ["u"], alias: "y", columns: ["b"] },
+    ]);
+  });
+
+  it("parses ONLY on a bare, qualified or parenthesised table name", () => {
+    expect(from("SELECT * FROM ONLY t;")).toEqual([{ kind: "table", only: true, name: ["t"], alias: null }]);
+    expect(from("SELECT * FROM ONLY s.t AS x (a);")).toEqual([
+      { kind: "table", only: true, name: ["s", "t"], alias: "x", columns: ["a"] },
+    ]);
+    // PG's `relation_expr` also admits `ONLY (name)`; the parentheses are not
+    // recorded, as they change nothing.
+    expect(from("SELECT * FROM ONLY (t) x;")).toEqual([{ kind: "table", only: true, name: ["t"], alias: "x" }]);
+    expect(from("SELECT * FROM a JOIN ONLY b ON true;")[0].right).toEqual({
+      kind: "table",
+      only: true,
+      name: ["b"],
+      alias: null,
+    });
+    expect((firstStmt("UPDATE t SET a = 1 FROM ONLY u WHERE t.a = u.a;") as any).from).toEqual([
+      { kind: "table", only: true, name: ["u"], alias: null },
+    ]);
+  });
+
+  it("omits `columns` and `only` when neither is written", () => {
+    // Both are spread in only when present, so every pre-existing FROM item —
+    // and its row in the parity golden — keeps its shape.
+    for (const item of [
+      ...from("SELECT * FROM t x TABLESAMPLE system (1);"),
+      ...from("SELECT * FROM (SELECT 1) s;"),
+      ...from("SELECT * FROM f(1) g;"),
+    ]) {
+      expect("columns" in item).toBe(false);
+      expect("only" in item).toBe(false);
+    }
+  });
+
+  it("still reads a bare `t (a, b)` as a table-function call", () => {
+    // With no alias ahead of it, the list would be indistinguishable from a
+    // call's argument list — and PG resolves it the same way, as a call to `t`.
+    expect(from("SELECT * FROM t (a, b);")).toEqual([
+      { kind: "function", call: call("t", [name("a"), name("b")]), alias: null },
+    ]);
+  });
+
+  it("keeps a nested-paren FROM subquery a subquery", () => {
+    // A `(` that opens a FROM item stays a query however deeply it nests, and
+    // the alias clause — list included — follows the outermost `)`.
+    expect(from("SELECT * FROM ((SELECT 1) UNION (SELECT 2)) x;")).toEqual([
+      {
+        kind: "subquery",
+        query: {
+          kind: "setOp",
+          op: "union",
+          left: sel({ columns: [col(num(1))] }),
+          right: sel({ columns: [col(num(2))] }),
+        },
+        alias: "x",
+      },
+    ]);
+    expect(from("SELECT * FROM ((SELECT 1)) x;")).toEqual([
+      { kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "x" },
+    ]);
+    expect(from("SELECT * FROM ((SELECT 1)) x (a);")).toEqual([
+      { kind: "subquery", query: sel({ columns: [col(num(1))] }), alias: "x", columns: ["a"] },
+    ]);
+  });
+
+  it("takes no name away: `only` was already reserved", () => {
+    // ONLY is matched by value, and it was in RESERVED long before this rule
+    // existed — so it was never usable as a bare name or alias. Quoted, it is a
+    // name exactly as before.
+    expect(from('SELECT * FROM "only";')).toEqual([tableFrom(["only"])]);
+    expect(from('SELECT * FROM t AS "only" ("only");')).toEqual([
+      { kind: "table", name: ["t"], alias: "only", columns: ["only"] },
+    ]);
+    expect(() => sqlLite.parse("SELECT * FROM t only;")).toThrow(/Expected ";" but found "only"/);
+  });
+
+  it("rejects an empty or malformed alias list and a misplaced or malformed ONLY", () => {
+    // PG's list names at least one column.
+    expect(() => sqlLite.parse("SELECT * FROM t x ();")).toThrow(/Expected a name but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM t x (a,);")).toThrow(/Expected a name but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM t x (a b);")).toThrow(/Expected "\)" but found "b"/);
+    expect(() => sqlLite.parse("SELECT * FROM t x (a) (b);")).toThrow(/but found "\("/);
+    // The list needs an alias ahead of it on a subquery too, and comes before
+    // TABLESAMPLE, never after it.
+    expect(() => sqlLite.parse("SELECT * FROM (SELECT 1) (a);")).toThrow(/but found "\("/);
+    expect(() => sqlLite.parse("SELECT * FROM t TABLESAMPLE system (1) x (a);")).toThrow(/but found "x"/);
+    // A function's typed column-definition list is out of scope: it is not a
+    // name list, so the type word is where it stops.
+    expect(() => sqlLite.parse("SELECT * FROM f() AS g (n int);")).toThrow(/Expected "\)" but found "int"/);
+    // ONLY takes a table name — not a subquery, a function or nothing at all —
+    // and cannot follow LATERAL.
+    expect(() => sqlLite.parse("SELECT * FROM ONLY;")).toThrow(/Expected a name but found ";"/);
+    expect(() => sqlLite.parse("SELECT * FROM ONLY (SELECT 1) s;")).toThrow(/Expected a name but found "select"/);
+    expect(() => sqlLite.parse("SELECT * FROM ONLY f(1);")).toThrow(/but found "\("/);
+    expect(() => sqlLite.parse("SELECT * FROM ONLY (t x);")).toThrow(/Expected "\)" but found "x"/);
+    expect(() => sqlLite.parse("SELECT * FROM LATERAL ONLY t;")).toThrow(/Expected a name but found "only"/);
+  });
+});
+
 describe("SQL-lite VALUES query", () => {
   it("parses a standalone VALUES statement", () => {
     expect(firstStmt("VALUES (1, 2), (3, 4);")).toEqual({
@@ -1915,6 +2095,121 @@ describe("SQL-lite SELECT INTO and GROUP BY modifiers", () => {
     expect(() => sqlLite.parse("SELECT a INTO FROM t;")).toThrow(/Expected a name but found "from"/);
     expect(() => sqlLite.parse("SELECT a FROM t GROUP BY DISTINCT;")).toThrow(/but found ";"/);
     expect(() => sqlLite.parse("SELECT a FROM t GROUP BY (,);")).toThrow(ParseError);
+  });
+});
+
+// --- ORDER BY USING & window frame EXCLUDE ---
+
+describe("SQL-lite ORDER BY USING and window frame EXCLUDE", () => {
+  const stmt = (src: string) => firstStmt(src) as any;
+  const orderBy = (src: string) => stmt(`SELECT a FROM t ORDER BY ${src};`).orderBy;
+  const frame = (src: string) => stmt(`SELECT sum(x) OVER (${src}) FROM t;`).columns[0].expr.frame;
+  const order = (expr: unknown, dir: string | null = null, nulls: string | null = null) => ({ expr, dir, nulls });
+  const using = (expr: unknown, op: string, nulls: string | null = null) => ({ expr, dir: null, using: op, nulls });
+
+  it("parses ORDER BY … USING op in place of ASC/DESC", () => {
+    expect(stmt("SELECT a FROM t ORDER BY a USING <;")).toEqual(
+      sel({ columns: [col(name("a"))], from: [tableFrom(["t"])], orderBy: [using(name("a"), "<")] }),
+    );
+    // NULLS still follows, and a USING item mixes freely with plain ones.
+    expect(orderBy("a USING > NULLS FIRST, b DESC")).toEqual([
+      using(name("a"), ">", "first"),
+      order(name("b"), "desc"),
+    ]);
+    // Any operator token is a sort operator, not just the comparison ones.
+    expect(orderBy("a USING ~<~")).toEqual([using(name("a"), "~<~")]);
+  });
+
+  it("takes USING wherever an ORDER BY list is, and omits the key otherwise", () => {
+    // Every sort list shares `orderItem`: aggregate, WITHIN GROUP and window.
+    expect(stmt("SELECT array_agg(a ORDER BY b USING >) FROM t;").columns[0].expr.orderBy).toEqual([
+      using(name("b"), ">"),
+    ]);
+    expect(stmt("SELECT rank() OVER (ORDER BY b USING <) FROM t;").columns[0].expr.orderBy).toEqual([
+      using(name("b"), "<"),
+    ]);
+    expect(
+      stmt("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b USING <) FROM t;").columns[0].expr.orderBy,
+    ).toEqual([using(name("b"), "<")]);
+    // Omit-when-absent: a plain item keeps exactly its three keys, so the AST
+    // golden's existing ORDER BY rows do not move.
+    expect(Object.keys(orderBy("a DESC")[0])).toEqual(["expr", "dir", "nulls"]);
+  });
+
+  it("parses a frame EXCLUDE clause after either frame shape", () => {
+    expect(frame("ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW")).toEqual({
+      mode: "rows",
+      start: { kind: "preceding", offset: num(1) },
+      end: { kind: "following", offset: num(1) },
+      exclude: "currentRow",
+    });
+    // The single-bound shorthand takes it too, and so does every mode.
+    expect(frame("GROUPS 1 PRECEDING EXCLUDE GROUP")).toEqual({
+      mode: "groups",
+      start: { kind: "preceding", offset: num(1) },
+      end: null,
+      exclude: "group",
+    });
+    expect(frame("RANGE CURRENT ROW EXCLUDE TIES").exclude).toBe("ties");
+    // NO OTHERS is the default spelled out; it is recorded, not dropped, so the
+    // AST still tells it apart from a frame with no EXCLUDE at all.
+    expect(frame("ROWS UNBOUNDED PRECEDING EXCLUDE NO OTHERS").exclude).toBe("noOthers");
+    expect("exclude" in frame("ROWS UNBOUNDED PRECEDING")).toBe(false);
+    // `parseFrame` is shared, so a named WINDOW definition takes it too.
+    expect(
+      stmt("SELECT rank() OVER w FROM t WINDOW w AS (ROWS 1 PRECEDING EXCLUDE TIES);").window[0].spec.frame,
+    ).toEqual({
+      mode: "rows",
+      start: { kind: "preceding", offset: num(1) },
+      end: null,
+      exclude: "ties",
+    });
+  });
+
+  it("keeps exclude / ties / others / no unreserved as names and aliases", () => {
+    expect(stmt("SELECT exclude, ties, others, no FROM t;").columns).toEqual([
+      col(name("exclude")),
+      col(name("ties")),
+      col(name("others")),
+      col(name("no")),
+    ]);
+    expect(stmt("SELECT a exclude, b ties FROM t;").columns).toEqual([
+      col(name("a"), "exclude"),
+      col(name("b"), "ties"),
+    ]);
+    expect(stmt("CREATE TABLE t (exclude int, ties text);").items.map((i: any) => i.name)).toEqual(["exclude", "ties"]);
+    // A frame offset is a full expression, so a column named `exclude` still
+    // works there: EXCLUDE is only claimed once a bound has been completed.
+    expect(frame("ROWS exclude PRECEDING")).toEqual({
+      mode: "rows",
+      start: { kind: "preceding", offset: name("exclude") },
+      end: null,
+    });
+    // `using` and `group` are reserved — matched by value here, and never
+    // usable as bare names — so quoted they stay names, as they always were.
+    expect(stmt('SELECT "using", "group" FROM t;').columns).toEqual([col(name("using")), col(name("group"))]);
+  });
+
+  it("rejects USING with a direction or a non-operator, and EXCLUDE malformed or outside a frame", () => {
+    // PG's sortby takes ASC/DESC *or* USING, never both.
+    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING < DESC;")).toThrow(/Expected ";" but found "desc"/);
+    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING b;")).toThrow(/Expected an operator but found "b"/);
+    // `=>` is PG's named-argument token, not an operator, so it is no sort operator.
+    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING =>;")).toThrow(/Expected an operator but found "=>"/);
+    // PG's `OPERATOR(schema.op)` spelling is out of scope, as it is everywhere else here.
+    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING OPERATOR(pg_catalog.<);")).toThrow(
+      /Expected an operator but found "operator"/,
+    );
+    expect(() => sqlLite.parse("SELECT sum(x) OVER (ROWS 1 PRECEDING EXCLUDE) FROM t;")).toThrow(
+      /Expected "current row" or "group" or "ties" or "no others" but found "\)"/,
+    );
+    expect(() => sqlLite.parse("SELECT sum(x) OVER (ROWS 1 PRECEDING EXCLUDE NO) FROM t;")).toThrow(
+      /Expected "others" but found "\)"/,
+    );
+    // EXCLUDE belongs to the frame clause, so without one it has nowhere to go.
+    expect(() => sqlLite.parse("SELECT sum(x) OVER (ORDER BY id EXCLUDE TIES) FROM t;")).toThrow(
+      /Expected "\)" but found "exclude"/,
+    );
   });
 });
 
@@ -2261,6 +2556,168 @@ describe("SQL-lite data-modifying CTEs", () => {
     expect(() => sqlLite.parse("WITH c AS (SELECT 1) VALUES (1);")).toThrow(
       /WITH must attach to a SELECT, INSERT, UPDATE or DELETE/,
     );
+  });
+});
+
+// --- CTE materialization, SEARCH and CYCLE ---
+
+describe("SQL-lite CTE materialization, SEARCH and CYCLE", () => {
+  const ctes = (src: string) => (firstStmt(src) as any).with_;
+  // The CTE node for `WITH RECURSIVE t AS (SELECT 1) <tail> SELECT 1;`.
+  const tailed = (tail: string) => ctes(`WITH RECURSIVE t AS (SELECT 1) ${tail} SELECT 1;`)[0];
+  const one = sel({ columns: [col(num(1))] });
+
+  it("parses AS MATERIALIZED and AS NOT MATERIALIZED", () => {
+    expect(firstStmt("WITH a AS MATERIALIZED (SELECT 1) SELECT * FROM a;")).toEqual(
+      sel({
+        with_: [{ name: "a", columns: null, materialized: true, query: one }],
+        columns: [col(star())],
+        from: [tableFrom(["a"])],
+      }),
+    );
+    expect(ctes("WITH a (x) AS NOT MATERIALIZED (SELECT 1) SELECT 1;")).toEqual([
+      { name: "a", columns: ["x"], materialized: false, query: one },
+    ]);
+    // Each CTE in the list carries its own setting.
+    expect(
+      ctes("WITH a AS MATERIALIZED (SELECT 1), b AS (SELECT 1), c AS NOT MATERIALIZED (SELECT 1) SELECT 1;").map(
+        (c: any) => c.materialized,
+      ),
+    ).toEqual([true, undefined, false]);
+    // A data-modifying body takes the setting too.
+    expect(ctes("WITH d AS MATERIALIZED (DELETE FROM t RETURNING id) SELECT 1;")[0]).toMatchObject({
+      name: "d",
+      materialized: true,
+      query: { kind: "delete", table: ["t"] },
+    });
+  });
+
+  it("parses SEARCH DEPTH / BREADTH FIRST", () => {
+    expect(tailed("SEARCH DEPTH FIRST BY id SET ord")).toEqual({
+      name: "t",
+      columns: null,
+      query: one,
+      search: { order: "depth", by: ["id"], set: "ord" },
+    });
+    expect(tailed("SEARCH BREADTH FIRST BY a, b SET ord").search).toEqual({
+      order: "breadth",
+      by: ["a", "b"],
+      set: "ord",
+    });
+  });
+
+  it("parses CYCLE with and without the TO / DEFAULT mark values", () => {
+    expect(tailed("CYCLE id SET is_cycle USING path")).toEqual({
+      name: "t",
+      columns: null,
+      query: one,
+      cycle: { columns: ["id"], set: "is_cycle", mark: null, using: "path" },
+    });
+    expect(tailed("CYCLE a, b SET is_cycle TO 'Y' DEFAULT 'N' USING path").cycle).toEqual({
+      columns: ["a", "b"],
+      set: "is_cycle",
+      mark: { to: str("Y"), default: str("N") },
+      using: "path",
+    });
+    // Any literal will do for a mark value: numbers, booleans, NULL.
+    expect(tailed("CYCLE a SET c TO 1 DEFAULT 0 USING p").cycle.mark).toEqual({ to: num(1), default: num(0) });
+    expect(tailed("CYCLE a SET c TO true DEFAULT null USING p").cycle.mark).toEqual({
+      to: { kind: "bool", value: true },
+      default: { kind: "null" },
+    });
+  });
+
+  it("parses all three together, in PG's order, ahead of another CTE", () => {
+    const [t, u] = ctes(
+      "WITH RECURSIVE t (id) AS NOT MATERIALIZED (SELECT 1) SEARCH DEPTH FIRST BY id SET ord " +
+        "CYCLE id SET is_cycle USING path, u AS (SELECT 2) SELECT * FROM t;",
+    );
+    expect(t).toEqual({
+      name: "t",
+      columns: ["id"],
+      materialized: false,
+      query: one,
+      search: { order: "depth", by: ["id"], set: "ord" },
+      cycle: { columns: ["id"], set: "is_cycle", mark: null, using: "path" },
+    });
+    expect(u).toEqual({ name: "u", columns: null, query: sel({ columns: [col(num(2))] }) });
+    // The clauses ride on a CTE that leads DML just as well.
+    expect(firstStmt("WITH RECURSIVE t AS (SELECT 1) CYCLE id SET c USING p DELETE FROM x;").with_[0].cycle).toEqual({
+      columns: ["id"],
+      set: "c",
+      mark: null,
+      using: "p",
+    });
+  });
+
+  it("records SEARCH / CYCLE on a non-recursive CTE, as PG's grammar does", () => {
+    // PG rejects the clauses on a CTE that is not actually recursive in parse
+    // analysis, not in the grammar, so — like SELECT INTO — they are recorded
+    // wherever written. (The fixtures above are grammar-only for the same reason.)
+    expect(firstStmt("WITH t AS (SELECT 1) SEARCH DEPTH FIRST BY id SET ord SELECT 1;")).toMatchObject({
+      recursive: false,
+      with_: [{ name: "t", search: { order: "depth", by: ["id"], set: "ord" } }],
+    });
+  });
+
+  it("omits all three keys when none of the clauses is written", () => {
+    const [plain] = ctes("WITH a AS (SELECT 1) SELECT 1;");
+    expect(Object.keys(plain)).toEqual(["name", "columns", "query"]);
+  });
+
+  it("keeps every new keyword usable as a name", () => {
+    // None of `materialized`, `search`, `cycle`, `depth`, `breadth` or `first`
+    // is reserved: inside a CTE each is matched by value only within its own
+    // clause (after AS, or after the body's `)` and `search`), where no name
+    // could stand before.
+    const words = ["materialized", "search", "cycle", "depth", "breadth", "first"];
+    expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(name(w))));
+    for (const word of words) {
+      expect(ctes(`WITH ${word} AS (SELECT 1) SELECT * FROM ${word};`)).toEqual([
+        { name: word, columns: null, query: one },
+      ]);
+    }
+    // …including as the column names inside the clauses themselves.
+    expect(tailed("SEARCH DEPTH FIRST BY search, first SET depth CYCLE cycle SET breadth USING materialized")).toEqual({
+      name: "t",
+      columns: null,
+      query: one,
+      search: { order: "depth", by: ["search", "first"], set: "depth" },
+      cycle: { columns: ["cycle"], set: "breadth", mark: null, using: "materialized" },
+    });
+    // A CTE called `materialized` may itself be materialized.
+    expect(ctes("WITH materialized AS MATERIALIZED (SELECT 1) SELECT 1;")[0]).toMatchObject({
+      name: "materialized",
+      materialized: true,
+    });
+  });
+
+  it("rejects malformed materialization, SEARCH and CYCLE clauses", () => {
+    expect(() => sqlLite.parse("WITH a AS NOT (SELECT 1) SELECT 1;")).toThrow(/Expected "materialized" but found "\("/);
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) SEARCH FIRST BY id SET o SELECT 1;")).toThrow(
+      /Expected "depth" or "breadth" but found "first"/,
+    );
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) SEARCH DEPTH BY id SET o SELECT 1;")).toThrow(
+      /Expected "first by"/,
+    );
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) SEARCH DEPTH FIRST BY id SELECT 1;")).toThrow(
+      /Expected "set" but found "select"/,
+    );
+    // TO without DEFAULT, a missing USING, and a non-constant mark value.
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c TO 1 USING p SELECT 1;")).toThrow(
+      /Expected "default" but found "using"/,
+    );
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c SELECT 1;")).toThrow(
+      /Expected "using" but found "select"/,
+    );
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c TO x DEFAULT 0 USING p SELECT 1;")).toThrow(
+      /Expected a constant but found "x"/,
+    );
+    // PG's order is SEARCH then CYCLE; the reverse leaves SEARCH where the
+    // statement should start.
+    expect(() =>
+      sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c USING p SEARCH DEPTH FIRST BY id SET o SELECT 1;"),
+    ).toThrow(ParseError);
   });
 });
 
