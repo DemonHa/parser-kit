@@ -17722,6 +17722,282 @@
     ]
   },
   {
+    "source": "CREATE TEMP TABLE t (id int) ON COMMIT DELETE ROWS;",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "id",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 24
+                },
+                "end": {
+                  "row": 1,
+                  "col": 27
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 21
+              },
+              "end": {
+                "row": 1,
+                "col": 27
+              }
+            }
+          }
+        ],
+        "onCommit": "deleteRows",
+        "modifiers": [
+          "temp"
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 50
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE UNLOGGED TABLE IF NOT EXISTS s.t (id int, note text);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": true,
+        "name": [
+          "s",
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "id",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 44
+                },
+                "end": {
+                  "row": 1,
+                  "col": 47
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 41
+              },
+              "end": {
+                "row": 1,
+                "col": 47
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "note",
+            "dataType": {
+              "name": "text",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 54
+                },
+                "end": {
+                  "row": 1,
+                  "col": 58
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 49
+              },
+              "end": {
+                "row": 1,
+                "col": 58
+              }
+            }
+          }
+        ],
+        "modifiers": [
+          "unlogged"
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 59
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE GLOBAL TEMPORARY TABLE t (id int);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "id",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 36
+                },
+                "end": {
+                  "row": 1,
+                  "col": 39
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 33
+              },
+              "end": {
+                "row": 1,
+                "col": 39
+              }
+            }
+          }
+        ],
+        "modifiers": [
+          "global",
+          "temporary"
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 40
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE LOCAL TEMP TABLE snap AS SELECT 1 AS one;",
+    "ast": [
+      {
+        "kind": "createTableAs",
+        "ifNotExists": false,
+        "name": [
+          "snap"
+        ],
+        "columns": null,
+        "query": {
+          "kind": "select",
+          "with_": null,
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 39
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 40
+                  }
+                }
+              },
+              "alias": "one"
+            }
+          ],
+          "from": null,
+          "where": null,
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": null,
+          "limit": null,
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 32
+            },
+            "end": {
+              "row": 1,
+              "col": 47
+            }
+          }
+        },
+        "withData": null,
+        "modifiers": [
+          "local",
+          "temp"
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 47
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {

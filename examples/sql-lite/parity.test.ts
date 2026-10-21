@@ -207,6 +207,11 @@ const SUPPLEMENTAL = [
   "INSERT INTO t (a, b) VALUES (DEFAULT, 1), (2, DEFAULT);",
   "INSERT INTO t AS x (a) OVERRIDING SYSTEM VALUE VALUES (1) ON CONFLICT ON CONSTRAINT t_pkey DO UPDATE SET a = x.a + 1;",
   "INSERT INTO t OVERRIDING USER VALUE SELECT * FROM u ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING;",
+  // --- TEMPORARY, UNLOGGED and scoped CREATE TABLE ---
+  "CREATE TEMP TABLE t (id int) ON COMMIT DELETE ROWS;",
+  "CREATE UNLOGGED TABLE IF NOT EXISTS s.t (id int, note text);",
+  "CREATE GLOBAL TEMPORARY TABLE t (id int);",
+  "CREATE LOCAL TEMP TABLE snap AS SELECT 1 AS one;",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind
