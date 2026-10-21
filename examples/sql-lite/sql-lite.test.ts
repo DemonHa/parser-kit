@@ -1886,6 +1886,121 @@ describe("SQL-lite SELECT INTO and GROUP BY modifiers", () => {
   });
 });
 
+// --- ORDER BY USING & window frame EXCLUDE ---
+
+describe("SQL-lite ORDER BY USING and window frame EXCLUDE", () => {
+  const stmt = (src: string) => firstStmt(src) as any;
+  const orderBy = (src: string) => stmt(`SELECT a FROM t ORDER BY ${src};`).orderBy;
+  const frame = (src: string) => stmt(`SELECT sum(x) OVER (${src}) FROM t;`).columns[0].expr.frame;
+  const order = (expr: unknown, dir: string | null = null, nulls: string | null = null) => ({ expr, dir, nulls });
+  const using = (expr: unknown, op: string, nulls: string | null = null) => ({ expr, dir: null, using: op, nulls });
+
+  it("parses ORDER BY … USING op in place of ASC/DESC", () => {
+    expect(stmt("SELECT a FROM t ORDER BY a USING <;")).toEqual(
+      sel({ columns: [col(name("a"))], from: [tableFrom(["t"])], orderBy: [using(name("a"), "<")] }),
+    );
+    // NULLS still follows, and a USING item mixes freely with plain ones.
+    expect(orderBy("a USING > NULLS FIRST, b DESC")).toEqual([
+      using(name("a"), ">", "first"),
+      order(name("b"), "desc"),
+    ]);
+    // Any operator token is a sort operator, not just the comparison ones.
+    expect(orderBy("a USING ~<~")).toEqual([using(name("a"), "~<~")]);
+  });
+
+  it("takes USING wherever an ORDER BY list is, and omits the key otherwise", () => {
+    // Every sort list shares `orderItem`: aggregate, WITHIN GROUP and window.
+    expect(stmt("SELECT array_agg(a ORDER BY b USING >) FROM t;").columns[0].expr.orderBy).toEqual([
+      using(name("b"), ">"),
+    ]);
+    expect(stmt("SELECT rank() OVER (ORDER BY b USING <) FROM t;").columns[0].expr.orderBy).toEqual([
+      using(name("b"), "<"),
+    ]);
+    expect(
+      stmt("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b USING <) FROM t;").columns[0].expr.orderBy,
+    ).toEqual([using(name("b"), "<")]);
+    // Omit-when-absent: a plain item keeps exactly its three keys, so the AST
+    // golden's existing ORDER BY rows do not move.
+    expect(Object.keys(orderBy("a DESC")[0])).toEqual(["expr", "dir", "nulls"]);
+  });
+
+  it("parses a frame EXCLUDE clause after either frame shape", () => {
+    expect(frame("ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW")).toEqual({
+      mode: "rows",
+      start: { kind: "preceding", offset: num(1) },
+      end: { kind: "following", offset: num(1) },
+      exclude: "currentRow",
+    });
+    // The single-bound shorthand takes it too, and so does every mode.
+    expect(frame("GROUPS 1 PRECEDING EXCLUDE GROUP")).toEqual({
+      mode: "groups",
+      start: { kind: "preceding", offset: num(1) },
+      end: null,
+      exclude: "group",
+    });
+    expect(frame("RANGE CURRENT ROW EXCLUDE TIES").exclude).toBe("ties");
+    // NO OTHERS is the default spelled out; it is recorded, not dropped, so the
+    // AST still tells it apart from a frame with no EXCLUDE at all.
+    expect(frame("ROWS UNBOUNDED PRECEDING EXCLUDE NO OTHERS").exclude).toBe("noOthers");
+    expect("exclude" in frame("ROWS UNBOUNDED PRECEDING")).toBe(false);
+    // `parseFrame` is shared, so a named WINDOW definition takes it too.
+    expect(
+      stmt("SELECT rank() OVER w FROM t WINDOW w AS (ROWS 1 PRECEDING EXCLUDE TIES);").window[0].spec.frame,
+    ).toEqual({
+      mode: "rows",
+      start: { kind: "preceding", offset: num(1) },
+      end: null,
+      exclude: "ties",
+    });
+  });
+
+  it("keeps exclude / ties / others / no unreserved as names and aliases", () => {
+    expect(stmt("SELECT exclude, ties, others, no FROM t;").columns).toEqual([
+      col(name("exclude")),
+      col(name("ties")),
+      col(name("others")),
+      col(name("no")),
+    ]);
+    expect(stmt("SELECT a exclude, b ties FROM t;").columns).toEqual([
+      col(name("a"), "exclude"),
+      col(name("b"), "ties"),
+    ]);
+    expect(stmt("CREATE TABLE t (exclude int, ties text);").items.map((i: any) => i.name)).toEqual(["exclude", "ties"]);
+    // A frame offset is a full expression, so a column named `exclude` still
+    // works there: EXCLUDE is only claimed once a bound has been completed.
+    expect(frame("ROWS exclude PRECEDING")).toEqual({
+      mode: "rows",
+      start: { kind: "preceding", offset: name("exclude") },
+      end: null,
+    });
+    // `using` and `group` are reserved — matched by value here, and never
+    // usable as bare names — so quoted they stay names, as they always were.
+    expect(stmt('SELECT "using", "group" FROM t;').columns).toEqual([col(name("using")), col(name("group"))]);
+  });
+
+  it("rejects USING with a direction or a non-operator, and EXCLUDE malformed or outside a frame", () => {
+    // PG's sortby takes ASC/DESC *or* USING, never both.
+    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING < DESC;")).toThrow(/Expected ";" but found "desc"/);
+    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING b;")).toThrow(/Expected an operator but found "b"/);
+    // `=>` is PG's named-argument token, not an operator, so it is no sort operator.
+    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING =>;")).toThrow(/Expected an operator but found "=>"/);
+    // PG's `OPERATOR(schema.op)` spelling is out of scope, as it is everywhere else here.
+    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING OPERATOR(pg_catalog.<);")).toThrow(
+      /Expected an operator but found "operator"/,
+    );
+    expect(() => sqlLite.parse("SELECT sum(x) OVER (ROWS 1 PRECEDING EXCLUDE) FROM t;")).toThrow(
+      /Expected "current row" or "group" or "ties" or "no others" but found "\)"/,
+    );
+    expect(() => sqlLite.parse("SELECT sum(x) OVER (ROWS 1 PRECEDING EXCLUDE NO) FROM t;")).toThrow(
+      /Expected "others" but found "\)"/,
+    );
+    // EXCLUDE belongs to the frame clause, so without one it has nowhere to go.
+    expect(() => sqlLite.parse("SELECT sum(x) OVER (ORDER BY id EXCLUDE TIES) FROM t;")).toThrow(
+      /Expected "\)" but found "exclude"/,
+    );
+  });
+});
+
 // --- robustness ---
 
 describe("SQL-lite robustness", () => {
