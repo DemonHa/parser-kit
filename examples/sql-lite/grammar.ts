@@ -28,7 +28,7 @@ import {
 } from "@parser-kit/core";
 import { type SqlTokenType, sqlLexer } from "./lexer";
 
-// SQL-lite parses a slice of PostgreSQL DDL — CREATE TABLE (incl. TABLE AS,
+// SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
 // (enum, composite, RANGE) / [MATERIALIZED] VIEW / SEQUENCE / DOMAIN, ALTER
 // TABLE, DROP family, TRUNCATE, COMMENT ON — plus a DML core — SELECT (with
@@ -287,7 +287,13 @@ export type ColConstraint =
   | ({ kind: "primaryKey"; span: Span } & ConstraintAttrs)
   | ({ kind: "unique"; span: Span } & ConstraintAttrs)
   | ({ kind: "references"; table: string[]; columns: string[] | null; span: Span } & ForeignKeyTail & ConstraintAttrs)
-  | { kind: "check"; expr: Expr; span: Span };
+  | { kind: "check"; expr: Expr; span: Span }
+  // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(sequence options)]`;
+  // `options` is present only when the parenthesised list is.
+  | { kind: "identity"; generated: "always" | "by default"; options?: SequenceOption[]; span: Span }
+  // `GENERATED ALWAYS AS (expr) STORED` — a stored generated column.
+  | { kind: "generated"; expr: Expr; span: Span }
+  | { kind: "collate"; collation: string[]; span: Span };
 
 export type ColumnDef = {
   kind: "column";
@@ -610,8 +616,7 @@ export type CreateTableAs = {
   options?: RelationOption[];
   onCommit?: "preserveRows" | "deleteRows" | "drop";
   tablespace?: string;
-  // As on `createTable`: the CREATE prefix modifiers, omitted when absent —
-  // which, until CREATE_PREFIX_WORDS names one, is always.
+  // As on `createTable`: the CREATE prefix modifiers, omitted when absent.
   modifiers?: string[];
   span: Span;
 };
@@ -633,6 +638,10 @@ export type FunctionArg = {
   type: ColType;
   defaultValue: Expr | null;
 };
+
+// A routine's argument list as DROP identifies it, and an aggregate's as CREATE,
+// ALTER and DROP AGGREGATE parse it: `(*)` (aggregates only) is `star` with no args.
+export type DropSignature = { star: boolean; args: FunctionArg[] };
 
 // `RETURNS [SETOF] type` or `RETURNS TABLE (col type, …)`.
 export type FunctionReturns =
@@ -815,8 +824,8 @@ export type Vacuum = { kind: "vacuum"; options: RelationOption[]; tables: Mainte
 
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
-  // UNLOGGED family). Omitted, not null, when there are none — and no word
-  // qualifies yet (see CREATE_PREFIX_WORDS), so today it is always absent.
+  // UNLOGGED family, see parseTempPrefix), in source order. Omitted, not null,
+  // when there are none.
   // The clauses after the element list follow the same rule: each key is
   // present only when its clause is written (see parseTableClauses).
   // `partitionOf` marks a `PARTITION OF parent … FOR VALUES …` table, whose
@@ -893,9 +902,16 @@ export type Stmt =
       span: Span;
     }
   | { kind: "alterSequence"; ifExists: boolean; name: string[]; action: AlterSequenceAction; span: Span }
-  // Generalized DROP: `DROP {TABLE|VIEW|INDEX|TYPE|SEQUENCE|SCHEMA}
-  // [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `objectType` is the
-  // folded keyword; `behavior` is the trailing CASCADE/RESTRICT (null when absent).
+  // Generalized DROP: `DROP <object> [CONCURRENTLY] [IF EXISTS] name[, …]
+  // [CASCADE|RESTRICT]`. `objectType` is the folded keyword (`"materialized
+  // view"` for the two-word one); `behavior` is the trailing CASCADE/RESTRICT
+  // (null when absent, and always null where PG takes none: DATABASE, ROLE,
+  // USER). CONCURRENTLY is only accepted on the original six object kinds.
+  // The remaining keys belong to one object kind each and are omitted elsewhere:
+  // - `signatures` (FUNCTION / PROCEDURE / AGGREGATE): one entry per name, null
+  //   where a function or procedure name carries no argument list;
+  // - `table` (TRIGGER): the `ON table` the trigger belongs to;
+  // - `force` (DATABASE): present, as true, only when `(FORCE)` is written.
   | {
       kind: "drop";
       objectType: string;
@@ -903,6 +919,9 @@ export type Stmt =
       ifExists: boolean;
       names: string[][];
       behavior: "cascade" | "restrict" | null;
+      signatures?: (DropSignature | null)[];
+      table?: string[];
+      force?: true;
       span: Span;
     }
   // `TRUNCATE [TABLE] name[, …] [RESTART|CONTINUE IDENTITY] [CASCADE|RESTRICT]`.
@@ -2790,6 +2809,61 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
       return { kind: "check", expr: ctx.parse(parenExpr), span: ctx.spanFrom(start) };
     },
   },
+  // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(options)]` or `GENERATED
+  // ALWAYS AS (expr) STORED`. The handler owns all of its lookahead, so one key
+  // covers both forms. As in PG, BY DEFAULT is only for identity columns, and
+  // STORED is required (PG 18's VIRTUAL and bare form are not parsed); PG's
+  // identity-only `SEQUENCE NAME` option is not parsed yet. GENERATED, ALWAYS,
+  // IDENTITY and STORED stay unreserved: they are matched only here, in a
+  // column's constraint list.
+  generated: {
+    parse: (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw("generated"));
+      const whenStart = ctx.position();
+      let generated: "always" | "by default";
+      if (ctx.eat("ident", "always") !== null) {
+        generated = "always";
+      } else if (ctx.is("ident", "by")) {
+        ctx.parse(kwseq("by", "default"));
+        generated = "by default";
+      } else {
+        return ctx.croak(`Expected ${quoteList(["always", "by default"])} but found ${describeFound(ctx.peek())}`);
+      }
+      const whenEnd = ctx.lastEnd();
+      ctx.parse(kw("as"));
+      if (ctx.eat("ident", "identity") !== null) {
+        if (ctx.eat("punc", "(") === null) return { kind: "identity", generated, span: ctx.spanFrom(start) };
+        // At least one option, as in PG: an empty `IDENTITY ()` is an error.
+        const options = parseSequenceOptions(ctx);
+        if (options.length === 0) ctx.croak(`Expected a sequence option but found ${describeFound(ctx.peek())}`);
+        expectClose(ctx);
+        return { kind: "identity", generated, options, span: ctx.spanFrom(start) };
+      }
+      if (!ctx.is("punc", "(")) {
+        return ctx.croak(`Expected ${quoteList(["identity", "("])} but found ${describeFound(ctx.peek())}`);
+      }
+      const expr = ctx.parse(parenExpr);
+      ctx.parse(kw("stored"));
+      // Judged once the clause is whole and pinned to the BY DEFAULT, as PG does.
+      if (generated !== "always") {
+        return ctx.croak("for a generated column, GENERATED ALWAYS must be specified", whenStart, whenEnd);
+      }
+      return { kind: "generated", expr, span: ctx.spanFrom(start) };
+    },
+  },
+  // Column-level `COLLATE name`. `collate` is reserved, so it cannot be a type
+  // word and, straight after the type, it can only be this. After a DEFAULT,
+  // though, the expression's COLLATE postfix takes it first: `DEFAULT 'a'
+  // COLLATE "C"` collates the default, where PG (whose DEFAULT operand has no
+  // COLLATE) would collate the column. Write the COLLATE before the DEFAULT.
+  collate: {
+    parse: (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw("collate"));
+      return { kind: "collate", collation: ctx.parse(qualName), span: ctx.spanFrom(start) };
+    },
+  },
 };
 
 const COLUMN_CONSTRAINT_EXPECTED = joinExpected(COLUMN_CONSTRAINTS);
@@ -3947,7 +4021,9 @@ const ARG_MODES: ReadonlySet<string> = new Set(["in", "out", "inout", "variadic"
 
 // One `[mode] [name] type [DEFAULT expr]` argument. See `FunctionArg` for the
 // mode/name recovery heuristic.
-function parseFunctionArg(ctx: ParseContext<SqlTokenType>): FunctionArg {
+// `allowDefault` is false for DROP, whose signatures name types only: PG
+// refuses a default there, so one is croaked at its own DEFAULT / `=`.
+function parseFunctionArg(ctx: ParseContext<SqlTokenType>, allowDefault = true): FunctionArg {
   let mode: FunctionArg["mode"] = null;
   const cur = ctx.peek();
   if (cur !== null && cur.type === "ident" && ARG_MODES.has(cur.value)) {
@@ -3981,19 +4057,30 @@ function parseFunctionArg(ctx: ParseContext<SqlTokenType>): FunctionArg {
   }
   const type = ctx.parse(typeRef);
   let defaultValue: Expr | null = null;
+  if (!allowDefault && (ctx.is("ident", "default") || ctx.is("op", "="))) {
+    ctx.croak(`A DROP signature takes no argument defaults, but found ${describeFound(ctx.peek())}`);
+  }
   if (ctx.eat("ident", "default") !== null || ctx.eat("op", "=") !== null) {
     defaultValue = ctx.parse(expression);
   }
   return { mode, name, type, defaultValue };
 }
 
-const signatureArg = custom<FunctionArg, SqlTokenType>(parseFunctionArg, {
-  expected: "a function argument",
-  first: [{ type: "ident" }, { type: "qident" }],
-});
-
-// The parenthesised argument signature — possibly empty `()`.
-const functionArgs = delimited(P("("), P(")"), P(","), signatureArg, { interleaved: true });
+// The parenthesised argument signature — possibly empty `()`. CREATE takes
+// argument defaults; DROP's `dropFunctionArgs` does not.
+const signatureArgs = (allowDefault: boolean) =>
+  delimited(
+    P("("),
+    P(")"),
+    P(","),
+    custom<FunctionArg, SqlTokenType>((ctx) => parseFunctionArg(ctx, allowDefault), {
+      expected: "a function argument",
+      first: [{ type: "ident" }, { type: "qident" }],
+    }),
+    { interleaved: true },
+  );
+const functionArgs = signatureArgs(true);
+const dropFunctionArgs = signatureArgs(false);
 
 // `RETURNS [SETOF] type` | `RETURNS TABLE (col type, …)`, or null when absent.
 function parseFunctionReturns(ctx: ParseContext<SqlTokenType>): FunctionReturns | null {
@@ -4182,14 +4269,15 @@ function parseAggregateBody(ctx: ParseContext<SqlTokenType>, start: Position, or
 }
 
 // An aggregate's `( * )` or `( type, … )` signature, its `(` not yet consumed.
-function parseAggregateSignature(ctx: ParseContext<SqlTokenType>): { star: boolean; args: FunctionArg[] } {
+// DROP passes its default-free `dropFunctionArgs` as `args`.
+function parseAggregateSignature(ctx: ParseContext<SqlTokenType>, args = functionArgs): DropSignature {
   if (ctx.is("punc", "(") && ctx.peekAhead(1)?.type === "op" && ctx.peekAhead(1)?.value === "*") {
     ctx.next(); // "("
     ctx.next(); // "*"
     expectClose(ctx);
     return { star: true, args: [] };
   }
-  return { star: false, args: ctx.parse(functionArgs) };
+  return { star: false, args: ctx.parse(args) };
 }
 
 // One trigger event: INSERT / DELETE / TRUNCATE, or UPDATE with an optional
@@ -4250,6 +4338,38 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
   };
 }
 
+// The words PG's `OptTemp` puts between CREATE and TABLE, and its
+// `OptTempTableName` between SELECT's INTO and the target. Both allow at most one
+// of `temp`/`temporary`/`unlogged`, with the scope words `global`/`local` legal
+// only ahead of a `temp`/`temporary`, never on their own and never repeated.
+const TEMP_SCOPE_WORDS: ReadonlySet<string> = new Set(["global", "local"]);
+const TEMP_WORDS: ReadonlySet<string> = new Set(["temp", "temporary"]);
+const TABLE_STORAGE_WORDS: ReadonlySet<string> = new Set(["temp", "temporary", "unlogged"]);
+
+// `[{GLOBAL | LOCAL} {TEMP | TEMPORARY} | TEMP | TEMPORARY | UNLOGGED]` after
+// CREATE, returned in source order. No CREATE target leads with one of these
+// words, so they are claimed without looking past them; a scope word must be
+// followed by a temp word, and a second storage word is left for the caller's
+// `"table"` check to reject.
+function parseTempPrefix(ctx: ParseContext<SqlTokenType>): string[] {
+  const head = ctx.peek();
+  if (head?.type !== "ident") return [];
+  if (TEMP_SCOPE_WORDS.has(head.value)) {
+    ctx.next();
+    const temp = ctx.peek();
+    if (temp?.type !== "ident" || !TEMP_WORDS.has(temp.value)) {
+      return ctx.croak(`Expected ${quoteList([...TEMP_WORDS])} but found ${describeFound(temp)}`);
+    }
+    ctx.next();
+    return [head.value, temp.value];
+  }
+  if (TABLE_STORAGE_WORDS.has(head.value)) {
+    ctx.next();
+    return [head.value];
+  }
+  return [];
+}
+
 // The CREATE targets split in two, because only some of them accept `OR
 // REPLACE` and the two halves consume their lead word at different moments.
 //
@@ -4257,8 +4377,8 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
 // node's span still opens on `TABLE` / `INDEX` / …. Every handler is offered the
 // position just after CREATE and the prefix-modifier bag, but only `table` reads
 // them — the others build their own span from their own keyword and drop the
-// bag. A word added to CREATE_PREFIX_WORDS is therefore silently swallowed for
-// everything but TABLE, so widen those handlers in the same breath.
+// bag, which is safe only because createStmt refuses modifiers ahead of any
+// target but TABLE. Widen that check along with any handler that learns them.
 const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   table: { parse: createTableRest },
   // `[UNIQUE] INDEX` can lead with either word, so it takes two keys. They share
@@ -4317,20 +4437,13 @@ for (const target of SCHEMA_REPLACEABLE_TARGETS) {
   if (!SCHEMA_ELEMENT_TARGETS.includes(target)) throw new Error(`Schema element target "${target}" is not admitted`);
 }
 
-// Prefix modifier words between CREATE and its target — PG's TEMP / TEMPORARY /
-// UNLOGGED / GLOBAL / LOCAL family. None of them is spelled yet, so the loop
-// below never runs and `modifiers` is always empty; what ships now is the seam,
-// so that adding those words is an entry here and a handler widening rather than
-// surgery on `createTableRest`, which several other changes are queued against.
-// Listing a word here makes it a modifier rather than a candidate target lead.
-const CREATE_PREFIX_WORDS = new Set<string>();
-
 // After CREATE: an optional `OR REPLACE`, then one of the objects that permit it
 // (VIEW / MATERIALIZED VIEW / FUNCTION / AGGREGATE / TRIGGER) — or, with no such
-// prefix, any prefix modifiers followed by one of the remaining keyword-led
-// targets (TABLE / [UNIQUE] INDEX / TYPE / SEQUENCE / DOMAIN / DATABASE /
-// SCHEMA / EXTENSION / TABLESPACE). `OR REPLACE` before a non-replaceable
-// object croaks.
+// prefix, one of the remaining keyword-led targets (TABLE / [UNIQUE] INDEX /
+// TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION / TABLESPACE), TABLE
+// alone taking the TEMP / UNLOGGED prefix. `OR REPLACE` before a non-replaceable
+// object croaks, as does a prefix before anything but TABLE — PG's TEMP VIEW and
+// TEMP SEQUENCE are not parsed.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -4349,13 +4462,11 @@ const createStmt = custom<Stmt, SqlTokenType>(
       return ctx.croak(`Expected ${REPLACEABLE_CREATE_EXPECTED} but found ${describeFound(ctx.peek())}`);
     }
     // Nothing was consumed since `tailStart` — OR REPLACE never reaches here —
-    // so a target with no modifiers spans exactly as it did before.
-    const modifiers: string[] = [];
-    while (true) {
-      const word = ctx.peek();
-      if (word === null || word.type !== "ident" || !CREATE_PREFIX_WORDS.has(word.value)) break;
-      ctx.next();
-      modifiers.push(word.value);
+    // so a target with no modifiers spans exactly as it did before, and one with
+    // them spans from its first modifier.
+    const modifiers = parseTempPrefix(ctx);
+    if (modifiers.length > 0 && !ctx.is("ident", "table")) {
+      return ctx.croak(`Expected "table" but found ${describeFound(ctx.peek())}`);
     }
     return dispatch(PLAIN_CREATE, PLAIN_CREATE_EXPECTED, ctx, tailStart, modifiers);
   },
@@ -4962,37 +5073,145 @@ const dropBehavior = optional(oneOf(kw("cascade"), kw("restrict"))).map(
   (n) => (n?.value ?? null) as "cascade" | "restrict" | null,
 );
 
-// The object kinds a bare DROP can target. Each is an unreserved keyword matched
-// by value; `table` is reserved but still matches here via `kw`.
-const dropObjectType = oneOf(kw("table"), kw("view"), kw("index"), kw("type"), kw("sequence"), kw("schema")).map(
-  (n) => n.value,
+// `DROP <object> …`, dispatched on the object keyword like ALTER. Every lead
+// word is matched by value, so none of them stops being usable as a name;
+// `table` and `user` are reserved but match here all the same.
+type DropStmt = Extract<Stmt, { kind: "drop" }>;
+type DropEntry = DispatchEntry<Stmt, [Position]>;
+
+// The `[IF EXISTS] item[, …]` run shared by every DROP form, with each item
+// already shaped into a `names` entry by `item`.
+function parseDropNames<T>(ctx: ParseContext<SqlTokenType>, item: Rule<T, SqlTokenType>) {
+  const ifExists = parseIfExists(ctx);
+  return { ifExists, items: ctx.parse(sepBy(item, P(","))) };
+}
+
+// The node every DROP form builds; `extra` carries the per-kind keys, which are
+// omitted when absent so the original object kinds keep their shape.
+const dropNode = (
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  objectType: string,
+  fields: Pick<DropStmt, "concurrently" | "ifExists" | "names" | "behavior">,
+  extra: Pick<DropStmt, "signatures" | "table" | "force"> = {},
+): Stmt => ({ kind: "drop", objectType, ...fields, ...extra, span: ctx.spanFrom(start) });
+
+const unqualName = nameWord.map((n) => [n]);
+
+// `DROP kind [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `lead`
+// is the object keyword(s) consumed before the list. CONCURRENTLY is meant for
+// INDEX but stays accepted on the original six kinds, as it always was.
+const listDrop = (
+  objectType: string,
+  name: Rule<string[], SqlTokenType>,
+  opts: { lead?: Rule<unknown, SqlTokenType>; concurrently?: boolean; behavior?: boolean } = {},
+): DropEntry => ({
+  parse: (ctx, start) => {
+    if (opts.lead !== undefined) ctx.parse(opts.lead);
+    else ctx.next(); // the object keyword
+    const concurrently = opts.concurrently === true && ctx.eat("ident", "concurrently") !== null;
+    const { ifExists, items: names } = parseDropNames(ctx, name);
+    const behavior = opts.behavior === false ? null : ctx.parse(dropBehavior);
+    return dropNode(ctx, start, objectType, { concurrently, ifExists, names, behavior });
+  },
+});
+
+type RoutineRef = { name: string[]; signature: DropSignature | null };
+
+// A function or procedure name, with its argument list when one is written.
+const routineRef = custom<RoutineRef, SqlTokenType>(
+  (ctx) => {
+    const name = ctx.parse(qualName);
+    const signature = ctx.is("punc", "(") ? { star: false, args: ctx.parse(dropFunctionArgs) } : null;
+    return { name, signature };
+  },
+  { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
 );
 
-const dropStmt = seq(
-  skip(kw("drop")),
-  field("objectType", dropObjectType),
-  // CONCURRENTLY is only meaningful for DROP INDEX, but we accept it after any
-  // object kind; it precedes IF EXISTS (PG order).
-  field(
-    "concurrently",
-    optional(kw("concurrently")).map((x) => x !== null),
-  ),
-  field(
-    "ifExists",
-    optional(attempt(kwseq("if", "exists"))).map((x) => x !== null),
-  ),
-  field("names", sepBy(qualName, P(","))),
-  field("behavior", dropBehavior),
-).map(
-  ({ objectType, concurrently, ifExists, names, behavior }, span): Stmt => ({
-    kind: "drop",
-    objectType,
-    concurrently,
-    ifExists,
-    names,
-    behavior,
-    span,
-  }),
+// An aggregate name and its required `(*)` / `(type, …)` signature, which PG
+// never lets be empty: a zero-argument aggregate is spelled `(*)`.
+const aggregateRef = custom<{ name: string[]; signature: DropSignature }, SqlTokenType>(
+  (ctx) => {
+    const name = ctx.parse(qualName);
+    const close = ctx.peekAhead(1);
+    if (ctx.is("punc", "(") && close?.type === "punc" && close.value === ")") {
+      ctx.next(); // "("
+      ctx.croak(`Expected "*" or a function argument but found ${describeFound(close)}`);
+    }
+    return { name, signature: parseAggregateSignature(ctx, dropFunctionArgs) };
+  },
+  { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
+);
+
+// `DROP {FUNCTION|PROCEDURE|AGGREGATE} [IF EXISTS] name [(args)][, …]
+// [CASCADE|RESTRICT]`; `signatures` runs parallel to `names`.
+const routineDrop = (objectType: string, ref: Rule<RoutineRef, SqlTokenType>): DropEntry => ({
+  parse: (ctx, start) => {
+    ctx.next(); // the object keyword
+    const { ifExists, items } = parseDropNames(ctx, ref);
+    const behavior = ctx.parse(dropBehavior);
+    const names = items.map((i) => i.name);
+    const signatures = items.map((i) => i.signature);
+    return dropNode(ctx, start, objectType, { concurrently: false, ifExists, names, behavior }, { signatures });
+  },
+});
+
+const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
+  table: listDrop("table", qualName, { concurrently: true }),
+  view: listDrop("view", qualName, { concurrently: true }),
+  index: listDrop("index", qualName, { concurrently: true }),
+  type: listDrop("type", qualName, { concurrently: true }),
+  sequence: listDrop("sequence", qualName, { concurrently: true }),
+  schema: listDrop("schema", qualName, { concurrently: true }),
+  materialized: listDrop("materialized view", qualName, { lead: kwseq("materialized", "view") }),
+  function: routineDrop("function", routineRef),
+  procedure: routineDrop("procedure", routineRef),
+  aggregate: routineDrop("aggregate", aggregateRef),
+  // `DROP TRIGGER [IF EXISTS] name ON table [CASCADE|RESTRICT]` — one trigger.
+  trigger: {
+    parse: (ctx, start) => {
+      ctx.next(); // TRIGGER
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(nameWord);
+      ctx.parse(kw("on"));
+      const table = ctx.parse(qualName);
+      const behavior = ctx.parse(dropBehavior);
+      return dropNode(ctx, start, "trigger", { concurrently: false, ifExists, names: [[name]], behavior }, { table });
+    },
+  },
+  domain: listDrop("domain", qualName),
+  extension: listDrop("extension", unqualName),
+  // `DROP DATABASE [IF EXISTS] name [[WITH] (FORCE[, …])]` — one database, and
+  // no CASCADE / RESTRICT. FORCE is PG's only option, so the list holds just it.
+  database: {
+    parse: (ctx, start) => {
+      ctx.next(); // DATABASE
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(nameWord);
+      const force = ctx.eat("ident", "with") !== null || ctx.is("punc", "(");
+      if (force) {
+        if (ctx.eat("punc", "(") === null) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+        ctx.parse(sepBy(kw("force"), P(",")));
+        expectClose(ctx);
+      }
+      const fields = { concurrently: false, ifExists, names: [[name]], behavior: null };
+      return dropNode(ctx, start, "database", fields, force ? { force } : {});
+    },
+  },
+  role: listDrop("role", unqualName, { behavior: false }),
+  // USER only; `DROP USER MAPPING` is not supported and reads as a user named
+  // `mapping` followed by stray words.
+  user: listDrop("user", unqualName, { behavior: false }),
+};
+const DROP_TARGET_EXPECTED = keyList(DROP_TARGETS);
+
+const dropStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("drop"));
+    return dispatch(DROP_TARGETS, DROP_TARGET_EXPECTED, ctx, start);
+  },
+  { expected: '"drop"', first: [{ type: "ident", value: "drop" }] },
 );
 
 const truncateStmt = seq(
@@ -5966,17 +6185,9 @@ const fromClause = sepBy(joinTail, P(","));
 
 // --- SELECT core + set-ops + WITH ---
 
-// The words PG's `OptTempTableName` puts between INTO and the target. Its nine
-// productions allow at most one of `temp`/`temporary`/`unlogged` — two of them
-// take none at all — with the scope words `global`/`local` legal only ahead of a
-// `temp`/`temporary`, never on their own and never repeated.
-const INTO_SCOPE_WORDS: ReadonlySet<string> = new Set(["global", "local"]);
-const INTO_TEMP_WORDS: ReadonlySet<string> = new Set(["temp", "temporary"]);
-const INTO_STORAGE_WORDS: ReadonlySet<string> = new Set(["temp", "temporary", "unlogged"]);
-
-// None of those words is reserved, so one counts as a modifier only when the
-// token past it can still start the target: an unreserved name, a quoted one,
-// or the reserved `table` noise word.
+// None of the TEMP_SCOPE_WORDS / TABLE_STORAGE_WORDS is reserved, so after INTO
+// one counts as a modifier only when the token past it can still start the
+// target: an unreserved name, a quoted one, or the reserved `table` noise word.
 const startsIntoTarget = (tok: Token<SqlTokenType> | null): boolean =>
   tok !== null &&
   (tok.type === "qident" || (tok.type === "ident" && (!RESERVED.has(tok.value) || tok.value === "table")));
@@ -6001,14 +6212,14 @@ const intoClause = custom<SelectInto, SqlTokenType>(
     if (
       head?.type === "ident" &&
       second?.type === "ident" &&
-      INTO_SCOPE_WORDS.has(head.value) &&
-      INTO_TEMP_WORDS.has(second.value) &&
+      TEMP_SCOPE_WORDS.has(head.value) &&
+      TEMP_WORDS.has(second.value) &&
       startsIntoTarget(ctx.peekAhead(2))
     ) {
       modifiers.push(head.value, second.value);
       ctx.next(); // global / local
       ctx.next(); // temp / temporary
-    } else if (head?.type === "ident" && INTO_STORAGE_WORDS.has(head.value) && startsIntoTarget(second)) {
+    } else if (head?.type === "ident" && TABLE_STORAGE_WORDS.has(head.value) && startsIntoTarget(second)) {
       modifiers.push(head.value);
       ctx.next(); // the storage word
     }

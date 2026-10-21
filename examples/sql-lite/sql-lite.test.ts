@@ -512,6 +512,147 @@ describe("SQL-lite DROP family & TRUNCATE", () => {
   });
 });
 
+// --- DROP: the remaining object types ---
+
+describe("SQL-lite DROP object types", () => {
+  const drop = (text: string) => firstStmt(text) as Extract<Stmt, { kind: "drop" }>;
+  const arg = (type: string, extra: Record<string, unknown> = {}) => ({
+    mode: null,
+    name: null,
+    type: { name: type, args: [], array: false },
+    defaultValue: null,
+    ...extra,
+  });
+
+  it("drops functions and procedures with optional signatures", () => {
+    expect(drop("DROP FUNCTION IF EXISTS f(int, double precision), s.g, h() CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "function",
+      concurrently: false,
+      ifExists: true,
+      names: [["f"], ["s", "g"], ["h"]],
+      behavior: "cascade",
+      signatures: [{ star: false, args: [arg("int"), arg("double precision")] }, null, { star: false, args: [] }],
+    });
+    expect(drop("DROP PROCEDURE p(IN a int, OUT b text) RESTRICT;")).toMatchObject({
+      objectType: "procedure",
+      names: [["p"]],
+      behavior: "restrict",
+      signatures: [
+        { star: false, args: [arg("int", { mode: "in", name: "a" }), arg("text", { mode: "out", name: "b" })] },
+      ],
+    });
+  });
+
+  it("drops aggregates by their (*) or typed signature", () => {
+    expect(drop("DROP AGGREGATE IF EXISTS myavg(*), s.agg(int);")).toEqual({
+      kind: "drop",
+      objectType: "aggregate",
+      concurrently: false,
+      ifExists: true,
+      names: [["myavg"], ["s", "agg"]],
+      behavior: null,
+      signatures: [
+        { star: true, args: [] },
+        { star: false, args: [arg("int")] },
+      ],
+    });
+  });
+
+  it("drops a trigger from its table", () => {
+    expect(drop("DROP TRIGGER IF EXISTS trg ON s.t CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "trigger",
+      concurrently: false,
+      ifExists: true,
+      names: [["trg"]],
+      behavior: "cascade",
+      table: ["s", "t"],
+    });
+  });
+
+  it("drops a database, with and without FORCE", () => {
+    const base = { kind: "drop", objectType: "database", concurrently: false, names: [["db"]], behavior: null };
+    expect(drop("DROP DATABASE db;")).toEqual({ ...base, ifExists: false });
+    expect(drop("DROP DATABASE IF EXISTS db WITH (FORCE);")).toEqual({ ...base, ifExists: true, force: true });
+    expect(drop("DROP DATABASE db (force, FORCE);")).toEqual({ ...base, ifExists: false, force: true });
+  });
+
+  it("drops domains, extensions, materialized views, roles and users", () => {
+    expect(drop("DROP DOMAIN IF EXISTS s.d, e RESTRICT;")).toEqual({
+      kind: "drop",
+      objectType: "domain",
+      concurrently: false,
+      ifExists: true,
+      names: [["s", "d"], ["e"]],
+      behavior: "restrict",
+    });
+    expect(drop("DROP EXTENSION hstore, pgcrypto CASCADE;")).toMatchObject({
+      objectType: "extension",
+      names: [["hstore"], ["pgcrypto"]],
+      behavior: "cascade",
+    });
+    expect(drop("DROP MATERIALIZED VIEW IF EXISTS s.mv;")).toMatchObject({
+      objectType: "materialized view",
+      ifExists: true,
+      names: [["s", "mv"]],
+    });
+    expect(drop("DROP ROLE a, b;")).toMatchObject({ objectType: "role", names: [["a"], ["b"]], behavior: null });
+    expect(drop("DROP USER IF EXISTS u;")).toMatchObject({ objectType: "user", ifExists: true, names: [["u"]] });
+  });
+
+  it("omits the per-kind keys on the original object kinds", () => {
+    const stmt = drop("DROP VIEW v CASCADE;");
+    expect(stmt).not.toHaveProperty("signatures");
+    expect(stmt).not.toHaveProperty("table");
+    expect(stmt).not.toHaveProperty("force");
+  });
+
+  it("keeps the DROP object words unreserved as names", () => {
+    expect((firstStmt("SELECT function, procedure, aggregate, trigger, domain FROM t;") as any).columns).toHaveLength(
+      5,
+    );
+    expect((firstStmt("SELECT database, extension, materialized, role, force FROM t;") as any).columns).toHaveLength(5);
+    expect(drop("DROP FUNCTION function(procedure int);")).toMatchObject({
+      names: [["function"]],
+      signatures: [{ star: false, args: [arg("int", { name: "procedure" })] }],
+    });
+    expect(drop("DROP TRIGGER trigger ON aggregate;")).toMatchObject({ names: [["trigger"]], table: ["aggregate"] });
+    expect(drop("DROP DATABASE force;")).toMatchObject({ names: [["force"]] });
+    expect(drop("DROP ROLE role;")).toMatchObject({ names: [["role"]] });
+    expect(drop("DROP EXTENSION extension;")).toMatchObject({ names: [["extension"]] });
+    expect(drop("DROP DOMAIN domain;")).toMatchObject({ names: [["domain"]] });
+    expect(drop("DROP TABLE database, materialized;")).toMatchObject({ names: [["database"], ["materialized"]] });
+    // `if` is a name wherever `exists` does not follow it.
+    expect(drop("DROP DATABASE if;")).toMatchObject({ ifExists: false, names: [["if"]] });
+    expect(drop("DROP TRIGGER if ON t;")).toMatchObject({ ifExists: false, names: [["if"]] });
+  });
+
+  it("rejects malformed DROP statements", () => {
+    const fails = (text: string) => () => sqlLite.parse(text);
+    expect(fails("DROP TRIGGER t;")).toThrow(/Expected "on" but found ";"/);
+    expect(fails("DROP frobnicate x;")).toThrow(
+      /Expected "table", "view", "index", "type", "sequence", "schema", "materialized", "function", "procedure", "aggregate", "trigger", "domain", "extension", "database", "role" or "user" but found "frobnicate"/,
+    );
+    expect(fails("DROP AGGREGATE a;")).toThrow(/Expected "\(" but found ";"/);
+    expect(fails("DROP MATERIALIZED t;")).toThrow(/Expected "view" but found "t"/);
+    expect(fails("DROP DATABASE d WITH force;")).toThrow(/Expected "\(" but found "force"/);
+    expect(fails("DROP DATABASE d (cascade);")).toThrow(/Expected "force" but found "cascade"/);
+    // PG takes no CASCADE / RESTRICT on roles or databases.
+    expect(fails("DROP ROLE r CASCADE;")).toThrow(/Expected ";" but found "cascade"/);
+    expect(fails("DROP DATABASE a, b;")).toThrow(/Expected ";" but found ","/);
+    expect(fails("DROP DATABASE d WITH ();")).toThrow(/Expected "force" but found "\)"/);
+    // CONCURRENTLY stays an INDEX-family word; trigger names are unqualified.
+    expect(fails("DROP FUNCTION CONCURRENTLY f;")).toThrow(/Expected ";" but found "f"/);
+    expect(fails("DROP TRIGGER s.trg ON t;")).toThrow(/Expected "on" but found "\."/);
+    // Signatures name types only: no `*` outside aggregates, no defaults, no empty aggregate list.
+    expect(fails("DROP FUNCTION f(*);")).toThrow(/Expected a name but found "\*"/);
+    expect(fails("DROP FUNCTION f(a int = 2) CASCADE;")).toThrow(/takes no argument defaults, but found "=" \(1:22\)/);
+    expect(fails("DROP AGGREGATE a(x int DEFAULT 1);")).toThrow(/takes no argument defaults, but found "default"/);
+    expect(fails("DROP AGGREGATE a();")).toThrow(/Expected "\*" or a function argument but found "\)"/);
+  });
+});
+
 // --- Phase 7: more CREATE objects ---
 
 describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
@@ -5464,6 +5605,125 @@ describe("SQL-lite PREPARE and EXECUTE", () => {
   });
 });
 
+// --- generated identity and stored columns and column collation ---
+
+describe("SQL-lite generated identity and stored columns and column collation", () => {
+  const colConstraints = (src: string) =>
+    (firstStmt(`CREATE TABLE t (c int ${src});`) as any).items[0].constraints as Record<string, unknown>[];
+  const bad = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int ${src});`);
+
+  it("parses GENERATED ALWAYS and BY DEFAULT AS IDENTITY, with and without options", () => {
+    expect(colConstraints("GENERATED ALWAYS AS IDENTITY")).toEqual([{ kind: "identity", generated: "always" }]);
+    expect(colConstraints("GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY")).toEqual([
+      { kind: "identity", generated: "by default" },
+      { kind: "primaryKey" },
+    ]);
+    // The option list is CREATE SEQUENCE's, order-free.
+    expect(colConstraints("GENERATED ALWAYS AS IDENTITY (START WITH 10 INCREMENT BY -1 NO CYCLE CACHE 5)")).toEqual([
+      {
+        kind: "identity",
+        generated: "always",
+        options: [
+          { kind: "start", value: num(10) },
+          { kind: "increment", value: { kind: "unary", op: "-", operand: num(1) } },
+          { kind: "cycle", value: false },
+          { kind: "cache", value: num(5) },
+        ],
+      },
+    ]);
+    expect(colConstraints("NOT NULL GENERATED BY DEFAULT AS IDENTITY (AS bigint MINVALUE 1)")).toEqual([
+      { kind: "notNull" },
+      {
+        kind: "identity",
+        generated: "by default",
+        options: [
+          { kind: "as", type: ct("bigint") },
+          { kind: "minValue", value: num(1) },
+        ],
+      },
+    ]);
+  });
+
+  it("parses GENERATED ALWAYS AS (expr) STORED", () => {
+    expect(colConstraints("GENERATED ALWAYS AS (a * 2) STORED NOT NULL")).toEqual([
+      { kind: "generated", expr: bin("*", name("a"), num(2)) },
+      { kind: "notNull" },
+    ]);
+    // The span runs from GENERATED through STORED.
+    const [stmt] = sqlLite.parse("CREATE TABLE t (c int GENERATED ALWAYS AS (a) STORED);") as any[];
+    expect(stmt.items[0].constraints[0].span).toEqual({ start: { row: 1, col: 22 }, end: { row: 1, col: 52 } });
+  });
+
+  it("parses a column-level COLLATE straight after the type", () => {
+    expect(colConstraints('COLLATE "C" NOT NULL')).toEqual([
+      { kind: "collate", collation: ["C"] },
+      { kind: "notNull" },
+    ]);
+    expect(firstStmt("CREATE TABLE t (c text COLLATE app.german DEFAULT 'a');").items[0].constraints).toEqual([
+      { kind: "collate", collation: ["app", "german"] },
+      { kind: "default", expr: str("a") },
+    ]);
+    // After a DEFAULT, the expression's COLLATE postfix takes the clause.
+    expect(colConstraints(`DEFAULT 'a' COLLATE "C"`)).toEqual([
+      { kind: "default", expr: { kind: "collate", expr: str("a"), collation: ["C"] } },
+    ]);
+  });
+
+  it("reaches ALTER TABLE ADD and PARTITION OF columns", () => {
+    expect(firstStmt("ALTER TABLE t ADD COLUMN id int GENERATED ALWAYS AS IDENTITY;").actions[0]).toMatchObject({
+      kind: "addColumn",
+      column: { name: "id", constraints: [{ kind: "identity", generated: "always" }] },
+    });
+    expect(firstStmt('CREATE TABLE p PARTITION OF m (b COLLATE "C") DEFAULT;').items[0]).toMatchObject({
+      kind: "columnOptions",
+      name: "b",
+      constraints: [{ kind: "collate", collation: ["C"] }],
+    });
+  });
+
+  it("keeps generated, always, identity and stored unreserved", () => {
+    expect(
+      firstStmt("CREATE TABLE t (generated int, identity text, always int, stored int);").items.map((i: any) => i.name),
+    ).toEqual(["generated", "identity", "always", "stored"]);
+    // …as type names, ahead of a constraint of the same word…
+    expect(
+      firstStmt("CREATE TABLE t (a stored, b always, c identity);").items.map((i: any) => i.dataType.name),
+    ).toEqual(["stored", "always", "identity"]);
+    expect(firstStmt("CREATE TABLE t (a generated GENERATED ALWAYS AS IDENTITY);").items[0]).toMatchObject({
+      dataType: { name: "generated" },
+      constraints: [{ kind: "identity" }],
+    });
+    // …and as names everywhere else.
+    expect(firstStmt("SELECT generated, always, identity, stored FROM generated;")).toEqual(
+      sel({
+        columns: [col(name("generated")), col(name("always")), col(name("identity")), col(name("stored"))],
+        from: [tableFrom(["generated"])],
+      }),
+    );
+    expect(firstStmt("ALTER TABLE t ADD generated int;").actions[0]).toMatchObject({
+      kind: "addColumn",
+      column: { name: "generated" },
+    });
+  });
+
+  it("rejects a malformed GENERATED or COLLATE", () => {
+    expect(bad("GENERATED ALWAYS AS (a)")).toThrow(/Expected "stored" but found "\)"/);
+    expect(bad("GENERATED SOMETIMES AS IDENTITY")).toThrow(
+      /Expected "always" or "by default" but found "sometimes" \(1:32\)/,
+    );
+    // A malformed clause is a plain syntax error first, as in PG.
+    expect(bad("GENERATED BY DEFAULT AS (a)")).toThrow(/Expected "stored" but found "\)"/);
+    expect(bad("GENERATED BY DEFAULT AS (a) STORED")).toThrow(
+      /for a generated column, GENERATED ALWAYS must be specified \(1:32\)/,
+    );
+    expect(bad("GENERATED ALWAYS IDENTITY")).toThrow(/Expected "as" but found "identity"/);
+    expect(bad("GENERATED ALWAYS AS stored")).toThrow(/Expected "identity" or "\(" but found "stored"/);
+    expect(bad("GENERATED ALWAYS AS IDENTITY ()")).toThrow(/Expected a sequence option but found "\)"/);
+    expect(bad("GENERATED ALWAYS AS IDENTITY (START 1 frob)")).toThrow(/Expected "\)" but found "frob"/);
+    expect(bad("COLLATE")).toThrow(/Expected a name but found "\)"/);
+  });
+});
+
 // --- CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE ---
 
 describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
@@ -5803,5 +6063,83 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
     expect(bad("VACUUM VERBOSE FREEZE;")).toThrow(/Expected a name but found "freeze" \(1:15\)/);
     expect(bad("VACUUM ANALYZE VERBOSE t;")).toThrow(/Expected a name but found "verbose"/);
     expect(bad("ANALYZE VERBOSE VERBOSE;")).toThrow(/Expected a name but found "verbose"/);
+  });
+});
+
+// --- TEMPORARY, UNLOGGED and scoped CREATE TABLE ---
+
+describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
+  const rawFirst = (text: string) => sqlLite.parse(text)[0] as Record<string, any>;
+  const modifiersOf = (src: string) => firstStmt(src).modifiers;
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("keeps the PG prefix words in source order, as written", () => {
+    expect(modifiersOf("CREATE TEMP TABLE t (id int);")).toEqual(["temp"]);
+    expect(modifiersOf("CREATE TEMPORARY TABLE t (id int);")).toEqual(["temporary"]);
+    expect(modifiersOf("CREATE UNLOGGED TABLE t (id int);")).toEqual(["unlogged"]);
+    expect(modifiersOf("CREATE GLOBAL TEMPORARY TABLE t (id int);")).toEqual(["global", "temporary"]);
+    expect(modifiersOf("create local temp table t (id int);")).toEqual(["local", "temp"]);
+  });
+
+  it("carries the prefix through every createTable shape and CREATE TABLE AS", () => {
+    expect(firstStmt("CREATE TEMP TABLE IF NOT EXISTS s.t (id int) ON COMMIT DROP;")).toMatchObject({
+      kind: "createTable",
+      ifNotExists: true,
+      name: ["s", "t"],
+      onCommit: "drop",
+      modifiers: ["temp"],
+    });
+    expect(firstStmt("CREATE UNLOGGED TABLE p PARTITION OF q DEFAULT;")).toMatchObject({
+      partitionOf: { parent: ["q"] },
+      modifiers: ["unlogged"],
+    });
+    expect(firstStmt("CREATE LOCAL TEMPORARY TABLE snap AS SELECT 1;")).toMatchObject({
+      kind: "createTableAs",
+      modifiers: ["local", "temporary"],
+    });
+  });
+
+  it("opens the span on the first modifier, and on TABLE without one", () => {
+    expect(rawFirst("CREATE TABLE t (id int);").span.start).toEqual({ row: 1, col: 7 });
+    expect(rawFirst("CREATE TEMP TABLE t (id int);").span).toEqual({
+      start: { row: 1, col: 7 },
+      end: { row: 1, col: 28 },
+    });
+    expect(rawFirst("CREATE GLOBAL TEMP TABLE t AS SELECT 1;").span.start).toEqual({ row: 1, col: 7 });
+  });
+
+  it("keeps temp, temporary, unlogged, global and local unreserved", () => {
+    const words = ["temp", "temporary", "unlogged", "global", "local"];
+    for (const word of words) {
+      expect(firstStmt(`CREATE TABLE ${word} (${word} int);`)).toMatchObject({
+        name: [word],
+        items: [{ kind: "column", name: word }],
+      });
+      expect(firstStmt(`CREATE TEMP TABLE ${word} (id int);`)).toMatchObject({ name: [word], modifiers: ["temp"] });
+    }
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM local;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["local"])] }),
+    );
+    // SELECT … INTO shares the word lists, and still reads these as names.
+    expect(firstStmt("SELECT a INTO temp FROM t;").into).toEqual({ name: ["temp"] });
+    expect(firstStmt("SELECT a INTO GLOBAL TEMP unlogged FROM t;").into).toEqual({
+      name: ["unlogged"],
+      modifiers: ["global", "temp"],
+    });
+  });
+
+  it("rejects a bare scope word, stacked storage words and a non-TABLE target", () => {
+    expect(bad("CREATE GLOBAL TABLE t (id int);")).toThrow(/Expected "temp" or "temporary" but found "table" \(1:14\)/);
+    expect(bad("CREATE LOCAL UNLOGGED TABLE t (id int);")).toThrow(
+      /Expected "temp" or "temporary" but found "unlogged"/,
+    );
+    expect(bad("CREATE TEMP UNLOGGED TABLE t (id int);")).toThrow(/Expected "table" but found "unlogged" \(1:12\)/);
+    expect(bad("CREATE TEMP TEMP TABLE t (id int);")).toThrow(/Expected "table" but found "temp"/);
+    expect(bad("CREATE UNLOGGED INDEX i ON t (a);")).toThrow(/Expected "table" but found "index"/);
+    expect(bad("CREATE TEMP VIEW v AS SELECT 1;")).toThrow(/Expected "table" but found "view"/);
+    expect(bad("CREATE TEMPORARY SEQUENCE s;")).toThrow(/Expected "table" but found "sequence"/);
+    expect(bad("CREATE OR REPLACE TEMP VIEW v AS SELECT 1;")).toThrow(/Expected "view", "materialized"/);
+    expect(bad("CREATE TEMP;")).toThrow(/Expected "table" but found ";"/);
+    expect(bad("CREATE GLOBAL")).toThrow(/Expected "temp" or "temporary" but found end of input/);
   });
 });
