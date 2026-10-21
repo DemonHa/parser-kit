@@ -3,7 +3,7 @@
     "source": "CREATE TABLE t (id int, 42 bad, ok text);\nDROP TABLE t;",
     "errors": [
       {
-        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or a name but found \"42\" (1:24)",
+        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or \"like\" or a name but found \"42\" (1:24)",
         "end": {
           "row": 1,
           "col": 26
@@ -415,7 +415,7 @@
     "source": "CREATE TABLE a (id int, 42 bad);\nSELECT * FROM;\nSELECT 5;",
     "errors": [
       {
-        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or a name but found \"42\" (1:24)",
+        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or \"like\" or a name but found \"42\" (1:24)",
         "end": {
           "row": 1,
           "col": 26
@@ -1240,6 +1240,143 @@
             "expr": {
               "kind": "number",
               "value": 11,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 9
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 9
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (id int, LIKE src INCLUDING everything, ok text);\nSELECT 12;",
+    "errors": [
+      {
+        "message": "Expected \"comments\", \"compression\", \"constraints\", \"defaults\", \"identity\", \"generated\", \"indexes\", \"statistics\", \"storage\" or \"all\" but found \"everything\" (1:43)",
+        "end": {
+          "row": 1,
+          "col": 53
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "id",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 19
+                },
+                "end": {
+                  "row": 1,
+                  "col": 22
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 22
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "ok",
+            "dataType": {
+              "name": "text",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 58
+                },
+                "end": {
+                  "row": 1,
+                  "col": 62
+                }
+              }
+            },
+            "constraints": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 55
+              },
+              "end": {
+                "row": 1,
+                "col": 62
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 63
+          }
+        }
+      },
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 12,
               "span": {
                 "start": {
                   "row": 2,

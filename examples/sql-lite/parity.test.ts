@@ -121,8 +121,16 @@ const SUPPLEMENTAL = [
   "ALTER TABLE t RENAME TO t2;",
   "ALTER TABLE t OWNER TO admin;",
   "ALTER TABLE t REPLICA IDENTITY USING INDEX t_pkey;",
+  "ALTER TABLE IF EXISTS s.t ADD COLUMN IF NOT EXISTS a int, ADD IF NOT EXISTS b text, DROP c, OWNER TO bob;",
+  "ALTER TABLE IF EXISTS t RENAME TO t2;",
   "CREATE TABLE t (id int NOT NULL DEFAULT 0, u text UNIQUE, parent int REFERENCES p (id) ON DELETE CASCADE, CHECK (id > 0));",
   "CREATE TABLE t (a int NULL, b int, FOREIGN KEY (b) REFERENCES p (id));",
+  // LIKE as a table item and the clauses after the element list, each a key the
+  // node carries only when written — against the rows above, which write none.
+  "CREATE TABLE t (LIKE app.src INCLUDING DEFAULTS EXCLUDING INDEXES, id int) INHERITS (p, app.q);",
+  "CREATE TABLE t (id int) WITH (fillfactor = 70, autovacuum_enabled, x -1, y = 'z') ON COMMIT DELETE ROWS TABLESPACE ts;",
+  "CREATE TABLE t (id int) WITH (toast.autovacuum_enabled = false, force_quote *, force_null (a, 'b'));",
+  "CREATE TABLE t (a, b) WITH (fillfactor = 70) ON COMMIT DROP TABLESPACE ts AS SELECT 1, 2 WITH NO DATA;",
   // The foreign-key tail (MATCH, ON DELETE / ON UPDATE in either order) and the
   // DEFERRABLE / INITIALLY attributes, column- and table-level. Each new key is
   // present only when its clause is, so the pre-existing constraint rows stay
@@ -261,6 +269,9 @@ const MALFORMED = [
   // item, so recovery resyncs at the next comma and the table survives with
   // both columns.
   "CREATE TABLE t (a int, UNIQUE (a) é, b int);\nSELECT 11;",
+  // A failure inside a LIKE item recovers like one inside a column: the
+  // element-list siblings around it survive.
+  "CREATE TABLE t (id int, LIKE src INCLUDING everything, ok text);\nSELECT 12;",
 ];
 
 // Record a throw rather than propagating it, so one bad case doesn't abort the
