@@ -3146,6 +3146,9 @@ describe("SQL-lite keyword dispatch maps", () => {
     expect(() => sqlLite.parse("CREATE constructor;")).toThrow(/Expected "table" or "unique"/);
     expect(() => sqlLite.parse("CREATE OR REPLACE __proto__;")).toThrow(/Expected "view", "materialized"/);
     expect(() => sqlLite.parse("CREATE TABLE t (id int, constructor text);")).not.toThrow();
+    expect(() => sqlLite.parse("CREATE TABLE t (id int REFERENCES p ON DELETE constructor);")).toThrow(
+      /Expected "no action" or "restrict"/,
+    );
   });
 
   // stripSpans hides this everywhere else in the file: the keyword-led targets
@@ -3342,5 +3345,275 @@ describe("SQL-lite multi-word type names", () => {
       col(name("a"), "precision"),
       col(name("b"), "varying"),
     ]);
+  });
+});
+
+// --- foreign-key actions, MATCH and DEFERRABLE constraints ---
+
+describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () => {
+  const colConstraints = (src: string) =>
+    (firstStmt(`CREATE TABLE t (c int ${src});`) as any).items[0].constraints as Record<string, unknown>[];
+  const tableItem = (src: string) => (firstStmt(`CREATE TABLE t (c int, ${src});`) as any).items[1];
+
+  it("reads ON DELETE and ON UPDATE in either order", () => {
+    expect(colConstraints("REFERENCES p ON UPDATE CASCADE")).toEqual([
+      { kind: "references", table: ["p"], columns: null, onDelete: null, onUpdate: "cascade" },
+    ]);
+    expect(colConstraints("REFERENCES p (id) ON DELETE SET NULL ON UPDATE RESTRICT")).toEqual([
+      { kind: "references", table: ["p"], columns: ["id"], onDelete: "set null", onUpdate: "restrict" },
+    ]);
+    expect(colConstraints("REFERENCES p (id) ON UPDATE RESTRICT ON DELETE SET NULL")).toEqual([
+      { kind: "references", table: ["p"], columns: ["id"], onDelete: "set null", onUpdate: "restrict" },
+    ]);
+    expect(tableItem("FOREIGN KEY (c) REFERENCES p (id) ON UPDATE CASCADE ON DELETE CASCADE")).toEqual({
+      kind: "foreignKey",
+      name: null,
+      columns: ["c"],
+      refTable: ["p"],
+      refColumns: ["id"],
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    });
+  });
+
+  it("parses every referential action", () => {
+    const action = (spelled: string) => colConstraints(`REFERENCES p ON DELETE ${spelled}`)[0]!.onDelete;
+    expect(action("NO ACTION")).toBe("no action");
+    expect(action("RESTRICT")).toBe("restrict");
+    expect(action("CASCADE")).toBe("cascade");
+    expect(action("SET NULL")).toBe("set null");
+    expect(action("SET DEFAULT")).toBe("set default");
+    expect(colConstraints("REFERENCES p ON UPDATE SET DEFAULT")[0]!.onUpdate).toBe("set default");
+  });
+
+  it("parses MATCH FULL | PARTIAL | SIMPLE ahead of the actions", () => {
+    expect(colConstraints("REFERENCES p MATCH FULL")).toEqual([
+      { kind: "references", table: ["p"], columns: null, match: "full", onDelete: null },
+    ]);
+    expect(colConstraints("REFERENCES p (id) MATCH PARTIAL ON DELETE CASCADE")[0]).toMatchObject({
+      match: "partial",
+      onDelete: "cascade",
+    });
+    expect(tableItem("FOREIGN KEY (c) REFERENCES p MATCH SIMPLE ON UPDATE NO ACTION")).toMatchObject({
+      kind: "foreignKey",
+      match: "simple",
+      onDelete: null,
+      onUpdate: "no action",
+    });
+    // PG's order is fixed: MATCH comes before the ON clauses, never after.
+    expect(() => sqlLite.parse("CREATE TABLE t (c int REFERENCES p ON DELETE CASCADE MATCH FULL);")).toThrow(
+      /Expected "," but found "match"/,
+    );
+  });
+
+  it("attaches DEFERRABLE / INITIALLY to the constraint it follows", () => {
+    expect(colConstraints("UNIQUE DEFERRABLE")).toEqual([{ kind: "unique", deferrable: true }]);
+    expect(colConstraints("PRIMARY KEY NOT DEFERRABLE INITIALLY IMMEDIATE")).toEqual([
+      { kind: "primaryKey", deferrable: false, initially: "immediate" },
+    ]);
+    // Either order, and INITIALLY alone.
+    expect(colConstraints("UNIQUE INITIALLY DEFERRED DEFERRABLE")).toEqual([
+      { kind: "unique", deferrable: true, initially: "deferred" },
+    ]);
+    expect(colConstraints("UNIQUE INITIALLY IMMEDIATE")).toEqual([{ kind: "unique", initially: "immediate" }]);
+    // On a REFERENCES column constraint the attributes follow the FK tail.
+    expect(colConstraints("REFERENCES p MATCH FULL ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED")).toEqual([
+      {
+        kind: "references",
+        table: ["p"],
+        columns: null,
+        match: "full",
+        onDelete: "cascade",
+        deferrable: true,
+        initially: "deferred",
+      },
+    ]);
+    // Table level: PRIMARY KEY, UNIQUE and FOREIGN KEY, named or not.
+    expect(tableItem("PRIMARY KEY (c) DEFERRABLE")).toEqual({
+      kind: "primaryKey",
+      name: null,
+      columns: ["c"],
+      deferrable: true,
+    });
+    expect(tableItem("CONSTRAINT u UNIQUE (c) NOT DEFERRABLE")).toEqual({
+      kind: "unique",
+      name: "u",
+      columns: ["c"],
+      deferrable: false,
+    });
+    expect(tableItem("FOREIGN KEY (c) REFERENCES p ON DELETE CASCADE INITIALLY DEFERRED DEFERRABLE")).toMatchObject({
+      kind: "foreignKey",
+      onDelete: "cascade",
+      deferrable: true,
+      initially: "deferred",
+    });
+  });
+
+  it("reaches ALTER TABLE ADD [CONSTRAINT] through the shared table-constraint body", () => {
+    expect(
+      (firstStmt("ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES p ON UPDATE CASCADE DEFERRABLE;") as any)
+        .action,
+    ).toEqual({
+      kind: "addConstraint",
+      name: "fk",
+      constraint: {
+        kind: "foreignKey",
+        name: null,
+        columns: ["a"],
+        refTable: ["p"],
+        refColumns: null,
+        onDelete: null,
+        onUpdate: "cascade",
+        deferrable: true,
+      },
+    });
+    expect((firstStmt("ALTER TABLE t ADD UNIQUE (a) INITIALLY DEFERRED;") as any).action.constraint).toEqual({
+      kind: "unique",
+      name: null,
+      columns: ["a"],
+      initially: "deferred",
+    });
+    // And the column-level form, through ADD COLUMN.
+    expect(
+      (firstStmt("ALTER TABLE t ADD COLUMN a int REFERENCES p ON UPDATE SET NULL;") as any).action.column.constraints,
+    ).toEqual([{ kind: "references", table: ["p"], columns: null, onDelete: null, onUpdate: "set null" }]);
+  });
+
+  it("leaves a following NOT NULL to the column-constraint list", () => {
+    // `not` is shared: the attribute tail takes it only before `deferrable`.
+    expect(colConstraints("UNIQUE NOT NULL")).toEqual([{ kind: "unique" }, { kind: "notNull" }]);
+    expect(colConstraints("REFERENCES p ON DELETE CASCADE NOT NULL")).toEqual([
+      { kind: "references", table: ["p"], columns: null, onDelete: "cascade" },
+      { kind: "notNull" },
+    ]);
+    expect(colConstraints("PRIMARY KEY NOT DEFERRABLE NOT NULL DEFAULT 0")).toEqual([
+      { kind: "primaryKey", deferrable: false },
+      { kind: "notNull" },
+      { kind: "default", expr: num(0) },
+    ]);
+  });
+
+  it("omits the new keys entirely when their clauses are absent", () => {
+    // `toEqual` and the JSON golden both ignore a key whose value is undefined,
+    // so neither would notice `onUpdate: undefined` creeping in; this is the
+    // check that the keys are genuinely left out.
+    const [column, fk, pk] = (
+      firstStmt(
+        "CREATE TABLE t (c int UNIQUE REFERENCES p, FOREIGN KEY (c) REFERENCES p (id), PRIMARY KEY (c));",
+      ) as any
+    ).items;
+    const [unique, references] = (column as any).constraints;
+    for (const node of [unique, references, fk, pk]) {
+      expect(node).not.toHaveProperty("match");
+      expect(node).not.toHaveProperty("onUpdate");
+      expect(node).not.toHaveProperty("deferrable");
+      expect(node).not.toHaveProperty("initially");
+    }
+    // `onDelete` predates them and stays an always-present null.
+    expect(references).toHaveProperty("onDelete", null);
+    expect(fk).toHaveProperty("onDelete", null);
+  });
+
+  it("keeps the FK and attribute words unreserved as names and aliases", () => {
+    // Every word these clauses match by value that was not already reserved.
+    // (`on`, `set`, `null`, `default`, `full`, `deferrable` and `initially`
+    // are the ones that were.)
+    const words = [
+      "match",
+      "partial",
+      "simple",
+      "delete",
+      "update",
+      "no",
+      "action",
+      "restrict",
+      "cascade",
+      "deferred",
+      "immediate",
+    ];
+    expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(name(w))));
+    expect((firstStmt("SELECT a AS match, b simple FROM t;") as any).columns).toEqual([
+      col(name("a"), "match"),
+      col(name("b"), "simple"),
+    ]);
+    // …as column names,
+    expect(
+      (firstStmt(`CREATE TABLE t (a int REFERENCES p, ${words.map((w) => `${w} int`).join(", ")});`) as any).items.map(
+        (i: any) => i.name,
+      ),
+    ).toEqual(["a", ...words]);
+    // …and as the referenced table and column, where the FK tail is looking
+    // for `match` and reads the one after the column list, not the table name.
+    expect(colConstraints("REFERENCES match (simple) MATCH SIMPLE")).toEqual([
+      { kind: "references", table: ["match"], columns: ["simple"], match: "simple", onDelete: null },
+    ]);
+  });
+
+  it("judges a repeated attribute as PG does at each level", () => {
+    const column = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int ${src});`);
+    const table = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int, ${src});`);
+    // A column constraint's attributes are separate items, and any repeat is an
+    // error — reported on the repeat, rather than misread as a NOT NULL.
+    expect(column("UNIQUE DEFERRABLE NOT DEFERRABLE")).toThrow(
+      /multiple DEFERRABLE\/NOT DEFERRABLE clauses not allowed \(1:40\)/,
+    );
+    expect(column("UNIQUE DEFERRABLE DEFERRABLE")).toThrow(/multiple DEFERRABLE\/NOT DEFERRABLE clauses not allowed/);
+    expect(column("UNIQUE INITIALLY DEFERRED INITIALLY DEFERRED")).toThrow(
+      /multiple INITIALLY IMMEDIATE\/DEFERRED clauses not allowed/,
+    );
+    // …and the repeat is checked before the never-deferred contradiction.
+    expect(column("UNIQUE DEFERRABLE INITIALLY DEFERRED NOT DEFERRABLE")).toThrow(
+      /multiple DEFERRABLE\/NOT DEFERRABLE clauses not allowed/,
+    );
+    // A table constraint's attributes are one spec: an identical repeat is let
+    // through, and only a contradiction is an error.
+    expect(tableItem("UNIQUE (c) DEFERRABLE DEFERRABLE INITIALLY DEFERRED INITIALLY DEFERRED")).toEqual({
+      kind: "unique",
+      name: null,
+      columns: ["c"],
+      deferrable: true,
+      initially: "deferred",
+    });
+    expect(table("UNIQUE (c) DEFERRABLE NOT DEFERRABLE")).toThrow(/conflicting constraint properties \(1:45\)/);
+    expect(table("PRIMARY KEY (c) INITIALLY IMMEDIATE INITIALLY DEFERRED")).toThrow(
+      /conflicting constraint properties/,
+    );
+    expect(() => sqlLite.parse("ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES p NOT DEFERRABLE DEFERRABLE;")).toThrow(
+      /conflicting constraint properties/,
+    );
+    // …and there the never-deferred case is checked first.
+    expect(table("UNIQUE (c) DEFERRABLE INITIALLY DEFERRED NOT DEFERRABLE")).toThrow(
+      /constraint declared INITIALLY DEFERRED must be DEFERRABLE/,
+    );
+  });
+
+  it("rejects a repeated, unknown or misplaced clause", () => {
+    const create = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int ${src});`);
+    // A repeated verb names the one still open; PG takes each at most once.
+    expect(create("REFERENCES p ON DELETE CASCADE ON DELETE SET NULL")).toThrow(/Expected "update" but found "delete"/);
+    expect(create("REFERENCES p ON UPDATE CASCADE ON UPDATE CASCADE")).toThrow(/Expected "delete" but found "update"/);
+    expect(create("REFERENCES p ON INSERT CASCADE")).toThrow(/Expected "delete" or "update" but found "insert"/);
+    expect(create("REFERENCES p ON DELETE frob")).toThrow(
+      /Expected "no action" or "restrict" or "cascade" or "set null" or "set default" but found "frob"/,
+    );
+    expect(create("REFERENCES p ON DELETE SET frob")).toThrow(/Expected "null" or "default" but found "frob"/);
+    expect(create("REFERENCES p ON DELETE NO frob")).toThrow(/Expected "action" but found "frob"/);
+    expect(create("REFERENCES p MATCH frob")).toThrow(/Expected "full" or "partial" or "simple" but found "frob"/);
+    expect(create("UNIQUE INITIALLY frob")).toThrow(/Expected "deferred" or "immediate" but found "frob"/);
+    // A constraint that can never be deferred cannot start out deferred. The
+    // error sits on whichever clause completes the contradiction.
+    expect(create("UNIQUE NOT DEFERRABLE INITIALLY DEFERRED")).toThrow(
+      /constraint declared INITIALLY DEFERRED must be DEFERRABLE \(1:44\)/,
+    );
+    expect(create("UNIQUE INITIALLY DEFERRED NOT DEFERRABLE")).toThrow(
+      /constraint declared INITIALLY DEFERRED must be DEFERRABLE \(1:48\)/,
+    );
+    // PG's "misplaced DEFERRABLE clause": only UNIQUE, PRIMARY KEY and foreign
+    // keys take the attributes.
+    expect(create("NOT NULL DEFERRABLE")).toThrow(/Expected "," but found "deferrable"/);
+    expect(create("CHECK (c > 0) DEFERRABLE")).toThrow(/Expected "," but found "deferrable"/);
+    expect(() => sqlLite.parse("CREATE TABLE t (c int, CHECK (c > 0) INITIALLY DEFERRED);")).toThrow(
+      /Expected "," but found "initially"/,
+    );
   });
 });

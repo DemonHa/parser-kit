@@ -11321,6 +11321,235 @@
     ]
   },
   {
+    "source": "CREATE TABLE t (a int REFERENCES p (id) MATCH FULL ON UPDATE CASCADE ON DELETE SET DEFAULT DEFERRABLE INITIALLY DEFERRED NOT NULL, b int UNIQUE NOT DEFERRABLE, CONSTRAINT fk FOREIGN KEY (b) REFERENCES p ON DELETE NO ACTION ON UPDATE SET NULL INITIALLY IMMEDIATE, PRIMARY KEY (a) DEFERRABLE);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "a",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 21
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "references",
+                "table": [
+                  "p"
+                ],
+                "columns": [
+                  "id"
+                ],
+                "match": "full",
+                "onDelete": "set default",
+                "onUpdate": "cascade",
+                "deferrable": true,
+                "initially": "deferred",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 22
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 120
+                  }
+                }
+              },
+              {
+                "kind": "notNull",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 121
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 129
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 129
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "b",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 133
+                },
+                "end": {
+                  "row": 1,
+                  "col": 136
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "unique",
+                "deferrable": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 137
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 158
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 131
+              },
+              "end": {
+                "row": 1,
+                "col": 158
+              }
+            }
+          },
+          {
+            "kind": "foreignKey",
+            "name": "fk",
+            "columns": [
+              "b"
+            ],
+            "refTable": [
+              "p"
+            ],
+            "refColumns": null,
+            "onDelete": "no action",
+            "onUpdate": "set null",
+            "initially": "immediate",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 174
+              },
+              "end": {
+                "row": 1,
+                "col": 261
+              }
+            }
+          },
+          {
+            "kind": "primaryKey",
+            "name": null,
+            "columns": [
+              "a"
+            ],
+            "deferrable": true,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 263
+              },
+              "end": {
+                "row": 1,
+                "col": 289
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 290
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES p MATCH SIMPLE ON UPDATE RESTRICT NOT DEFERRABLE;",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "name": [
+          "t"
+        ],
+        "action": {
+          "kind": "addConstraint",
+          "name": "fk",
+          "constraint": {
+            "kind": "foreignKey",
+            "name": null,
+            "columns": [
+              "a"
+            ],
+            "refTable": [
+              "p"
+            ],
+            "refColumns": null,
+            "match": "simple",
+            "onDelete": null,
+            "onUpdate": "restrict",
+            "deferrable": false,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 32
+              },
+              "end": {
+                "row": 1,
+                "col": 107
+              }
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 107
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE TABLE snap AS SELECT id, name FROM users;",
     "ast": [
       {
