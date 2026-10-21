@@ -72,6 +72,11 @@ const SUPPLEMENTAL = [
   "SELECT sum(x) OVER (RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM t;",
   "SELECT sum(x) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) FROM t;",
   "SELECT sum(x) OVER (ROWS 5 PRECEDING) FROM t;",
+  // EXCLUDE is a frame key present only when written; the rows above pin its omission.
+  "SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM t;",
+  "SELECT sum(x) OVER (GROUPS 1 PRECEDING EXCLUDE TIES), sum(x) OVER (RANGE CURRENT ROW EXCLUDE NO OTHERS) FROM t;",
+  // USING is an order-item key present only when written; `c DESC` pins its omission.
+  "SELECT a FROM t ORDER BY a USING <, b USING > NULLS FIRST, c DESC;",
   "SELECT a FROM t GROUP BY CUBE (a, b), ROLLUP (c), GROUPING SETS ((a), ());",
   "SELECT a FROM t GROUP BY DISTINCT a, ();",
   "SELECT a, count(*) INTO TABLE reports.summary FROM t GROUP BY ALL a;",

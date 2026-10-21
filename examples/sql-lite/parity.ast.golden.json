@@ -7658,6 +7658,450 @@
     ]
   },
   {
+    "source": "SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "window",
+              "fn": {
+                "kind": "call",
+                "name": "sum",
+                "args": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "x"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 11
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 12
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 13
+                  }
+                }
+              },
+              "name": null,
+              "partitionBy": null,
+              "orderBy": [
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "id"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 29
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 31
+                      }
+                    }
+                  },
+                  "dir": null,
+                  "nulls": null
+                }
+              ],
+              "frame": {
+                "mode": "rows",
+                "start": {
+                  "kind": "preceding",
+                  "offset": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 45
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 46
+                      }
+                    }
+                  }
+                },
+                "end": {
+                  "kind": "following",
+                  "offset": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 61
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 62
+                      }
+                    }
+                  }
+                },
+                "exclude": "currentRow"
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 93
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 100
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT sum(x) OVER (GROUPS 1 PRECEDING EXCLUDE TIES), sum(x) OVER (RANGE CURRENT ROW EXCLUDE NO OTHERS) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "window",
+              "fn": {
+                "kind": "call",
+                "name": "sum",
+                "args": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "x"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 11
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 12
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 13
+                  }
+                }
+              },
+              "name": null,
+              "partitionBy": null,
+              "orderBy": null,
+              "frame": {
+                "mode": "groups",
+                "start": {
+                  "kind": "preceding",
+                  "offset": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 27
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 28
+                      }
+                    }
+                  }
+                },
+                "end": null,
+                "exclude": "ties"
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 52
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "window",
+              "fn": {
+                "kind": "call",
+                "name": "sum",
+                "args": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "x"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 58
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 59
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 54
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 60
+                  }
+                }
+              },
+              "name": null,
+              "partitionBy": null,
+              "orderBy": null,
+              "frame": {
+                "mode": "range",
+                "start": {
+                  "kind": "currentRow"
+                },
+                "end": null,
+                "exclude": "noOthers"
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 54
+                },
+                "end": {
+                  "row": 1,
+                  "col": 103
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 110
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT a FROM t ORDER BY a USING <, b USING > NULLS FIRST, c DESC;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "a"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "a"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 25
+                },
+                "end": {
+                  "row": 1,
+                  "col": 26
+                }
+              }
+            },
+            "dir": null,
+            "using": "<",
+            "nulls": null
+          },
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "b"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 36
+                },
+                "end": {
+                  "row": 1,
+                  "col": 37
+                }
+              }
+            },
+            "dir": null,
+            "using": ">",
+            "nulls": "first"
+          },
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "c"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 59
+                },
+                "end": {
+                  "row": 1,
+                  "col": 60
+                }
+              }
+            },
+            "dir": "desc",
+            "nulls": null
+          }
+        ],
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 65
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "SELECT a FROM t GROUP BY CUBE (a, b), ROLLUP (c), GROUPING SETS ((a), ());",
     "ast": [
       {

@@ -172,12 +172,16 @@ export type WindowFrameBound =
   | { kind: "unboundedFollowing" };
 
 // A frame clause: a mode plus one bound, or a `BETWEEN start AND end` pair
-// (`end` null for the single-bound `ROWS start` shorthand).
+// (`end` null for the single-bound `ROWS start` shorthand). `exclude` is the
+// optional `EXCLUDE …` tail, present only when written — `noOthers` is the
+// explicit spelling of the default, kept distinct from an absent clause.
 export type WindowFrame = {
   mode: "rows" | "range" | "groups";
   start: WindowFrameBound;
   end: WindowFrameBound | null;
+  exclude?: WindowFrameExclusion;
 };
+export type WindowFrameExclusion = "currentRow" | "group" | "ties" | "noOthers";
 
 // A window specification, shared by inline `OVER (…)`, bare `OVER name`, and the
 // `WINDOW w AS (…)` clause. `name` is the optional referenced base window; the
@@ -654,7 +658,15 @@ export type FromItem =
       using: string[] | null;
     };
 
-export type OrderItem = { expr: Expr; dir: "asc" | "desc" | null; nulls: "first" | "last" | null };
+// `using` is PG's sort-operator spelling (`ORDER BY a USING <`), which stands
+// in place of ASC/DESC — so `dir` is null whenever it is set. The key is present
+// only when the clause is written; a plain item keeps its three keys.
+export type OrderItem = {
+  expr: Expr;
+  dir: "asc" | "desc" | null;
+  using?: string;
+  nulls: "first" | "last" | null;
+};
 
 // A CTE body is a query or a data-modifying statement (kept in the `query` field
 // for both, so plain `WITH … SELECT` output is unchanged).
@@ -1056,17 +1068,33 @@ function parseFrameBound(ctx: ParseContext<SqlTokenType>): WindowFrameBound {
   return { kind: "following", offset };
 }
 
-// `{ROWS|RANGE|GROUPS} bound` or `… BETWEEN start AND end`. Entered positioned on
-// the mode word.
+// The frame exclusion after `EXCLUDE`. `group` is reserved and `current`/`row`/
+// `ties`/`no`/`others` are not, but nothing else can follow `EXCLUDE` here, so
+// all four forms are matched by value with no guard.
+const frameExclusion = oneOf(
+  kwseq("current", "row").map((): WindowFrameExclusion => "currentRow"),
+  kw("group").map((): WindowFrameExclusion => "group"),
+  kw("ties").map((): WindowFrameExclusion => "ties"),
+  kwseq("no", "others").map((): WindowFrameExclusion => "noOthers"),
+);
+
+// `{ROWS|RANGE|GROUPS} bound` or `… BETWEEN start AND end`, then an optional
+// `EXCLUDE …`. Entered positioned on the mode word. A bound always ends on a
+// keyword (`preceding`/`following`/`row`), so an `exclude` after it cannot be
+// part of an offset expression — the unreserved word is safe to commit on.
 function parseFrame(ctx: ParseContext<SqlTokenType>): WindowFrame {
   const mode = ctx.next()!.value as "rows" | "range" | "groups";
+  let start: WindowFrameBound;
+  let end: WindowFrameBound | null = null;
   if (ctx.eat("ident", "between") !== null) {
-    const start = parseFrameBound(ctx);
+    start = parseFrameBound(ctx);
     ctx.parse(kw("and"));
-    const end = parseFrameBound(ctx);
-    return { mode, start, end };
+    end = parseFrameBound(ctx);
+  } else {
+    start = parseFrameBound(ctx);
   }
-  return { mode, start: parseFrameBound(ctx), end: null };
+  const exclude = ctx.eat("ident", "exclude") !== null ? ctx.parse(frameExclusion) : null;
+  return { mode, start, end, ...(exclude && { exclude }) };
 }
 
 // A window specification: a bare `name` reference, or a parenthesised inline spec
@@ -3384,9 +3412,33 @@ const namedWindowDef = seq(field("name", nameWord), skip(kw("as")), field("spec"
 );
 const windowClause = seq(skip(kw("window")), field("defs", sepBy(namedWindowDef, P(",")))).map((s) => s.defs);
 
+// The operator after `USING`: any operator token except `=>`, which PG lexes
+// as its own named-argument token rather than an operator (see `functionArg`).
+// PG's `OPERATOR(schema.op)` spelling is deliberately not taken — no other
+// position in this grammar parses it either.
+const sortOperator = custom<string, SqlTokenType>(
+  (ctx) => {
+    const tok = ctx.peek();
+    if (tok === null || tok.type !== "op" || tok.value === "=>") {
+      return ctx.croak(`Expected an operator but found ${describeFound(tok)}`);
+    }
+    ctx.next();
+    return tok.value;
+  },
+  { expected: "an operator", first: [{ type: "op" }] },
+);
+
+// ASC / DESC, or PG's `USING op` (`ORDER BY a USING <`) — one optional slot,
+// since PG's sortby takes either but never both. `using` is reserved, so no
+// valid input has it after a sort key for the slot to steal.
+const sortOrder = oneOf(
+  kw("asc").map(() => ({ dir: "asc" as const, using: null })),
+  kw("desc").map(() => ({ dir: "desc" as const, using: null })),
+  seq(skip(kw("using")), field("op", sortOperator)).map((s) => ({ dir: null, using: s.op })),
+);
 const orderItem = seq(
   field("expr", expression),
-  field("dir", optional(oneOf(kw("asc"), kw("desc")).map((n) => n.value as "asc" | "desc"))),
+  field("order", optional(sortOrder)),
   field(
     "nulls",
     optional(
@@ -3399,7 +3451,14 @@ const orderItem = seq(
       ).map((s) => s.n),
     ),
   ),
-).map(({ expr, dir, nulls }): OrderItem => ({ expr, dir: dir ?? null, nulls: nulls ?? null }));
+).map(
+  ({ expr, order, nulls }): OrderItem => ({
+    expr,
+    dir: order?.dir ?? null,
+    ...(order?.using && { using: order.using }),
+    nulls: nulls ?? null,
+  }),
+);
 const orderByClause = seq(skip(kwseq("order", "by")), field("items", sepBy(orderItem, P(",")))).map((s) => s.items);
 
 // DISTINCT / DISTINCT ON (…) / ALL. Succeeds consuming nothing (→ false) so it
