@@ -522,9 +522,13 @@ export type DomainConstraint =
   | { kind: "default"; expr: Expr }
   | { kind: "collate"; collation: string[] };
 
-// `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] name [(cols)] AS query
-// [WITH [NO] DATA]`. `withData` is materialized-only (`null` otherwise / when the
-// clause is absent); `ifNotExists` is materialized-only in PG but stored uniformly.
+// `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] name [(cols)] [WITH
+// (option, …)] AS query [WITH [NO] DATA | WITH [CASCADED | LOCAL] CHECK OPTION]`.
+// `withData` is materialized-only (`null` otherwise / when the clause is absent);
+// `ifNotExists` is materialized-only in PG but stored uniformly. `options` (a
+// view's `security_barrier`, a materialized view's storage parameters) and the
+// plain-view-only `checkOption` are present only when written; a bare WITH CHECK
+// OPTION is CASCADED, as in PG.
 export type CreateView = {
   kind: "createView";
   materialized: boolean;
@@ -534,6 +538,8 @@ export type CreateView = {
   columns: string[] | null;
   query: Query;
   withData: boolean | null;
+  options?: RelationOption[];
+  checkOption?: "cascaded" | "local";
   span: Span;
 };
 
@@ -935,6 +941,9 @@ export type Stmt =
   | CreateProcedure
   | CreateAggregate
   | CreateTrigger
+  // `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`; `withData`
+  // is null when the clause is absent, as on createView.
+  | { kind: "refreshMaterializedView"; concurrently: boolean; name: string[]; withData: boolean | null; span: Span }
   // `ALTER TABLE [IF EXISTS] name action[, …]`. `actions` is never empty, and a
   // RENAME is always its only element — PG keeps those out of the action list.
   | { kind: "alterTable"; ifExists: boolean; name: string[]; actions: AlterAction[]; span: Span }
@@ -3148,13 +3157,13 @@ const tableItem = oneOf(tableConstraint, likeBody, excludeItem, columnDef);
 // --- statements ---
 
 // `WITH [NO] DATA` — the trailing materialization flag on CREATE TABLE AS /
-// MATERIALIZED VIEW. Returns true (WITH DATA), false (WITH NO DATA), or null when
-// no clause follows. The preceding query does not usually consume it (WITH DATA
-// is not a query continuation, and typeRef takes a WITH only as `WITH TIME
-// ZONE`), so a bare `ctx.is("with")` peek is enough here. Two query endings do
-// take a WITH unconditionally, and so leave none for this clause: a trailing
-// `IS JSON` (its uniqueness clause, as in PG) and a FETCH clause not closed by
-// ONLY (its WITH TIES).
+// MATERIALIZED VIEW and on REFRESH MATERIALIZED VIEW. Returns true (WITH DATA),
+// false (WITH NO DATA), or null when no clause follows. The preceding query
+// does not usually consume it (WITH DATA is not a query continuation, and
+// typeRef takes a WITH only as `WITH TIME ZONE`), so a bare `ctx.is("with")`
+// peek is enough here. Two query endings do take a WITH unconditionally, and so
+// leave none for this clause: a trailing `IS JSON` (its uniqueness clause, as in
+// PG) and a FETCH clause not closed by ONLY (its WITH TIES).
 function parseWithData(ctx: ParseContext<SqlTokenType>): boolean | null {
   if (!ctx.is("ident", "with")) return null;
   ctx.next(); // WITH
@@ -4128,8 +4137,28 @@ function createRoleRest(ctx: ParseContext<SqlTokenType>, user: boolean): Stmt {
   return { kind: "createRole", user, name, options, span: ctx.spanFrom(start) };
 }
 
+// `WITH [CASCADED | LOCAL] CHECK OPTION` after a plain view's query, or null.
+// The query leaves a trailing WITH alone (see parseWithData), and nothing else
+// can follow it there, so a WITH commits; the word after it is peeked first,
+// so one that leads no check option croaks where it stands.
+const CHECK_OPTION_WORDS = ["cascaded", "local", "check"];
+function parseCheckOption(ctx: ParseContext<SqlTokenType>): "cascaded" | "local" | null {
+  if (!ctx.is("ident", "with")) return null;
+  const word = ctx.peekAhead(1);
+  ctx.next(); // WITH
+  if (word?.type !== "ident" || !CHECK_OPTION_WORDS.includes(word.value)) {
+    return ctx.croak(`Expected ${quoteList(CHECK_OPTION_WORDS)} but found ${describeFound(word)}`);
+  }
+  const level = word.value === "check" ? "cascaded" : (ctx.next()!.value as "cascaded" | "local");
+  ctx.parse(kw("check"));
+  ctx.parse(kw("option"));
+  return level;
+}
+
 // The body of a (MATERIALIZED) VIEW after the VIEW keyword: `[IF NOT EXISTS] name
-// [(cols)] AS query [WITH [NO] DATA]`. The query reuses the shared `query` rule.
+// [(cols)] [WITH (option, …)] AS query`, then WITH [NO] DATA on a materialized
+// view or a check option on a plain one. The query reuses the shared `query`
+// rule. `with` is reserved, so before AS it can only open the option list.
 function parseViewBody(
   ctx: ParseContext<SqlTokenType>,
   start: Position,
@@ -4139,9 +4168,11 @@ function parseViewBody(
   const ifNotExists = materialized && ctx.parse(optional(attempt(kwseq("if", "not", "exists")))) !== null;
   const name = ctx.parse(qualName);
   const columns = ctx.is("punc", "(") ? ctx.parse(columnList) : null;
+  const options = ctx.eat("ident", "with") !== null ? ctx.parse(relationOptions) : null;
   ctx.parse(kw("as"));
   const q = ctx.parse(query);
   const withData = materialized ? parseWithData(ctx) : null;
+  const checkOption = materialized ? null : parseCheckOption(ctx);
   return {
     kind: "createView",
     materialized,
@@ -4151,6 +4182,8 @@ function parseViewBody(
     columns,
     query: q,
     withData,
+    ...(options !== null && { options }),
+    ...(checkOption !== null && { checkOption }),
     span: ctx.spanFrom(start),
   };
 }
@@ -5393,6 +5426,22 @@ const truncateStmt = seq(
   field("behavior", dropBehavior),
 ).map(({ names, identity, behavior }, span): Stmt => ({ kind: "truncate", names, identity, behavior, span }));
 
+// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`. Every word
+// is matched by value and stays a name elsewhere. CONCURRENTLY is taken whenever
+// it follows VIEW, as DROP takes it: PG ranks it a type_func_name keyword, which
+// is no table name there either.
+const refreshStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kwseq("refresh", "materialized", "view"));
+    const concurrently = ctx.eat("ident", "concurrently") !== null;
+    const name = ctx.parse(qualName);
+    const withData = parseWithData(ctx);
+    return { kind: "refreshMaterializedView", concurrently, name, withData, span: ctx.spanFrom(start) };
+  },
+  { expected: '"refresh"', first: [{ type: "ident", value: "refresh" }] },
+);
+
 const commentStmt = seq(
   skip(kw("comment")),
   skip(kw("on")),
@@ -6112,7 +6161,8 @@ function parseCallArgList(ctx: ParseContext<SqlTokenType>): Expr[] {
 
 // `WITH ORDINALITY` after a table function. Keyed on the word pair, since a
 // bare `with` after a FROM item can also open an enclosing materialized view's
-// `WITH [NO] DATA`; `ordinality` itself stays unreserved.
+// `WITH [NO] DATA` or a view's `WITH [CASCADED | LOCAL] CHECK OPTION`;
+// `ordinality` itself stays unreserved.
 const eatOrdinality = (ctx: ParseContext<SqlTokenType>): boolean => {
   if (!ctx.is("ident", "with")) return false;
   const after = ctx.peekAhead(1);
@@ -7103,7 +7153,7 @@ const closeStmt = custom<Stmt, SqlTokenType>(
 // to grow. Nesting is dispatch- and validation-equivalent to the flat form —
 // oneOf's first() is a flatMap, and the inner groups catch collisions within a
 // family — and the composed `expected` is overridden by describe() anyway.
-const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt);
+const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt, refreshStmt);
 const utilityStmt = oneOf(
   grantStmt,
   transactionStmt,

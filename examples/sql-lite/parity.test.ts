@@ -267,6 +267,11 @@ const SUPPLEMENTAL = [
   "LOCK t;",
   "CALL s.p(1, 'a', b => 2);",
   "CALL p();",
+  // --- view options and REFRESH MATERIALIZED VIEW ---
+  "CREATE OR REPLACE VIEW v (a, b) WITH (security_barrier, security_invoker = true) AS SELECT a, now()::timestamp FROM t WITH CHECK OPTION;",
+  "CREATE VIEW v AS SELECT a FROM t WITH LOCAL CHECK OPTION;",
+  "CREATE MATERIALIZED VIEW mv WITH (fillfactor = 70) AS SELECT now()::timestamp WITH NO DATA;",
+  "REFRESH MATERIALIZED VIEW CONCURRENTLY s.mv WITH DATA;",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind

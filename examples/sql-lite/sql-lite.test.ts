@@ -6418,3 +6418,134 @@ describe("SQL-lite LOCK and CALL", () => {
     expect(bad("CALL p(1;")).toThrow(/Expected "\)" but found ";" \(1:8\)/);
   });
 });
+
+// --- view options and REFRESH MATERIALIZED VIEW ---
+
+describe("SQL-lite view options and REFRESH MATERIALIZED VIEW", () => {
+  const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses a view's WITH (option, …) list before AS", () => {
+    expect(
+      firstStmt("CREATE OR REPLACE VIEW v (a) WITH (security_barrier, check_option = local) AS SELECT 1;"),
+    ).toMatchObject({
+      kind: "createView",
+      orReplace: true,
+      columns: ["a"],
+      options: [opt("security_barrier"), opt("check_option", name("local"))],
+    });
+    // A materialized view's storage parameters sit in the same place.
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv WITH (fillfactor = 70) AS SELECT 1 WITH NO DATA;")).toMatchObject({
+      materialized: true,
+      options: [opt("fillfactor", num(70))],
+      withData: false,
+    });
+  });
+
+  it("parses WITH [CASCADED | LOCAL] CHECK OPTION after a view's query", () => {
+    const check = (src: string) => firstStmt(src).checkOption;
+    // A bare WITH CHECK OPTION is CASCADED, as in PG.
+    expect(check("CREATE VIEW v AS SELECT a FROM t WITH CHECK OPTION;")).toBe("cascaded");
+    expect(check("CREATE VIEW v AS SELECT a FROM t WITH CASCADED CHECK OPTION;")).toBe("cascaded");
+    expect(check("CREATE VIEW v AS SELECT a FROM t WITH LOCAL CHECK OPTION;")).toBe("local");
+    expect(check("CREATE VIEW v WITH (security_barrier) AS SELECT 1 WITH LOCAL CHECK OPTION;")).toBe("local");
+  });
+
+  it("keeps a trailing WITH apart from a type's WITH TIME ZONE", () => {
+    for (const [clause, level] of [
+      ["WITH CHECK OPTION", "cascaded"],
+      ["WITH LOCAL CHECK OPTION", "local"],
+      ["WITH CASCADED CHECK OPTION", "cascaded"],
+    ]) {
+      const v = firstStmt(`CREATE VIEW v AS SELECT now()::timestamp ${clause};`);
+      expect(v.checkOption).toBe(level);
+      expect(v.query.columns[0].expr.type).toMatchObject({ name: "timestamp" });
+    }
+    expect(firstStmt("CREATE VIEW v AS SELECT now()::timestamp WITH TIME ZONE WITH CHECK OPTION;")).toMatchObject({
+      query: { columns: [{ expr: { type: { name: "timestamp with time zone" } } }] },
+      checkOption: "cascaded",
+    });
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv AS SELECT now()::timestamp WITH NO DATA;")).toMatchObject({
+      withData: false,
+    });
+    // A FETCH clause's WITH TIES is taken first, and the check option follows it.
+    expect(
+      firstStmt("CREATE VIEW v AS SELECT a FROM t ORDER BY a FETCH FIRST 1 ROW WITH TIES WITH CHECK OPTION;"),
+    ).toMatchObject({ query: { limit: num(1) }, checkOption: "cascaded" });
+    // A trailing IS JSON takes a following WITH as its uniqueness clause, as in PG.
+    expect(bad("CREATE VIEW v AS SELECT a IS JSON WITH CHECK OPTION;")).toThrow(/Expected "unique" but found "check"/);
+  });
+
+  it("ends a schema element view at its check option", () => {
+    const schema = firstStmt(
+      "CREATE SCHEMA s CREATE VIEW v AS SELECT 1 WITH LOCAL CHECK OPTION CREATE TABLE t (a int);",
+    );
+    expect(schema.elements.map((e: any) => [e.kind, e.checkOption])).toEqual([
+      ["createView", "local"],
+      ["createTable", undefined],
+    ]);
+  });
+
+  it("omits the new keys when their clauses are absent", () => {
+    for (const src of ["CREATE VIEW v AS SELECT 1;", "CREATE MATERIALIZED VIEW mv AS SELECT 1 WITH DATA;"]) {
+      const v = firstStmt(src);
+      expect(v).not.toHaveProperty("options");
+      expect(v).not.toHaveProperty("checkOption");
+    }
+  });
+
+  it("parses REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]", () => {
+    expect(firstStmt("REFRESH MATERIALIZED VIEW mv;")).toEqual({
+      kind: "refreshMaterializedView",
+      concurrently: false,
+      name: ["mv"],
+      withData: null,
+    });
+    expect(firstStmt("REFRESH MATERIALIZED VIEW CONCURRENTLY s.mv WITH DATA;")).toMatchObject({
+      concurrently: true,
+      name: ["s", "mv"],
+      withData: true,
+    });
+    expect(firstStmt("REFRESH MATERIALIZED VIEW mv WITH NO DATA;")).toMatchObject({ withData: false });
+    expect(sqlLite.parse("REFRESH MATERIALIZED VIEW mv;")[0]!.span).toEqual({
+      start: { row: 1, col: 0 },
+      end: { row: 1, col: 28 },
+    });
+  });
+
+  it("keeps the new words unreserved as names", () => {
+    const words = ["refresh", "materialized", "concurrently", "cascaded", "local", "option", "security_barrier"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM refresh;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    const cols = words.map((word) => `${word} text`).join(", ");
+    expect(firstStmt(`CREATE TABLE option (${cols});`).items.map((i: any) => i.name)).toEqual(words);
+    // …and as the views these statements name.
+    expect(firstStmt("CREATE VIEW cascaded AS SELECT local FROM option WITH LOCAL CHECK OPTION;")).toMatchObject({
+      name: ["cascaded"],
+      checkOption: "local",
+    });
+    expect(firstStmt("REFRESH MATERIALIZED VIEW refresh;")).toMatchObject({ name: ["refresh"] });
+    // `check` is reserved, so only a quoted one is a name.
+    expect(bad("SELECT check FROM t;")).toThrow(/Expected a name but found "check"/);
+    expect(firstStmt('CREATE VIEW "check" AS SELECT 1;')).toMatchObject({ name: ["check"] });
+  });
+
+  it("rejects malformed view options, check options and REFRESH", () => {
+    expect(bad("CREATE MATERIALIZED VIEW mv AS SELECT 1 WITH CHECK OPTION;")).toThrow(
+      /Expected "data" but found "check"/,
+    );
+    expect(bad("CREATE VIEW v AS SELECT 1 WITH DATA;")).toThrow(
+      /Expected "cascaded", "local" or "check" but found "data" \(1:31\)/,
+    );
+    expect(bad("CREATE VIEW v AS SELECT 1 WITH;")).toThrow(/Expected "cascaded", "local" or "check" but found ";"/);
+    expect(bad("CREATE VIEW v AS SELECT 1 WITH LOCAL OPTION;")).toThrow(/Expected "check" but found "option"/);
+    expect(bad("CREATE VIEW v AS SELECT 1 WITH CHECK;")).toThrow(/Expected "option" but found ";"/);
+    expect(bad("CREATE VIEW v WITH security_barrier AS SELECT 1;")).toThrow(/Expected "\(" but found/);
+    expect(bad("CREATE VIEW v WITH () AS SELECT 1;")).toThrow(/Expected an option name but found "\)"/);
+    expect(bad("REFRESH VIEW v;")).toThrow(/Expected "materialized" but found "view"/);
+    expect(bad("REFRESH MATERIALIZED VIEW;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("REFRESH MATERIALIZED VIEW CONCURRENTLY;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("REFRESH MATERIALIZED VIEW mv WITH CHECK OPTION;")).toThrow(/Expected "data" but found "check"/);
+  });
+});
