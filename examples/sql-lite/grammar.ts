@@ -1258,9 +1258,18 @@ export type Cte = {
   cycle?: CteCycle;
 };
 
-// One `column = value` item of a SET list, shared by UPDATE and ON CONFLICT DO
-// UPDATE.
-export type Assignment = { column: string; value: Expr };
+// One item of a SET list, shared by UPDATE and ON CONFLICT DO UPDATE: either
+// `column = value`, or PG's multi-column `(a, b) = source`. The multi-column
+// source is a row constructor (`(1, 2)` / `ROW(1, 2)`, whose top-level items
+// may be a bare DEFAULT) or a `(SELECT …)` subquery — the only sources PG accepts.
+export type Assignment =
+  | { column: string; value: Expr }
+  | { columns: string[]; value: AssignmentRow | Extract<Expr, { kind: "row" | "subquery" }> };
+
+// The row-constructor source of a multi-column assignment: RowExpr's shape, but
+// its items may be a bare DEFAULT. A `((1, 2))` source keeps the inner RowExpr
+// (listed in Assignment's union for that reason).
+export type AssignmentRow = { kind: "row"; items: (Expr | DefaultValue)[]; implicit?: true; span: Span };
 
 // `constraint` is present only for `ON CONFLICT ON CONSTRAINT name`, which
 // names the arbiter instead of listing its columns (`target` is then null).
@@ -6009,9 +6018,71 @@ const asAlias = custom<string | null, SqlTokenType>(
 );
 
 const eq = token("op", { values: ["="] });
-const assignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(
+const singleAssignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(
   ({ column, value }): Assignment => ({ column, value }),
 );
+// `(a, b, …) = source`. The row items are read locally (not via `expression`)
+// so they may be a bare DEFAULT, as in an INSERT VALUES row. `row` is matched
+// by value only when `(` follows, so a bare `row` source is reported rather
+// than consumed (inside the items, `expression` reads it as a name). A lone
+// parenthesised item is a row only if it already is one (`((1, 2))`) or is a
+// subquery; PG rejects any other single-item source. A row's item count must
+// match the columns (a subquery's is left to PG's analysis). DEFAULT one paren
+// deeper (`((1, DEFAULT))`), which PG also takes, is not accepted here.
+type MultiAssignmentSource = Extract<Assignment, { columns: string[] }>["value"];
+// `subqueryExpr`, typed as the narrow source it is rather than any Expr.
+const assignmentSubquery = parenQuery.map((query, span): MultiAssignmentSource => ({ kind: "subquery", query, span }));
+const multiAssignment = custom<Assignment, SqlTokenType>(
+  (ctx) => {
+    ctx.next(); // "("
+    const columns = [ctx.parse(nameWord)];
+    while (ctx.eat("punc", ",") !== null) columns.push(ctx.parse(nameWord));
+    expectClose(ctx);
+    ctx.parse(eq);
+    if (isSubqueryParen(ctx)) return { columns, value: ctx.parse(assignmentSubquery) };
+    const start = ctx.position();
+    const after = ctx.peekAhead(1);
+    const explicit = ctx.is("ident", "row") && after?.type === "punc" && after.value === "(";
+    if (explicit) ctx.next();
+    if (!ctx.is("punc", "(")) {
+      return ctx.croak(`Expected a row constructor or a subquery but found ${describeFound(ctx.peek())}`);
+    }
+    ctx.next(); // "("
+    const items: (Expr | DefaultValue)[] = [];
+    if (!(explicit && ctx.is("punc", ")"))) {
+      items.push(ctx.parse(insertValue));
+      while (ctx.eat("punc", ",") !== null) items.push(ctx.parse(insertValue));
+    }
+    expectClose(ctx);
+    let value: MultiAssignmentSource = {
+      kind: "row",
+      items,
+      ...(!explicit && { implicit: true }),
+      span: ctx.spanFrom(start),
+    };
+    if (!explicit && items.length === 1) {
+      const only = items[0]!;
+      if (only.kind !== "row" && only.kind !== "subquery") {
+        return ctx.croak(
+          "Expected a row constructor or a subquery as a multi-column assignment source",
+          start,
+          ctx.position(),
+        );
+      }
+      value = only;
+    }
+    if (value.kind === "row" && value.items.length !== columns.length) {
+      return ctx.croak(
+        `Expected ${columns.length} values for ${columns.length} assigned columns but found ${value.items.length}`,
+        value.span.start,
+        value.span.end,
+      );
+    }
+    return { columns, value };
+  },
+  { expected: '"("', first: [{ type: "punc", value: "(" }] },
+);
+const assignment = oneOf(multiAssignment, singleAssignment);
 const setAssignments = seq(skip(kw("set")), field("items", sepBy(assignment, P(",")))).map((s) => s.items);
 
 const whereClause = seq(skip(kw("where")), field("e", expression)).map((s) => s.e);
