@@ -126,7 +126,7 @@ const SUPPLEMENTAL = [
   "ALTER TABLE t REPLICA IDENTITY USING INDEX t_pkey;",
   "ALTER TABLE IF EXISTS s.t ADD COLUMN IF NOT EXISTS a int, ADD IF NOT EXISTS b text, DROP c, OWNER TO bob;",
   "ALTER TABLE IF EXISTS t RENAME TO t2;",
-  // The other ALTER targets; only INDEX takes an action list.
+  // The other ALTER targets; only INDEX and VIEW take an action list.
   "ALTER SCHEMA s RENAME TO s2;",
   "ALTER DOMAIN app.d ADD CONSTRAINT pos CHECK (VALUE > 0) NOT VALID;",
   "ALTER DOMAIN d DROP CONSTRAINT IF EXISTS pos CASCADE;",
@@ -135,6 +135,13 @@ const SUPPLEMENTAL = [
   "ALTER TYPE mood RENAME VALUE 'sad' TO 'blue';",
   "ALTER TYPE mood SET SCHEMA archive;",
   "ALTER INDEX IF EXISTS i SET (fillfactor = 70), RESET (deduplicate_items), SET TABLESPACE ts;",
+  "ALTER FUNCTION s.f(double precision, a int) RENAME TO g;",
+  "ALTER FUNCTION f(int) IMMUTABLE NOT LEAKPROOF SECURITY DEFINER SET search_path = public;",
+  "ALTER AGGREGATE a(*) OWNER TO r;",
+  "ALTER VIEW IF EXISTS v ALTER COLUMN c SET DEFAULT 1, OWNER TO r, SET (security_barrier);",
+  "ALTER MATERIALIZED VIEW m RENAME COLUMN a TO b;",
+  "ALTER SEQUENCE IF EXISTS s RESTART WITH 5 OWNED BY t.id;",
+  "ALTER SEQUENCE s SET SCHEMA archive;",
   "CREATE TABLE t (id int NOT NULL DEFAULT 0, u text UNIQUE, parent int REFERENCES p (id) ON DELETE CASCADE, CHECK (id > 0));",
   "CREATE TABLE t (a int NULL, b int, FOREIGN KEY (b) REFERENCES p (id));",
   // LIKE as a table item and the clauses after the element list, each a key the
