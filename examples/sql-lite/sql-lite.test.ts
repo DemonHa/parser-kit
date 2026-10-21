@@ -2724,6 +2724,10 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     expect(() => sqlLite.parse("SELECT current_timestamp(1.5);")).toThrow(
       /Expected an integer precision but found "1.5"/,
     );
+    // PG's integer constants include hex, and the lexer has already dropped any
+    // digit separators; a float spelling of a whole number is still a float.
+    expect(colExpr("current_timestamp(0x3)")).toEqual(svf("current_timestamp", { precision: 3 }));
+    expect(colExpr("current_time(1_0)")).toEqual(svf("current_time", { precision: 10 }));
     expect(() => sqlLite.parse("SELECT current_timestamp(3e0);")).toThrow(
       /Expected an integer precision but found "3e0"/,
     );
@@ -2777,6 +2781,12 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     expect(() => sqlLite.parse(`SELECT "date" 'x';`)).toThrow(/Expected ";" but found "x"/);
     // So is a lead whose tail is not followed by a string — no word is taken.
     expect(() => sqlLite.parse("SELECT timestamp with time zone FROM t;")).toThrow(/Expected ";" but found "with"/);
+    // A lex error in the lookahead past the lead word must not cost the syntax
+    // error the statement already had.
+    expect(sqlLite.diagnose("SELECT time with time zone é;").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "é" (1:27)',
+      'Expected ";" but found "with" (1:12)',
+    ]);
     // PG writes the precision before the tail, never after it.
     expect(() => sqlLite.parse("SELECT timestamp with time zone(3) 'x';")).toThrow(/Expected ";" but found "with"/);
     // DATE takes no precision, so `date(3)` is a call and the string a stray.
@@ -2834,7 +2844,7 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
 
   it("rejects a malformed OVERLAY", () => {
     expect(() => sqlLite.parse("SELECT overlay(s PLACING 'x');")).toThrow(/Expected "from" but found "\)"/);
-    expect(() => sqlLite.parse("SELECT overlay(s PLACING 'x' FROM 1 FOR);")).toThrow(ParseError);
+    expect(() => sqlLite.parse("SELECT overlay(s PLACING 'x' FROM 1 FOR);")).toThrow(/but found "\)" \(1:39\)/);
     // PLACING may follow only the first argument of a bare OVERLAY, and only a plain one.
     expect(() => sqlLite.parse("SELECT overlay(a, b PLACING 'x' FROM 1);")).toThrow(
       /Expected "\)" but found "placing"/,
@@ -2846,6 +2856,7 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     expect(() => sqlLite.parse("SELECT overlay(v => s PLACING 'x' FROM 1);")).toThrow(
       /Expected "\)" but found "placing"/,
     );
+    expect(() => sqlLite.parse(`SELECT "overlay"(s PLACING 'x' FROM 1);`)).toThrow(/Expected "\)" but found "placing"/);
     expect(() => sqlLite.parse("SELECT pg_catalog.overlay(s PLACING 'x' FROM 1);")).toThrow(
       /Expected "\)" but found "placing"/,
     );

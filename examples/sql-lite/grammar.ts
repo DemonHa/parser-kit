@@ -1230,6 +1230,9 @@ const columnRef = custom<Expr, SqlTokenType>(
       const value = ctx.next()!.value; // the string literal
       return { kind: "typedLiteral", type, value, span: ctx.spanFrom(start) };
     }
+    // Only a bare OVERLAY has the PLACING form; a quoted `"overlay"` is an
+    // ordinary function name to PG.
+    const bareLead = ctx.peek()?.type === "ident";
     const parts: string[] = [ctx.parse(nameWord)];
     while (ctx.is("punc", ".")) {
       ctx.next(); // "."
@@ -1265,6 +1268,7 @@ const columnRef = custom<Expr, SqlTokenType>(
         // does not take either.
         const value = args[0]!;
         if (
+          bareLead &&
           parts.length === 1 &&
           parts[0] === "overlay" &&
           !distinct &&
@@ -1377,11 +1381,12 @@ const sqlValueFunction = custom<Expr, SqlTokenType>(
     let precision: number | null = null;
     if (PRECISION_FUNCTIONS.has(name) && ctx.is("punc", "(")) {
       ctx.next(); // "("
-      // Plain decimal digits only. PG caps the precision at 6, so the lexer's
-      // hex and digit-separator spellings are rejected rather than decoded, and
-      // so is `3e0`, which PG lexes as a float rather than an integer.
+      // An integer constant, as PG lexes one: decimal or hex digits (the lexer
+      // has already dropped any `_` separators), but not `1.5` or `3e0`, which
+      // PG reads as floats. The value is not range-checked — PG only warns
+      // above 6 and clamps.
       const tok = ctx.peek();
-      if (tok === null || tok.type !== "number" || !/^[0-9]+$/.test(tok.value)) {
+      if (tok === null || tok.type !== "number" || !/^(?:[0-9]+|0[xX][0-9a-fA-F]+)$/.test(tok.value)) {
         ctx.croak(`Expected an integer precision but found ${describeFound(tok)}`);
       }
       precision = Number(ctx.next()!.value);
@@ -1391,7 +1396,7 @@ const sqlValueFunction = custom<Expr, SqlTokenType>(
     return { kind: "sqlValueFunction", name, ...(precision !== null && { precision }), span: ctx.spanFrom(start) };
   },
   {
-    expected: "a niladic keyword function",
+    expected: 'a keyword like "current_date"',
     first: SQL_VALUE_FUNCTIONS.map((value): FirstEntry<SqlTokenType> => ({ type: "ident", value })),
   },
 );
@@ -1497,6 +1502,26 @@ const MULTI_WORD_TYPES: ReadonlyMap<string, readonly (readonly string[])[]> = ne
 // no other type in this grammar has its arity checked.
 const ARGS_BEFORE_TAIL: ReadonlySet<string> = new Set(["timestamp", "time"]);
 
+// A peek `index` tokens past the cursor that treats input which does not lex
+// as no token at all. Lexing is lazy, so a peek past the cursor can raise the
+// *next* token's lex error. Two things have to happen to it. Input that does not
+// lex cannot complete a lookahead pattern, so the candidate fails rather than
+// the whole rule — otherwise `diagnose("CREATE TABLE t (c timestamp with é);")`
+// reports the bad character and loses the column-definition error. But filling
+// the lookahead buffer consumes the offending character, so simply discarding
+// the error would drop it for good, and `c interval day é` would parse clean.
+// Hence report() — which records it in diagnose() and returns false under
+// strict parse(), where there is no collector and rethrowing is the only honest
+// answer.
+function peekOrReport(ctx: ParseContext<SqlTokenType>, index: number): Token<SqlTokenType> | null {
+  try {
+    return ctx.peekAhead(index);
+  } catch (error) {
+    if (!(error instanceof ParseError) || !ctx.report(error)) throw error;
+    return null;
+  }
+}
+
 // The longest continuation of `lead` sitting `offset` tokens past the cursor, or
 // null. Pure lookahead: nothing is consumed, so the caller decides. Every word
 // must be a bare `ident` — `readers.string("qident", …)` yields the *inner*
@@ -1505,23 +1530,8 @@ const ARGS_BEFORE_TAIL: ReadonlySet<string> = new Set(["timestamp", "time"]);
 function findTypeTail(ctx: ParseContext<SqlTokenType>, lead: string, offset: number): readonly string[] | null {
   const tails = MULTI_WORD_TYPES.get(lead);
   if (tails === undefined) return null;
-  // Lexing is lazy, so a peek past the cursor can raise the *next* token's lex
-  // error. Two things have to happen to it. Input that does not lex is not a
-  // tail, so the candidate fails rather than the whole type — otherwise
-  // `diagnose("CREATE TABLE t (c timestamp with é);")` reports the bad character
-  // and loses the column-definition error. But filling the lookahead buffer
-  // consumes the offending character, so simply discarding the error would drop
-  // it for good, and `c interval day é` would parse clean. Hence report() —
-  // which records it in diagnose() and returns false under strict parse(), where
-  // there is no collector and rethrowing is the only honest answer.
   const word = (index: number): string | null => {
-    let ahead: Token<SqlTokenType> | null;
-    try {
-      ahead = ctx.peekAhead(offset + index);
-    } catch (error) {
-      if (!(error instanceof ParseError) || !ctx.report(error)) throw error;
-      return null;
-    }
+    const ahead = peekOrReport(ctx, offset + index);
     return ahead !== null && ahead.type === "ident" ? ahead.value : null;
   };
   for (const tail of tails) {
@@ -1549,19 +1559,28 @@ const TYPED_LITERAL_LEADS: ReadonlySet<string> = new Set(["date", "time", "times
 // string. Every token is checked before columnRef commits, and nothing else
 // may sit between them — so `date(x)` and `timestamp(3)` stay calls, and a
 // type with an array suffix or a trailing arg list is never a literal's.
+//
+// The token straight after the lead is peeked plainly, as INTERVAL's is: a name
+// or call is about to peek it anyway, so a lex error there surfaces exactly as
+// it always did. Everything further out is lookahead nothing else would have
+// done, and goes through peekOrReport — under diagnose() the syntax error that
+// follows (`SELECT time with time zone é;` still reports `with`) is kept.
 function startsTypedLiteral(ctx: ParseContext<SqlTokenType>): boolean {
   const lead = ctx.peek();
   if (lead === null || lead.type !== "ident" || !TYPED_LITERAL_LEADS.has(lead.value)) return false;
+  const isPunc = (ahead: Token<SqlTokenType> | null, value: string) =>
+    ahead !== null && ahead.type === "punc" && ahead.value === value;
   let offset = 1;
-  const isPunc = (index: number, value: string) => {
-    const ahead = ctx.peekAhead(index);
-    return ahead !== null && ahead.type === "punc" && ahead.value === value;
-  };
-  if (ARGS_BEFORE_TAIL.has(lead.value) && isPunc(1, "(") && ctx.peekAhead(2)?.type === "number" && isPunc(3, ")")) {
+  if (
+    ARGS_BEFORE_TAIL.has(lead.value) &&
+    isPunc(ctx.peekAhead(1), "(") &&
+    peekOrReport(ctx, 2)?.type === "number" &&
+    isPunc(peekOrReport(ctx, 3), ")")
+  ) {
     offset = 4;
   }
   offset += findTypeTail(ctx, lead.value, offset)?.length ?? 0;
-  return ctx.peekAhead(offset)?.type === "string";
+  return (offset === 1 ? ctx.peekAhead(1) : peekOrReport(ctx, offset))?.type === "string";
 }
 
 // Consume the longest continuation of `lead` that is present, or nothing. The
