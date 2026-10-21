@@ -888,6 +888,26 @@ export type CursorFetch = { kind: "fetch" | "move"; direction: CursorDirection |
 // CLOSE {name | ALL} — `name` is null for CLOSE ALL.
 export type CloseCursor = { kind: "close"; name: string | null; span: Span };
 
+// One `table [(column, …)]` target of ANALYZE or VACUUM — `columns` is null when
+// no list is written.
+export type MaintenanceTarget = { name: string[]; columns: string[] | null };
+
+// `EXPLAIN [(option, …) | [ANALYZE] [VERBOSE]] statement`. As in PG, the legacy
+// keywords are options too: `EXPLAIN ANALYZE VERBOSE q` and `EXPLAIN (ANALYZE,
+// VERBOSE) q` both carry two bare options (`value: null`), spelt as written.
+// `options` is `[]` when neither form is.
+export type Explain = {
+  kind: "explain";
+  options: RelationOption[];
+  statement: Query | Insert | Update | Delete | CreateTableAs | CreateView | DeclareCursor | Execute;
+  span: Span;
+};
+// `ANALYZE [(option, …) | VERBOSE] [target, …]` and `VACUUM [(option, …) |
+// [FULL] [FREEZE] [VERBOSE] [ANALYZE]] [target, …]`, with `options` as on
+// EXPLAIN. `tables` is `[]` when none is named (the whole database).
+export type Analyze = { kind: "analyze"; options: RelationOption[]; tables: MaintenanceTarget[]; span: Span };
+export type Vacuum = { kind: "vacuum"; options: RelationOption[]; tables: MaintenanceTarget[]; span: Span };
+
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
   // UNLOGGED family, see parseTempPrefix), in source order. Omitted, not null,
@@ -1015,6 +1035,9 @@ export type Stmt =
   | Deallocate
   | Prepare
   | Execute
+  | Explain
+  | Analyze
+  | Vacuum
   | Lock
   | CallProcedure
   | DeclareCursor
@@ -6924,6 +6947,125 @@ const executeStmt = custom<Stmt, SqlTokenType>(
   { expected: '"execute"', first: [{ type: "ident", value: "execute" }] },
 );
 
+// --- EXPLAIN / ANALYZE / VACUUM ---
+//
+// The lead words are matched by value. `analyze` (and `analyse`) is reserved
+// already, as in PG; `explain` and `vacuum` stay names everywhere but a
+// statement's head. The parenthesised options are relationOptions as it stands:
+// PG's utility option list is `name [value]`, a shape that rule takes (along
+// with the `=`, the `namespace.` prefix and the `*` and list values this list
+// does not need, the trade that rule's comment describes).
+
+// The unparenthesised flags, in PG's fixed order: each a set of spellings, read
+// at most once, as a bare option. `verbose` and `freeze` are names elsewhere,
+// but here they are flags, as in PG, where neither can name a table: see
+// maintenanceTail for a flag written out of order.
+function legacyFlags(ctx: ParseContext<SqlTokenType>, flags: readonly (readonly string[])[]): RelationOption[] {
+  const options: RelationOption[] = [];
+  for (const spellings of flags) {
+    const tok = ctx.peek();
+    if (tok === null || tok.type !== "ident" || !spellings.includes(tok.value)) continue;
+    const start = ctx.position();
+    ctx.next();
+    options.push({ name: tok.value, value: null, span: ctx.spanFrom(start) });
+  }
+  return options;
+}
+
+const ANALYZE_WORDS = ["analyze", "analyse"] as const;
+// The column list may not be empty, unlike columnList's: PG's `opt_name_list`.
+const targetColumns = sepBy(nameWord, P(","));
+const maintenanceTarget = custom<MaintenanceTarget, SqlTokenType>(
+  (ctx) => ({ name: ctx.parse(qualName), columns: optParenList(ctx, targetColumns) }),
+  { expected: qualName.expected(), first: qualName.first() },
+);
+const maintenanceTargets = sepBy(maintenanceTarget, P(","));
+
+// `[(option, …) | flags] [target, …]` — the tail ANALYZE and VACUUM share. PG
+// takes either option form but not both; the target list ends the statement.
+// A bare flag word left over after the flags (one out of order, or repeated)
+// croaks rather than naming the first target, as PG's syntax error does; a
+// quoted one, or one past the first target, is a name.
+function maintenanceTail(ctx: ParseContext<SqlTokenType>, flags: readonly (readonly string[])[]) {
+  const parenthesised = ctx.is("punc", "(");
+  const options = parenthesised ? ctx.parse(relationOptions) : legacyFlags(ctx, flags);
+  const tok = ctx.peek();
+  if (!parenthesised && tok?.type === "ident" && flags.some((spellings) => spellings.includes(tok.value))) {
+    return ctx.croak(`Expected a name but found ${describeFound(tok)}`);
+  }
+  const tables = ctx.is("punc", ";") || ctx.peek() === null ? [] : ctx.parse(maintenanceTargets);
+  return { options, tables };
+}
+
+const analyzeStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.next(); // ANALYZE or ANALYSE
+    return { kind: "analyze", ...maintenanceTail(ctx, [["verbose"]]), span: ctx.spanFrom(start) };
+  },
+  { expected: '"analyze"', first: ANALYZE_WORDS.map((value) => ({ type: "ident" as const, value })) },
+);
+
+const vacuumStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("vacuum"));
+    const tail = maintenanceTail(ctx, [["full"], ["freeze"], ["verbose"], ANALYZE_WORDS]);
+    return { kind: "vacuum", ...tail, span: ctx.spanFrom(start) };
+  },
+  { expected: '"vacuum"', first: [{ type: "ident", value: "vacuum" }] },
+);
+
+// PG's ExplainableStmt, as far as sql-lite parses it: a preparable statement
+// (the same set as PREPARE's), CREATE TABLE AS, CREATE MATERIALIZED VIEW,
+// DECLARE (a cursor), or EXECUTE.
+const EXPLAINABLE =
+  "a SELECT, VALUES, INSERT, UPDATE, DELETE, CREATE TABLE AS, CREATE MATERIALIZED VIEW, DECLARE or EXECUTE statement";
+function explainable(ctx: ParseContext<SqlTokenType>): Explain["statement"] {
+  if (ctx.is("ident", "execute")) return ctx.parse(executeStmt) as Execute;
+  if (ctx.is("ident", "declare")) return ctx.parse(declareCursorStmt) as DeclareCursor;
+  if (ctx.is("ident", "create")) {
+    // Only parsed is a CREATE TABLE told apart from CREATE TABLE AS, so the
+    // croak spans the whole statement, as CREATE SCHEMA's element check does —
+    // from CREATE, which a CREATE TABLE node's own span leaves out.
+    const start = ctx.position();
+    const stmt = ctx.parse(createStmt);
+    if (stmt.kind === "createTableAs" || (stmt.kind === "createView" && stmt.materialized)) return stmt;
+    return ctx.croak(
+      "EXPLAIN takes CREATE TABLE AS or CREATE MATERIALIZED VIEW but no other CREATE",
+      start,
+      stmt.span.end,
+    );
+  }
+  if (!matchesFirst(ctx.peek(), PREPARABLE_FIRST)) {
+    return ctx.croak(`Expected ${EXPLAINABLE} but found ${describeFound(ctx.peek())}`);
+  }
+  return ctx.parse(dmlStatement) as Query | Insert | Update | Delete;
+}
+
+// A `(` after EXPLAIN opens the option list unless a query follows it: PG reads
+// `EXPLAIN (SELECT 1)` as the parenthesised query, since no option is named
+// `select`, `values` or `with`, nor opens with a `(`.
+function opensQuery(tok: Token<SqlTokenType> | null): boolean {
+  if (tok === null) return false;
+  if (tok.type === "punc") return tok.value === "(";
+  return tok.type === "ident" && (tok.value === "select" || tok.value === "values" || tok.value === "with");
+}
+
+const explainStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("explain"));
+    const options =
+      ctx.is("punc", "(") && !opensQuery(peekOrReport(ctx, 1))
+        ? ctx.parse(relationOptions)
+        : legacyFlags(ctx, [ANALYZE_WORDS, ["verbose"]]);
+    const statement = explainable(ctx);
+    return { kind: "explain", options, statement, span: ctx.spanFrom(start) };
+  },
+  { expected: '"explain"', first: [{ type: "ident", value: "explain" }] },
+);
+
 // --- LOCK and CALL ---
 // Both lead words stay UNRESERVED, matched by value, as do the lock-mode words.
 
@@ -7162,6 +7304,9 @@ const utilityStmt = oneOf(
   deallocateStmt,
   prepareStmt,
   executeStmt,
+  explainStmt,
+  analyzeStmt,
+  vacuumStmt,
   lockStmt,
   callStmt,
   declareCursorStmt,
