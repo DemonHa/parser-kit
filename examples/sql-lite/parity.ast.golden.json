@@ -5964,7 +5964,7 @@
     ]
   },
   {
-    "source": "SELECT (a, b), (a, b) = (1, 2), x = ANY (a, b) FROM t;",
+    "source": "SELECT (a, b), (a, b) = (1, 2), x = ANY ((a, b)) FROM t;",
     "ast": [
       {
         "kind": "select",
@@ -6009,6 +6009,7 @@
                   }
                 }
               ],
+              "implicit": true,
               "span": {
                 "start": {
                   "row": 1,
@@ -6062,6 +6063,7 @@
                     }
                   }
                 ],
+                "implicit": true,
                 "span": {
                   "start": {
                     "row": 1,
@@ -6105,6 +6107,7 @@
                     }
                   }
                 ],
+                "implicit": true,
                 "span": {
                   "start": {
                     "row": 1,
@@ -6161,11 +6164,11 @@
                     "span": {
                       "start": {
                         "row": 1,
-                        "col": 41
+                        "col": 42
                       },
                       "end": {
                         "row": 1,
-                        "col": 42
+                        "col": 43
                       }
                     }
                   },
@@ -6177,23 +6180,24 @@
                     "span": {
                       "start": {
                         "row": 1,
-                        "col": 44
+                        "col": 45
                       },
                       "end": {
                         "row": 1,
-                        "col": 45
+                        "col": 46
                       }
                     }
                   }
                 ],
+                "implicit": true,
                 "span": {
                   "start": {
                     "row": 1,
-                    "col": 40
+                    "col": 41
                   },
                   "end": {
                     "row": 1,
-                    "col": 46
+                    "col": 47
                   }
                 }
               },
@@ -6204,7 +6208,7 @@
                 },
                 "end": {
                   "row": 1,
-                  "col": 46
+                  "col": 48
                 }
               }
             },
@@ -6235,7 +6239,7 @@
           },
           "end": {
             "row": 1,
-            "col": 53
+            "col": 55
           }
         }
       }
@@ -6289,6 +6293,7 @@
                     }
                   }
                 ],
+                "implicit": true,
                 "span": {
                   "start": {
                     "row": 1,
@@ -6336,6 +6341,7 @@
                     }
                   }
                 ],
+                "implicit": true,
                 "span": {
                   "start": {
                     "row": 1,
@@ -6515,6 +6521,7 @@
                         }
                       }
                     ],
+                    "implicit": true,
                     "span": {
                       "start": {
                         "row": 1,
@@ -6562,6 +6569,7 @@
                         }
                       }
                     ],
+                    "implicit": true,
                     "span": {
                       "start": {
                         "row": 1,
@@ -6656,7 +6664,7 @@
     ]
   },
   {
-    "source": "SELECT a BETWEEN SYMMETRIC 1 AND 2, b NOT BETWEEN ASYMMETRIC 1 AND 2 FROM t;",
+    "source": "SELECT a BETWEEN SYMMETRIC 1 AND 2, b NOT BETWEEN ASYMMETRIC 1 AND 2, c NOT BETWEEN 1 AND 2 FROM t;",
     "ast": [
       {
         "kind": "select",
@@ -6787,6 +6795,67 @@
               }
             },
             "alias": null
+          },
+          {
+            "expr": {
+              "kind": "between",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "c"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 70
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 71
+                  }
+                }
+              },
+              "lo": {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 84
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 85
+                  }
+                }
+              },
+              "hi": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 90
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 91
+                  }
+                }
+              },
+              "negated": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 70
+                },
+                "end": {
+                  "row": 1,
+                  "col": 91
+                }
+              }
+            },
+            "alias": null
           }
         ],
         "from": [
@@ -6813,7 +6882,7 @@
           },
           "end": {
             "row": 1,
-            "col": 75
+            "col": 98
           }
         }
       }
