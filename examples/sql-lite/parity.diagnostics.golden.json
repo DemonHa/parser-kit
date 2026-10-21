@@ -3,7 +3,7 @@
     "source": "CREATE TABLE t (id int, 42 bad, ok text);\nDROP TABLE t;",
     "errors": [
       {
-        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or \"like\" or a name but found \"42\" (1:24)",
+        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or \"like\" or \"exclude\" or a name but found \"42\" (1:24)",
         "end": {
           "row": 1,
           "col": 26
@@ -415,7 +415,7 @@
     "source": "CREATE TABLE a (id int, 42 bad);\nSELECT * FROM;\nSELECT 5;",
     "errors": [
       {
-        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or \"like\" or a name but found \"42\" (1:24)",
+        "message": "Expected \"constraint\" or \"primary key\" or \"unique\" or \"check\" or \"foreign key\" or \"like\" or \"exclude\" or a name but found \"42\" (1:24)",
         "end": {
           "row": 1,
           "col": 26
