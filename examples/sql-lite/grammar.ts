@@ -656,9 +656,30 @@ export type FromItem =
 
 export type OrderItem = { expr: Expr; dir: "asc" | "desc" | null; nulls: "first" | "last" | null };
 
+// `SEARCH {DEPTH | BREADTH} FIRST BY col, … SET seq_col` on a CTE: `by` lists the
+// ordering columns, `set` names the sequence column the clause adds.
+export type CteSearch = { order: "depth" | "breadth"; by: string[]; set: string };
+
+// `CYCLE col, … SET mark_col [TO value DEFAULT default] USING path_col` on a
+// CTE. `mark` holds the TO / DEFAULT pair, which PG takes together or not at all
+// (omitted, the mark column is a boolean); null when it is not written.
+export type CteCycle = { columns: string[]; set: string; mark: { to: Expr; default: Expr } | null; using: string };
+
 // A CTE body is a query or a data-modifying statement (kept in the `query` field
-// for both, so plain `WITH … SELECT` output is unchanged).
-export type Cte = { name: string; columns: string[] | null; query: Query | Insert | Update | Delete };
+// for both, so plain `WITH … SELECT` output is unchanged). `materialized`
+// (`true` = MATERIALIZED, `false` = NOT MATERIALIZED), `search` and `cycle` are
+// present only when written, so a CTE without them keeps its original shape.
+// PG's grammar admits SEARCH / CYCLE on any CTE; parse analysis rejects them
+// unless that CTE is actually recursive (it refers to itself under WITH
+// RECURSIVE), so they are recorded wherever written.
+export type Cte = {
+  name: string;
+  columns: string[] | null;
+  materialized?: boolean;
+  query: Query | Insert | Update | Delete;
+  search?: CteSearch;
+  cycle?: CteCycle;
+};
 
 export type OnConflict = {
   target: string[] | null;
@@ -3737,14 +3758,64 @@ const cteBody = custom<Query | Insert | Update | Delete, SqlTokenType>(
     ],
   },
 );
+// PG's `opt_materialized`, between AS and the body's `(`. Nothing but `(` could
+// follow AS before, so neither word takes anything away from a name.
+const cteMaterialized = oneOf(
+  kw("materialized").map(() => true),
+  kwseq("not", "materialized").map(() => false),
+);
+// The CTE's trailing clauses come after the body's `)`, where only `,` or the
+// statement the WITH leads could follow before — and neither `search` nor
+// `cycle` begins a statement — so they too are matched by value with no guard.
+// The new words (`search`, `depth`, `breadth`, `cycle`) stay ordinary names
+// everywhere else; `set` / `to` / `default` / `using` were already reserved.
+const cteSearch = seq(
+  skip(kw("search")),
+  field(
+    "order",
+    oneOf(kw("depth"), kw("breadth")).map((n) => n.value as "depth" | "breadth"),
+  ),
+  skip(kwseq("first", "by")),
+  field("by", sepBy(nameWord, P(","))),
+  skip(kw("set")),
+  field("set", nameWord),
+).map(({ order, by, set }): CteSearch => ({ order, by, set }));
+// The mark values are PG's `AexprConst`: a literal, never an expression. The
+// typed-literal forms of AexprConst (`DATE '…'`, `INTERVAL '…'`) are not
+// accepted here.
+const cycleMarkValue = oneOf(numberLit, stringLit, bitStringLit, hexStringLit, boolLit, nullLit).describe("a constant");
+const cteCycle = seq(
+  skip(kw("cycle")),
+  field("columns", sepBy(nameWord, P(","))),
+  skip(kw("set")),
+  field("set", nameWord),
+  field(
+    "mark",
+    optional(seq(skip(kw("to")), field("to", cycleMarkValue), skip(kw("default")), field("default", cycleMarkValue))),
+  ),
+  skip(kw("using")),
+  field("using", nameWord),
+).map(({ columns, set, mark, using }): CteCycle => ({ columns, set, mark: mark ?? null, using }));
 const cte = seq(
   field("name", nameWord),
   field("columns", optional(columnList)),
   skip(kw("as")),
+  field("materialized", optional(cteMaterialized)),
   skip(punc("(")),
   field("query", cteBody),
   skip(punc(")")),
-).map(({ name, columns, query: q }): Cte => ({ name, columns: columns ?? null, query: q }));
+  field("search", optional(cteSearch)),
+  field("cycle", optional(cteCycle)),
+).map(
+  ({ name, columns, materialized, query: q, search, cycle }): Cte => ({
+    name,
+    columns: columns ?? null,
+    ...(materialized !== null && { materialized }),
+    query: q,
+    ...(search && { search }),
+    ...(cycle && { cycle }),
+  }),
+);
 const withPrefix = seq(
   skip(kw("with")),
   field(

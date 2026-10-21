@@ -2052,6 +2052,168 @@ describe("SQL-lite data-modifying CTEs", () => {
   });
 });
 
+// --- CTE materialization, SEARCH and CYCLE ---
+
+describe("SQL-lite CTE materialization, SEARCH and CYCLE", () => {
+  const ctes = (src: string) => (firstStmt(src) as any).with_;
+  // The CTE node for `WITH RECURSIVE t AS (SELECT 1) <tail> SELECT 1;`.
+  const tailed = (tail: string) => ctes(`WITH RECURSIVE t AS (SELECT 1) ${tail} SELECT 1;`)[0];
+  const one = sel({ columns: [col(num(1))] });
+
+  it("parses AS MATERIALIZED and AS NOT MATERIALIZED", () => {
+    expect(firstStmt("WITH a AS MATERIALIZED (SELECT 1) SELECT * FROM a;")).toEqual(
+      sel({
+        with_: [{ name: "a", columns: null, materialized: true, query: one }],
+        columns: [col(star())],
+        from: [tableFrom(["a"])],
+      }),
+    );
+    expect(ctes("WITH a (x) AS NOT MATERIALIZED (SELECT 1) SELECT 1;")).toEqual([
+      { name: "a", columns: ["x"], materialized: false, query: one },
+    ]);
+    // Each CTE in the list carries its own setting.
+    expect(
+      ctes("WITH a AS MATERIALIZED (SELECT 1), b AS (SELECT 1), c AS NOT MATERIALIZED (SELECT 1) SELECT 1;").map(
+        (c: any) => c.materialized,
+      ),
+    ).toEqual([true, undefined, false]);
+    // A data-modifying body takes the setting too.
+    expect(ctes("WITH d AS MATERIALIZED (DELETE FROM t RETURNING id) SELECT 1;")[0]).toMatchObject({
+      name: "d",
+      materialized: true,
+      query: { kind: "delete", table: ["t"] },
+    });
+  });
+
+  it("parses SEARCH DEPTH / BREADTH FIRST", () => {
+    expect(tailed("SEARCH DEPTH FIRST BY id SET ord")).toEqual({
+      name: "t",
+      columns: null,
+      query: one,
+      search: { order: "depth", by: ["id"], set: "ord" },
+    });
+    expect(tailed("SEARCH BREADTH FIRST BY a, b SET ord").search).toEqual({
+      order: "breadth",
+      by: ["a", "b"],
+      set: "ord",
+    });
+  });
+
+  it("parses CYCLE with and without the TO / DEFAULT mark values", () => {
+    expect(tailed("CYCLE id SET is_cycle USING path")).toEqual({
+      name: "t",
+      columns: null,
+      query: one,
+      cycle: { columns: ["id"], set: "is_cycle", mark: null, using: "path" },
+    });
+    expect(tailed("CYCLE a, b SET is_cycle TO 'Y' DEFAULT 'N' USING path").cycle).toEqual({
+      columns: ["a", "b"],
+      set: "is_cycle",
+      mark: { to: str("Y"), default: str("N") },
+      using: "path",
+    });
+    // Any literal will do for a mark value: numbers, booleans, NULL.
+    expect(tailed("CYCLE a SET c TO 1 DEFAULT 0 USING p").cycle.mark).toEqual({ to: num(1), default: num(0) });
+    expect(tailed("CYCLE a SET c TO true DEFAULT null USING p").cycle.mark).toEqual({
+      to: { kind: "bool", value: true },
+      default: { kind: "null" },
+    });
+  });
+
+  it("parses all three together, in PG's order, ahead of another CTE", () => {
+    const [t, u] = ctes(
+      "WITH RECURSIVE t (id) AS NOT MATERIALIZED (SELECT 1) SEARCH DEPTH FIRST BY id SET ord " +
+        "CYCLE id SET is_cycle USING path, u AS (SELECT 2) SELECT * FROM t;",
+    );
+    expect(t).toEqual({
+      name: "t",
+      columns: ["id"],
+      materialized: false,
+      query: one,
+      search: { order: "depth", by: ["id"], set: "ord" },
+      cycle: { columns: ["id"], set: "is_cycle", mark: null, using: "path" },
+    });
+    expect(u).toEqual({ name: "u", columns: null, query: sel({ columns: [col(num(2))] }) });
+    // The clauses ride on a CTE that leads DML just as well.
+    expect(firstStmt("WITH RECURSIVE t AS (SELECT 1) CYCLE id SET c USING p DELETE FROM x;").with_[0].cycle).toEqual({
+      columns: ["id"],
+      set: "c",
+      mark: null,
+      using: "p",
+    });
+  });
+
+  it("records SEARCH / CYCLE on a non-recursive CTE, as PG's grammar does", () => {
+    // PG rejects the clauses on a CTE that is not actually recursive in parse
+    // analysis, not in the grammar, so — like SELECT INTO — they are recorded
+    // wherever written. (The fixtures above are grammar-only for the same reason.)
+    expect(firstStmt("WITH t AS (SELECT 1) SEARCH DEPTH FIRST BY id SET ord SELECT 1;")).toMatchObject({
+      recursive: false,
+      with_: [{ name: "t", search: { order: "depth", by: ["id"], set: "ord" } }],
+    });
+  });
+
+  it("omits all three keys when none of the clauses is written", () => {
+    const [plain] = ctes("WITH a AS (SELECT 1) SELECT 1;");
+    expect(Object.keys(plain)).toEqual(["name", "columns", "query"]);
+  });
+
+  it("keeps every new keyword usable as a name", () => {
+    // None of `materialized`, `search`, `cycle`, `depth`, `breadth` or `first`
+    // is reserved: inside a CTE each is matched by value only within its own
+    // clause (after AS, or after the body's `)` and `search`), where no name
+    // could stand before.
+    const words = ["materialized", "search", "cycle", "depth", "breadth", "first"];
+    expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(name(w))));
+    for (const word of words) {
+      expect(ctes(`WITH ${word} AS (SELECT 1) SELECT * FROM ${word};`)).toEqual([
+        { name: word, columns: null, query: one },
+      ]);
+    }
+    // …including as the column names inside the clauses themselves.
+    expect(tailed("SEARCH DEPTH FIRST BY search, first SET depth CYCLE cycle SET breadth USING materialized")).toEqual({
+      name: "t",
+      columns: null,
+      query: one,
+      search: { order: "depth", by: ["search", "first"], set: "depth" },
+      cycle: { columns: ["cycle"], set: "breadth", mark: null, using: "materialized" },
+    });
+    // A CTE called `materialized` may itself be materialized.
+    expect(ctes("WITH materialized AS MATERIALIZED (SELECT 1) SELECT 1;")[0]).toMatchObject({
+      name: "materialized",
+      materialized: true,
+    });
+  });
+
+  it("rejects malformed materialization, SEARCH and CYCLE clauses", () => {
+    expect(() => sqlLite.parse("WITH a AS NOT (SELECT 1) SELECT 1;")).toThrow(/Expected "materialized" but found "\("/);
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) SEARCH FIRST BY id SET o SELECT 1;")).toThrow(
+      /Expected "depth" or "breadth" but found "first"/,
+    );
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) SEARCH DEPTH BY id SET o SELECT 1;")).toThrow(
+      /Expected "first by"/,
+    );
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) SEARCH DEPTH FIRST BY id SELECT 1;")).toThrow(
+      /Expected "set" but found "select"/,
+    );
+    // TO without DEFAULT, a missing USING, and a non-constant mark value.
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c TO 1 USING p SELECT 1;")).toThrow(
+      /Expected "default" but found "using"/,
+    );
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c SELECT 1;")).toThrow(
+      /Expected "using" but found "select"/,
+    );
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c TO x DEFAULT 0 USING p SELECT 1;")).toThrow(
+      /Expected a constant but found "x"/,
+    );
+    // PG's order is SEARCH then CYCLE; the reverse leaves SEARCH where the
+    // statement should start.
+    expect(() =>
+      sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c USING p SEARCH DEPTH FIRST BY id SET o SELECT 1;"),
+    ).toThrow(ParseError);
+  });
+});
+
 // --- INSERT / UPDATE / DELETE ---
 
 describe("SQL-lite INSERT / UPDATE / DELETE", () => {
