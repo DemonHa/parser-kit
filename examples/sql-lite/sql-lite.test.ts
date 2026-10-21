@@ -171,11 +171,11 @@ describe("SQL-lite statements", () => {
   it("parses CREATE [UNIQUE] INDEX with expressions and a partial WHERE", () => {
     const plain = firstStmt("CREATE INDEX idx_email ON users (email);");
     expect(plain).toMatchObject({ kind: "createIndex", unique: false, name: "idx_email", table: ["users"] });
-    expect((plain as any).columns).toEqual([name("email")]);
+    expect((plain as any).columns).toEqual([{ expr: name("email") }]);
 
     const partial = firstStmt("CREATE UNIQUE INDEX ON users (lower(email)) WHERE active;");
     expect(partial).toMatchObject({ kind: "createIndex", unique: true, name: null });
-    expect((partial as any).columns).toEqual([{ kind: "call", name: "lower", args: [name("email")] }]);
+    expect((partial as any).columns).toEqual([{ expr: { kind: "call", name: "lower", args: [name("email")] } }]);
     expect((partial as any).where).toEqual(name("active"));
     // The Phase 6 extras default off / absent on a plain index.
     expect(plain).toMatchObject({ concurrently: false, ifNotExists: false, include: null });
@@ -191,7 +191,7 @@ describe("SQL-lite statements", () => {
       table: ["users"],
       include: ["name", "id"],
     });
-    expect((idx as any).columns).toEqual([name("email")]);
+    expect((idx as any).columns).toEqual([{ expr: name("email") }]);
   });
 
   it("parses CREATE TYPE ... AS ENUM", () => {
@@ -3255,7 +3255,7 @@ describe("SQL-lite keyword dispatch maps", () => {
 
   it("names the table-item alternatives in the join form", () => {
     expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(
-      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or "like" or a name but found "42"/,
+      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or "like" or "exclude" or a name but found "42"/,
     );
   });
 
@@ -3928,6 +3928,264 @@ describe("SQL-lite CREATE TABLE storage options, LIKE and INHERITS", () => {
   });
 });
 
+// --- declarative partitioning ---
+
+describe("SQL-lite declarative partitioning", () => {
+  const stmt = (src: string) => firstStmt(src) as any;
+  const spec = (keys: string, strategy = "RANGE") =>
+    stmt(`CREATE TABLE m (a int) PARTITION BY ${strategy} (${keys});`).partitionBy;
+  const bound = (src: string) => stmt(`CREATE TABLE p PARTITION OF m ${src};`).partitionOf.bound;
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const aCol = { kind: "column", name: "a", dataType: ct("int"), constraints: [] };
+
+  it("parses PARTITION BY after the element list, with each key's collation and operator class", () => {
+    expect(stmt("CREATE TABLE m (a int) PARTITION BY LIST (a);")).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["m"],
+      items: [aCol],
+      partitionBy: { strategy: "list", keys: [{ expr: name("a") }] },
+    });
+    // A column, a call or a parenthesised expression; COLLATE and the opclass
+    // belong to the key, so neither is left on the expression.
+    expect(spec('a text_ops, lower(b) COLLATE "C" app.text_pattern_ops, (a + 1) COLLATE x', "HASH")).toEqual({
+      strategy: "hash",
+      keys: [
+        { expr: name("a"), opclass: ["text_ops"] },
+        {
+          expr: { kind: "call", name: "lower", args: [name("b")] },
+          collate: ["C"],
+          opclass: ["app", "text_pattern_ops"],
+        },
+        { expr: bin("+", name("a"), num(1)), collate: ["x"] },
+      ],
+    });
+    // A COLLATE inside the parentheses is the expression's own.
+    expect(spec("(a COLLATE x)").keys[0]).toEqual({ expr: { kind: "collate", expr: name("a"), collation: ["x"] } });
+    // The strategy is read ignoring case, quoted or not, as PG reads it.
+    expect(spec("a", '"Range"').strategy).toBe("range");
+    expect(spec("extract(year FROM a)").keys[0].expr).toMatchObject({ kind: "extract", field: "year" });
+    // CAST(…) and the niladic keyword functions are calls in PG's grammar too.
+    expect(spec("CAST(a AS text), current_date").keys.map((k: any) => k.expr.kind)).toEqual([
+      "cast",
+      "sqlValueFunction",
+    ]);
+  });
+
+  it("parses PARTITION OF with no element list, for each kind of bound", () => {
+    expect(stmt("CREATE TABLE p PARTITION OF app.m DEFAULT;")).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["p"],
+      items: [],
+      partitionOf: { parent: ["app", "m"], bound: { kind: "default" } },
+    });
+    expect(bound("FOR VALUES IN (1, 'x' || 'y')")).toEqual({
+      kind: "list",
+      values: [num(1), bin("||", str("x"), str("y"))],
+    });
+    expect(bound("FOR VALUES FROM (1, MINVALUE) TO (10, maxvalue)")).toEqual({
+      kind: "range",
+      from: [num(1), { kind: "minvalue" }],
+      to: [num(10), { kind: "maxvalue" }],
+    });
+    expect(bound("FOR VALUES WITH (MODULUS 4, REMAINDER 0)")).toEqual({ kind: "hash", modulus: 4, remainder: 0 });
+    // Either order, and with the `=` the shared option list allows.
+    expect(bound("FOR VALUES WITH (remainder = 3, modulus = 8)")).toEqual({ kind: "hash", modulus: 8, remainder: 3 });
+  });
+
+  it("reads MINVALUE / MAXVALUE as PG does: a one-part name, only in a range bound", () => {
+    // Quoted, it is still the same column reference PG picks out by name.
+    expect(bound('FOR VALUES FROM ("minvalue") TO (maxvalue + 1)')).toEqual({
+      kind: "range",
+      from: [{ kind: "minvalue" }],
+      to: [bin("+", name("maxvalue"), num(1))],
+    });
+    expect(bound("FOR VALUES IN (minvalue)").values).toEqual([name("minvalue")]);
+    // Only MINVALUE may follow MINVALUE, and only MAXVALUE may follow MAXVALUE.
+    expect(bound("FOR VALUES FROM (1, MINVALUE, MINVALUE) TO (MAXVALUE, MAXVALUE)").to).toEqual([
+      { kind: "maxvalue" },
+      { kind: "maxvalue" },
+    ]);
+    expect(bad("CREATE TABLE p PARTITION OF m FOR VALUES FROM (MINVALUE, 1) TO (2);")).toThrow(
+      /every bound following MINVALUE must also be MINVALUE/,
+    );
+    expect(bad("CREATE TABLE p PARTITION OF m FOR VALUES FROM (1) TO (MAXVALUE, minvalue);")).toThrow(
+      /every bound following MAXVALUE must also be MAXVALUE/,
+    );
+  });
+
+  it("parses a PARTITION OF element list of column options and table constraints", () => {
+    expect(
+      stmt(
+        "CREATE TABLE p PARTITION OF m (a WITH OPTIONS NOT NULL, b DEFAULT 'x', c, CONSTRAINT k CHECK (a > 0), PRIMARY KEY (a)) FOR VALUES IN (1);",
+      ).items,
+    ).toEqual([
+      { kind: "columnOptions", name: "a", withOptions: true, constraints: [{ kind: "notNull" }] },
+      { kind: "columnOptions", name: "b", constraints: [{ kind: "default", expr: str("x") }] },
+      { kind: "columnOptions", name: "c", constraints: [] },
+      { kind: "check", name: "k", expr: bin(">", name("a"), num(0)) },
+      { kind: "primaryKey", name: null, columns: ["a"] },
+    ]);
+  });
+
+  it("composes with INHERITS and the storage clauses in PG's order", () => {
+    expect(
+      stmt(
+        "CREATE TABLE m (a int) INHERITS (p) PARTITION BY RANGE (a) WITH (fillfactor = 70) ON COMMIT DROP TABLESPACE ts;",
+      ),
+    ).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["m"],
+      items: [aCol],
+      inherits: [["p"]],
+      partitionBy: { strategy: "range", keys: [{ expr: name("a") }] },
+      options: [{ name: "fillfactor", value: num(70) }],
+      onCommit: "drop",
+      tablespace: "ts",
+    });
+    // A partition may itself be partitioned, and the bound's WITH is its own:
+    // a storage WITH can still follow it.
+    expect(
+      stmt(
+        "CREATE TABLE IF NOT EXISTS p PARTITION OF m FOR VALUES WITH (MODULUS 2, REMAINDER 1) PARTITION BY LIST (b) WITH (fillfactor = 70) TABLESPACE ts;",
+      ),
+    ).toEqual({
+      kind: "createTable",
+      ifNotExists: true,
+      name: ["p"],
+      items: [],
+      partitionOf: { parent: ["m"], bound: { kind: "hash", modulus: 2, remainder: 1 } },
+      partitionBy: { strategy: "list", keys: [{ expr: name("b") }] },
+      options: [{ name: "fillfactor", value: num(70) }],
+      tablespace: "ts",
+    });
+  });
+
+  it("omits the partitioning keys from a table that writes neither clause", () => {
+    const plain = stmt("CREATE TABLE t (id int);");
+    for (const key of ["partitionOf", "partitionBy"]) expect(plain).not.toHaveProperty(key);
+    // Nor is `withOptions` written on a column option that has none.
+    expect(stmt("CREATE TABLE p PARTITION OF m (a NOT NULL) DEFAULT;").items[0]).not.toHaveProperty("withOptions");
+  });
+
+  it("records spans for the partition spec, its keys and the bound", () => {
+    const node = sqlLite.parse("CREATE TABLE m (a int) PARTITION BY RANGE (a, (a + 1));")[0] as Record<string, any>;
+    expect(node.partitionBy.span).toEqual({ start: { row: 1, col: 23 }, end: { row: 1, col: 54 } });
+    expect(node.partitionBy.keys[1].span).toEqual({ start: { row: 1, col: 46 }, end: { row: 1, col: 53 } });
+    const part = sqlLite.parse("CREATE TABLE p PARTITION OF m FOR VALUES FROM (MINVALUE) TO (1);")[0] as Record<
+      string,
+      any
+    >;
+    expect(part.partitionOf.bound.span).toEqual({ start: { row: 1, col: 30 }, end: { row: 1, col: 63 } });
+    expect(part.partitionOf.bound.from[0].span).toEqual({ start: { row: 1, col: 47 }, end: { row: 1, col: 55 } });
+  });
+
+  it("keeps every partitioning word usable as a name", () => {
+    // Each is matched by value only past a table name, past the element list's
+    // `)`, or inside a clause already begun — where no name could stand.
+    const words = [
+      "partition",
+      "of",
+      "range",
+      "list",
+      "hash",
+      "modulus",
+      "remainder",
+      "minvalue",
+      "maxvalue",
+      "options",
+    ];
+    expect(stmt(`SELECT ${words.join(", ")} FROM t;`).columns).toEqual(words.map((w) => col(name(w))));
+    expect(
+      stmt(`CREATE TABLE partition (${words.map((w) => `${w} int`).join(", ")});`).items.map((c: any) => c.name),
+    ).toEqual(words);
+    // …including in the clauses that use them as keywords.
+    expect(stmt("CREATE TABLE range PARTITION OF partition (list NOT NULL) DEFAULT PARTITION BY HASH (hash);")).toEqual(
+      {
+        kind: "createTable",
+        ifNotExists: false,
+        name: ["range"],
+        items: [{ kind: "columnOptions", name: "list", constraints: [{ kind: "notNull" }] }],
+        partitionOf: { parent: ["partition"], bound: { kind: "default" } },
+        partitionBy: { strategy: "hash", keys: [{ expr: name("hash") }] },
+      },
+    );
+  });
+
+  it("rejects malformed partition specs, bounds and element lists", () => {
+    expect(bad("CREATE TABLE m (a int) PARTITION BY TREE (a);")).toThrow(
+      /Expected "range", "list" or "hash" but found "tree"/,
+    );
+    expect(bad("CREATE TABLE m (a int) PARTITION RANGE (a);")).toThrow(/Expected "by" but found "range"/);
+    expect(bad("CREATE TABLE m (a int) PARTITION BY LIST (a, b);")).toThrow(
+      /cannot use "list" partition strategy with more than one column/,
+    );
+    // A reserved word after a key is no operator class.
+    expect(bad("CREATE TABLE m (a int) PARTITION BY RANGE (a DESC);")).toThrow(/but found "desc"/);
+    expect(bad("CREATE TABLE m (a int) PARTITION BY RANGE (a DESC);")).not.toThrow(/Expected a name/);
+    expect(bad("CREATE TABLE m (a int) PARTITION BY RANGE a;")).toThrow(/Expected "\(" but found "a"/);
+    // Anything but a column or a call must be parenthesised, as in PG.
+    for (const key of ["a + 1", "t.a", "a::int", "CAST(a AS int)::text", "count(a) OVER ()"]) {
+      expect(bad(`CREATE TABLE m (a int) PARTITION BY RANGE (${key});`)).toThrow(
+        /a partition key expression must be parenthesised/,
+      );
+    }
+    expect(bad("CREATE TABLE p PARTITION m DEFAULT;")).toThrow(/Expected "of" but found "m"/);
+    expect(bad("CREATE TABLE p PARTITION OF m;")).toThrow(/Expected "for values" or "default" but found ";"/);
+    expect(bad("CREATE TABLE p PARTITION OF m FOR VALUES BETWEEN (1);")).toThrow(
+      /Expected "in", "from" or "with" but found "between"/,
+    );
+    expect(bad("CREATE TABLE p PARTITION OF m FOR VALUES FROM (1);")).toThrow(/Expected "to" but found ";"/);
+    // The element list takes no types, may not be empty, and INHERITS has no
+    // place in the PARTITION OF form.
+    expect(bad("CREATE TABLE p PARTITION OF m (a int) DEFAULT;")).toThrow(/but found "int"/);
+    expect(bad("CREATE TABLE p PARTITION OF m () DEFAULT;")).toThrow(/or a name but found "\)"/);
+    expect(bad("CREATE TABLE p PARTITION OF m INHERITS (x) DEFAULT;")).toThrow(/but found "inherits"/);
+    // PG's order: PARTITION BY after INHERITS, before WITH.
+    expect(bad("CREATE TABLE m (a int) WITH (x = 1) PARTITION BY HASH (a);")).toThrow(
+      /Expected ";" but found "partition"/,
+    );
+    expect(bad("CREATE TABLE m (a int) PARTITION BY HASH (a) INHERITS (p);")).toThrow(
+      /Expected ";" but found "inherits"/,
+    );
+  });
+
+  it("holds a hash bound to exactly one MODULUS and one REMAINDER", () => {
+    const hash = (opts: string) => bad(`CREATE TABLE p PARTITION OF m FOR VALUES WITH (${opts});`);
+    expect(hash("MODULUS 4")).toThrow(/remainder for hash partition must be specified/);
+    expect(hash("REMAINDER 0")).toThrow(/modulus for hash partition must be specified/);
+    expect(hash("MODULUS 4, modulus 2, REMAINDER 0")).toThrow(/modulus for hash partition provided more than once/);
+    expect(hash("MODULUS 4, REMAINDER 0, fillfactor 1")).toThrow(
+      /unrecognized hash partition bound specification "fillfactor"/,
+    );
+    expect(hash("toast.modulus 4, REMAINDER 0")).toThrow(
+      /unrecognized hash partition bound specification "toast.modulus"/,
+    );
+    expect(hash("MODULUS 0, REMAINDER 0")).toThrow(
+      /modulus for hash partition must be an integer value greater than zero/,
+    );
+    expect(hash("MODULUS, REMAINDER 0")).toThrow(
+      /modulus for hash partition must be an integer value greater than zero/,
+    );
+    expect(hash("MODULUS 4, REMAINDER -1")).toThrow(
+      /remainder for hash partition must be an integer value greater than or equal to zero/,
+    );
+    expect(hash("MODULUS 4, REMAINDER 1.5")).toThrow(/remainder for hash partition must be an integer value/);
+    expect(hash("MODULUS 2147483648, REMAINDER 0")).toThrow(
+      /modulus for hash partition is out of range for type integer/,
+    );
+    // A zero modulus is PG's analysis-time error, so a missing remainder wins.
+    expect(hash("MODULUS 0")).toThrow(/remainder for hash partition must be specified/);
+    // `-0` is read as 0.
+    expect(Object.is(bound("FOR VALUES WITH (MODULUS 4, REMAINDER -0)").remainder, 0)).toBe(true);
+    // PG's analysis-time check, made here for want of an analysis pass.
+    expect(hash("MODULUS 4, REMAINDER 4")).toThrow(/remainder for hash partition must be less than modulus/);
+    expect(hash("MODULUS 'four', REMAINDER 0")).toThrow(/modulus for hash partition must be an integer value/);
+  });
+});
+
 // --- foreign-key actions, MATCH and DEFERRABLE constraints ---
 
 describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () => {
@@ -4195,6 +4453,227 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
     expect(create("CHECK (c > 0) DEFERRABLE")).toThrow(/Expected "," but found "deferrable"/);
     expect(() => sqlLite.parse("CREATE TABLE t (c int, CHECK (c > 0) INITIALLY DEFERRED);")).toThrow(
       /Expected "," but found "initially"/,
+    );
+  });
+});
+
+// --- index column options and storage parameters ---
+
+describe("SQL-lite index column options and storage parameters", () => {
+  const index = (tail: string) => firstStmt(`CREATE INDEX i ON t ${tail};`) as any;
+  const columns = (list: string) => index(`(${list})`).columns;
+  const lower = (arg: unknown) => ({ kind: "call", name: "lower", args: [arg] });
+
+  it("parses an operator class, ASC / DESC and NULLS FIRST / LAST per column", () => {
+    expect(columns("a text_pattern_ops DESC NULLS LAST, b ASC, c NULLS FIRST, d")).toEqual([
+      { expr: name("a"), opclass: ["text_pattern_ops"], dir: "desc", nulls: "last" },
+      { expr: name("b"), dir: "asc" },
+      { expr: name("c"), nulls: "first" },
+      { expr: name("d") },
+    ]);
+    // An expression column takes them too, and the class may be qualified or quoted.
+    expect(columns('lower(a) pg_catalog.text_pattern_ops, b "My Ops" DESC')).toEqual([
+      { expr: lower(name("a")), opclass: ["pg_catalog", "text_pattern_ops"] },
+      { expr: name("b"), opclass: ["My Ops"], dir: "desc" },
+    ]);
+  });
+
+  it("keeps COLLATE on the expression and takes operator-class parameters", () => {
+    expect(columns('a COLLATE "C" varchar_pattern_ops')).toEqual([
+      { expr: { kind: "collate", expr: name("a"), collation: ["C"] }, opclass: ["varchar_pattern_ops"] },
+    ]);
+    expect(columns("a gist_trgm_ops (siglen = 32) DESC")).toEqual([
+      {
+        expr: name("a"),
+        opclass: ["gist_trgm_ops"],
+        opclassOptions: [{ name: "siglen", value: num(32) }],
+        dir: "desc",
+      },
+    ]);
+  });
+
+  it("parses WITH (storage parameters) between INCLUDE and WHERE", () => {
+    const idx = index("USING gin (a) INCLUDE (b) WITH (fastupdate = off, gin_pending_list_limit = 128) WHERE a > 0");
+    expect(idx).toMatchObject({ using: "gin", include: ["b"], where: bin(">", name("a"), num(0)) });
+    expect(idx.options).toEqual([
+      { name: "fastupdate", value: name("off") },
+      { name: "gin_pending_list_limit", value: num(128) },
+    ]);
+    // Omitted, the key is absent rather than null.
+    expect("options" in index("(a)")).toBe(false);
+  });
+
+  it("leaves nulls, first and last usable as names", () => {
+    // As columns, as an operator class, and `nulls` alone with no FIRST/LAST after it.
+    expect(columns("nulls, first, last")).toEqual([
+      { expr: name("nulls") },
+      { expr: name("first") },
+      { expr: name("last") },
+    ]);
+    expect(columns("first nulls")).toEqual([{ expr: name("first"), opclass: ["nulls"] }]);
+    expect(columns("nulls nulls first")).toEqual([{ expr: name("nulls"), nulls: "first" }]);
+    expect(columns("a nulls nulls last")).toEqual([{ expr: name("a"), opclass: ["nulls"], nulls: "last" }]);
+    expect(columns("a last DESC")).toEqual([{ expr: name("a"), opclass: ["last"], dir: "desc" }]);
+    expect(firstStmt("SELECT nulls, first, last FROM t;")).toEqual(
+      sel({ columns: [col(name("nulls")), col(name("first")), col(name("last"))], from: [tableFrom(["t"])] }),
+    );
+  });
+
+  it("rejects a malformed column option or storage parameter list", () => {
+    expect(() => sqlLite.parse("CREATE INDEX i ON t (a DESC NULLS);")).toThrow(
+      /Expected "first" or "last" but found "\)"/,
+    );
+    expect(() => sqlLite.parse("CREATE INDEX i ON t (a DESC ASC);")).toThrow(/Expected "," but found "asc"/);
+    expect(() => sqlLite.parse("CREATE INDEX i ON t (a) WITH fillfactor = 70;")).toThrow(
+      /Expected "\(" but found "fillfactor"/,
+    );
+  });
+});
+
+// --- EXCLUDE table constraints ---
+
+describe("SQL-lite EXCLUDE table constraints", () => {
+  const items = (src: string) => (firstStmt(`CREATE TABLE t (${src});`) as any).items as Record<string, unknown>[];
+  const addAction = (src: string) => (firstStmt(`ALTER TABLE t ADD ${src};`) as any).actions[0];
+
+  it("parses EXCLUDE [USING method] (element WITH operator, …)", () => {
+    expect(items("c int, EXCLUDE USING gist (c WITH =)")[1]).toEqual({
+      kind: "exclude",
+      name: null,
+      using: "gist",
+      elements: [{ expr: name("c"), operator: "=" }],
+    });
+    // No USING is PG's default btree; several elements, any operator.
+    expect(items("EXCLUDE (a WITH =, b WITH &&)")).toEqual([
+      {
+        kind: "exclude",
+        name: null,
+        using: null,
+        elements: [
+          { expr: name("a"), operator: "=" },
+          { expr: name("b"), operator: "&&" },
+        ],
+      },
+    ]);
+    // An element may be a call or a parenthesised expression.
+    const [call, paren] = (items("EXCLUDE USING gist (tsrange(s, e) WITH &&, (a + 1) WITH =)")[0] as any).elements;
+    expect(call.expr.kind).toBe("call");
+    expect(call.operator).toBe("&&");
+    expect(paren.expr).toMatchObject({ kind: "binary", op: "+" });
+  });
+
+  it("takes INCLUDE, WHERE and the DEFERRABLE / INITIALLY tail", () => {
+    expect(
+      items("EXCLUDE USING gist (r WITH &&) INCLUDE (a, b) WHERE (active) DEFERRABLE INITIALLY DEFERRED")[0],
+    ).toEqual({
+      kind: "exclude",
+      name: null,
+      using: "gist",
+      elements: [{ expr: name("r"), operator: "&&" }],
+      include: ["a", "b"],
+      where: name("active"),
+      deferrable: true,
+      initially: "deferred",
+    });
+    expect(items("EXCLUDE (a WITH =) NOT DEFERRABLE")[0]).toMatchObject({ deferrable: false });
+    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE (a WITH =) NOT DEFERRABLE INITIALLY DEFERRED);")).toThrow(
+      /constraint declared INITIALLY DEFERRED must be DEFERRABLE/,
+    );
+  });
+
+  it("names the constraint with CONSTRAINT n, in CREATE TABLE and ALTER TABLE ADD", () => {
+    expect(items("CONSTRAINT no_overlap EXCLUDE USING gist (r WITH &&)")[0]).toMatchObject({
+      kind: "exclude",
+      name: "no_overlap",
+      using: "gist",
+    });
+    expect(addAction("CONSTRAINT no_overlap EXCLUDE USING gist (r WITH &&)")).toEqual({
+      kind: "addConstraint",
+      name: "no_overlap",
+      constraint: { kind: "exclude", name: null, using: "gist", elements: [{ expr: name("r"), operator: "&&" }] },
+    });
+    // The keyword-led constraints still reach CONSTRAINT n unchanged.
+    expect(addAction("CONSTRAINT u UNIQUE (a)")).toMatchObject({ name: "u", constraint: { kind: "unique" } });
+  });
+
+  it("parses a bare ALTER TABLE … ADD EXCLUDE", () => {
+    expect(addAction("EXCLUDE USING gist (r WITH &&)")).toMatchObject({
+      kind: "addConstraint",
+      name: null,
+      constraint: { kind: "exclude", using: "gist" },
+    });
+    expect(addAction("EXCLUDE (a WITH =)")).toMatchObject({
+      kind: "addConstraint",
+      constraint: { kind: "exclude", using: null },
+    });
+  });
+
+  it("keeps a column called exclude a column definition", () => {
+    const column = (dataType: string, array = false) => ({
+      kind: "column",
+      name: "exclude",
+      dataType: { name: dataType, args: [], array },
+      constraints: [],
+    });
+    expect(items("exclude text")).toEqual([column("text")]);
+    expect(items("exclude int[]")).toEqual([column("int", true)]);
+    expect(items('exclude "using"')).toEqual([column("using")]);
+    expect(items("exclude int, EXCLUDE (exclude WITH =)").map((i) => i.kind)).toEqual(["column", "exclude"]);
+    expect(addAction("exclude text")).toEqual({
+      kind: "addColumn",
+      ifNotExists: false,
+      column: column("text"),
+    });
+    expect(addAction('exclude "using"')).toMatchObject({ kind: "addColumn", column: { name: "exclude" } });
+    expect(addAction("COLUMN exclude text")).toMatchObject({ kind: "addColumn", column: { name: "exclude" } });
+    expect(
+      (firstStmt("ALTER TABLE t ADD EXCLUDE (a WITH =), ADD exclude text;") as any).actions.map((a: any) => a.kind),
+    ).toEqual(["addConstraint", "addColumn"]);
+    // A quoted "exclude" is a name, never the keyword.
+    expect(() => sqlLite.parse('CREATE TABLE t ("exclude" (a WITH =));')).toThrow(/Expected a name but found "\("/);
+  });
+
+  it("keeps exclude and include unreserved as names and aliases", () => {
+    expect((firstStmt("SELECT exclude, include FROM t;") as any).columns).toEqual([
+      col(name("exclude")),
+      col(name("include")),
+    ]);
+    expect((firstStmt("SELECT a AS exclude, b include FROM t;") as any).columns).toEqual([
+      col(name("a"), "exclude"),
+      col(name("b"), "include"),
+    ]);
+    expect(items("include int").map((i) => i.name)).toEqual(["include"]);
+  });
+
+  it("reports a bad character after exclude as after any column name", () => {
+    const { ast, errors } = sqlLite.diagnose("CREATE TABLE t (id int, exclude é, ok text);");
+    expect(errors.map((e) => e.message)).toEqual(['Unexpected character "é" (1:32)']);
+    expect((stripSpans(ast) as any)[0].items.map((i: any) => i.name)).toEqual(["id", "ok"]);
+    expect(sqlLite.diagnose("CREATE TABLE t (EXCLUDE (a WITH é));").errors[0]!.message).toBe(
+      'Unexpected character "é" (1:32)',
+    );
+  });
+
+  it("rejects a malformed EXCLUDE", () => {
+    // In a table body the EXCLUDE reports its own error, not a column's.
+    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE (a));")).toThrow(/Expected "with" but found "\)" \(1:26\)/);
+    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE USING gist);")).toThrow(/Expected "\(" but found "\)"/);
+    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE (a WITH =) INCLUDE ());")).toThrow(
+      /Expected a name but found "\)"/,
+    );
+    expect(() => sqlLite.parse("CREATE TABLE t (CONSTRAINT c 42);")).toThrow(
+      /Expected "primary key" or "unique" or "check" or "foreign key" or "exclude" but found "42"/,
+    );
+    expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE (a);")).toThrow(/Expected "with" but found "\)"/);
+    expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE USING gist (a WITH b);")).toThrow(
+      /Expected an operator but found "b"/,
+    );
+    expect(() => sqlLite.parse("ALTER TABLE t ADD CONSTRAINT c EXCLUDE (a WITH =) WHERE a;")).toThrow(
+      /Expected "\(" but found "a"/,
+    );
+    // An EXCLUDE with no elements is a syntax error, as in PG.
+    expect(() => sqlLite.parse("ALTER TABLE t ADD CONSTRAINT c EXCLUDE ();")).toThrow(
+      /Expected a number or .* or a name but found "\)" \(1:40\)/,
     );
   });
 });
