@@ -24183,6 +24183,238 @@
     ]
   },
   {
+    "source": "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET (a, b) = (s.a, DEFAULT), c = s.c WHEN NOT MATCHED BY SOURCE THEN UPDATE SET (a) = (SELECT 0);",
+    "ast": [
+      {
+        "kind": "merge",
+        "table": [
+          "t"
+        ],
+        "alias": null,
+        "source": {
+          "kind": "table",
+          "name": [
+            "s"
+          ],
+          "alias": null
+        },
+        "on": {
+          "kind": "binary",
+          "op": "=",
+          "left": {
+            "kind": "name",
+            "parts": [
+              "t",
+              "id"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 24
+              },
+              "end": {
+                "row": 1,
+                "col": 28
+              }
+            }
+          },
+          "right": {
+            "kind": "name",
+            "parts": [
+              "s",
+              "id"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 31
+              },
+              "end": {
+                "row": 1,
+                "col": 35
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 24
+            },
+            "end": {
+              "row": 1,
+              "col": 35
+            }
+          }
+        },
+        "when": [
+          {
+            "match": "matched",
+            "condition": null,
+            "action": {
+              "kind": "update",
+              "set": [
+                {
+                  "columns": [
+                    "a",
+                    "b"
+                  ],
+                  "value": {
+                    "kind": "row",
+                    "items": [
+                      {
+                        "kind": "name",
+                        "parts": [
+                          "s",
+                          "a"
+                        ],
+                        "span": {
+                          "start": {
+                            "row": 1,
+                            "col": 75
+                          },
+                          "end": {
+                            "row": 1,
+                            "col": 78
+                          }
+                        }
+                      },
+                      {
+                        "kind": "default",
+                        "span": {
+                          "start": {
+                            "row": 1,
+                            "col": 80
+                          },
+                          "end": {
+                            "row": 1,
+                            "col": 87
+                          }
+                        }
+                      }
+                    ],
+                    "implicit": true,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 74
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 88
+                      }
+                    }
+                  }
+                },
+                {
+                  "column": "c",
+                  "value": {
+                    "kind": "name",
+                    "parts": [
+                      "s",
+                      "c"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 94
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 97
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "match": "notMatchedBySource",
+            "condition": null,
+            "action": {
+              "kind": "update",
+              "set": [
+                {
+                  "columns": [
+                    "a"
+                  ],
+                  "value": {
+                    "kind": "subquery",
+                    "query": {
+                      "kind": "select",
+                      "with_": null,
+                      "recursive": false,
+                      "distinct": false,
+                      "columns": [
+                        {
+                          "expr": {
+                            "kind": "number",
+                            "value": 0,
+                            "span": {
+                              "start": {
+                                "row": 1,
+                                "col": 155
+                              },
+                              "end": {
+                                "row": 1,
+                                "col": 156
+                              }
+                            }
+                          },
+                          "alias": null
+                        }
+                      ],
+                      "from": null,
+                      "where": null,
+                      "groupBy": null,
+                      "having": null,
+                      "window": null,
+                      "orderBy": null,
+                      "limit": null,
+                      "offset": null,
+                      "locking": null,
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 148
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 156
+                        }
+                      }
+                    },
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 147
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 157
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "returning": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 157
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {

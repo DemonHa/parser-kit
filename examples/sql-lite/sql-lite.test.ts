@@ -6984,6 +6984,20 @@ describe("SQL-lite MERGE", () => {
     ]);
   });
 
+  it("takes UPDATE's multi-column assignments, under either UPDATE form", () => {
+    const row = (items: unknown[]) => ({ kind: "row", items, implicit: true });
+    expect(whenOf("WHEN MATCHED THEN UPDATE SET (a, b) = (s.a, DEFAULT), c = 1")[0].action).toEqual({
+      kind: "update",
+      set: [
+        { columns: ["a", "b"], value: row([name("s", "a"), { kind: "default" }]) },
+        { column: "c", value: num(1) },
+      ],
+    });
+    expect(whenOf("WHEN NOT MATCHED BY SOURCE THEN UPDATE SET (a) = ROW(0)")[0].action.set).toEqual([
+      { columns: ["a"], value: { kind: "row", items: [num(0)] } },
+    ]);
+  });
+
   it("parses INSERT's DEFAULT VALUES, OVERRIDING and bare VALUES forms", () => {
     const actionOf = (src: string) => whenOf(`WHEN NOT MATCHED THEN INSERT ${src}`)[0].action;
     expect(actionOf("DEFAULT VALUES")).toEqual({ kind: "insert", columns: null, source: { kind: "defaultValues" } });
