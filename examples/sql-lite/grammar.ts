@@ -28,7 +28,7 @@ import {
 } from "@parser-kit/core";
 import { type SqlTokenType, sqlLexer } from "./lexer";
 
-// SQL-lite parses a slice of PostgreSQL DDL — CREATE TABLE (incl. TABLE AS,
+// SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
 // (enum, composite, RANGE) / [MATERIALIZED] VIEW / SEQUENCE / DOMAIN, ALTER
 // TABLE, DROP family, TRUNCATE, COMMENT ON — plus a DML core — SELECT (with
@@ -287,7 +287,13 @@ export type ColConstraint =
   | ({ kind: "primaryKey"; span: Span } & ConstraintAttrs)
   | ({ kind: "unique"; span: Span } & ConstraintAttrs)
   | ({ kind: "references"; table: string[]; columns: string[] | null; span: Span } & ForeignKeyTail & ConstraintAttrs)
-  | { kind: "check"; expr: Expr; span: Span };
+  | { kind: "check"; expr: Expr; span: Span }
+  // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(sequence options)]`;
+  // `options` is present only when the parenthesised list is.
+  | { kind: "identity"; generated: "always" | "by default"; options?: SequenceOption[]; span: Span }
+  // `GENERATED ALWAYS AS (expr) STORED` — a stored generated column.
+  | { kind: "generated"; expr: Expr; span: Span }
+  | { kind: "collate"; collation: string[]; span: Span };
 
 export type ColumnDef = {
   kind: "column";
@@ -610,8 +616,7 @@ export type CreateTableAs = {
   options?: RelationOption[];
   onCommit?: "preserveRows" | "deleteRows" | "drop";
   tablespace?: string;
-  // As on `createTable`: the CREATE prefix modifiers, omitted when absent —
-  // which, until CREATE_PREFIX_WORDS names one, is always.
+  // As on `createTable`: the CREATE prefix modifiers, omitted when absent.
   modifiers?: string[];
   span: Span;
 };
@@ -825,8 +830,8 @@ export type CloseCursor = { kind: "close"; name: string | null; span: Span };
 
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
-  // UNLOGGED family). Omitted, not null, when there are none — and no word
-  // qualifies yet (see CREATE_PREFIX_WORDS), so today it is always absent.
+  // UNLOGGED family, see parseTempPrefix), in source order. Omitted, not null,
+  // when there are none.
   // The clauses after the element list follow the same rule: each key is
   // present only when its clause is written (see parseTableClauses).
   // `partitionOf` marks a `PARTITION OF parent … FOR VALUES …` table, whose
@@ -2810,6 +2815,61 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
       return { kind: "check", expr: ctx.parse(parenExpr), span: ctx.spanFrom(start) };
     },
   },
+  // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(options)]` or `GENERATED
+  // ALWAYS AS (expr) STORED`. The handler owns all of its lookahead, so one key
+  // covers both forms. As in PG, BY DEFAULT is only for identity columns, and
+  // STORED is required (PG 18's VIRTUAL and bare form are not parsed); PG's
+  // identity-only `SEQUENCE NAME` option is not parsed yet. GENERATED, ALWAYS,
+  // IDENTITY and STORED stay unreserved: they are matched only here, in a
+  // column's constraint list.
+  generated: {
+    parse: (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw("generated"));
+      const whenStart = ctx.position();
+      let generated: "always" | "by default";
+      if (ctx.eat("ident", "always") !== null) {
+        generated = "always";
+      } else if (ctx.is("ident", "by")) {
+        ctx.parse(kwseq("by", "default"));
+        generated = "by default";
+      } else {
+        return ctx.croak(`Expected ${quoteList(["always", "by default"])} but found ${describeFound(ctx.peek())}`);
+      }
+      const whenEnd = ctx.lastEnd();
+      ctx.parse(kw("as"));
+      if (ctx.eat("ident", "identity") !== null) {
+        if (ctx.eat("punc", "(") === null) return { kind: "identity", generated, span: ctx.spanFrom(start) };
+        // At least one option, as in PG: an empty `IDENTITY ()` is an error.
+        const options = parseSequenceOptions(ctx);
+        if (options.length === 0) ctx.croak(`Expected a sequence option but found ${describeFound(ctx.peek())}`);
+        expectClose(ctx);
+        return { kind: "identity", generated, options, span: ctx.spanFrom(start) };
+      }
+      if (!ctx.is("punc", "(")) {
+        return ctx.croak(`Expected ${quoteList(["identity", "("])} but found ${describeFound(ctx.peek())}`);
+      }
+      const expr = ctx.parse(parenExpr);
+      ctx.parse(kw("stored"));
+      // Judged once the clause is whole and pinned to the BY DEFAULT, as PG does.
+      if (generated !== "always") {
+        return ctx.croak("for a generated column, GENERATED ALWAYS must be specified", whenStart, whenEnd);
+      }
+      return { kind: "generated", expr, span: ctx.spanFrom(start) };
+    },
+  },
+  // Column-level `COLLATE name`. `collate` is reserved, so it cannot be a type
+  // word and, straight after the type, it can only be this. After a DEFAULT,
+  // though, the expression's COLLATE postfix takes it first: `DEFAULT 'a'
+  // COLLATE "C"` collates the default, where PG (whose DEFAULT operand has no
+  // COLLATE) would collate the column. Write the COLLATE before the DEFAULT.
+  collate: {
+    parse: (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw("collate"));
+      return { kind: "collate", collation: ctx.parse(qualName), span: ctx.spanFrom(start) };
+    },
+  },
 };
 
 const COLUMN_CONSTRAINT_EXPECTED = joinExpected(COLUMN_CONSTRAINTS);
@@ -4284,6 +4344,38 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
   };
 }
 
+// The words PG's `OptTemp` puts between CREATE and TABLE, and its
+// `OptTempTableName` between SELECT's INTO and the target. Both allow at most one
+// of `temp`/`temporary`/`unlogged`, with the scope words `global`/`local` legal
+// only ahead of a `temp`/`temporary`, never on their own and never repeated.
+const TEMP_SCOPE_WORDS: ReadonlySet<string> = new Set(["global", "local"]);
+const TEMP_WORDS: ReadonlySet<string> = new Set(["temp", "temporary"]);
+const TABLE_STORAGE_WORDS: ReadonlySet<string> = new Set(["temp", "temporary", "unlogged"]);
+
+// `[{GLOBAL | LOCAL} {TEMP | TEMPORARY} | TEMP | TEMPORARY | UNLOGGED]` after
+// CREATE, returned in source order. No CREATE target leads with one of these
+// words, so they are claimed without looking past them; a scope word must be
+// followed by a temp word, and a second storage word is left for the caller's
+// `"table"` check to reject.
+function parseTempPrefix(ctx: ParseContext<SqlTokenType>): string[] {
+  const head = ctx.peek();
+  if (head?.type !== "ident") return [];
+  if (TEMP_SCOPE_WORDS.has(head.value)) {
+    ctx.next();
+    const temp = ctx.peek();
+    if (temp?.type !== "ident" || !TEMP_WORDS.has(temp.value)) {
+      return ctx.croak(`Expected ${quoteList([...TEMP_WORDS])} but found ${describeFound(temp)}`);
+    }
+    ctx.next();
+    return [head.value, temp.value];
+  }
+  if (TABLE_STORAGE_WORDS.has(head.value)) {
+    ctx.next();
+    return [head.value];
+  }
+  return [];
+}
+
 // The CREATE targets split in two, because only some of them accept `OR
 // REPLACE` and the two halves consume their lead word at different moments.
 //
@@ -4291,8 +4383,8 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
 // node's span still opens on `TABLE` / `INDEX` / …. Every handler is offered the
 // position just after CREATE and the prefix-modifier bag, but only `table` reads
 // them — the others build their own span from their own keyword and drop the
-// bag. A word added to CREATE_PREFIX_WORDS is therefore silently swallowed for
-// everything but TABLE, so widen those handlers in the same breath.
+// bag, which is safe only because createStmt refuses modifiers ahead of any
+// target but TABLE. Widen that check along with any handler that learns them.
 const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   table: { parse: createTableRest },
   // `[UNIQUE] INDEX` can lead with either word, so it takes two keys. They share
@@ -4351,20 +4443,13 @@ for (const target of SCHEMA_REPLACEABLE_TARGETS) {
   if (!SCHEMA_ELEMENT_TARGETS.includes(target)) throw new Error(`Schema element target "${target}" is not admitted`);
 }
 
-// Prefix modifier words between CREATE and its target — PG's TEMP / TEMPORARY /
-// UNLOGGED / GLOBAL / LOCAL family. None of them is spelled yet, so the loop
-// below never runs and `modifiers` is always empty; what ships now is the seam,
-// so that adding those words is an entry here and a handler widening rather than
-// surgery on `createTableRest`, which several other changes are queued against.
-// Listing a word here makes it a modifier rather than a candidate target lead.
-const CREATE_PREFIX_WORDS = new Set<string>();
-
 // After CREATE: an optional `OR REPLACE`, then one of the objects that permit it
 // (VIEW / MATERIALIZED VIEW / FUNCTION / AGGREGATE / TRIGGER) — or, with no such
-// prefix, any prefix modifiers followed by one of the remaining keyword-led
-// targets (TABLE / [UNIQUE] INDEX / TYPE / SEQUENCE / DOMAIN / DATABASE /
-// SCHEMA / EXTENSION / TABLESPACE). `OR REPLACE` before a non-replaceable
-// object croaks.
+// prefix, one of the remaining keyword-led targets (TABLE / [UNIQUE] INDEX /
+// TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION / TABLESPACE), TABLE
+// alone taking the TEMP / UNLOGGED prefix. `OR REPLACE` before a non-replaceable
+// object croaks, as does a prefix before anything but TABLE — PG's TEMP VIEW and
+// TEMP SEQUENCE are not parsed.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -4383,13 +4468,11 @@ const createStmt = custom<Stmt, SqlTokenType>(
       return ctx.croak(`Expected ${REPLACEABLE_CREATE_EXPECTED} but found ${describeFound(ctx.peek())}`);
     }
     // Nothing was consumed since `tailStart` — OR REPLACE never reaches here —
-    // so a target with no modifiers spans exactly as it did before.
-    const modifiers: string[] = [];
-    while (true) {
-      const word = ctx.peek();
-      if (word === null || word.type !== "ident" || !CREATE_PREFIX_WORDS.has(word.value)) break;
-      ctx.next();
-      modifiers.push(word.value);
+    // so a target with no modifiers spans exactly as it did before, and one with
+    // them spans from its first modifier.
+    const modifiers = parseTempPrefix(ctx);
+    if (modifiers.length > 0 && !ctx.is("ident", "table")) {
+      return ctx.croak(`Expected "table" but found ${describeFound(ctx.peek())}`);
     }
     return dispatch(PLAIN_CREATE, PLAIN_CREATE_EXPECTED, ctx, tailStart, modifiers);
   },
@@ -6108,17 +6191,9 @@ const fromClause = sepBy(joinTail, P(","));
 
 // --- SELECT core + set-ops + WITH ---
 
-// The words PG's `OptTempTableName` puts between INTO and the target. Its nine
-// productions allow at most one of `temp`/`temporary`/`unlogged` — two of them
-// take none at all — with the scope words `global`/`local` legal only ahead of a
-// `temp`/`temporary`, never on their own and never repeated.
-const INTO_SCOPE_WORDS: ReadonlySet<string> = new Set(["global", "local"]);
-const INTO_TEMP_WORDS: ReadonlySet<string> = new Set(["temp", "temporary"]);
-const INTO_STORAGE_WORDS: ReadonlySet<string> = new Set(["temp", "temporary", "unlogged"]);
-
-// None of those words is reserved, so one counts as a modifier only when the
-// token past it can still start the target: an unreserved name, a quoted one,
-// or the reserved `table` noise word.
+// None of the TEMP_SCOPE_WORDS / TABLE_STORAGE_WORDS is reserved, so after INTO
+// one counts as a modifier only when the token past it can still start the
+// target: an unreserved name, a quoted one, or the reserved `table` noise word.
 const startsIntoTarget = (tok: Token<SqlTokenType> | null): boolean =>
   tok !== null &&
   (tok.type === "qident" || (tok.type === "ident" && (!RESERVED.has(tok.value) || tok.value === "table")));
@@ -6143,14 +6218,14 @@ const intoClause = custom<SelectInto, SqlTokenType>(
     if (
       head?.type === "ident" &&
       second?.type === "ident" &&
-      INTO_SCOPE_WORDS.has(head.value) &&
-      INTO_TEMP_WORDS.has(second.value) &&
+      TEMP_SCOPE_WORDS.has(head.value) &&
+      TEMP_WORDS.has(second.value) &&
       startsIntoTarget(ctx.peekAhead(2))
     ) {
       modifiers.push(head.value, second.value);
       ctx.next(); // global / local
       ctx.next(); // temp / temporary
-    } else if (head?.type === "ident" && INTO_STORAGE_WORDS.has(head.value) && startsIntoTarget(second)) {
+    } else if (head?.type === "ident" && TABLE_STORAGE_WORDS.has(head.value) && startsIntoTarget(second)) {
       modifiers.push(head.value);
       ctx.next(); // the storage word
     }
