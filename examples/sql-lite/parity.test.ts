@@ -167,6 +167,12 @@ const SUPPLEMENTAL = [
   "DO $$ SELECT 1 $$ LANGUAGE sql;",
   "COMMENT ON COLUMN users.email IS $q$primary contact$q$;",
   "DEALLOCATE PREPARE my_stmt;",
+  // PREPARE with and without a (multi-word) type list, over a query and a
+  // WITH-led DML body; EXECUTE with and without arguments.
+  "PREPARE q (int, double precision, timestamp with time zone) AS SELECT $1, $2 FROM t WHERE c = $3;",
+  "PREPARE ins AS WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x RETURNING id;",
+  "EXECUTE q (1, 2.5, now());",
+  "EXECUTE ins;",
   "INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;",
   "CREATE TABLE t (flags bit DEFAULT B'1011', mask bit DEFAULT X'ff', label text DEFAULT U&'\\0041');",
 ];

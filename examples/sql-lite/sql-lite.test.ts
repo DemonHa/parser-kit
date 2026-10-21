@@ -4198,3 +4198,93 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
     );
   });
 });
+
+// --- PREPARE and EXECUTE ---
+
+describe("SQL-lite PREPARE and EXECUTE", () => {
+  const param = (n: string) => ({ kind: "param", name: n });
+  const bodyOf = (src: string) => firstStmt(`PREPARE p AS ${src};`).query;
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses PREPARE with and without a type list, multi-word types included", () => {
+    expect(firstStmt("PREPARE p AS SELECT 1;")).toEqual({
+      kind: "prepare",
+      name: "p",
+      types: null,
+      query: sel({ columns: [col(num(1))] }),
+    });
+    expect(firstStmt("PREPARE q (int, double precision, timestamp(3) with time zone, text[]) AS SELECT $1;")).toEqual({
+      kind: "prepare",
+      name: "q",
+      types: [
+        ct("int"),
+        ct("double precision"),
+        ct("timestamp with time zone", { args: [3] }),
+        ct("text", { array: true }),
+      ],
+      query: sel({ columns: [col(param("1"))] }),
+    });
+  });
+
+  it("takes any preparable statement as the body, a WITH prefix included", () => {
+    expect(bodyOf("VALUES (1)").kind).toBe("values");
+    expect(bodyOf("(SELECT 1) UNION SELECT 2")).toMatchObject({ kind: "setOp", op: "union" });
+    expect(bodyOf("INSERT INTO t (a) VALUES ($1)")).toMatchObject({ kind: "insert", table: ["t"], columns: ["a"] });
+    expect(bodyOf("UPDATE t SET a = $1 WHERE id = $2")).toMatchObject({ kind: "update", table: ["t"] });
+    expect(bodyOf("DELETE FROM t WHERE id = $1 RETURNING id")).toMatchObject({ kind: "delete", table: ["t"] });
+    expect(bodyOf("WITH x AS (SELECT 1) DELETE FROM t USING x")).toMatchObject({
+      kind: "delete",
+      with_: [{ name: "x" }],
+    });
+    // The body owns no `;` of its own: the statement after it parses separately.
+    expect(parse("PREPARE p AS SELECT 1; EXECUTE p;").map((s) => s.kind)).toEqual(["prepare", "execute"]);
+  });
+
+  it("parses EXECUTE with and without an argument list", () => {
+    expect(firstStmt("EXECUTE p;")).toEqual({ kind: "execute", name: "p", args: null });
+    expect(firstStmt("EXECUTE \"Q\" (1, 'a' || b, $1);")).toEqual({
+      kind: "execute",
+      name: "Q",
+      args: [num(1), bin("||", str("a"), name("b")), param("1")],
+    });
+  });
+
+  it("leaves CREATE TRIGGER's EXECUTE FUNCTION untouched", () => {
+    expect(firstStmt("CREATE TRIGGER a AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f(1);").execute).toEqual({
+      routine: "function",
+      name: ["f"],
+      args: [num(1)],
+    });
+  });
+
+  it("keeps prepare, execute and deallocate unreserved", () => {
+    expect(firstStmt("SELECT prepare, execute, deallocate FROM prepare;")).toEqual(
+      sel({
+        columns: [col(name("prepare")), col(name("execute")), col(name("deallocate"))],
+        from: [tableFrom(["prepare"])],
+      }),
+    );
+    expect(firstStmt("CREATE TABLE execute (prepare int, deallocate text);").items.map((i: any) => i.name)).toEqual([
+      "prepare",
+      "deallocate",
+    ]);
+    // …and as the statement names the three take.
+    expect(firstStmt("PREPARE execute AS SELECT prepare FROM t;")).toMatchObject({ kind: "prepare", name: "execute" });
+    expect(firstStmt("EXECUTE prepare;")).toEqual({ kind: "execute", name: "prepare", args: null });
+    expect(firstStmt("DEALLOCATE execute;")).toEqual({ kind: "deallocate", name: "execute" });
+  });
+
+  it("rejects a non-preparable body, a missing AS and an empty list", () => {
+    expect(bad("PREPARE p AS CREATE TABLE t (a int);")).toThrow(
+      /Expected a SELECT, VALUES, INSERT, UPDATE or DELETE statement but found "create" \(1:13\)/,
+    );
+    expect(bad("PREPARE p AS EXECUTE q;")).toThrow(/statement but found "execute"/);
+    expect(bad("PREPARE p AS;")).toThrow(/statement but found ";"/);
+    expect(bad("PREPARE p SELECT 1;")).toThrow(/Expected "as" but found "select"/);
+    expect(bad("PREPARE p (int AS SELECT 1;")).toThrow(/Expected "\)" but found "as"/);
+    expect(bad("PREPARE p () AS SELECT 1;")).toThrow(/Expected a name but found "\)"/);
+    expect(bad("PREPARE s.p AS SELECT 1;")).toThrow(/Expected "as" but found "\."/);
+    expect(bad("EXECUTE p ();")).toThrow(/or a name but found "\)" \(1:11\)/);
+    expect(bad("EXECUTE;")).toThrow(/Expected a name but found ";"/);
+  });
+});

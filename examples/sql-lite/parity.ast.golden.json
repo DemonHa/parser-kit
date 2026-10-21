@@ -14757,6 +14757,433 @@
     ]
   },
   {
+    "source": "PREPARE q (int, double precision, timestamp with time zone) AS SELECT $1, $2 FROM t WHERE c = $3;",
+    "ast": [
+      {
+        "kind": "prepare",
+        "name": "q",
+        "types": [
+          {
+            "name": "int",
+            "args": [],
+            "array": false,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 11
+              },
+              "end": {
+                "row": 1,
+                "col": 14
+              }
+            }
+          },
+          {
+            "name": "double precision",
+            "args": [],
+            "array": false,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 32
+              }
+            }
+          },
+          {
+            "name": "timestamp with time zone",
+            "args": [],
+            "array": false,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 34
+              },
+              "end": {
+                "row": 1,
+                "col": 58
+              }
+            }
+          }
+        ],
+        "query": {
+          "kind": "select",
+          "with_": null,
+          "recursive": false,
+          "distinct": false,
+          "columns": [
+            {
+              "expr": {
+                "kind": "param",
+                "name": "1",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 70
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 72
+                  }
+                }
+              },
+              "alias": null
+            },
+            {
+              "expr": {
+                "kind": "param",
+                "name": "2",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 74
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 76
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "from": [
+            {
+              "kind": "table",
+              "name": [
+                "t"
+              ],
+              "alias": null
+            }
+          ],
+          "where": {
+            "kind": "binary",
+            "op": "=",
+            "left": {
+              "kind": "name",
+              "parts": [
+                "c"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 90
+                },
+                "end": {
+                  "row": 1,
+                  "col": 91
+                }
+              }
+            },
+            "right": {
+              "kind": "param",
+              "name": "3",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 94
+                },
+                "end": {
+                  "row": 1,
+                  "col": 96
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 90
+              },
+              "end": {
+                "row": 1,
+                "col": 96
+              }
+            }
+          },
+          "groupBy": null,
+          "having": null,
+          "window": null,
+          "orderBy": null,
+          "limit": null,
+          "offset": null,
+          "locking": null,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 63
+            },
+            "end": {
+              "row": 1,
+              "col": 96
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 96
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "PREPARE ins AS WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x RETURNING id;",
+    "ast": [
+      {
+        "kind": "prepare",
+        "name": "ins",
+        "types": null,
+        "query": {
+          "kind": "insert",
+          "table": [
+            "t"
+          ],
+          "columns": null,
+          "source": {
+            "kind": "select",
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "star",
+                    "table": null,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 57
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 58
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": [
+                {
+                  "kind": "table",
+                  "name": [
+                    "x"
+                  ],
+                  "alias": null
+                }
+              ],
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 50
+                },
+                "end": {
+                  "row": 1,
+                  "col": 65
+                }
+              }
+            }
+          },
+          "onConflict": null,
+          "returning": [
+            {
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "id"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 76
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 78
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 36
+            },
+            "end": {
+              "row": 1,
+              "col": 78
+            }
+          },
+          "with_": [
+            {
+              "name": "x",
+              "columns": null,
+              "query": {
+                "kind": "select",
+                "with_": null,
+                "recursive": false,
+                "distinct": false,
+                "columns": [
+                  {
+                    "expr": {
+                      "kind": "number",
+                      "value": 1,
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 33
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 34
+                        }
+                      }
+                    },
+                    "alias": null
+                  }
+                ],
+                "from": null,
+                "where": null,
+                "groupBy": null,
+                "having": null,
+                "window": null,
+                "orderBy": null,
+                "limit": null,
+                "offset": null,
+                "locking": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 26
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 34
+                  }
+                }
+              }
+            }
+          ],
+          "recursive": false
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 78
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "EXECUTE q (1, 2.5, now());",
+    "ast": [
+      {
+        "kind": "execute",
+        "name": "q",
+        "args": [
+          {
+            "kind": "number",
+            "value": 1,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 11
+              },
+              "end": {
+                "row": 1,
+                "col": 12
+              }
+            }
+          },
+          {
+            "kind": "number",
+            "value": 2.5,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 14
+              },
+              "end": {
+                "row": 1,
+                "col": 17
+              }
+            }
+          },
+          {
+            "kind": "call",
+            "name": "now",
+            "args": [],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 19
+              },
+              "end": {
+                "row": 1,
+                "col": 24
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 25
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "EXECUTE ins;",
+    "ast": [
+      {
+        "kind": "execute",
+        "name": "ins",
+        "args": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 11
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;",
     "ast": [
       {
