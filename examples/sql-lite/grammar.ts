@@ -5184,7 +5184,7 @@ const TYPE_ACTIONS: DispatchMap<AlterTypeAction> = {
   set: { parse: parseSetSchemaAction },
 };
 
-// `RESET (name, …)`, ALTER INDEX's and ALTER VIEW's. It shares SET's option-list
+// `RESET (name, …)`, ALTER TABLE's, INDEX's and VIEW's. It shares SET's option-list
 // rule and, as PG does, refuses a value in it.
 function parseResetOptions(ctx: ParseContext<SqlTokenType>): Extract<AlterIndexAction, { kind: "resetOptions" }> {
   ctx.next(); // RESET
