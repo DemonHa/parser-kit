@@ -53,6 +53,14 @@ const SUPPLEMENTAL = [
   "SELECT true, false, null, a IS TRUE, b IS NOT FALSE FROM t;",
   "SELECT a SIMILAR TO 'x%', b AT TIME ZONE 'utc', c COLLATE \"C\" FROM t;",
   "SELECT a IN (SELECT id FROM u), b NOT IN (1, 2) FROM t;",
+  // Implicit rows, OVERLAPS (both row spellings, under NOT and AND), the BETWEEN
+  // modifiers and the IS JSON family. `symmetric` is a key the between node
+  // carries only when written; the corpus's plain `age BETWEEN 1 AND 10` row and
+  // the `c NOT BETWEEN` below pin its omission.
+  "SELECT (a, b), (a, b) = (1, 2), x = ANY ((a, b)) FROM t;",
+  "SELECT (a, b) OVERLAPS (c, d), ROW(a, b) OVERLAPS ROW(c, d), NOT (a, b) OVERLAPS (c, d) AND e FROM t;",
+  "SELECT a BETWEEN SYMMETRIC 1 AND 2, b NOT BETWEEN ASYMMETRIC 1 AND 2, c NOT BETWEEN 1 AND 2 FROM t;",
+  "SELECT a IS JSON, b IS NOT JSON OBJECT WITH UNIQUE KEYS, c IS JSON ARRAY WITHOUT UNIQUE FROM t;",
   "SELECT EXISTS (SELECT 1 FROM u) FROM t;",
   "SELECT INTERVAL '1 day' FROM t;",
   "SELECT count(*) FILTER (WHERE a > 1) FROM t;",
