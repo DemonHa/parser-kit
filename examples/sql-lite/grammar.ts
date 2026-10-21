@@ -522,9 +522,13 @@ export type DomainConstraint =
   | { kind: "default"; expr: Expr }
   | { kind: "collate"; collation: string[] };
 
-// `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] name [(cols)] AS query
-// [WITH [NO] DATA]`. `withData` is materialized-only (`null` otherwise / when the
-// clause is absent); `ifNotExists` is materialized-only in PG but stored uniformly.
+// `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] name [(cols)] [WITH
+// (option, …)] AS query [WITH [NO] DATA | WITH [CASCADED | LOCAL] CHECK OPTION]`.
+// `withData` is materialized-only (`null` otherwise / when the clause is absent);
+// `ifNotExists` is materialized-only in PG but stored uniformly. `options` (a
+// view's `security_barrier`, a materialized view's storage parameters) and the
+// plain-view-only `checkOption` are present only when written; a bare WITH CHECK
+// OPTION is CASCADED, as in PG.
 export type CreateView = {
   kind: "createView";
   materialized: boolean;
@@ -534,6 +538,8 @@ export type CreateView = {
   columns: string[] | null;
   query: Query;
   withData: boolean | null;
+  options?: RelationOption[];
+  checkOption?: "cascaded" | "local";
   span: Span;
 };
 
@@ -882,6 +888,26 @@ export type CursorFetch = { kind: "fetch" | "move"; direction: CursorDirection |
 // CLOSE {name | ALL} — `name` is null for CLOSE ALL.
 export type CloseCursor = { kind: "close"; name: string | null; span: Span };
 
+// One `table [(column, …)]` target of ANALYZE or VACUUM — `columns` is null when
+// no list is written.
+export type MaintenanceTarget = { name: string[]; columns: string[] | null };
+
+// `EXPLAIN [(option, …) | [ANALYZE] [VERBOSE]] statement`. As in PG, the legacy
+// keywords are options too: `EXPLAIN ANALYZE VERBOSE q` and `EXPLAIN (ANALYZE,
+// VERBOSE) q` both carry two bare options (`value: null`), spelt as written.
+// `options` is `[]` when neither form is.
+export type Explain = {
+  kind: "explain";
+  options: RelationOption[];
+  statement: Query | Insert | Update | Delete | CreateTableAs | CreateView | DeclareCursor | Execute;
+  span: Span;
+};
+// `ANALYZE [(option, …) | VERBOSE] [target, …]` and `VACUUM [(option, …) |
+// [FULL] [FREEZE] [VERBOSE] [ANALYZE]] [target, …]`, with `options` as on
+// EXPLAIN. `tables` is `[]` when none is named (the whole database).
+export type Analyze = { kind: "analyze"; options: RelationOption[]; tables: MaintenanceTarget[]; span: Span };
+export type Vacuum = { kind: "vacuum"; options: RelationOption[]; tables: MaintenanceTarget[]; span: Span };
+
 // Where COPY reads from or writes to: a server-side file, a shell command's
 // pipe, or the client connection: STDIN for FROM, STDOUT for TO, as PG's docs
 // spell it. (PG's grammar takes either word in either direction; this parser
@@ -963,6 +989,9 @@ export type Stmt =
   | CreateProcedure
   | CreateAggregate
   | CreateTrigger
+  // `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`; `withData`
+  // is null when the clause is absent, as on createView.
+  | { kind: "refreshMaterializedView"; concurrently: boolean; name: string[]; withData: boolean | null; span: Span }
   // `ALTER TABLE [IF EXISTS] name action[, …]`. `actions` is never empty, and a
   // RENAME is always its only element — PG keeps those out of the action list.
   | { kind: "alterTable"; ifExists: boolean; name: string[]; actions: AlterAction[]; span: Span }
@@ -1034,6 +1063,9 @@ export type Stmt =
   | Deallocate
   | Prepare
   | Execute
+  | Explain
+  | Analyze
+  | Vacuum
   | Lock
   | CallProcedure
   | DeclareCursor
@@ -3177,13 +3209,13 @@ const tableItem = oneOf(tableConstraint, likeBody, excludeItem, columnDef);
 // --- statements ---
 
 // `WITH [NO] DATA` — the trailing materialization flag on CREATE TABLE AS /
-// MATERIALIZED VIEW. Returns true (WITH DATA), false (WITH NO DATA), or null when
-// no clause follows. The preceding query does not usually consume it (WITH DATA
-// is not a query continuation, and typeRef takes a WITH only as `WITH TIME
-// ZONE`), so a bare `ctx.is("with")` peek is enough here. Two query endings do
-// take a WITH unconditionally, and so leave none for this clause: a trailing
-// `IS JSON` (its uniqueness clause, as in PG) and a FETCH clause not closed by
-// ONLY (its WITH TIES).
+// MATERIALIZED VIEW and on REFRESH MATERIALIZED VIEW. Returns true (WITH DATA),
+// false (WITH NO DATA), or null when no clause follows. The preceding query
+// does not usually consume it (WITH DATA is not a query continuation, and
+// typeRef takes a WITH only as `WITH TIME ZONE`), so a bare `ctx.is("with")`
+// peek is enough here. Two query endings do take a WITH unconditionally, and so
+// leave none for this clause: a trailing `IS JSON` (its uniqueness clause, as in
+// PG) and a FETCH clause not closed by ONLY (its WITH TIES).
 function parseWithData(ctx: ParseContext<SqlTokenType>): boolean | null {
   if (!ctx.is("ident", "with")) return null;
   ctx.next(); // WITH
@@ -4157,8 +4189,28 @@ function createRoleRest(ctx: ParseContext<SqlTokenType>, user: boolean): Stmt {
   return { kind: "createRole", user, name, options, span: ctx.spanFrom(start) };
 }
 
+// `WITH [CASCADED | LOCAL] CHECK OPTION` after a plain view's query, or null.
+// The query leaves a trailing WITH alone (see parseWithData), and nothing else
+// can follow it there, so a WITH commits; the word after it is peeked first,
+// so one that leads no check option croaks where it stands.
+const CHECK_OPTION_WORDS = ["cascaded", "local", "check"];
+function parseCheckOption(ctx: ParseContext<SqlTokenType>): "cascaded" | "local" | null {
+  if (!ctx.is("ident", "with")) return null;
+  const word = ctx.peekAhead(1);
+  ctx.next(); // WITH
+  if (word?.type !== "ident" || !CHECK_OPTION_WORDS.includes(word.value)) {
+    return ctx.croak(`Expected ${quoteList(CHECK_OPTION_WORDS)} but found ${describeFound(word)}`);
+  }
+  const level = word.value === "check" ? "cascaded" : (ctx.next()!.value as "cascaded" | "local");
+  ctx.parse(kw("check"));
+  ctx.parse(kw("option"));
+  return level;
+}
+
 // The body of a (MATERIALIZED) VIEW after the VIEW keyword: `[IF NOT EXISTS] name
-// [(cols)] AS query [WITH [NO] DATA]`. The query reuses the shared `query` rule.
+// [(cols)] [WITH (option, …)] AS query`, then WITH [NO] DATA on a materialized
+// view or a check option on a plain one. The query reuses the shared `query`
+// rule. `with` is reserved, so before AS it can only open the option list.
 function parseViewBody(
   ctx: ParseContext<SqlTokenType>,
   start: Position,
@@ -4168,9 +4220,11 @@ function parseViewBody(
   const ifNotExists = materialized && ctx.parse(optional(attempt(kwseq("if", "not", "exists")))) !== null;
   const name = ctx.parse(qualName);
   const columns = ctx.is("punc", "(") ? ctx.parse(columnList) : null;
+  const options = ctx.eat("ident", "with") !== null ? ctx.parse(relationOptions) : null;
   ctx.parse(kw("as"));
   const q = ctx.parse(query);
   const withData = materialized ? parseWithData(ctx) : null;
+  const checkOption = materialized ? null : parseCheckOption(ctx);
   return {
     kind: "createView",
     materialized,
@@ -4180,6 +4234,8 @@ function parseViewBody(
     columns,
     query: q,
     withData,
+    ...(options !== null && { options }),
+    ...(checkOption !== null && { checkOption }),
     span: ctx.spanFrom(start),
   };
 }
@@ -5422,6 +5478,22 @@ const truncateStmt = seq(
   field("behavior", dropBehavior),
 ).map(({ names, identity, behavior }, span): Stmt => ({ kind: "truncate", names, identity, behavior, span }));
 
+// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`. Every word
+// is matched by value and stays a name elsewhere. CONCURRENTLY is taken whenever
+// it follows VIEW, as DROP takes it: PG ranks it a type_func_name keyword, which
+// is no table name there either.
+const refreshStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kwseq("refresh", "materialized", "view"));
+    const concurrently = ctx.eat("ident", "concurrently") !== null;
+    const name = ctx.parse(qualName);
+    const withData = parseWithData(ctx);
+    return { kind: "refreshMaterializedView", concurrently, name, withData, span: ctx.spanFrom(start) };
+  },
+  { expected: '"refresh"', first: [{ type: "ident", value: "refresh" }] },
+);
+
 const commentStmt = seq(
   skip(kw("comment")),
   skip(kw("on")),
@@ -6141,7 +6213,8 @@ function parseCallArgList(ctx: ParseContext<SqlTokenType>): Expr[] {
 
 // `WITH ORDINALITY` after a table function. Keyed on the word pair, since a
 // bare `with` after a FROM item can also open an enclosing materialized view's
-// `WITH [NO] DATA`; `ordinality` itself stays unreserved.
+// `WITH [NO] DATA` or a view's `WITH [CASCADED | LOCAL] CHECK OPTION`;
+// `ordinality` itself stays unreserved.
 const eatOrdinality = (ctx: ParseContext<SqlTokenType>): boolean => {
   if (!ctx.is("ident", "with")) return false;
   const after = ctx.peekAhead(1);
@@ -6903,6 +6976,125 @@ const executeStmt = custom<Stmt, SqlTokenType>(
   { expected: '"execute"', first: [{ type: "ident", value: "execute" }] },
 );
 
+// --- EXPLAIN / ANALYZE / VACUUM ---
+//
+// The lead words are matched by value. `analyze` (and `analyse`) is reserved
+// already, as in PG; `explain` and `vacuum` stay names everywhere but a
+// statement's head. The parenthesised options are relationOptions as it stands:
+// PG's utility option list is `name [value]`, a shape that rule takes (along
+// with the `=`, the `namespace.` prefix and the `*` and list values this list
+// does not need, the trade that rule's comment describes).
+
+// The unparenthesised flags, in PG's fixed order: each a set of spellings, read
+// at most once, as a bare option. `verbose` and `freeze` are names elsewhere,
+// but here they are flags, as in PG, where neither can name a table: see
+// maintenanceTail for a flag written out of order.
+function legacyFlags(ctx: ParseContext<SqlTokenType>, flags: readonly (readonly string[])[]): RelationOption[] {
+  const options: RelationOption[] = [];
+  for (const spellings of flags) {
+    const tok = ctx.peek();
+    if (tok === null || tok.type !== "ident" || !spellings.includes(tok.value)) continue;
+    const start = ctx.position();
+    ctx.next();
+    options.push({ name: tok.value, value: null, span: ctx.spanFrom(start) });
+  }
+  return options;
+}
+
+const ANALYZE_WORDS = ["analyze", "analyse"] as const;
+// The column list may not be empty, unlike columnList's: PG's `opt_name_list`.
+const targetColumns = sepBy(nameWord, P(","));
+const maintenanceTarget = custom<MaintenanceTarget, SqlTokenType>(
+  (ctx) => ({ name: ctx.parse(qualName), columns: optParenList(ctx, targetColumns) }),
+  { expected: qualName.expected(), first: qualName.first() },
+);
+const maintenanceTargets = sepBy(maintenanceTarget, P(","));
+
+// `[(option, …) | flags] [target, …]` — the tail ANALYZE and VACUUM share. PG
+// takes either option form but not both; the target list ends the statement.
+// A bare flag word left over after the flags (one out of order, or repeated)
+// croaks rather than naming the first target, as PG's syntax error does; a
+// quoted one, or one past the first target, is a name.
+function maintenanceTail(ctx: ParseContext<SqlTokenType>, flags: readonly (readonly string[])[]) {
+  const parenthesised = ctx.is("punc", "(");
+  const options = parenthesised ? ctx.parse(relationOptions) : legacyFlags(ctx, flags);
+  const tok = ctx.peek();
+  if (!parenthesised && tok?.type === "ident" && flags.some((spellings) => spellings.includes(tok.value))) {
+    return ctx.croak(`Expected a name but found ${describeFound(tok)}`);
+  }
+  const tables = ctx.is("punc", ";") || ctx.peek() === null ? [] : ctx.parse(maintenanceTargets);
+  return { options, tables };
+}
+
+const analyzeStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.next(); // ANALYZE or ANALYSE
+    return { kind: "analyze", ...maintenanceTail(ctx, [["verbose"]]), span: ctx.spanFrom(start) };
+  },
+  { expected: '"analyze"', first: ANALYZE_WORDS.map((value) => ({ type: "ident" as const, value })) },
+);
+
+const vacuumStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("vacuum"));
+    const tail = maintenanceTail(ctx, [["full"], ["freeze"], ["verbose"], ANALYZE_WORDS]);
+    return { kind: "vacuum", ...tail, span: ctx.spanFrom(start) };
+  },
+  { expected: '"vacuum"', first: [{ type: "ident", value: "vacuum" }] },
+);
+
+// PG's ExplainableStmt, as far as sql-lite parses it: a preparable statement
+// (the same set as PREPARE's), CREATE TABLE AS, CREATE MATERIALIZED VIEW,
+// DECLARE (a cursor), or EXECUTE.
+const EXPLAINABLE =
+  "a SELECT, VALUES, INSERT, UPDATE, DELETE, CREATE TABLE AS, CREATE MATERIALIZED VIEW, DECLARE or EXECUTE statement";
+function explainable(ctx: ParseContext<SqlTokenType>): Explain["statement"] {
+  if (ctx.is("ident", "execute")) return ctx.parse(executeStmt) as Execute;
+  if (ctx.is("ident", "declare")) return ctx.parse(declareCursorStmt) as DeclareCursor;
+  if (ctx.is("ident", "create")) {
+    // Only parsed is a CREATE TABLE told apart from CREATE TABLE AS, so the
+    // croak spans the whole statement, as CREATE SCHEMA's element check does —
+    // from CREATE, which a CREATE TABLE node's own span leaves out.
+    const start = ctx.position();
+    const stmt = ctx.parse(createStmt);
+    if (stmt.kind === "createTableAs" || (stmt.kind === "createView" && stmt.materialized)) return stmt;
+    return ctx.croak(
+      "EXPLAIN takes CREATE TABLE AS or CREATE MATERIALIZED VIEW but no other CREATE",
+      start,
+      stmt.span.end,
+    );
+  }
+  if (!matchesFirst(ctx.peek(), PREPARABLE_FIRST)) {
+    return ctx.croak(`Expected ${EXPLAINABLE} but found ${describeFound(ctx.peek())}`);
+  }
+  return ctx.parse(dmlStatement) as Query | Insert | Update | Delete;
+}
+
+// A `(` after EXPLAIN opens the option list unless a query follows it: PG reads
+// `EXPLAIN (SELECT 1)` as the parenthesised query, since no option is named
+// `select`, `values` or `with`, nor opens with a `(`.
+function opensQuery(tok: Token<SqlTokenType> | null): boolean {
+  if (tok === null) return false;
+  if (tok.type === "punc") return tok.value === "(";
+  return tok.type === "ident" && (tok.value === "select" || tok.value === "values" || tok.value === "with");
+}
+
+const explainStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("explain"));
+    const options =
+      ctx.is("punc", "(") && !opensQuery(peekOrReport(ctx, 1))
+        ? ctx.parse(relationOptions)
+        : legacyFlags(ctx, [ANALYZE_WORDS, ["verbose"]]);
+    const statement = explainable(ctx);
+    return { kind: "explain", options, statement, span: ctx.spanFrom(start) };
+  },
+  { expected: '"explain"', first: [{ type: "ident", value: "explain" }] },
+);
+
 // --- LOCK and CALL ---
 // Both lead words stay UNRESERVED, matched by value, as do the lock-mode words.
 
@@ -7182,7 +7374,7 @@ const copyStmt = custom<Stmt, SqlTokenType>(
 // to grow. Nesting is dispatch- and validation-equivalent to the flat form —
 // oneOf's first() is a flatMap, and the inner groups catch collisions within a
 // family — and the composed `expected` is overridden by describe() anyway.
-const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt);
+const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt, refreshStmt);
 const utilityStmt = oneOf(
   grantStmt,
   transactionStmt,
@@ -7191,6 +7383,9 @@ const utilityStmt = oneOf(
   deallocateStmt,
   prepareStmt,
   executeStmt,
+  explainStmt,
+  analyzeStmt,
+  vacuumStmt,
   lockStmt,
   callStmt,
   declareCursorStmt,

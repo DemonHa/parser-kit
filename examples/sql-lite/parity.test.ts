@@ -252,6 +252,20 @@ const SUPPLEMENTAL = [
   "CREATE SCHEMA AUTHORIZATION bob;",
   "CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public VERSION '1.4' CASCADE;",
   "CREATE TABLESPACE ts OWNER bob LOCATION '/data' WITH (seq_page_cost = 1.5);",
+  // --- EXPLAIN, ANALYZE and VACUUM ---
+  "EXPLAIN SELECT * FROM t;",
+  "EXPLAIN ANALYZE VERBOSE WITH x AS (SELECT 1) DELETE FROM t USING x;",
+  "EXPLAIN (ANALYZE, COSTS off, BUFFERS true, WAL 1, FORMAT JSON) (SELECT 1) UNION SELECT 2;",
+  "EXPLAIN (VERBOSE) CREATE TABLE t (a) AS SELECT 1 WITH NO DATA;",
+  "EXPLAIN (SELECT 1);",
+  "EXPLAIN ANALYSE EXECUTE q (1);",
+  "EXPLAIN DECLARE c NO SCROLL CURSOR WITH HOLD FOR SELECT * FROM t;",
+  "EXPLAIN CREATE MATERIALIZED VIEW mv AS SELECT 1 WITH NO DATA;",
+  "ANALYZE;",
+  "ANALYZE VERBOSE t (a, b), s.u;",
+  "ANALYZE (SKIP_LOCKED) t;",
+  "VACUUM FULL FREEZE VERBOSE ANALYZE t (a);",
+  "VACUUM (PARALLEL 4, INDEX_CLEANUP auto) a, b;",
   // --- TEMPORARY, UNLOGGED and scoped CREATE TABLE ---
   "CREATE TEMP TABLE t (id int) ON COMMIT DELETE ROWS;",
   "CREATE UNLOGGED TABLE IF NOT EXISTS s.t (id int, note text);",
@@ -267,6 +281,11 @@ const SUPPLEMENTAL = [
   "LOCK t;",
   "CALL s.p(1, 'a', b => 2);",
   "CALL p();",
+  // --- view options and REFRESH MATERIALIZED VIEW ---
+  "CREATE OR REPLACE VIEW v (a, b) WITH (security_barrier, security_invoker = true) AS SELECT a, now()::timestamp FROM t WITH CHECK OPTION;",
+  "CREATE VIEW v AS SELECT a FROM t WITH LOCAL CHECK OPTION;",
+  "CREATE MATERIALIZED VIEW mv WITH (fillfactor = 70) AS SELECT now()::timestamp WITH NO DATA;",
+  "REFRESH MATERIALIZED VIEW CONCURRENTLY s.mv WITH DATA;",
   // --- COPY: each location, the option shapes (bare, word, string, list, `*`)
   // and WHERE; a query source, WITH-prefixed DML with RETURNING included ---
   "COPY s.t (a, b) FROM STDIN WITH (FORMAT csv, HEADER MATCH, NULL '', FORCE_NOT_NULL (a, b), FREEZE) WHERE a > 0;",

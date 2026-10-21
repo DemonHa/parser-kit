@@ -5937,6 +5937,140 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
   });
 });
 
+// --- EXPLAIN, ANALYZE and VACUUM ---
+
+describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
+  const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
+  const word = (w: string) => ({ kind: "name", parts: [w] });
+  const bool = (value: boolean) => ({ kind: "bool", value });
+  const target = (tableName: string[], columns: string[] | null = null) => ({ name: tableName, columns });
+  const explained = (src: string) => firstStmt(`EXPLAIN ${src};`).statement;
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses EXPLAIN with no options, the legacy flags and the option list", () => {
+    expect(firstStmt("EXPLAIN SELECT 1;")).toEqual({
+      kind: "explain",
+      options: [],
+      statement: sel({ columns: [col(num(1))] }),
+    });
+    expect(firstStmt("EXPLAIN ANALYZE VERBOSE SELECT 1;").options).toEqual([opt("analyze"), opt("verbose")]);
+    expect(firstStmt("EXPLAIN ANALYSE SELECT 1;").options).toEqual([opt("analyse")]);
+    expect(firstStmt("EXPLAIN VERBOSE SELECT 1;").options).toEqual([opt("verbose")]);
+    expect(
+      firstStmt(
+        "EXPLAIN (ANALYZE, VERBOSE false, COSTS off, SETTINGS on, BUFFERS true, WAL 1, TIMING, SUMMARY 'on', FORMAT JSON) SELECT 1;",
+      ).options,
+    ).toEqual([
+      opt("analyze"),
+      opt("verbose", bool(false)),
+      opt("costs", word("off")),
+      opt("settings", word("on")),
+      opt("buffers", bool(true)),
+      opt("wal", num(1)),
+      opt("timing"),
+      opt("summary", str("on")),
+      opt("format", word("json")),
+    ]);
+    // A legacy flag spans its own word.
+    const [stmt] = sqlLite.parse("EXPLAIN  VERBOSE SELECT 1;") as any[];
+    expect(stmt.options[0].span).toEqual({ start: { row: 1, col: 9 }, end: { row: 1, col: 16 } });
+  });
+
+  it("explains a query, DML, CREATE TABLE AS, CREATE MATERIALIZED VIEW, DECLARE or EXECUTE", () => {
+    expect(explained("VALUES (1)").kind).toBe("values");
+    expect(explained("WITH x AS (SELECT 1) SELECT * FROM x")).toMatchObject({ kind: "select", with_: [{ name: "x" }] });
+    expect(explained("INSERT INTO t VALUES (1)")).toMatchObject({ kind: "insert", table: ["t"] });
+    expect(explained("UPDATE t SET a = 1")).toMatchObject({ kind: "update", table: ["t"] });
+    expect(explained("DELETE FROM t")).toMatchObject({ kind: "delete", table: ["t"] });
+    expect(explained("CREATE TABLE t (a) AS SELECT 1")).toMatchObject({ kind: "createTableAs", columns: ["a"] });
+    expect(explained("CREATE MATERIALIZED VIEW mv AS SELECT 1")).toMatchObject({
+      kind: "createView",
+      materialized: true,
+    });
+    expect(explained("DECLARE c SCROLL CURSOR FOR SELECT 1")).toMatchObject({
+      kind: "declare",
+      name: "c",
+      scroll: true,
+    });
+    expect(explained("EXECUTE p (1)")).toEqual({ kind: "execute", name: "p", args: [num(1)] });
+    // A `(` opening a query is the query, not an option list.
+    expect(firstStmt("EXPLAIN (SELECT 1);")).toMatchObject({ options: [], statement: { kind: "select" } });
+    expect(firstStmt("EXPLAIN ((SELECT 1) UNION SELECT 2);").statement).toMatchObject({ kind: "setOp" });
+    expect(firstStmt("EXPLAIN (VALUES (1));").statement.kind).toBe("values");
+    expect(firstStmt("EXPLAIN (ANALYZE) (SELECT 1);")).toMatchObject({ options: [opt("analyze")] });
+  });
+
+  it("parses ANALYZE and VACUUM with and without targets", () => {
+    expect(firstStmt("ANALYZE;")).toEqual({ kind: "analyze", options: [], tables: [] });
+    expect(firstStmt("ANALYSE VERBOSE t (a, b), s.u;")).toEqual({
+      kind: "analyze",
+      options: [opt("verbose")],
+      tables: [target(["t"], ["a", "b"]), target(["s", "u"])],
+    });
+    expect(firstStmt("ANALYZE (VERBOSE, SKIP_LOCKED true) t;")).toEqual({
+      kind: "analyze",
+      options: [opt("verbose"), opt("skip_locked", bool(true))],
+      tables: [target(["t"])],
+    });
+    expect(firstStmt("VACUUM;")).toEqual({ kind: "vacuum", options: [], tables: [] });
+    expect(firstStmt("VACUUM FULL FREEZE VERBOSE ANALYZE t (a);")).toEqual({
+      kind: "vacuum",
+      options: [opt("full"), opt("freeze"), opt("verbose"), opt("analyze")],
+      tables: [target(["t"], ["a"])],
+    });
+    expect(firstStmt("VACUUM FREEZE ANALYSE;").options).toEqual([opt("freeze"), opt("analyse")]);
+    expect(firstStmt("VACUUM (FULL, PARALLEL 4, INDEX_CLEANUP auto) a, b;")).toEqual({
+      kind: "vacuum",
+      options: [opt("full"), opt("parallel", num(4)), opt("index_cleanup", word("auto"))],
+      tables: [target(["a"]), target(["b"])],
+    });
+  });
+
+  // `analyze`, `analyse` and `full` were reserved already; the option names
+  // (`costs`, `format`, …) are read by relationOptions, which matches none by value.
+  it("keeps the new words unreserved", () => {
+    const words = ["explain", "vacuum", "verbose", "freeze"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM explain;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["explain"])] }),
+    );
+    const cols = words.map((w) => `${w} text`).join(", ");
+    expect(firstStmt(`CREATE TABLE vacuum (${cols});`).items.map((i: any) => i.name)).toEqual(words);
+    // …and as the targets these statements take, past any flag.
+    expect(firstStmt("VACUUM VERBOSE explain (vacuum, freeze);").tables).toEqual([
+      target(["explain"], ["vacuum", "freeze"]),
+    ]);
+    expect(firstStmt("ANALYZE vacuum;").tables).toEqual([target(["vacuum"])]);
+    // A flag word is a target when quoted, or past the first target.
+    expect(firstStmt('VACUUM VERBOSE "freeze", verbose;').tables).toEqual([target(["freeze"]), target(["verbose"])]);
+  });
+
+  it("rejects malformed EXPLAIN, ANALYZE and VACUUM", () => {
+    expect(bad("EXPLAIN;")).toThrow(
+      /Expected a SELECT, VALUES, INSERT, UPDATE, DELETE, CREATE TABLE AS, CREATE MATERIALIZED VIEW, DECLARE or EXECUTE/,
+    );
+    expect(bad("EXPLAIN DROP TABLE t;")).toThrow(/or EXECUTE statement but found "drop" \(1:8\)/);
+    expect(bad("EXPLAIN EXPLAIN SELECT 1;")).toThrow(/statement but found "explain"/);
+    expect(bad("EXPLAIN CREATE TABLE t (a int);")).toThrow(
+      /EXPLAIN takes CREATE TABLE AS or CREATE MATERIALIZED VIEW but no other CREATE \(1:8\)/,
+    );
+    expect(bad("EXPLAIN CREATE VIEW v AS SELECT 1;")).toThrow(/but no other CREATE \(1:8\)/);
+    // The flags come in PG's order, and either form excludes the other.
+    expect(bad("EXPLAIN VERBOSE ANALYZE SELECT 1;")).toThrow(/statement but found "analyze"/);
+    expect(bad("EXPLAIN (ANALYZE) VERBOSE SELECT 1;")).toThrow(/statement but found "verbose"/);
+    expect(bad("EXPLAIN () SELECT 1;")).toThrow(/Expected an option name but found "\)"/);
+    expect(bad("EXPLAIN (ANALYZE SELECT 1;")).toThrow(/Expected "\)" but found "1"/);
+    expect(bad("VACUUM ANALYZE FULL t;")).toThrow(/Expected a name but found "full"/);
+    expect(bad("VACUUM 1;")).toThrow(/Expected a name but found "1" \(1:7\)/);
+    expect(bad("VACUUM t,;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("ANALYZE t ();")).toThrow(/Expected a name but found "\)"/);
+    expect(bad("ANALYZE FULL t;")).toThrow(/Expected a name but found "full"/);
+    // A flag out of order, or repeated, is not taken for a table name.
+    expect(bad("VACUUM VERBOSE FREEZE;")).toThrow(/Expected a name but found "freeze" \(1:15\)/);
+    expect(bad("VACUUM ANALYZE VERBOSE t;")).toThrow(/Expected a name but found "verbose"/);
+    expect(bad("ANALYZE VERBOSE VERBOSE;")).toThrow(/Expected a name but found "verbose"/);
+  });
+});
+
 // --- cursors: DECLARE, FETCH, MOVE and CLOSE ---
 
 describe("SQL-lite cursors", () => {
@@ -6416,6 +6550,137 @@ describe("SQL-lite LOCK and CALL", () => {
     expect(bad("LOCK;")).toThrow(/Expected a name but found ";"/);
     expect(bad("CALL p;")).toThrow(/Expected "\(" but found ";" \(1:6\)/);
     expect(bad("CALL p(1;")).toThrow(/Expected "\)" but found ";" \(1:8\)/);
+  });
+});
+
+// --- view options and REFRESH MATERIALIZED VIEW ---
+
+describe("SQL-lite view options and REFRESH MATERIALIZED VIEW", () => {
+  const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses a view's WITH (option, …) list before AS", () => {
+    expect(
+      firstStmt("CREATE OR REPLACE VIEW v (a) WITH (security_barrier, check_option = local) AS SELECT 1;"),
+    ).toMatchObject({
+      kind: "createView",
+      orReplace: true,
+      columns: ["a"],
+      options: [opt("security_barrier"), opt("check_option", name("local"))],
+    });
+    // A materialized view's storage parameters sit in the same place.
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv WITH (fillfactor = 70) AS SELECT 1 WITH NO DATA;")).toMatchObject({
+      materialized: true,
+      options: [opt("fillfactor", num(70))],
+      withData: false,
+    });
+  });
+
+  it("parses WITH [CASCADED | LOCAL] CHECK OPTION after a view's query", () => {
+    const check = (src: string) => firstStmt(src).checkOption;
+    // A bare WITH CHECK OPTION is CASCADED, as in PG.
+    expect(check("CREATE VIEW v AS SELECT a FROM t WITH CHECK OPTION;")).toBe("cascaded");
+    expect(check("CREATE VIEW v AS SELECT a FROM t WITH CASCADED CHECK OPTION;")).toBe("cascaded");
+    expect(check("CREATE VIEW v AS SELECT a FROM t WITH LOCAL CHECK OPTION;")).toBe("local");
+    expect(check("CREATE VIEW v WITH (security_barrier) AS SELECT 1 WITH LOCAL CHECK OPTION;")).toBe("local");
+  });
+
+  it("keeps a trailing WITH apart from a type's WITH TIME ZONE", () => {
+    for (const [clause, level] of [
+      ["WITH CHECK OPTION", "cascaded"],
+      ["WITH LOCAL CHECK OPTION", "local"],
+      ["WITH CASCADED CHECK OPTION", "cascaded"],
+    ]) {
+      const v = firstStmt(`CREATE VIEW v AS SELECT now()::timestamp ${clause};`);
+      expect(v.checkOption).toBe(level);
+      expect(v.query.columns[0].expr.type).toMatchObject({ name: "timestamp" });
+    }
+    expect(firstStmt("CREATE VIEW v AS SELECT now()::timestamp WITH TIME ZONE WITH CHECK OPTION;")).toMatchObject({
+      query: { columns: [{ expr: { type: { name: "timestamp with time zone" } } }] },
+      checkOption: "cascaded",
+    });
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv AS SELECT now()::timestamp WITH NO DATA;")).toMatchObject({
+      withData: false,
+    });
+    // A FETCH clause's WITH TIES is taken first, and the check option follows it.
+    expect(
+      firstStmt("CREATE VIEW v AS SELECT a FROM t ORDER BY a FETCH FIRST 1 ROW WITH TIES WITH CHECK OPTION;"),
+    ).toMatchObject({ query: { limit: num(1) }, checkOption: "cascaded" });
+    // A trailing IS JSON takes a following WITH as its uniqueness clause, as in PG.
+    expect(bad("CREATE VIEW v AS SELECT a IS JSON WITH CHECK OPTION;")).toThrow(/Expected "unique" but found "check"/);
+  });
+
+  it("ends a schema element view at its check option", () => {
+    const schema = firstStmt(
+      "CREATE SCHEMA s CREATE VIEW v AS SELECT 1 WITH LOCAL CHECK OPTION CREATE TABLE t (a int);",
+    );
+    expect(schema.elements.map((e: any) => [e.kind, e.checkOption])).toEqual([
+      ["createView", "local"],
+      ["createTable", undefined],
+    ]);
+  });
+
+  it("omits the new keys when their clauses are absent", () => {
+    for (const src of ["CREATE VIEW v AS SELECT 1;", "CREATE MATERIALIZED VIEW mv AS SELECT 1 WITH DATA;"]) {
+      const v = firstStmt(src);
+      expect(v).not.toHaveProperty("options");
+      expect(v).not.toHaveProperty("checkOption");
+    }
+  });
+
+  it("parses REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]", () => {
+    expect(firstStmt("REFRESH MATERIALIZED VIEW mv;")).toEqual({
+      kind: "refreshMaterializedView",
+      concurrently: false,
+      name: ["mv"],
+      withData: null,
+    });
+    expect(firstStmt("REFRESH MATERIALIZED VIEW CONCURRENTLY s.mv WITH DATA;")).toMatchObject({
+      concurrently: true,
+      name: ["s", "mv"],
+      withData: true,
+    });
+    expect(firstStmt("REFRESH MATERIALIZED VIEW mv WITH NO DATA;")).toMatchObject({ withData: false });
+    expect(sqlLite.parse("REFRESH MATERIALIZED VIEW mv;")[0]!.span).toEqual({
+      start: { row: 1, col: 0 },
+      end: { row: 1, col: 28 },
+    });
+  });
+
+  it("keeps the new words unreserved as names", () => {
+    const words = ["refresh", "materialized", "concurrently", "cascaded", "local", "option", "security_barrier"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM refresh;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    const cols = words.map((word) => `${word} text`).join(", ");
+    expect(firstStmt(`CREATE TABLE option (${cols});`).items.map((i: any) => i.name)).toEqual(words);
+    // …and as the views these statements name.
+    expect(firstStmt("CREATE VIEW cascaded AS SELECT local FROM option WITH LOCAL CHECK OPTION;")).toMatchObject({
+      name: ["cascaded"],
+      checkOption: "local",
+    });
+    expect(firstStmt("REFRESH MATERIALIZED VIEW refresh;")).toMatchObject({ name: ["refresh"] });
+    // `check` is reserved, so only a quoted one is a name.
+    expect(bad("SELECT check FROM t;")).toThrow(/Expected a name but found "check"/);
+    expect(firstStmt('CREATE VIEW "check" AS SELECT 1;')).toMatchObject({ name: ["check"] });
+  });
+
+  it("rejects malformed view options, check options and REFRESH", () => {
+    expect(bad("CREATE MATERIALIZED VIEW mv AS SELECT 1 WITH CHECK OPTION;")).toThrow(
+      /Expected "data" but found "check"/,
+    );
+    expect(bad("CREATE VIEW v AS SELECT 1 WITH DATA;")).toThrow(
+      /Expected "cascaded", "local" or "check" but found "data" \(1:31\)/,
+    );
+    expect(bad("CREATE VIEW v AS SELECT 1 WITH;")).toThrow(/Expected "cascaded", "local" or "check" but found ";"/);
+    expect(bad("CREATE VIEW v AS SELECT 1 WITH LOCAL OPTION;")).toThrow(/Expected "check" but found "option"/);
+    expect(bad("CREATE VIEW v AS SELECT 1 WITH CHECK;")).toThrow(/Expected "option" but found ";"/);
+    expect(bad("CREATE VIEW v WITH security_barrier AS SELECT 1;")).toThrow(/Expected "\(" but found/);
+    expect(bad("CREATE VIEW v WITH () AS SELECT 1;")).toThrow(/Expected an option name but found "\)"/);
+    expect(bad("REFRESH VIEW v;")).toThrow(/Expected "materialized" but found "view"/);
+    expect(bad("REFRESH MATERIALIZED VIEW;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("REFRESH MATERIALIZED VIEW CONCURRENTLY;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("REFRESH MATERIALIZED VIEW mv WITH CHECK OPTION;")).toThrow(/Expected "data" but found "check"/);
   });
 });
 
