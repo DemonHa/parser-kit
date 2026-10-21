@@ -286,6 +286,12 @@ const SUPPLEMENTAL = [
   "CREATE VIEW v AS SELECT a FROM t WITH LOCAL CHECK OPTION;",
   "CREATE MATERIALIZED VIEW mv WITH (fillfactor = 70) AS SELECT now()::timestamp WITH NO DATA;",
   "REFRESH MATERIALIZED VIEW CONCURRENTLY s.mv WITH DATA;",
+  // --- COPY: each location, the option shapes (bare, word, string, list, `*`)
+  // and WHERE; a query source, WITH-prefixed DML with RETURNING included ---
+  "COPY s.t (a, b) FROM STDIN WITH (FORMAT csv, HEADER MATCH, NULL '', FORCE_NOT_NULL (a, b), FREEZE) WHERE a > 0;",
+  "COPY t TO PROGRAM 'gzip > /tmp/t.gz' (FORMAT csv, FORCE_QUOTE *, DELIMITER ';', ENCODING 'UTF8');",
+  "COPY (WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x RETURNING id) TO STDOUT;",
+  "COPY (SELECT a FROM t UNION SELECT b FROM u) TO '/tmp/out.csv' (HEADER);",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind
