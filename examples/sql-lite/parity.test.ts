@@ -240,6 +240,12 @@ const SUPPLEMENTAL = [
   "CREATE UNLOGGED TABLE IF NOT EXISTS s.t (id int, note text);",
   "CREATE GLOBAL TEMPORARY TABLE t (id int);",
   "CREATE LOCAL TEMP TABLE snap AS SELECT 1 AS one;",
+  // --- LOCK and CALL ---
+  "LOCK TABLE ONLY s.t, u *, ONLY (v) IN SHARE ROW EXCLUSIVE MODE NOWAIT;",
+  "LOCK t IN ACCESS SHARE MODE;",
+  "LOCK t;",
+  "CALL s.p(1, 'a', b => 2);",
+  "CALL p();",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind
