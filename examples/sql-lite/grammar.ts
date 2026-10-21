@@ -6670,6 +6670,7 @@ function cursorOptions(ctx: ParseContext<SqlTokenType>): Pick<DeclareCursor, "bi
   }
 }
 
+const QUERY_FIRST = query.first();
 const declareCursorStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -6686,7 +6687,7 @@ const declareCursorStmt = custom<Stmt, SqlTokenType>(
     // Checked up front, as PREPARE's body is, so a non-query body reports what
     // DECLARE accepts rather than setOpQuery's narrower first set (no `with`).
     // PG's `TABLE name` body aside, which sql-lite doesn't parse yet.
-    if (!matchesFirst(ctx.peek(), query.first())) {
+    if (!matchesFirst(ctx.peek(), QUERY_FIRST)) {
       return ctx.croak(`Expected a query but found ${describeFound(ctx.peek())}`);
     }
     const body = ctx.parse(query);
