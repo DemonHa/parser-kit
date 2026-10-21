@@ -18076,6 +18076,472 @@
     ]
   },
   {
+    "source": "CREATE DATABASE d WITH OWNER = bob TEMPLATE template0 ENCODING 'UTF8' CONNECTION LIMIT -1 IS_TEMPLATE false;",
+    "ast": [
+      {
+        "kind": "createDatabase",
+        "name": "d",
+        "options": [
+          {
+            "name": "owner",
+            "value": {
+              "kind": "name",
+              "parts": [
+                "bob"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 31
+                },
+                "end": {
+                  "row": 1,
+                  "col": 34
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 23
+              },
+              "end": {
+                "row": 1,
+                "col": 34
+              }
+            }
+          },
+          {
+            "name": "template",
+            "value": {
+              "kind": "name",
+              "parts": [
+                "template0"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 44
+                },
+                "end": {
+                  "row": 1,
+                  "col": 53
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 35
+              },
+              "end": {
+                "row": 1,
+                "col": 53
+              }
+            }
+          },
+          {
+            "name": "encoding",
+            "value": {
+              "kind": "string",
+              "value": "UTF8",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 64
+                },
+                "end": {
+                  "row": 1,
+                  "col": 68
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 54
+              },
+              "end": {
+                "row": 1,
+                "col": 68
+              }
+            }
+          },
+          {
+            "name": "connection limit",
+            "value": {
+              "kind": "number",
+              "value": -1,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 87
+                },
+                "end": {
+                  "row": 1,
+                  "col": 89
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 70
+              },
+              "end": {
+                "row": 1,
+                "col": 89
+              }
+            }
+          },
+          {
+            "name": "is_template",
+            "value": {
+              "kind": "bool",
+              "value": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 102
+                },
+                "end": {
+                  "row": 1,
+                  "col": 107
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 90
+              },
+              "end": {
+                "row": 1,
+                "col": 107
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 107
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE SCHEMA IF NOT EXISTS s AUTHORIZATION CURRENT_USER;",
+    "ast": [
+      {
+        "kind": "createSchema",
+        "ifNotExists": true,
+        "name": "s",
+        "authorization": "current_user",
+        "elements": [],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 56
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE SCHEMA s AUTHORIZATION bob CREATE TABLE t (id int) CREATE OR REPLACE VIEW v AS SELECT id FROM t GRANT SELECT ON t TO bob;",
+    "ast": [
+      {
+        "kind": "createSchema",
+        "ifNotExists": false,
+        "name": "s",
+        "authorization": "bob",
+        "elements": [
+          {
+            "kind": "createTable",
+            "ifNotExists": false,
+            "name": [
+              "t"
+            ],
+            "items": [
+              {
+                "kind": "column",
+                "name": "id",
+                "dataType": {
+                  "name": "int",
+                  "args": [],
+                  "array": false,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 53
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 56
+                    }
+                  }
+                },
+                "constraints": [],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 50
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 56
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 41
+              },
+              "end": {
+                "row": 1,
+                "col": 57
+              }
+            }
+          },
+          {
+            "kind": "createView",
+            "materialized": false,
+            "orReplace": true,
+            "ifNotExists": false,
+            "name": [
+              "v"
+            ],
+            "columns": null,
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "id"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 93
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 95
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": [
+                {
+                  "kind": "table",
+                  "name": [
+                    "t"
+                  ],
+                  "alias": null
+                }
+              ],
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 86
+                },
+                "end": {
+                  "row": 1,
+                  "col": 102
+                }
+              }
+            },
+            "withData": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 58
+              },
+              "end": {
+                "row": 1,
+                "col": 102
+              }
+            }
+          },
+          {
+            "kind": "grant",
+            "privileges": [
+              {
+                "name": "select",
+                "columns": null
+              }
+            ],
+            "on": {
+              "objectType": "table",
+              "names": [
+                [
+                  "t"
+                ]
+              ],
+              "inSchema": null
+            },
+            "grantees": [
+              "bob"
+            ],
+            "withGrantOption": false,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 103
+              },
+              "end": {
+                "row": 1,
+                "col": 127
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 127
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE SCHEMA AUTHORIZATION bob;",
+    "ast": [
+      {
+        "kind": "createSchema",
+        "ifNotExists": false,
+        "name": null,
+        "authorization": "bob",
+        "elements": [],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 31
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public VERSION '1.4' CASCADE;",
+    "ast": [
+      {
+        "kind": "createExtension",
+        "ifNotExists": true,
+        "name": "hstore",
+        "options": [
+          {
+            "kind": "schema",
+            "schema": "public"
+          },
+          {
+            "kind": "version",
+            "version": "1.4"
+          },
+          {
+            "kind": "cascade"
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 78
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLESPACE ts OWNER bob LOCATION '/data' WITH (seq_page_cost = 1.5);",
+    "ast": [
+      {
+        "kind": "createTablespace",
+        "name": "ts",
+        "owner": "bob",
+        "location": "/data",
+        "options": [
+          {
+            "name": "seq_page_cost",
+            "value": {
+              "kind": "number",
+              "value": 1.5,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 70
+                },
+                "end": {
+                  "row": 1,
+                  "col": 73
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 54
+              },
+              "end": {
+                "row": 1,
+                "col": 73
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 74
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {
