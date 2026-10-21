@@ -5676,3 +5676,155 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
     expect(bad("CREATE OR REPLACE SCHEMA s;")).toThrow(/Expected "view", "materialized"/);
   });
 });
+
+// --- cursors: DECLARE, FETCH, MOVE and CLOSE ---
+
+describe("SQL-lite cursors", () => {
+  const declare = (over: Record<string, unknown>) => ({
+    kind: "declare",
+    name: "c",
+    binary: false,
+    sensitivity: null,
+    scroll: null,
+    hold: null,
+    query: sel({ columns: [col(num(1))] }),
+    ...over,
+  });
+  const directionOf = (src: string) => firstStmt(`FETCH ${src};`).direction;
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses a bare DECLARE … CURSOR FOR query", () => {
+    expect(firstStmt("DECLARE c CURSOR FOR SELECT 1;")).toEqual(declare({}));
+  });
+
+  it("parses every cursor option, in any order, and WITH / WITHOUT HOLD", () => {
+    expect(firstStmt("DECLARE c BINARY INSENSITIVE NO SCROLL CURSOR WITH HOLD FOR SELECT 1;")).toEqual(
+      declare({ binary: true, sensitivity: "insensitive", scroll: false, hold: true }),
+    );
+    expect(firstStmt("DECLARE c SCROLL ASENSITIVE BINARY CURSOR WITHOUT HOLD FOR SELECT 1;")).toEqual(
+      declare({ binary: true, sensitivity: "asensitive", scroll: true, hold: false }),
+    );
+    // A repeated option is accepted, as PG's grammar does.
+    expect(firstStmt("DECLARE c SCROLL SCROLL BINARY BINARY CURSOR FOR SELECT 1;")).toEqual(
+      declare({ binary: true, scroll: true }),
+    );
+  });
+
+  it("takes a full query as the body, FETCH FIRST and a WITH prefix included", () => {
+    expect(firstStmt("DECLARE c CURSOR FOR SELECT 1 FETCH FIRST 2 ROWS ONLY;").query).toEqual(
+      sel({ columns: [col(num(1))], limit: num(2) }),
+    );
+    expect(firstStmt("DECLARE c CURSOR FOR VALUES (1);").query.kind).toBe("values");
+    expect(firstStmt("DECLARE c CURSOR FOR (SELECT 1) UNION SELECT 2;").query).toMatchObject({ kind: "setOp" });
+    expect(firstStmt("DECLARE c CURSOR FOR WITH x AS (SELECT 1) SELECT * FROM x;").query).toMatchObject({
+      kind: "select",
+      with_: [{ name: "x" }],
+    });
+    // The body owns no `;` of its own: the statement after it parses separately.
+    expect(parse("DECLARE c CURSOR FOR SELECT 1; FETCH c; CLOSE c;").map((s) => s.kind)).toEqual([
+      "declare",
+      "fetch",
+      "close",
+    ]);
+  });
+
+  it("parses every FETCH direction, signed counts included", () => {
+    expect(directionOf("c")).toBeNull();
+    for (const word of ["next", "prior", "first", "last"])
+      expect(directionOf(`${word} FROM c`)).toEqual({ kind: word });
+    expect(directionOf("ALL IN c")).toEqual({ kind: "all" });
+    expect(directionOf("ABSOLUTE -1 FROM c")).toEqual({ kind: "absolute", count: -1 });
+    expect(directionOf("RELATIVE +2 c")).toEqual({ kind: "relative", count: 2 });
+    expect(directionOf("5 FROM c")).toEqual({ kind: "count", count: 5 });
+    expect(directionOf("-5 c")).toEqual({ kind: "count", count: -5 });
+    expect(directionOf("FORWARD 5 FROM c")).toEqual({ kind: "forward", count: 5 });
+    expect(directionOf("FORWARD FROM c")).toEqual({ kind: "forward", count: null });
+    expect(directionOf("FORWARD c")).toEqual({ kind: "forward", count: null });
+    expect(directionOf("BACKWARD ALL IN c")).toEqual({ kind: "backward", count: "all" });
+    expect(directionOf("BACKWARD -3 c")).toEqual({ kind: "backward", count: -3 });
+    // FROM / IN is optional and dropped.
+    expect(firstStmt("FETCH IN c;")).toEqual({ kind: "fetch", direction: null, cursor: "c" });
+  });
+
+  it("reads a lone direction word as the cursor name", () => {
+    expect(firstStmt("FETCH next;")).toEqual({ kind: "fetch", direction: null, cursor: "next" });
+    expect(firstStmt("FETCH forward;")).toEqual({ kind: "fetch", direction: null, cursor: "forward" });
+    expect(firstStmt("FETCH next next;")).toEqual({ kind: "fetch", direction: { kind: "next" }, cursor: "next" });
+    expect(firstStmt("FETCH forward FROM forward;")).toEqual({
+      kind: "fetch",
+      direction: { kind: "forward", count: null },
+      cursor: "forward",
+    });
+  });
+
+  it("parses MOVE with the same directions, and CLOSE", () => {
+    expect(firstStmt("MOVE c;")).toEqual({ kind: "move", direction: null, cursor: "c" });
+    expect(firstStmt("MOVE LAST IN c;")).toEqual({ kind: "move", direction: { kind: "last" }, cursor: "c" });
+    expect(firstStmt("MOVE BACKWARD 2 FROM c;")).toEqual({
+      kind: "move",
+      direction: { kind: "backward", count: 2 },
+      cursor: "c",
+    });
+    expect(firstStmt("CLOSE c;")).toEqual({ kind: "close", name: "c" });
+    expect(firstStmt('CLOSE "C";')).toEqual({ kind: "close", name: "C" });
+    expect(firstStmt("CLOSE ALL;")).toEqual({ kind: "close", name: null });
+  });
+
+  it("leaves SELECT's FETCH FIRST / NEXT clause untouched", () => {
+    expect(firstStmt("SELECT a FROM t FETCH FIRST 3 ROWS ONLY;")).toEqual(
+      sel({ columns: [col(name("a"))], from: [tableFrom(["t"])], limit: num(3) }),
+    );
+    expect(firstStmt("SELECT a FROM t OFFSET 1 ROWS FETCH NEXT ROW WITH TIES;").offset).toEqual(num(1));
+  });
+
+  it("keeps the cursor words unreserved", () => {
+    const words = [
+      "declare",
+      "move",
+      "close",
+      "cursor",
+      "scroll",
+      "hold",
+      "binary",
+      "insensitive",
+      "asensitive",
+      "without",
+      "prior",
+      "next",
+      "absolute",
+      "relative",
+      "forward",
+      "backward",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM cursor;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["cursor"])] }),
+    );
+    expect(firstStmt(`CREATE TABLE close (${words.map((w) => `${w} int`).join(", ")});`).items.length).toBe(
+      words.length,
+    );
+    // …and as the cursor names the statements take.
+    expect(firstStmt("DECLARE scroll SCROLL CURSOR FOR SELECT 1;")).toMatchObject({ name: "scroll", scroll: true });
+    expect(firstStmt("CLOSE cursor;")).toEqual({ kind: "close", name: "cursor" });
+    // `fetch` was already reserved for SELECT's clause, as in PG, and stays so.
+    expect(bad("SELECT fetch FROM t;")).toThrow(/Expected a name but found "fetch"/);
+  });
+
+  it("rejects contradictory options, a non-query body and malformed directions", () => {
+    expect(bad("DECLARE c SCROLL NO SCROLL CURSOR FOR SELECT 1;")).toThrow(/Cannot specify both SCROLL and NO SCROLL/);
+    expect(bad("DECLARE c INSENSITIVE ASENSITIVE CURSOR FOR SELECT 1;")).toThrow(
+      /Cannot specify both ASENSITIVE and INSENSITIVE/,
+    );
+    expect(bad("DECLARE c NO CURSOR FOR SELECT 1;")).toThrow(/Expected "scroll" but found "cursor"/);
+    expect(bad("DECLARE c FOR SELECT 1;")).toThrow(/Expected "cursor" but found "for"/);
+    expect(bad("DECLARE c CURSOR WITH FOR SELECT 1;")).toThrow(/Expected "hold" but found "for"/);
+    expect(bad("DECLARE c CURSOR SELECT 1;")).toThrow(/Expected "for" but found "select"/);
+    expect(bad("DECLARE c CURSOR FOR CREATE TABLE t (a int);")).toThrow(/Expected a query but found "create" \(1:21\)/);
+    expect(bad("DECLARE c CURSOR FOR INSERT INTO t VALUES (1);")).toThrow(/Expected a query but found "insert"/);
+    expect(bad("FETCH RELATIVE c;")).toThrow(/Expected an integer count but found "c"/);
+    expect(bad("FETCH 1.5 c;")).toThrow(/Expected an integer count but found "1.5"/);
+    expect(bad("FETCH FORWARD 5;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("FETCH ALL;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("FETCH s.c;")).toThrow(/Expected ";" but found "\."/);
+    expect(bad("CLOSE;")).toThrow(/Expected a name but found ";"/);
+  });
+});

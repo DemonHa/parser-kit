@@ -793,6 +793,32 @@ export type Prepare = {
 // EXECUTE name [(expr, …)] — `args` is null when the list is omitted.
 export type Execute = { kind: "execute"; name: string; args: Expr[] | null; span: Span };
 
+// DECLARE name [option …] CURSOR [{WITH | WITHOUT} HOLD] FOR query. The options
+// come in any order, as in PG: `binary` is false when BINARY is absent;
+// `sensitivity`, `scroll` (false for NO SCROLL) and `hold` (false for WITHOUT
+// HOLD) are null when their words are.
+export type DeclareCursor = {
+  kind: "declare";
+  name: string;
+  binary: boolean;
+  sensitivity: "asensitive" | "insensitive" | null;
+  scroll: boolean | null;
+  hold: boolean | null;
+  query: Query;
+  span: Span;
+};
+// A FETCH / MOVE direction. A bare count is `count`; FORWARD / BACKWARD's
+// `count` is null when neither a count nor ALL follows the word.
+export type CursorDirection =
+  | { kind: "next" | "prior" | "first" | "last" | "all" }
+  | { kind: "absolute" | "relative" | "count"; count: number }
+  | { kind: "forward" | "backward"; count: number | "all" | null };
+// {FETCH | MOVE} [direction] [{FROM | IN}] cursor — `direction` is null when
+// omitted; the FROM / IN noise word is dropped.
+export type CursorFetch = { kind: "fetch" | "move"; direction: CursorDirection | null; cursor: string; span: Span };
+// CLOSE {name | ALL} — `name` is null for CLOSE ALL.
+export type CloseCursor = { kind: "close"; name: string | null; span: Span };
+
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
   // UNLOGGED family). Omitted, not null, when there are none — and no word
@@ -905,6 +931,9 @@ export type Stmt =
   | Deallocate
   | Prepare
   | Execute
+  | DeclareCursor
+  | CursorFetch
+  | CloseCursor
   // A top-level query or DML statement is a statement too.
   | Query
   | Insert
@@ -6470,6 +6499,139 @@ const executeStmt = custom<Stmt, SqlTokenType>(
   { expected: '"execute"', first: [{ type: "ident", value: "execute" }] },
 );
 
+// --- cursors: DECLARE / FETCH / MOVE / CLOSE ---
+//
+// Every lead and option word stays UNRESERVED, matched by value — `fetch`
+// aside, which is already reserved (as in PG) for the SELECT clause. The cursor
+// name is a plain name, as PG's is, and the body is a full query.
+
+// The cursor options between the name and CURSOR, in any order. A repeated
+// option is accepted, as PG's grammar does; a contradictory pair is an error,
+// as PG's parse analysis makes it.
+function cursorOptions(ctx: ParseContext<SqlTokenType>): Pick<DeclareCursor, "binary" | "sensitivity" | "scroll"> {
+  let binary = false;
+  let sensitivity: DeclareCursor["sensitivity"] = null;
+  let scroll: boolean | null = null;
+  while (true) {
+    if (ctx.eat("ident", "binary") !== null) binary = true;
+    else if (ctx.is("ident", ["asensitive", "insensitive"])) {
+      const word = ctx.next()!.value as "asensitive" | "insensitive";
+      if (sensitivity !== null && sensitivity !== word) {
+        return ctx.croak(`Cannot specify both ASENSITIVE and INSENSITIVE`);
+      }
+      sensitivity = word;
+    } else if (ctx.is("ident", ["scroll", "no"])) {
+      const on = ctx.next()!.value === "scroll";
+      if (!on) ctx.parse(kw("scroll"));
+      if (scroll !== null && scroll !== on) return ctx.croak(`Cannot specify both SCROLL and NO SCROLL`);
+      scroll = on;
+    } else return { binary, sensitivity, scroll };
+  }
+}
+
+const declareCursorStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("declare"));
+    const name = ctx.parse(nameWord);
+    const options = cursorOptions(ctx);
+    ctx.parse(kw("cursor"));
+    let hold: boolean | null = null;
+    if (ctx.is("ident", ["with", "without"])) {
+      hold = ctx.next()!.value === "with";
+      ctx.parse(kw("hold"));
+    }
+    ctx.parse(kw("for"));
+    // Checked up front, as PREPARE's body is, so a non-query body reports what
+    // DECLARE accepts rather than setOpQuery's narrower first set (no `with`).
+    if (!matchesFirst(ctx.peek(), query.first())) {
+      return ctx.croak(`Expected a query but found ${describeFound(ctx.peek())}`);
+    }
+    const body = ctx.parse(query);
+    return { kind: "declare", name, ...options, hold, query: body, span: ctx.spanFrom(start) };
+  },
+  { expected: '"declare"', first: [{ type: "ident", value: "declare" }] },
+);
+
+// PG's SignedIconst: an integer constant with an optional sign of its own.
+const isSign = (tok: Token<SqlTokenType> | null): boolean =>
+  tok !== null && tok.type === "op" && (tok.value === "-" || tok.value === "+");
+const startsCount = (ctx: ParseContext<SqlTokenType>): boolean =>
+  ctx.is("number") || (isSign(ctx.peek()) && ctx.peekAhead(1)?.type === "number");
+function signedCount(ctx: ParseContext<SqlTokenType>): number {
+  const sign = isSign(ctx.peek()) ? ctx.next()!.value : null;
+  const tok = ctx.peek();
+  if (!isIntegerConstant(tok)) return ctx.croak(`Expected an integer count but found ${describeFound(tok)}`);
+  const value = Number(ctx.next()!.value);
+  return sign === "-" ? -value : value;
+}
+
+const DIRECTION_WORDS: ReadonlySet<string> = new Set([
+  "next",
+  "prior",
+  "first",
+  "last",
+  "absolute",
+  "relative",
+  "forward",
+  "backward",
+]);
+
+// The optional direction. Every direction word is also a legal cursor name, so
+// one is the direction only when something follows it: `FETCH next;` reads from
+// a cursor named `next` (PG's LR parse settles it the same way), while `FETCH
+// next FROM c` and `FETCH next c` take the direction. `all` is reserved, so it
+// is never the name.
+function cursorDirection(ctx: ParseContext<SqlTokenType>): CursorDirection | null {
+  if (startsCount(ctx)) return { kind: "count", count: signedCount(ctx) };
+  if (ctx.eat("ident", "all") !== null) return { kind: "all" };
+  const tok = ctx.peek();
+  if (tok?.type !== "ident" || !DIRECTION_WORDS.has(tok.value)) return null;
+  const after = ctx.peekAhead(1);
+  if (after === null || (after.type === "punc" && after.value === ";")) return null;
+  ctx.next();
+  switch (tok.value) {
+    case "absolute":
+    case "relative":
+      return { kind: tok.value, count: signedCount(ctx) };
+    case "forward":
+    case "backward": {
+      let count: number | "all" | null = null;
+      if (ctx.eat("ident", "all") !== null) count = "all";
+      else if (startsCount(ctx)) count = signedCount(ctx);
+      return { kind: tok.value, count };
+    }
+    default:
+      return { kind: tok.value as "next" | "prior" | "first" | "last" };
+  }
+}
+
+// FETCH and MOVE share PG's fetch_args.
+const cursorFetchStmt = (lead: "fetch" | "move") =>
+  custom<Stmt, SqlTokenType>(
+    (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw(lead));
+      const direction = cursorDirection(ctx);
+      ctx.eat("ident", ["from", "in"]); // optional FROM / IN noise word
+      const cursor = ctx.parse(nameWord);
+      return { kind: lead, direction, cursor, span: ctx.spanFrom(start) };
+    },
+    { expected: `"${lead}"`, first: [{ type: "ident", value: lead }] },
+  );
+const fetchStmt = cursorFetchStmt("fetch");
+const moveStmt = cursorFetchStmt("move");
+
+const closeStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("close"));
+    const name = ctx.eat("ident", "all") !== null ? null : ctx.parse(nameWord);
+    return { kind: "close", name, span: ctx.spanFrom(start) };
+  },
+  { expected: '"close"', first: [{ type: "ident", value: "close" }] },
+);
+
 // First-sets: the DDL and utility rules each dispatch on their own lead keyword;
 // dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
 //
@@ -6478,7 +6640,19 @@ const executeStmt = custom<Stmt, SqlTokenType>(
 // oneOf's first() is a flatMap, and the inner groups catch collisions within a
 // family — and the composed `expected` is overridden by describe() anyway.
 const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt);
-const utilityStmt = oneOf(grantStmt, transactionStmt, sessionStmt, doStmt, deallocateStmt, prepareStmt, executeStmt);
+const utilityStmt = oneOf(
+  grantStmt,
+  transactionStmt,
+  sessionStmt,
+  doStmt,
+  deallocateStmt,
+  prepareStmt,
+  executeStmt,
+  declareCursorStmt,
+  fetchStmt,
+  moveStmt,
+  closeStmt,
+);
 const statementBody = oneOf(ddlStmt, utilityStmt, dmlStatement).describe("a statement");
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.
 const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
