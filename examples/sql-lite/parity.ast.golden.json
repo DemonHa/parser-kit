@@ -19214,6 +19214,90 @@
     ]
   },
   {
+    "source": "EXPLAIN CREATE MATERIALIZED VIEW mv AS SELECT 1 WITH NO DATA;",
+    "ast": [
+      {
+        "kind": "explain",
+        "options": [],
+        "statement": {
+          "kind": "createView",
+          "materialized": true,
+          "orReplace": false,
+          "ifNotExists": false,
+          "name": [
+            "mv"
+          ],
+          "columns": null,
+          "query": {
+            "kind": "select",
+            "with_": null,
+            "recursive": false,
+            "distinct": false,
+            "columns": [
+              {
+                "expr": {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 46
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 47
+                    }
+                  }
+                },
+                "alias": null
+              }
+            ],
+            "from": null,
+            "where": null,
+            "groupBy": null,
+            "having": null,
+            "window": null,
+            "orderBy": null,
+            "limit": null,
+            "offset": null,
+            "locking": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 39
+              },
+              "end": {
+                "row": 1,
+                "col": 47
+              }
+            }
+          },
+          "withData": false,
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 8
+            },
+            "end": {
+              "row": 1,
+              "col": 60
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 60
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "ANALYZE;",
     "ast": [
       {

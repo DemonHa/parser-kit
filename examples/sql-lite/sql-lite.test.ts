@@ -5716,13 +5716,17 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
     expect(stmt.options[0].span).toEqual({ start: { row: 1, col: 9 }, end: { row: 1, col: 16 } });
   });
 
-  it("explains a query, DML, CREATE TABLE AS or EXECUTE", () => {
+  it("explains a query, DML, CREATE TABLE AS, CREATE MATERIALIZED VIEW or EXECUTE", () => {
     expect(explained("VALUES (1)").kind).toBe("values");
     expect(explained("WITH x AS (SELECT 1) SELECT * FROM x")).toMatchObject({ kind: "select", with_: [{ name: "x" }] });
     expect(explained("INSERT INTO t VALUES (1)")).toMatchObject({ kind: "insert", table: ["t"] });
     expect(explained("UPDATE t SET a = 1")).toMatchObject({ kind: "update", table: ["t"] });
     expect(explained("DELETE FROM t")).toMatchObject({ kind: "delete", table: ["t"] });
     expect(explained("CREATE TABLE t (a) AS SELECT 1")).toMatchObject({ kind: "createTableAs", columns: ["a"] });
+    expect(explained("CREATE MATERIALIZED VIEW mv AS SELECT 1")).toMatchObject({
+      kind: "createView",
+      materialized: true,
+    });
     expect(explained("EXECUTE p (1)")).toEqual({ kind: "execute", name: "p", args: [num(1)] });
     // A `(` opening a query is the query, not an option list.
     expect(firstStmt("EXPLAIN (SELECT 1);")).toMatchObject({ options: [], statement: { kind: "select" } });
@@ -5757,31 +5761,34 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
     });
   });
 
+  // `analyze`, `analyse` and `full` were reserved already; the option names
+  // (`costs`, `format`, …) are read by relationOptions, which matches none by value.
   it("keeps the new words unreserved", () => {
-    const words = ["explain", "vacuum", "verbose", "freeze", "costs", "settings", "buffers", "wal", "timing"];
-    expect(firstStmt(`SELECT ${words.join(", ")}, summary, format FROM explain;`)).toEqual(
-      sel({
-        columns: [...words, "summary", "format"].map((w) => col(name(w))),
-        from: [tableFrom(["explain"])],
-      }),
+    const words = ["explain", "vacuum", "verbose", "freeze"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM explain;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["explain"])] }),
     );
     const cols = words.map((w) => `${w} text`).join(", ");
     expect(firstStmt(`CREATE TABLE vacuum (${cols});`).items.map((i: any) => i.name)).toEqual(words);
     // …and as the targets these statements take, past any flag.
-    expect(firstStmt("VACUUM VERBOSE explain (costs, format);").tables).toEqual([
-      target(["explain"], ["costs", "format"]),
+    expect(firstStmt("VACUUM VERBOSE explain (vacuum, freeze);").tables).toEqual([
+      target(["explain"], ["vacuum", "freeze"]),
     ]);
     expect(firstStmt("ANALYZE vacuum;").tables).toEqual([target(["vacuum"])]);
+    // A flag word is a target when quoted, or past the first target.
+    expect(firstStmt('VACUUM VERBOSE "freeze", verbose;').tables).toEqual([target(["freeze"]), target(["verbose"])]);
   });
 
   it("rejects malformed EXPLAIN, ANALYZE and VACUUM", () => {
-    expect(bad("EXPLAIN;")).toThrow(/Expected a SELECT, VALUES, INSERT, UPDATE, DELETE, CREATE TABLE AS or EXECUTE/);
+    expect(bad("EXPLAIN;")).toThrow(
+      /Expected a SELECT, VALUES, INSERT, UPDATE, DELETE, CREATE TABLE AS, CREATE MATERIALIZED VIEW or EXECUTE/,
+    );
     expect(bad("EXPLAIN DROP TABLE t;")).toThrow(/or EXECUTE statement but found "drop" \(1:8\)/);
     expect(bad("EXPLAIN EXPLAIN SELECT 1;")).toThrow(/statement but found "explain"/);
     expect(bad("EXPLAIN CREATE TABLE t (a int);")).toThrow(
-      /EXPLAIN takes CREATE TABLE AS but no other CREATE \(1:15\)/,
+      /EXPLAIN takes CREATE TABLE AS or CREATE MATERIALIZED VIEW but no other CREATE \(1:8\)/,
     );
-    expect(bad("EXPLAIN CREATE VIEW v AS SELECT 1;")).toThrow(/but no other CREATE/);
+    expect(bad("EXPLAIN CREATE VIEW v AS SELECT 1;")).toThrow(/but no other CREATE \(1:8\)/);
     // The flags come in PG's order, and either form excludes the other.
     expect(bad("EXPLAIN VERBOSE ANALYZE SELECT 1;")).toThrow(/statement but found "analyze"/);
     expect(bad("EXPLAIN (ANALYZE) VERBOSE SELECT 1;")).toThrow(/statement but found "verbose"/);
@@ -5792,5 +5799,9 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
     expect(bad("VACUUM t,;")).toThrow(/Expected a name but found ";"/);
     expect(bad("ANALYZE t ();")).toThrow(/Expected a name but found "\)"/);
     expect(bad("ANALYZE FULL t;")).toThrow(/Expected a name but found "full"/);
+    // A flag out of order, or repeated, is not taken for a table name.
+    expect(bad("VACUUM VERBOSE FREEZE;")).toThrow(/Expected a name but found "freeze" \(1:15\)/);
+    expect(bad("VACUUM ANALYZE VERBOSE t;")).toThrow(/Expected a name but found "verbose"/);
+    expect(bad("ANALYZE VERBOSE VERBOSE;")).toThrow(/Expected a name but found "verbose"/);
   });
 });

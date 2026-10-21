@@ -804,7 +804,7 @@ export type MaintenanceTarget = { name: string[]; columns: string[] | null };
 export type Explain = {
   kind: "explain";
   options: RelationOption[];
-  statement: Query | Insert | Update | Delete | CreateTableAs | Execute;
+  statement: Query | Insert | Update | Delete | CreateTableAs | CreateView | Execute;
   span: Span;
 };
 // `ANALYZE [(option, …) | VERBOSE] [target, …]` and `VACUUM [(option, …) |
@@ -6499,11 +6499,13 @@ const executeStmt = custom<Stmt, SqlTokenType>(
 // already, as in PG; `explain` and `vacuum` stay names everywhere but a
 // statement's head. The parenthesised options are relationOptions as it stands:
 // PG's utility option list is `name [value]`, a shape that rule takes (along
-// with the `=` the list does not need, the trade its comment describes).
+// with the `=`, the `namespace.` prefix and the `*` and list values this list
+// does not need, the trade that rule's comment describes).
 
 // The unparenthesised flags, in PG's fixed order: each a set of spellings, read
 // at most once, as a bare option. `verbose` and `freeze` are names elsewhere,
-// but here they are flags, as in PG, where neither can name a table.
+// but here they are flags, as in PG, where neither can name a table: see
+// maintenanceTail for a flag written out of order.
 function legacyFlags(ctx: ParseContext<SqlTokenType>, flags: readonly (readonly string[])[]): RelationOption[] {
   const options: RelationOption[] = [];
   for (const spellings of flags) {
@@ -6527,8 +6529,16 @@ const maintenanceTargets = sepBy(maintenanceTarget, P(","));
 
 // `[(option, …) | flags] [target, …]` — the tail ANALYZE and VACUUM share. PG
 // takes either option form but not both; the target list ends the statement.
+// A bare flag word left over after the flags (one out of order, or repeated)
+// croaks rather than naming the first target, as PG's syntax error does; a
+// quoted one, or one past the first target, is a name.
 function maintenanceTail(ctx: ParseContext<SqlTokenType>, flags: readonly (readonly string[])[]) {
-  const options = ctx.is("punc", "(") ? ctx.parse(relationOptions) : legacyFlags(ctx, flags);
+  const parenthesised = ctx.is("punc", "(");
+  const options = parenthesised ? ctx.parse(relationOptions) : legacyFlags(ctx, flags);
+  const tok = ctx.peek();
+  if (!parenthesised && tok?.type === "ident" && flags.some((spellings) => spellings.includes(tok.value))) {
+    return ctx.croak(`Expected a name but found ${describeFound(tok)}`);
+  }
   const tables = ctx.is("punc", ";") || ctx.peek() === null ? [] : ctx.parse(maintenanceTargets);
   return { options, tables };
 }
@@ -6553,18 +6563,24 @@ const vacuumStmt = custom<Stmt, SqlTokenType>(
 );
 
 // PG's ExplainableStmt, as far as sql-lite parses it: a preparable statement
-// (the same set as PREPARE's), CREATE TABLE AS, or EXECUTE.
-const EXPLAINABLE = "a SELECT, VALUES, INSERT, UPDATE, DELETE, CREATE TABLE AS or EXECUTE statement";
+// (the same set as PREPARE's), CREATE TABLE AS, CREATE MATERIALIZED VIEW, or
+// EXECUTE.
+const EXPLAINABLE =
+  "a SELECT, VALUES, INSERT, UPDATE, DELETE, CREATE TABLE AS, CREATE MATERIALIZED VIEW or EXECUTE statement";
 function explainable(ctx: ParseContext<SqlTokenType>): Explain["statement"] {
   if (ctx.is("ident", "execute")) return ctx.parse(executeStmt) as Execute;
   if (ctx.is("ident", "create")) {
     // Only parsed is a CREATE TABLE told apart from CREATE TABLE AS, so the
-    // croak spans the whole statement, as CREATE SCHEMA's element check does.
+    // croak spans the whole statement, as CREATE SCHEMA's element check does —
+    // from CREATE, which a CREATE TABLE node's own span leaves out.
+    const start = ctx.position();
     const stmt = ctx.parse(createStmt);
-    if (stmt.kind !== "createTableAs") {
-      return ctx.croak("EXPLAIN takes CREATE TABLE AS but no other CREATE", stmt.span.start, stmt.span.end);
-    }
-    return stmt;
+    if (stmt.kind === "createTableAs" || (stmt.kind === "createView" && stmt.materialized)) return stmt;
+    return ctx.croak(
+      "EXPLAIN takes CREATE TABLE AS or CREATE MATERIALIZED VIEW but no other CREATE",
+      start,
+      stmt.span.end,
+    );
   }
   if (!matchesFirst(ctx.peek(), PREPARABLE_FIRST)) {
     return ctx.croak(`Expected ${EXPLAINABLE} but found ${describeFound(ctx.peek())}`);
