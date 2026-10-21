@@ -965,19 +965,40 @@ export type Cte = {
   cycle?: CteCycle;
 };
 
+// One `column = value` item of a SET list, shared by UPDATE and ON CONFLICT DO
+// UPDATE.
+export type Assignment = { column: string; value: Expr };
+
+// `constraint` is present only for `ON CONFLICT ON CONSTRAINT name`, which
+// names the arbiter instead of listing its columns (`target` is then null).
 export type OnConflict = {
   target: string[] | null;
-  action: { kind: "nothing" } | { kind: "update"; set: { column: string; value: Expr }[]; where: Expr | null };
+  constraint?: string;
+  action: { kind: "nothing" } | { kind: "update"; set: Assignment[]; where: Expr | null };
 };
+
+// A bare DEFAULT standing for a column's default in an INSERT VALUES row. It
+// is a row item, not an expression. PG's a_expr also admits DEFAULT (e.g.
+// `UPDATE t SET a = DEFAULT`), but this grammar accepts it only here so far.
+export type DefaultValue = { kind: "default"; span: Span };
+
+// Which value wins for an identity column: `OVERRIDING {SYSTEM | USER} VALUE`.
+export type InsertOverriding = "system" | "user";
 
 // The three DML statements each accept a leading `WITH …` prefix. `with_` /
 // `recursive` are present only when one attaches (like FromItem's optional
-// `lateral`), so WITH-less DML keeps its original AST shape.
+// `lateral`), so WITH-less DML keeps its original AST shape. INSERT's `alias`
+// (`INSERT INTO t AS a`) and `overriding` follow the same rule.
 export type Insert = {
   kind: "insert";
   table: string[];
+  alias?: string;
   columns: string[] | null;
-  source: { kind: "values"; rows: Expr[][] } | { kind: "select"; query: Query };
+  overriding?: InsertOverriding;
+  source:
+    | { kind: "values"; rows: (Expr | DefaultValue)[][] }
+    | { kind: "select"; query: Query }
+    | { kind: "defaultValues" };
   onConflict: OnConflict | null;
   returning: SelectItem[] | null;
   with_?: Cte[];
@@ -989,7 +1010,7 @@ export type Update = {
   kind: "update";
   table: string[];
   alias: string | null;
-  set: { column: string; value: Expr }[];
+  set: Assignment[];
   from: FromItem[] | null;
   where: Expr | null;
   returning: SelectItem[] | null;
@@ -4875,10 +4896,9 @@ const asAlias = custom<string | null, SqlTokenType>(
 );
 
 const eq = token("op", { values: ["="] });
-const assignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(({ column, value }) => ({
-  column,
-  value,
-}));
+const assignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(
+  ({ column, value }): Assignment => ({ column, value }),
+);
 const setAssignments = seq(skip(kw("set")), field("items", sepBy(assignment, P(",")))).map((s) => s.items);
 
 const whereClause = seq(skip(kw("where")), field("e", expression)).map((s) => s.e);
@@ -5715,7 +5735,15 @@ const queryRule = custom<Query, SqlTokenType>(
 
 // --- INSERT / UPDATE / DELETE ---
 
-const valuesSource = seq(skip(kw("values")), field("rows", sepBy(exprList, P(",")))).map(({ rows }) => ({
+// One item of an INSERT VALUES row: an expression or a bare DEFAULT. A local
+// row rule rather than `exprList`, whose other consumers must not take DEFAULT.
+// `default` is reserved, so the keyword branch never shadows an expression.
+const insertValue = oneOf(
+  kw("default").map((_, span): DefaultValue => ({ kind: "default", span })),
+  expression,
+);
+const insertValuesRow = delimited(P("("), P(")"), P(","), insertValue, { interleaved: true });
+const valuesSource = seq(skip(kw("values")), field("rows", sepBy(insertValuesRow, P(",")))).map(({ rows }) => ({
   kind: "values" as const,
   rows,
 }));
@@ -5734,10 +5762,61 @@ const insertSource = custom<Insert["source"], SqlTokenType>(
     ],
   },
 );
+const insertSourceFirst = insertSource.first();
+const defaultValues = kwseq("default", "values").map(() => ({ kind: "defaultValues" as const }));
+// `OVERRIDING {SYSTEM | USER} VALUE`. `overriding`, `system` and `value` are
+// unreserved and matched by value, here after the optional column list (`user` is
+// reserved anyway).
+const overridingClause = seq(
+  skip(kw("overriding")),
+  field("kind", oneOf(kw("system"), kw("user"))),
+  skip(kw("value")),
+).map(({ kind }) => kind.value as InsertOverriding);
+
+// What follows the target: PG's insert_rest. DEFAULT VALUES stands alone — no
+// column list or OVERRIDING may precede it — so it is dispatched up front and
+// a `(a) DEFAULT VALUES` fails on `default` where a source was expected. That
+// failure, and any other where the source should start, is reported here with
+// the insert_rest forms still open at that point (DEFAULT VALUES only up front,
+// OVERRIDING until it is read), rather than as the query's narrower message.
+const insertColumns = optional(attempt(columnList));
+const insertOverriding = optional(overridingClause);
+type InsertRest = Pick<Insert, "columns" | "overriding" | "source">;
+const insertRest = custom<InsertRest, SqlTokenType>(
+  (ctx) => {
+    if (ctx.is("ident", "default")) return { columns: null, source: ctx.parse(defaultValues) };
+    // A `(` here is a column list unless it opens a parenthesised query source;
+    // attempt() rolls the column-list read back when the `(` is really a SELECT.
+    const columns = ctx.parse(insertColumns) ?? null;
+    const overriding = ctx.parse(insertOverriding) ?? null;
+    if (!matchesFirst(ctx.peek(), insertSourceFirst)) {
+      const open =
+        overriding !== null ? "" : columns === null ? '"default values" or "overriding" or ' : '"overriding" or ';
+      return ctx.croak(`Expected ${open}"values" or a query but found ${describeFound(ctx.peek())}`);
+    }
+    const source = ctx.parse(insertSource);
+    return { columns, ...(overriding && { overriding }), source };
+  },
+  {
+    expected: '"default values" or "overriding" or "values" or a query',
+    first: [{ type: "ident", value: "default" }, { type: "ident", value: "overriding" }, ...insertSourceFirst],
+  },
+);
+
+// `ON CONSTRAINT name` names the arbiter constraint in place of a column list.
+const conflictConstraint = seq(skip(kwseq("on", "constraint")), field("name", nameWord)).map((s) => s.name);
 
 const onConflict = seq(
   skip(kwseq("on", "conflict")),
-  field("target", optional(columnList)),
+  field(
+    "target",
+    optional(
+      oneOf(
+        columnList.map((columns) => ({ columns })),
+        conflictConstraint.map((name) => ({ name })),
+      ),
+    ),
+  ),
   skip(kw("do")),
   field(
     "action",
@@ -5748,24 +5827,34 @@ const onConflict = seq(
       ),
     ),
   ),
-).map(({ target, action }): OnConflict => ({ target: target ?? null, action }));
+).map(
+  ({ target, action }): OnConflict => ({
+    target: target && "columns" in target ? target.columns : null,
+    ...(target && "name" in target && { constraint: target.name }),
+    action,
+  }),
+);
+
+// `INSERT INTO t AS a`: PG requires the AS here (its insert_target notes that
+// a bare alias would make `VALUES` a shift/reduce conflict), so no asAlias.
+const insertAlias = optional(seq(skip(kw("as")), field("name", nameWord)).map((s) => s.name));
 
 const insertStmt = seq(
   skip(kw("insert")),
   skip(kw("into")),
   field("table", qualName),
-  // A `(` here is a column list unless it opens a parenthesised query source;
-  // attempt() rolls the column-list read back when the `(` is really a SELECT.
-  field("columns", optional(attempt(columnList))),
-  field("source", insertSource),
+  field("alias", insertAlias),
+  field("rest", insertRest),
   field("onConflict", optional(onConflict)),
   field("returning", optional(returningClause)),
 ).map(
-  ({ table, columns, source, onConflict: oc, returning }, span): Insert => ({
+  ({ table, alias, rest, onConflict: oc, returning }, span): Insert => ({
     kind: "insert",
     table,
-    columns: columns ?? null,
-    source,
+    ...(typeof alias === "string" && { alias }),
+    columns: rest.columns,
+    ...(rest.overriding && { overriding: rest.overriding }),
+    source: rest.source,
     onConflict: oc ?? null,
     returning: returning ?? null,
     span,

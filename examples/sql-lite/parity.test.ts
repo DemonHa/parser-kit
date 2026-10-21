@@ -195,6 +195,12 @@ const SUPPLEMENTAL = [
   // --- EXCLUDE table constraints ---
   "CREATE TABLE t (r tsrange, EXCLUDE USING gist (r WITH &&) INCLUDE (r) WHERE (r IS NOT NULL) DEFERRABLE);",
   "ALTER TABLE t ADD CONSTRAINT no_overlap EXCLUDE (a WITH =, b WITH <>), ADD exclude text;",
+  // INSERT's DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON
+  // CONFLICT ON CONSTRAINT; the INSERT rows above pin the keys they omit.
+  "INSERT INTO t AS x DEFAULT VALUES RETURNING x.id;",
+  "INSERT INTO t (a, b) VALUES (DEFAULT, 1), (2, DEFAULT);",
+  "INSERT INTO t AS x (a) OVERRIDING SYSTEM VALUE VALUES (1) ON CONFLICT ON CONSTRAINT t_pkey DO UPDATE SET a = x.a + 1;",
+  "INSERT INTO t OVERRIDING USER VALUE SELECT * FROM u ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING;",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind
