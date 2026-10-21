@@ -3959,7 +3959,8 @@ function parseIfNotExists(ctx: ParseContext<SqlTokenType>): boolean {
 }
 
 // A role: a name, or one of the CURRENT_ / SESSION_ pseudo-roles, which are
-// reserved and so matched by value ahead of `nameWord` (as parseGrantee does).
+// reserved and so matched by value ahead of `nameWord`. OWNER TO and GRANT's
+// grantees take it too.
 const ROLE_KEYWORDS: ReadonlySet<string> = new Set(["current_user", "current_role", "session_user"]);
 function parseRoleSpec(ctx: ParseContext<SqlTokenType>): string {
   const tok = ctx.peek();
@@ -4757,10 +4758,10 @@ const createStmt = custom<Stmt, SqlTokenType>(
   { expected: '"create"', first: [{ type: "ident", value: "create" }] },
 );
 
-// `[IF NOT EXISTS] column-def`, the tail of `ADD [COLUMN]`. Decided by peeking
-// (parseIfNotExists) rather than by `attempt`, so a column that happens to be called `if` costs no
-// backtrack: `not` is reserved, so an unquoted one can never be the type of such
-// a column. The `ident` test is what keeps a quoted `"not"`, which can, out.
+// `[IF NOT EXISTS] column-def`, the tail of `ADD [COLUMN]`. IF NOT EXISTS is
+// peeked by parseIfNotExists rather than tried by `attempt`, so a column that
+// happens to be called `if` costs no backtrack: `not` is reserved, so an
+// unquoted one can never be the type of such a column.
 function parseAddColumn(ctx: ParseContext<SqlTokenType>): AlterAction {
   return { kind: "addColumn", ifNotExists: parseIfNotExists(ctx), column: ctx.parse(columnDef) };
 }
