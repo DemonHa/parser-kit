@@ -5749,6 +5749,7 @@ describe("SQL-lite cursors", () => {
   it("reads a lone direction word as the cursor name", () => {
     expect(firstStmt("FETCH next;")).toEqual({ kind: "fetch", direction: null, cursor: "next" });
     expect(firstStmt("FETCH forward;")).toEqual({ kind: "fetch", direction: null, cursor: "forward" });
+    expect(firstStmt("MOVE absolute;")).toEqual({ kind: "move", direction: null, cursor: "absolute" });
     expect(firstStmt("FETCH next next;")).toEqual({ kind: "fetch", direction: { kind: "next" }, cursor: "next" });
     expect(firstStmt("FETCH forward FROM forward;")).toEqual({
       kind: "fetch",
@@ -5768,6 +5769,8 @@ describe("SQL-lite cursors", () => {
     expect(firstStmt("CLOSE c;")).toEqual({ kind: "close", name: "c" });
     expect(firstStmt('CLOSE "C";')).toEqual({ kind: "close", name: "C" });
     expect(firstStmt("CLOSE ALL;")).toEqual({ kind: "close", name: null });
+    // A quoted word is always a name.
+    expect(firstStmt('CLOSE "all";')).toEqual({ kind: "close", name: "all" });
   });
 
   it("leaves SELECT's FETCH FIRST / NEXT clause untouched", () => {
@@ -5810,9 +5813,11 @@ describe("SQL-lite cursors", () => {
   });
 
   it("rejects contradictory options, a non-query body and malformed directions", () => {
-    expect(bad("DECLARE c SCROLL NO SCROLL CURSOR FOR SELECT 1;")).toThrow(/Cannot specify both SCROLL and NO SCROLL/);
+    expect(bad("DECLARE c SCROLL NO SCROLL CURSOR FOR SELECT 1;")).toThrow(
+      /cannot specify both SCROLL and NO SCROLL \(1:17\)/,
+    );
     expect(bad("DECLARE c INSENSITIVE ASENSITIVE CURSOR FOR SELECT 1;")).toThrow(
-      /Cannot specify both ASENSITIVE and INSENSITIVE/,
+      /cannot specify both ASENSITIVE and INSENSITIVE \(1:22\)/,
     );
     expect(bad("DECLARE c NO CURSOR FOR SELECT 1;")).toThrow(/Expected "scroll" but found "cursor"/);
     expect(bad("DECLARE c FOR SELECT 1;")).toThrow(/Expected "cursor" but found "for"/);
@@ -5822,6 +5827,10 @@ describe("SQL-lite cursors", () => {
     expect(bad("DECLARE c CURSOR FOR INSERT INTO t VALUES (1);")).toThrow(/Expected a query but found "insert"/);
     expect(bad("FETCH RELATIVE c;")).toThrow(/Expected an integer count but found "c"/);
     expect(bad("FETCH 1.5 c;")).toThrow(/Expected an integer count but found "1.5"/);
+    expect(bad("FETCH 99999999999 c;")).toThrow(/Expected an integer count but found "99999999999"/);
+    expect(bad('FETCH "next" FROM c;')).toThrow(/Expected ";" but found "from" \(1:13\)/);
+    expect(bad("MOVE ABSOLUTE FROM c;")).toThrow(/Expected an integer count but found "from"/);
+    expect(bad("MOVE;")).toThrow(/Expected a name but found ";"/);
     expect(bad("FETCH FORWARD 5;")).toThrow(/Expected a name but found ";"/);
     expect(bad("FETCH ALL;")).toThrow(/Expected a name but found ";"/);
     expect(bad("FETCH s.c;")).toThrow(/Expected ";" but found "\."/);

@@ -796,7 +796,7 @@ export type Execute = { kind: "execute"; name: string; args: Expr[] | null; span
 // DECLARE name [option …] CURSOR [{WITH | WITHOUT} HOLD] FOR query. The options
 // come in any order, as in PG: `binary` is false when BINARY is absent;
 // `sensitivity`, `scroll` (false for NO SCROLL) and `hold` (false for WITHOUT
-// HOLD) are null when their words are.
+// HOLD) are null when their words are absent.
 export type DeclareCursor = {
   kind: "declare";
   name: string;
@@ -6507,23 +6507,28 @@ const executeStmt = custom<Stmt, SqlTokenType>(
 
 // The cursor options between the name and CURSOR, in any order. A repeated
 // option is accepted, as PG's grammar does; a contradictory pair is an error,
-// as PG's parse analysis makes it.
+// as PG's parse analysis makes it. That analysis's other checks (WITH HOLD,
+// SCROLL or INSENSITIVE beside FOR UPDATE/SHARE; a data-modifying CTE in the
+// body) are not mirrored.
 function cursorOptions(ctx: ParseContext<SqlTokenType>): Pick<DeclareCursor, "binary" | "sensitivity" | "scroll"> {
   let binary = false;
   let sensitivity: DeclareCursor["sensitivity"] = null;
   let scroll: boolean | null = null;
   while (true) {
+    const start = ctx.position();
     if (ctx.eat("ident", "binary") !== null) binary = true;
     else if (ctx.is("ident", ["asensitive", "insensitive"])) {
       const word = ctx.next()!.value as "asensitive" | "insensitive";
       if (sensitivity !== null && sensitivity !== word) {
-        return ctx.croak(`Cannot specify both ASENSITIVE and INSENSITIVE`);
+        return ctx.croak("cannot specify both ASENSITIVE and INSENSITIVE", start, ctx.lastEnd());
       }
       sensitivity = word;
     } else if (ctx.is("ident", ["scroll", "no"])) {
       const on = ctx.next()!.value === "scroll";
       if (!on) ctx.parse(kw("scroll"));
-      if (scroll !== null && scroll !== on) return ctx.croak(`Cannot specify both SCROLL and NO SCROLL`);
+      if (scroll !== null && scroll !== on) {
+        return ctx.croak("cannot specify both SCROLL and NO SCROLL", start, ctx.lastEnd());
+      }
       scroll = on;
     } else return { binary, sensitivity, scroll };
   }
@@ -6544,6 +6549,7 @@ const declareCursorStmt = custom<Stmt, SqlTokenType>(
     ctx.parse(kw("for"));
     // Checked up front, as PREPARE's body is, so a non-query body reports what
     // DECLARE accepts rather than setOpQuery's narrower first set (no `with`).
+    // PG's `TABLE name` body aside, which sql-lite doesn't parse yet.
     if (!matchesFirst(ctx.peek(), query.first())) {
       return ctx.croak(`Expected a query but found ${describeFound(ctx.peek())}`);
     }
