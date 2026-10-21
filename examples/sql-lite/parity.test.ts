@@ -53,6 +53,14 @@ const SUPPLEMENTAL = [
   "SELECT true, false, null, a IS TRUE, b IS NOT FALSE FROM t;",
   "SELECT a SIMILAR TO 'x%', b AT TIME ZONE 'utc', c COLLATE \"C\" FROM t;",
   "SELECT a IN (SELECT id FROM u), b NOT IN (1, 2) FROM t;",
+  // Implicit rows, OVERLAPS (both row spellings, under NOT and AND), the BETWEEN
+  // modifiers and the IS JSON family. `symmetric` is a key the between node
+  // carries only when written; the corpus's plain `age BETWEEN 1 AND 10` row and
+  // the `c NOT BETWEEN` below pin its omission.
+  "SELECT (a, b), (a, b) = (1, 2), x = ANY ((a, b)) FROM t;",
+  "SELECT (a, b) OVERLAPS (c, d), ROW(a, b) OVERLAPS ROW(c, d), NOT (a, b) OVERLAPS (c, d) AND e FROM t;",
+  "SELECT a BETWEEN SYMMETRIC 1 AND 2, b NOT BETWEEN ASYMMETRIC 1 AND 2, c NOT BETWEEN 1 AND 2 FROM t;",
+  "SELECT a IS JSON, b IS NOT JSON OBJECT WITH UNIQUE KEYS, c IS JSON ARRAY WITHOUT UNIQUE FROM t;",
   "SELECT EXISTS (SELECT 1 FROM u) FROM t;",
   "SELECT INTERVAL '1 day' FROM t;",
   "SELECT count(*) FILTER (WHERE a > 1) FROM t;",
@@ -114,6 +122,12 @@ const SUPPLEMENTAL = [
   "CREATE TABLE t (id int) WITH (fillfactor = 70, autovacuum_enabled, x -1, y = 'z') ON COMMIT DELETE ROWS TABLESPACE ts;",
   "CREATE TABLE t (id int) WITH (toast.autovacuum_enabled = false, force_quote *, force_null (a, 'b'));",
   "CREATE TABLE t (a, b) WITH (fillfactor = 70) ON COMMIT DROP TABLESPACE ts AS SELECT 1, 2 WITH NO DATA;",
+  // The foreign-key tail (MATCH, ON DELETE / ON UPDATE in either order) and the
+  // DEFERRABLE / INITIALLY attributes, column- and table-level. Each new key is
+  // present only when its clause is, so the pre-existing constraint rows stay
+  // as they were.
+  "CREATE TABLE t (a int REFERENCES p (id) MATCH FULL ON UPDATE CASCADE ON DELETE SET DEFAULT DEFERRABLE INITIALLY DEFERRED NOT NULL, b int UNIQUE NOT DEFERRABLE, CONSTRAINT fk FOREIGN KEY (b) REFERENCES p ON DELETE NO ACTION ON UPDATE SET NULL INITIALLY IMMEDIATE, PRIMARY KEY (a) DEFERRABLE);",
+  "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES p MATCH SIMPLE ON UPDATE RESTRICT NOT DEFERRABLE;",
   "CREATE TABLE snap AS SELECT id, name FROM users;",
   "CREATE SEQUENCE s MINVALUE -100 NO CYCLE OWNED BY NONE;",
   "CREATE SEQUENCE IF NOT EXISTS s AS bigint INCREMENT BY 2 MINVALUE 1 NO MAXVALUE START WITH 10 CACHE 5 CYCLE OWNED BY t.id;",
@@ -235,9 +249,20 @@ const MALFORMED = [
   // type, the bad character is the statement's only error, and the column
   // definition around it recovers into the AST whole.
   "CREATE TABLE t (c interval day é);\nSELECT 8;",
+  // The constraint-attribute tail after UNIQUE / PRIMARY KEY / REFERENCES peeks
+  // a second token only past a `not`. Peeking unconditionally, the bad
+  // character after the comma would fail inside the UNIQUE handler and take
+  // column `a` down with it. The second row is the peek it does take: the
+  // column is lost, exactly as NOT NULL's own `null` lookup would lose it.
+  "CREATE TABLE t (a int UNIQUE, é int);\nSELECT 9;",
+  "CREATE TABLE t (a int UNIQUE NOT é);\nSELECT 10;",
+  // At table level the tail's peek meets the bad character inside the UNIQUE
+  // item, so recovery resyncs at the next comma and the table survives with
+  // both columns.
+  "CREATE TABLE t (a int, UNIQUE (a) é, b int);\nSELECT 11;",
   // A failure inside a LIKE item recovers like one inside a column: the
   // element-list siblings around it survive.
-  "CREATE TABLE t (id int, LIKE src INCLUDING everything, ok text);\nSELECT 9;",
+  "CREATE TABLE t (id int, LIKE src INCLUDING everything, ok text);\nSELECT 12;",
 ];
 
 // Record a throw rather than propagating it, so one bad case doesn't abort the

@@ -6283,6 +6283,1076 @@
     ]
   },
   {
+    "source": "SELECT (a, b), (a, b) = (1, 2), x = ANY ((a, b)) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "row",
+              "items": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "a"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 8
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 9
+                    }
+                  }
+                },
+                {
+                  "kind": "name",
+                  "parts": [
+                    "b"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 11
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 12
+                    }
+                  }
+                }
+              ],
+              "implicit": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 13
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "binary",
+              "op": "=",
+              "left": {
+                "kind": "row",
+                "items": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "a"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 16
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 17
+                      }
+                    }
+                  },
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "b"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 19
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 20
+                      }
+                    }
+                  }
+                ],
+                "implicit": true,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 15
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 21
+                  }
+                }
+              },
+              "right": {
+                "kind": "row",
+                "items": [
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 25
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 26
+                      }
+                    }
+                  },
+                  {
+                    "kind": "number",
+                    "value": 2,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 28
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 29
+                      }
+                    }
+                  }
+                ],
+                "implicit": true,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 24
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 30
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 15
+                },
+                "end": {
+                  "row": 1,
+                  "col": 30
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "anyAll",
+              "op": "=",
+              "quantifier": "any",
+              "left": {
+                "kind": "name",
+                "parts": [
+                  "x"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 32
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 33
+                  }
+                }
+              },
+              "right": {
+                "kind": "row",
+                "items": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "a"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 42
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 43
+                      }
+                    }
+                  },
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "b"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 45
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 46
+                      }
+                    }
+                  }
+                ],
+                "implicit": true,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 41
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 47
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 32
+                },
+                "end": {
+                  "row": 1,
+                  "col": 48
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 55
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT (a, b) OVERLAPS (c, d), ROW(a, b) OVERLAPS ROW(c, d), NOT (a, b) OVERLAPS (c, d) AND e FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "overlaps",
+              "left": {
+                "kind": "row",
+                "items": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "a"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 8
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 9
+                      }
+                    }
+                  },
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "b"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 11
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 12
+                      }
+                    }
+                  }
+                ],
+                "implicit": true,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 13
+                  }
+                }
+              },
+              "right": {
+                "kind": "row",
+                "items": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "c"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 24
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 25
+                      }
+                    }
+                  },
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "d"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 27
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 28
+                      }
+                    }
+                  }
+                ],
+                "implicit": true,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 23
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 29
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 29
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "overlaps",
+              "left": {
+                "kind": "row",
+                "items": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "a"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 35
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 36
+                      }
+                    }
+                  },
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "b"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 38
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 39
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 31
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 40
+                  }
+                }
+              },
+              "right": {
+                "kind": "row",
+                "items": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "c"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 54
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 55
+                      }
+                    }
+                  },
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "d"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 57
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 58
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 50
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 59
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 31
+                },
+                "end": {
+                  "row": 1,
+                  "col": 59
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "binary",
+              "op": "and",
+              "left": {
+                "kind": "unary",
+                "op": "not",
+                "operand": {
+                  "kind": "overlaps",
+                  "left": {
+                    "kind": "row",
+                    "items": [
+                      {
+                        "kind": "name",
+                        "parts": [
+                          "a"
+                        ],
+                        "span": {
+                          "start": {
+                            "row": 1,
+                            "col": 66
+                          },
+                          "end": {
+                            "row": 1,
+                            "col": 67
+                          }
+                        }
+                      },
+                      {
+                        "kind": "name",
+                        "parts": [
+                          "b"
+                        ],
+                        "span": {
+                          "start": {
+                            "row": 1,
+                            "col": 69
+                          },
+                          "end": {
+                            "row": 1,
+                            "col": 70
+                          }
+                        }
+                      }
+                    ],
+                    "implicit": true,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 65
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 71
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "row",
+                    "items": [
+                      {
+                        "kind": "name",
+                        "parts": [
+                          "c"
+                        ],
+                        "span": {
+                          "start": {
+                            "row": 1,
+                            "col": 82
+                          },
+                          "end": {
+                            "row": 1,
+                            "col": 83
+                          }
+                        }
+                      },
+                      {
+                        "kind": "name",
+                        "parts": [
+                          "d"
+                        ],
+                        "span": {
+                          "start": {
+                            "row": 1,
+                            "col": 85
+                          },
+                          "end": {
+                            "row": 1,
+                            "col": 86
+                          }
+                        }
+                      }
+                    ],
+                    "implicit": true,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 81
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 87
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 65
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 87
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 61
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 87
+                  }
+                }
+              },
+              "right": {
+                "kind": "name",
+                "parts": [
+                  "e"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 92
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 93
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 61
+                },
+                "end": {
+                  "row": 1,
+                  "col": 93
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 100
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT a BETWEEN SYMMETRIC 1 AND 2, b NOT BETWEEN ASYMMETRIC 1 AND 2, c NOT BETWEEN 1 AND 2 FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "between",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "a"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 8
+                  }
+                }
+              },
+              "lo": {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 27
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 28
+                  }
+                }
+              },
+              "hi": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 33
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 34
+                  }
+                }
+              },
+              "negated": false,
+              "symmetric": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 34
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "between",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "b"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 36
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 37
+                  }
+                }
+              },
+              "lo": {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 61
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 62
+                  }
+                }
+              },
+              "hi": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 67
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 68
+                  }
+                }
+              },
+              "negated": true,
+              "symmetric": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 36
+                },
+                "end": {
+                  "row": 1,
+                  "col": 68
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "between",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "c"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 70
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 71
+                  }
+                }
+              },
+              "lo": {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 84
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 85
+                  }
+                }
+              },
+              "hi": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 90
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 91
+                  }
+                }
+              },
+              "negated": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 70
+                },
+                "end": {
+                  "row": 1,
+                  "col": 91
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 98
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT a IS JSON, b IS NOT JSON OBJECT WITH UNIQUE KEYS, c IS JSON ARRAY WITHOUT UNIQUE FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "isJson",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "a"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 8
+                  }
+                }
+              },
+              "itemType": null,
+              "uniqueKeys": null,
+              "negated": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 16
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "isJson",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "b"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 18
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 19
+                  }
+                }
+              },
+              "itemType": "object",
+              "uniqueKeys": true,
+              "negated": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 55
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "isJson",
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "c"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 57
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 58
+                  }
+                }
+              },
+              "itemType": "array",
+              "uniqueKeys": false,
+              "negated": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 57
+                },
+                "end": {
+                  "row": 1,
+                  "col": 87
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 94
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "SELECT EXISTS (SELECT 1 FROM u) FROM t;",
     "ast": [
       {
@@ -10776,6 +11846,235 @@
           "end": {
             "row": 1,
             "col": 101
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (a int REFERENCES p (id) MATCH FULL ON UPDATE CASCADE ON DELETE SET DEFAULT DEFERRABLE INITIALLY DEFERRED NOT NULL, b int UNIQUE NOT DEFERRABLE, CONSTRAINT fk FOREIGN KEY (b) REFERENCES p ON DELETE NO ACTION ON UPDATE SET NULL INITIALLY IMMEDIATE, PRIMARY KEY (a) DEFERRABLE);",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "a",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 21
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "references",
+                "table": [
+                  "p"
+                ],
+                "columns": [
+                  "id"
+                ],
+                "match": "full",
+                "onDelete": "set default",
+                "onUpdate": "cascade",
+                "deferrable": true,
+                "initially": "deferred",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 22
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 120
+                  }
+                }
+              },
+              {
+                "kind": "notNull",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 121
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 129
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 129
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "b",
+            "dataType": {
+              "name": "int",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 133
+                },
+                "end": {
+                  "row": 1,
+                  "col": 136
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "unique",
+                "deferrable": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 137
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 158
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 131
+              },
+              "end": {
+                "row": 1,
+                "col": 158
+              }
+            }
+          },
+          {
+            "kind": "foreignKey",
+            "name": "fk",
+            "columns": [
+              "b"
+            ],
+            "refTable": [
+              "p"
+            ],
+            "refColumns": null,
+            "onDelete": "no action",
+            "onUpdate": "set null",
+            "initially": "immediate",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 174
+              },
+              "end": {
+                "row": 1,
+                "col": 261
+              }
+            }
+          },
+          {
+            "kind": "primaryKey",
+            "name": null,
+            "columns": [
+              "a"
+            ],
+            "deferrable": true,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 263
+              },
+              "end": {
+                "row": 1,
+                "col": 289
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 290
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES p MATCH SIMPLE ON UPDATE RESTRICT NOT DEFERRABLE;",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "name": [
+          "t"
+        ],
+        "action": {
+          "kind": "addConstraint",
+          "name": "fk",
+          "constraint": {
+            "kind": "foreignKey",
+            "name": null,
+            "columns": [
+              "a"
+            ],
+            "refTable": [
+              "p"
+            ],
+            "refColumns": null,
+            "match": "simple",
+            "onDelete": null,
+            "onUpdate": "restrict",
+            "deferrable": false,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 32
+              },
+              "end": {
+                "row": 1,
+                "col": 107
+              }
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 107
           }
         }
       }

@@ -40,8 +40,10 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // operator reader, the fold-and-match keyword strategy, match-based and non-associative
 // pratt operators, mutual expr↔query recursion via lazy(), and farthest-failure
 // / nested recovery. The expression sublanguage also covers the PG special forms
-// — CAST / EXTRACT / SUBSTRING / POSITION / TRIM, ARRAY[…] / ROW(…), array
-// subscripts & slices, INTERVAL literals, and COLLATE / AT TIME ZONE postfixes —
+// — CAST / EXTRACT / SUBSTRING / POSITION / TRIM, ARRAY[…] / ROW(…) and the
+// implicit row `(a, b)`, array subscripts & slices, INTERVAL literals, COLLATE /
+// AT TIME ZONE postfixes, `row OVERLAPS row`, BETWEEN [A]SYMMETRIC and the
+// `IS [NOT] JSON` predicate family —
 // plus window functions: `fn(…) [WITHIN GROUP (ORDER BY …)] [IGNORE|RESPECT
 // NULLS] [FILTER (WHERE …)] [OVER (…) | OVER name]`, with named windows via a
 // `WINDOW w AS (…)` clause. Calls also carry the aggregate modifiers that live
@@ -70,6 +72,14 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 
 export type ColType = { name: string; args: number[]; array: boolean; span: Span };
 
+// A row constructor: the explicit `ROW(…)` (which may be empty, or hold a single
+// item) and the implicit `(a, b, …)` (always two items or more — a lone `(a)` is
+// just a parenthesised expression). They share a node, but `implicit` (present
+// only on the bare spelling) keeps them apart, because PG does not always treat
+// them alike: `GROUP BY (a, b)` groups by `a` and `b`, `GROUP BY ROW(a, b)` by
+// one composite value. Named on its own so OVERLAPS can require it on both sides.
+export type RowExpr = { kind: "row"; items: Expr[]; implicit?: true; span: Span };
+
 export type Expr =
   | { kind: "number"; value: number; span: Span }
   | { kind: "string"; value: string; span: Span }
@@ -90,14 +100,30 @@ export type Expr =
   // the plain `is` node (IS [NOT] NULL), each carrying its own negation flag.
   | { kind: "isDistinct"; expr: Expr; from: Expr; negated: boolean; span: Span }
   | { kind: "isTest"; expr: Expr; test: "true" | "false" | "unknown"; negated: boolean; span: Span }
+  // `IS [NOT] JSON [VALUE | SCALAR | ARRAY | OBJECT] [{WITH | WITHOUT} UNIQUE [KEYS]]`.
+  // `itemType` is the item-type word as written (null when there is none, which
+  // means the same as VALUE); `uniqueKeys` is true for WITH UNIQUE, false for
+  // WITHOUT UNIQUE and null when neither is written. The optional KEYS noise word
+  // is not recorded.
+  | {
+      kind: "isJson";
+      expr: Expr;
+      itemType: "value" | "scalar" | "array" | "object" | null;
+      uniqueKeys: boolean | null;
+      negated: boolean;
+      span: Span;
+    }
   // `escape` is present only when an `ESCAPE x` tail follows (LIKE / ILIKE).
   | { kind: "like"; expr: Expr; pattern: Expr; negated: boolean; ci: boolean; escape?: Expr; span: Span }
   // `x [NOT] SIMILAR TO pattern [ESCAPE x]` — a POSIX-ish sibling of LIKE.
   | { kind: "similarTo"; expr: Expr; pattern: Expr; negated: boolean; escape?: Expr; span: Span }
-  | { kind: "between"; expr: Expr; lo: Expr; hi: Expr; negated: boolean; span: Span }
+  // `symmetric` is present only when a SYMMETRIC (true) or ASYMMETRIC (false)
+  // keyword was written; ASYMMETRIC is the default, so its absence means the same.
+  | { kind: "between"; expr: Expr; lo: Expr; hi: Expr; negated: boolean; symmetric?: boolean; span: Span }
   | { kind: "in"; expr: Expr; list: Expr[]; negated: boolean; span: Span }
   // `x <cmp> ANY|ALL|SOME (array|subquery)` — a comparison whose RHS is
-  // quantified. `right` is a scalar subquery or a parenthesised array expr.
+  // quantified. `right` is a scalar subquery or a parenthesised array expr (a row
+  // only with a second pair of parentheses, `x = ANY ((a, b))`, as in PG).
   | { kind: "anyAll"; op: string; quantifier: "any" | "all" | "some"; left: Expr; right: Expr; span: Span }
   // --- DML expression additions (all pure-additive; existing nodes untouched) ---
   // `*` and `t.*` — used in select lists and `count(*)`. `table` is the dotted
@@ -116,8 +142,12 @@ export type Expr =
   | { kind: "param"; name: string; span: Span }
   // `ARRAY[…]` constructor. `elements` may be empty (`ARRAY[]`).
   | { kind: "array"; elements: Expr[]; span: Span }
-  // `ROW(…)` explicit row constructor.
-  | { kind: "row"; items: Expr[]; span: Span }
+  // `ROW(…)` and the implicit `(a, b, …)` — see RowExpr.
+  | RowExpr
+  // `(start, end) OVERLAPS (start, end)` — two periods, each a two-item row
+  // constructor (either spelling). PG rejects any other arity at parse time, and
+  // so does this grammar.
+  | { kind: "overlaps"; left: RowExpr; right: RowExpr; span: Span }
   // Array subscript / slice postfix: `a[i]` (no `upper` key) or `a[lo:hi]`
   // (`upper` present, either bound possibly null for `a[:hi]` / `a[lo:]`).
   | { kind: "subscript"; base: Expr; index: Expr | null; upper?: Expr | null; span: Span }
@@ -200,13 +230,31 @@ export type WindowSpec = {
 // A `WINDOW name AS (spec)` entry from a SELECT's WINDOW clause.
 export type NamedWindow = { name: string; spec: WindowSpec };
 
+// The `[NOT] DEFERRABLE` / `INITIALLY DEFERRED | IMMEDIATE` attributes PG allows
+// on a UNIQUE, PRIMARY KEY or foreign-key constraint, column- or table-level.
+// Each key is omitted entirely when its clause is absent — so a missing
+// `deferrable` is PG's default, not NOT DEFERRABLE, and `initially: "deferred"`
+// alone still means deferrable, as INITIALLY DEFERRED implies it.
+export type ConstraintAttrs = { deferrable?: boolean; initially?: "deferred" | "immediate" };
+
+export type RefAction = "no action" | "restrict" | "cascade" | "set null" | "set default";
+
+// What follows `REFERENCES t [(cols)]`. `onDelete` predates the rest, so it is
+// always present (null when absent); `match` and `onUpdate` are omitted when
+// absent.
+export type ForeignKeyTail = {
+  match?: "full" | "partial" | "simple";
+  onDelete: RefAction | null;
+  onUpdate?: RefAction;
+};
+
 export type ColConstraint =
   | { kind: "notNull"; span: Span }
   | { kind: "nullable"; span: Span }
   | { kind: "default"; expr: Expr; span: Span }
-  | { kind: "primaryKey"; span: Span }
-  | { kind: "unique"; span: Span }
-  | { kind: "references"; table: string[]; columns: string[] | null; onDelete: string | null; span: Span }
+  | ({ kind: "primaryKey"; span: Span } & ConstraintAttrs)
+  | ({ kind: "unique"; span: Span } & ConstraintAttrs)
+  | ({ kind: "references"; table: string[]; columns: string[] | null; span: Span } & ForeignKeyTail & ConstraintAttrs)
   | { kind: "check"; expr: Expr; span: Span };
 
 export type ColumnDef = {
@@ -218,18 +266,18 @@ export type ColumnDef = {
 };
 
 export type TableConstraint =
-  | { kind: "primaryKey"; name: string | null; columns: string[]; span: Span }
-  | { kind: "unique"; name: string | null; columns: string[]; span: Span }
+  | ({ kind: "primaryKey"; name: string | null; columns: string[]; span: Span } & ConstraintAttrs)
+  | ({ kind: "unique"; name: string | null; columns: string[]; span: Span } & ConstraintAttrs)
   | { kind: "check"; name: string | null; expr: Expr; span: Span }
-  | {
+  | ({
       kind: "foreignKey";
       name: string | null;
       columns: string[];
       refTable: string[];
       refColumns: string[] | null;
-      onDelete: string | null;
       span: Span;
-    };
+    } & ForeignKeyTail &
+      ConstraintAttrs);
 
 // One `{INCLUDING | EXCLUDING} property` option of a `LIKE source` table item.
 export type LikeOption = {
@@ -1090,18 +1138,75 @@ function parseTrim(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
   return { kind: "trim", side, characters, source, span: ctx.spanFrom(start) };
 }
 
-// ROW(a, b, …) — an explicit row constructor (may be empty).
-function parseRow(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+// The `a, b, …` of a row constructor, entered just past its `(` and consuming
+// through the `)`. Only an explicit ROW may be empty: the implicit spelling reads
+// its first item unconditionally, so `()` still fails where an expression does.
+function parseRowItems(ctx: ParseContext<SqlTokenType>, allowEmpty: boolean): Expr[] {
   const items: Expr[] = [];
-  if (!ctx.is("punc", ")")) {
+  if (!(allowEmpty && ctx.is("punc", ")"))) {
     items.push(ctx.parse(expression));
-    while (ctx.is("punc", ",")) {
-      ctx.next(); // ","
-      items.push(ctx.parse(expression));
-    }
+    while (ctx.eat("punc", ",") !== null) items.push(ctx.parse(expression));
   }
   expectClose(ctx);
-  return { kind: "row", items, span: ctx.spanFrom(start) };
+  return items;
+}
+
+// ROW(a, b, …) — an explicit row constructor (may be empty). May lead OVERLAPS.
+function parseRow(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const row: RowExpr = { kind: "row", items: parseRowItems(ctx, true), span: ctx.spanFrom(start) };
+  return startsOverlaps(ctx) ? parseOverlaps(ctx, row) : row;
+}
+
+// --- OVERLAPS ---
+// `row OVERLAPS row`. `overlaps` is unreserved here — PG reserves it, but this
+// grammar never did, so `SELECT a overlaps FROM t` reads it as an alias — and a
+// pratt infix group cannot decline once it has matched, so the operator never
+// enters the pratt table. The row constructors that may lead it (the implicit
+// `(a, b)` in parenOrSubquery, and ROW(…) above) look for the tail themselves,
+// and only claim `overlaps` when a row can follow it: a `(` or a `ROW (`.
+// Consuming the tail at atom level gives OVERLAPS the tightest precedence there
+// is, so a trailing `::` binds to the whole predicate rather than to the
+// right-hand row. That is PG's reading too: both of its operands are rows, not
+// expressions, so `(c, d)::text` cannot be one, and the cast can only apply to
+// the finished predicate. Two over-acceptances come with the atom: a trailing
+// `[…]` binds the same way, where PG would reject it (as `ROW(a, b)[1]` already
+// was), and the b-expression shares the atom, so OVERLAPS also reaches positions
+// PG's b_expr does not admit, such as POSITION's first operand. Everything
+// looser composes as usual: `… OVERLAPS … AND x` is an AND, and `NOT` (a
+// prefix) wraps the predicate.
+const startsOverlaps = (ctx: ParseContext<SqlTokenType>): boolean => {
+  if (!ctx.is("ident", "overlaps")) return false;
+  const after = ctx.peekAhead(1);
+  if (after?.type === "punc" && after.value === "(") return true;
+  const next = ctx.peekAhead(2);
+  return after?.type === "ident" && after.value === "row" && next?.type === "punc" && next.value === "(";
+};
+
+// PG checks the arity of both periods in the grammar action itself, so a wrong
+// count is rejected at parse time here too, reported over the offending row.
+const expectPeriod = (ctx: ParseContext<SqlTokenType>, row: RowExpr, side: "left" | "right"): void => {
+  if (row.items.length !== 2) {
+    ctx.croak(
+      `Expected 2 items on the ${side} of OVERLAPS but found ${row.items.length}`,
+      row.span.start,
+      row.span.end,
+    );
+  }
+};
+
+// Entered on `overlaps`, which startsOverlaps has vouched for. The right-hand
+// row is read directly rather than through the atom, so it cannot open a second
+// OVERLAPS of its own — PG's `row OVERLAPS row` does not chain either.
+function parseOverlaps(ctx: ParseContext<SqlTokenType>, left: RowExpr): Expr {
+  expectPeriod(ctx, left, "left");
+  ctx.next(); // overlaps
+  const start = ctx.position();
+  const explicit = ctx.eat("ident", "row") !== null;
+  ctx.next(); // "("
+  const items = parseRowItems(ctx, explicit);
+  const right: RowExpr = { kind: "row", items, ...(!explicit && { implicit: true }), span: ctx.spanFrom(start) };
+  expectPeriod(ctx, right, "right");
+  return { kind: "overlaps", left, right, span: ctx.spanFrom(left.span.start) };
 }
 
 // SUBSTRING(value FROM from FOR for_) — or the ordinary comma form
@@ -1379,10 +1484,22 @@ const existsExpr = seq(skip(kw("exists")), field("query", parenQuery)).map(
 );
 
 // `(` dispatches on the token past it: a scalar subquery vs a parenthesised
-// expression. The `add` ALTER action (below) is the peekAhead template.
+// expression. The `add` ALTER action (below) is the peekAhead template. A comma
+// after the first item makes it an implicit row constructor `(a, b, …)` instead,
+// which may lead OVERLAPS. A lone `(a)` keeps the bare inner expression — span
+// and all — exactly as before; it only becomes a row long enough to report a
+// wrong OVERLAPS arity.
 const subqueryExpr = parenQuery.map((q, span): Expr => ({ kind: "subquery", query: q, span }));
 const parenOrSubquery = custom<Expr, SqlTokenType>(
-  (ctx) => (isSubqueryParen(ctx) ? ctx.parse(subqueryExpr) : ctx.parse(parenExpr)),
+  (ctx) => {
+    if (isSubqueryParen(ctx)) return ctx.parse(subqueryExpr);
+    const start = ctx.position();
+    ctx.next(); // "("
+    const items = parseRowItems(ctx, false);
+    const row: RowExpr = { kind: "row", items, implicit: true, span: ctx.spanFrom(start) };
+    if (startsOverlaps(ctx)) return parseOverlaps(ctx, row);
+    return items.length === 1 ? items[0]! : row;
+  },
   { expected: '"("', first: [{ type: "punc", value: "(" }] },
 );
 
@@ -1613,6 +1730,26 @@ const kwBinary = (op: string, bp: number) => ({
 
 const closeSpan = (left: Expr, end: Span["end"]): Span => ({ start: left.span.start, end });
 
+// `[NOT] BETWEEN [SYMMETRIC | ASYMMETRIC] lo AND hi`, entered just past BETWEEN.
+// The internal AND is recursed past at bp 11 (above AND's own bp) and then
+// consumed explicitly, so no ambiguity machinery. Both modifier words are
+// reserved, so neither can be the start of `lo` and they need no guard.
+const betweenTail = (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>, negated: boolean): Expr => {
+  const mode = ctx.eat("ident", ["symmetric", "asymmetric"]);
+  const lo = h.parseRhs(11);
+  ctx.parse(kw("and"));
+  const hi = h.parseRhs(11);
+  return {
+    kind: "between",
+    expr: left,
+    lo,
+    hi,
+    negated,
+    ...(mode !== null && { symmetric: mode.value === "symmetric" }),
+    span: closeSpan(left, ctx.lastEnd()),
+  };
+};
+
 // `IN (…)` tail, shared by the postfix `in` and the `not in` branch: a
 // `(SELECT …)` builds an inSubquery node, anything else the list-valued `in`.
 const inTail = (ctx: ParseContext<SqlTokenType>, left: Expr, negated: boolean): Expr => {
@@ -1782,16 +1919,12 @@ const expressionRule = pratt<Expr, SqlTokenType>({
       },
     },
     {
-      // BETWEEN lo AND hi — the internal AND is recursed past at bp 11 (above
-      // AND's own bp) and then consumed explicitly, so no ambiguity machinery.
+      // BETWEEN [SYMMETRIC | ASYMMETRIC] lo AND hi — see betweenTail.
       match: kw("between"),
       bp: 10,
       parse: (ctx, left, h): Expr => {
         ctx.parse(kw("between"));
-        const lo = h.parseRhs(11);
-        ctx.parse(kw("and"));
-        const hi = h.parseRhs(11);
-        return { kind: "between", expr: left, lo, hi, negated: false, span: closeSpan(left, ctx.lastEnd()) };
+        return betweenTail(ctx, left, h, false);
       },
     },
     {
@@ -1831,10 +1964,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
         }
         if (ctx.is("ident", "between")) {
           ctx.next();
-          const lo = h.parseRhs(11);
-          ctx.parse(kw("and"));
-          const hi = h.parseRhs(11);
-          return { kind: "between", expr: left, lo, hi, negated: true, span: closeSpan(left, ctx.lastEnd()) };
+          return betweenTail(ctx, left, h, true);
         }
         if (ctx.is("ident", "in")) {
           ctx.next();
@@ -1858,7 +1988,10 @@ const expressionRule = pratt<Expr, SqlTokenType>({
         const op = ctx.next()!.value;
         if (ctx.is("ident", ["any", "all", "some"])) {
           const quantifier = ctx.next()!.value as "any" | "all" | "some";
-          const right = ctx.parse(parenOrSubquery);
+          // `(subquery)` or `(array expr)` — not the parenOrSubquery atom, whose
+          // implicit row PG does not allow here: `x = ANY (a, b)` is a syntax
+          // error there, and only `x = ANY ((a, b))` reaches the row.
+          const right = isSubqueryParen(ctx) ? ctx.parse(subqueryExpr) : ctx.parse(parenExpr);
           return { kind: "anyAll", op, quantifier, left, right, span: closeSpan(left, ctx.lastEnd()) };
         }
         const right = h.parseRhs(10);
@@ -1886,6 +2019,30 @@ const expressionRule = pratt<Expr, SqlTokenType>({
           const from = h.parseRhs(9);
           return { kind: "isDistinct", expr: left, from, negated, span: closeSpan(left, ctx.lastEnd()) };
         }
+        // IS [NOT] JSON [VALUE | SCALAR | ARRAY | OBJECT] [{WITH | WITHOUT}
+        // UNIQUE [KEYS]]. Nothing else may follow IS, so `json` needs no guard.
+        // The words after it are taken unconditionally, as PG's grammar takes
+        // them: `x IS JSON value` is the VALUE form, never an alias, and a WITH
+        // or WITHOUT there must open the uniqueness clause — so `x IS JSON
+        // without` and a materialized view's trailing `… IS JSON WITH NO DATA`
+        // are errors, exactly as in PG. Only KEYS, which follows UNIQUE, is
+        // optional and stays an alias anywhere else (`x IS JSON keys`).
+        if (ctx.eat("ident", "json") !== null) {
+          const itemType = (ctx.eat("ident", ["value", "scalar", "array", "object"])?.value ?? null) as
+            | "value"
+            | "scalar"
+            | "array"
+            | "object"
+            | null;
+          let uniqueKeys: boolean | null = null;
+          const uniqueness = ctx.eat("ident", ["with", "without"]);
+          if (uniqueness !== null) {
+            uniqueKeys = uniqueness.value === "with";
+            ctx.parse(kw("unique"));
+            ctx.eat("ident", "keys");
+          }
+          return { kind: "isJson", expr: left, itemType, uniqueKeys, negated, span: closeSpan(left, ctx.lastEnd()) };
+        }
         // IS [NOT] TRUE / FALSE / UNKNOWN.
         if (ctx.is("ident", ["true", "false", "unknown"])) {
           const test = ctx.next()!.value as "true" | "false" | "unknown";
@@ -1909,7 +2066,8 @@ const expressionRule = pratt<Expr, SqlTokenType>({
 
 // The b-expression: the tight sublanguage (arithmetic / concat / JSON / cast /
 // subscript) with none of the comparison, IS, IN, LIKE, BETWEEN or logical
-// forms — see `bExpression` above. Used for the first operand of POSITION so its
+// forms — see `bExpression` above. (OVERLAPS lives in the shared atom, so it is
+// the one predicate that still reaches it.) Used for the first operand of POSITION so its
 // `IN` separator is left for the special-call parser instead of the `in` postfix.
 const bExprRule = pratt<Expr, SqlTokenType>({
   atom,
@@ -1919,15 +2077,17 @@ const bExprRule = pratt<Expr, SqlTokenType>({
 });
 
 // --- keyword dispatch maps ---
-// Four rules below (column constraints, table constraints, ALTER TABLE actions
-// and the CREATE targets) all answer the same question — "which keyword leads
-// here?" — and all grow one entry at a time. Each keeps that answer in a plain
-// record keyed by the lead word instead of an `oneOf` chain or a ladder of
-// `if`s, so extending one is a single entry and the `expected` string is
-// *derived* from the record rather than restated alongside it.
+// Five rules below (column constraints, a foreign key's referential actions,
+// table constraints, ALTER TABLE actions and the CREATE targets) all answer the
+// same question — "which keyword leads here?" — and all grow one entry at a
+// time. Each keeps that answer in a plain record keyed by the lead word instead
+// of an `oneOf` chain or a ladder of `if`s, so extending one is a single entry
+// and the `expected` string is *derived* from the record rather than restated
+// alongside it.
 //
-// Dispatch peeks; every handler consumes its own lead word and captures its own
-// `start`, so the nodes keep opening their spans on the keyword.
+// Dispatch peeks; every handler consumes its own lead word, and every one that
+// builds a node captures its own `start`, so the nodes keep opening their spans
+// on the keyword.
 type DispatchEntry<T, A extends unknown[]> = {
   // How this branch names itself in an "Expected …" message. Defaults to the
   // quoted key, so it is spelled out only where the two differ — a multi-word
@@ -1991,13 +2151,138 @@ function dispatch<T, A extends unknown[]>(
 
 const columnList = delimited(P("("), P(")"), P(","), nameWord, { interleaved: true });
 
-const onDeleteAction = seq(
-  skip(kwseq("on", "delete")),
-  field("action", oneOf(kw("cascade"), kw("restrict"), kwseq("set", "null"))),
-).map(({ action }) => action.value);
-
 const optColumnList = optional(columnList);
-const optOnDelete = optional(onDeleteAction);
+
+// A foreign key's referential actions. `set` leads two of them, so these could
+// not be oneOf branches (their first sets would overlap); the map lets the `set`
+// entry read the word after it instead.
+const setActionTarget = oneOf(kw("null"), kw("default"));
+const REF_ACTIONS: DispatchMap<RefAction> = {
+  no: {
+    expected: '"no action"',
+    parse: (ctx) => {
+      ctx.parse(kwseq("no", "action"));
+      return "no action";
+    },
+  },
+  restrict: {
+    parse: (ctx) => {
+      ctx.parse(kw("restrict"));
+      return "restrict";
+    },
+  },
+  cascade: {
+    parse: (ctx) => {
+      ctx.parse(kw("cascade"));
+      return "cascade";
+    },
+  },
+  set: {
+    expected: '"set null" or "set default"',
+    parse: (ctx) => {
+      ctx.parse(kw("set"));
+      return ctx.parse(setActionTarget).value === "null" ? "set null" : "set default";
+    },
+  },
+};
+
+// The join form although dispatch() croaks by hand: it is what the oneOf this
+// replaced produced, and it spells out the two-word actions in full.
+const REF_ACTION_EXPECTED = joinExpected(REF_ACTIONS);
+
+// PARTIAL is accepted on purpose: PG's grammar rejects it ("MATCH PARTIAL not
+// yet implemented"), but that is a missing executor feature, not a syntax rule.
+const matchType = oneOf(kw("full"), kw("partial"), kw("simple"));
+
+// `[MATCH FULL | PARTIAL | SIMPLE]`, then ON DELETE and ON UPDATE in either
+// order, each at most once — PG's `key_match key_actions`. The two ON clauses
+// share one loop rather than being two `optional(phrase)`s: phrase() commits on
+// `on` with no rollback, so whichever came first would croak on the other's
+// verb. A repeated verb croaks naming the one still open, as PG rejects it too;
+// once both are filled the loop stops, and a third ON is left to the caller.
+function parseForeignKeyTail(ctx: ParseContext<SqlTokenType>): ForeignKeyTail {
+  const match =
+    ctx.eat("ident", "match") !== null ? (ctx.parse(matchType).value as "full" | "partial" | "simple") : null;
+  let onDelete: RefAction | null = null;
+  let onUpdate: RefAction | null = null;
+  while ((onDelete === null || onUpdate === null) && ctx.is("ident", "on")) {
+    ctx.next(); // ON
+    if (onDelete === null && ctx.eat("ident", "delete") !== null) {
+      onDelete = dispatch(REF_ACTIONS, REF_ACTION_EXPECTED, ctx);
+    } else if (onUpdate === null && ctx.eat("ident", "update") !== null) {
+      onUpdate = dispatch(REF_ACTIONS, REF_ACTION_EXPECTED, ctx);
+    } else {
+      const open = [...(onDelete === null ? ["delete"] : []), ...(onUpdate === null ? ["update"] : [])];
+      return ctx.croak(`Expected ${quoteList(open)} but found ${describeFound(ctx.peek())}`);
+    }
+  }
+  return { ...(match && { match }), onDelete, ...(onUpdate && { onUpdate }) };
+}
+
+const initiallyWhen = oneOf(kw("deferred"), kw("immediate"));
+
+// True when the cursor sits on `NOT DEFERRABLE`. Lexing is lazy, so the peek
+// past `not` is taken only on a `not`: peeking on every token would raise the
+// lex error of a token two on from inside the constraint handler, and
+// diagnose() would drop the constraint — and the column — over a character the
+// column never reaches. After a `not` in a column constraint there is nothing
+// to save: NOT NULL would raise the same error on the same token. (At table
+// level the tail meets a bad token inside the constraint rather than between
+// items, so diagnose() keeps the table around it.)
+function atNotDeferrable(ctx: ParseContext<SqlTokenType>): boolean {
+  if (!ctx.is("ident", "not")) return false;
+  const next = ctx.peekAhead(1);
+  return next !== null && next.type === "ident" && next.value === "deferrable";
+}
+
+// `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. Only
+// UNIQUE, PRIMARY KEY and foreign keys read this tail, so PG's "misplaced
+// DEFERRABLE clause" (`a int NOT NULL DEFERRABLE`) never parses.
+//
+// `not` is shared with a following column constraint's NOT NULL, so it is taken
+// here only when `deferrable` comes next; a bare `ctx.eat("not")` would steal
+// `a int UNIQUE NOT NULL`.
+//
+// A second clause of either kind is still read, rather than falling out of the
+// loop to be misread as the start of the next constraint, and is then judged as
+// PG judges it — which differs by level. A column constraint's attributes are
+// separate list items checked after parsing (`transformConstraintAttrs`), where
+// any repeat is an error. A table constraint's are one `ConstraintAttributeSpec`
+// checked in its grammar action, which lets an identical repeat
+// through and reports only a contradiction. Both levels reject a constraint that
+// can never be deferred starting out deferred; the column check looks for a
+// repeat first, the table check for that case first, and so do these.
+function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column" | "table"): ConstraintAttrs {
+  let deferrable: boolean | null = null;
+  let initially: "deferred" | "immediate" | null = null;
+  while (true) {
+    const start = ctx.position();
+    const negated = atNotDeferrable(ctx);
+    let repeated: string;
+    let conflicting: boolean;
+    if (negated || ctx.is("ident", "deferrable")) {
+      ctx.parse(negated ? kwseq("not", "deferrable") : kw("deferrable"));
+      repeated = "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed";
+      conflicting = deferrable !== null && (level === "column" || deferrable === negated);
+      deferrable = !negated;
+    } else if (ctx.eat("ident", "initially") !== null) {
+      const when = ctx.parse(initiallyWhen).value as "deferred" | "immediate";
+      repeated = "multiple INITIALLY IMMEDIATE/DEFERRED clauses not allowed";
+      conflicting = initially !== null && (level === "column" || initially !== when);
+      initially = when;
+    } else {
+      break;
+    }
+    const neverDeferred = deferrable === false && initially === "deferred";
+    if (conflicting && (level === "column" || !neverDeferred)) {
+      return ctx.croak(level === "column" ? repeated : "conflicting constraint properties", start, ctx.lastEnd());
+    }
+    if (neverDeferred) {
+      return ctx.croak("constraint declared INITIALLY DEFERRED must be DEFERRABLE", start, ctx.lastEnd());
+    }
+  }
+  return { ...(deferrable !== null && { deferrable }), ...(initially && { initially }) };
+}
 
 const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
   not: {
@@ -2027,14 +2312,16 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kwseq("primary", "key"));
-      return { kind: "primaryKey", span: ctx.spanFrom(start) };
+      const attrs = parseConstraintAttrs(ctx, "column");
+      return { kind: "primaryKey", ...attrs, span: ctx.spanFrom(start) };
     },
   },
   unique: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("unique"));
-      return { kind: "unique", span: ctx.spanFrom(start) };
+      const attrs = parseConstraintAttrs(ctx, "column");
+      return { kind: "unique", ...attrs, span: ctx.spanFrom(start) };
     },
   },
   references: {
@@ -2043,8 +2330,9 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
       ctx.parse(kw("references"));
       const table = ctx.parse(qualName);
       const columns = ctx.parse(optColumnList);
-      const onDelete = ctx.parse(optOnDelete);
-      return { kind: "references", table, columns, onDelete, span: ctx.spanFrom(start) };
+      const tail = parseForeignKeyTail(ctx);
+      const attrs = parseConstraintAttrs(ctx, "column");
+      return { kind: "references", table, columns, ...tail, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   check: {
@@ -2072,14 +2360,18 @@ const TABLE_CONSTRAINTS: DispatchMap<TableConstraint> = {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kwseq("primary", "key"));
-      return { kind: "primaryKey", name: null, columns: ctx.parse(columnList), span: ctx.spanFrom(start) };
+      const columns = ctx.parse(columnList);
+      const attrs = parseConstraintAttrs(ctx, "table");
+      return { kind: "primaryKey", name: null, columns, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   unique: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("unique"));
-      return { kind: "unique", name: null, columns: ctx.parse(columnList), span: ctx.spanFrom(start) };
+      const columns = ctx.parse(columnList);
+      const attrs = parseConstraintAttrs(ctx, "table");
+      return { kind: "unique", name: null, columns, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   check: {
@@ -2098,14 +2390,16 @@ const TABLE_CONSTRAINTS: DispatchMap<TableConstraint> = {
       ctx.parse(kw("references"));
       const refTable = ctx.parse(qualName);
       const refColumns = ctx.parse(optColumnList);
-      const onDelete = ctx.parse(optOnDelete);
+      const tail = parseForeignKeyTail(ctx);
+      const attrs = parseConstraintAttrs(ctx, "table");
       return {
         kind: "foreignKey",
         name: null,
         columns,
         refTable,
         refColumns,
-        onDelete,
+        ...tail,
+        ...attrs,
         span: ctx.spanFrom(start),
       };
     },
