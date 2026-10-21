@@ -52,7 +52,8 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // named-argument notation is accepted in argument position, `f(a => 1)`.
 //
 // The SELECT surface also carries the remaining query clauses: LATERAL /
-// table-function / TABLESAMPLE / ONLY FROM items, each alias optionally followed
+// table-function / ROWS FROM / TABLESAMPLE / ONLY FROM items, WITH ORDINALITY,
+// parenthesised joins (`(a JOIN b ON …) AS j`), each alias optionally followed
 // by a column-alias list (`t AS x (a, b)`), VALUES as a standalone query and
 // table source, FETCH FIRST … ROWS, FOR UPDATE/SHARE locking, SELECT … INTO a
 // new (optionally TEMP / UNLOGGED) table, and GROUP BY [ALL | DISTINCT] over
@@ -261,7 +262,8 @@ export type WindowSpec = {
 export type NamedWindow = { name: string; spec: WindowSpec };
 
 // The `[NOT] DEFERRABLE` / `INITIALLY DEFERRED | IMMEDIATE` attributes PG allows
-// on a UNIQUE, PRIMARY KEY or foreign-key constraint, column- or table-level.
+// on a UNIQUE, PRIMARY KEY or foreign-key constraint, column- or table-level,
+// and on a table-level EXCLUDE constraint.
 // Each key is omitted entirely when its clause is absent — so a missing
 // `deferrable` is PG's default, not NOT DEFERRABLE, and `initially: "deferred"`
 // alone still means deferrable, as INITIALLY DEFERRED implies it.
@@ -307,7 +309,25 @@ export type TableConstraint =
       refColumns: string[] | null;
       span: Span;
     } & ForeignKeyTail &
-      ConstraintAttrs);
+      ConstraintAttrs)
+  | ExcludeConstraint;
+
+// One `element WITH operator` pair of an EXCLUDE constraint. `operator` is the
+// operator's text (`=`, `&&`).
+export type ExclusionElement = { expr: Expr; operator: string; span: Span };
+
+// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WHERE
+// (pred)]`. `using` is null when PG's default (btree) applies, as on
+// createIndex; `include` and `where` are omitted when absent.
+export type ExcludeConstraint = {
+  kind: "exclude";
+  name: string | null;
+  using: string | null;
+  elements: ExclusionElement[];
+  include?: string[];
+  where?: Expr;
+  span: Span;
+} & ConstraintAttrs;
 
 // One `{INCLUDING | EXCLUDING} property` option of a `LIKE source` table item.
 export type LikeOption = {
@@ -330,7 +350,38 @@ export type LikeOption = {
 // is in source order and empty when none is written.
 export type LikeTable = { kind: "likeTable"; table: string[]; options: LikeOption[]; span: Span };
 
-export type TableItem = ColumnDef | TableConstraint | LikeTable;
+// A column of a `PARTITION OF parent (…)` element list: no type (the parent
+// fixes it), only constraints. `withOptions` is present only when the optional
+// `WITH OPTIONS` noise words are written.
+export type ColumnOptions = {
+  kind: "columnOptions";
+  name: string;
+  withOptions?: true;
+  constraints: ColConstraint[];
+  span: Span;
+};
+
+export type TableItem = ColumnDef | TableConstraint | LikeTable | ColumnOptions;
+
+// One key of `PARTITION BY strategy (key, …)`: a column (a `name` node), a
+// function call, or a parenthesised expression, then an optional collation and
+// operator class. Both are omitted when absent.
+export type PartitionKey = { expr: Expr; collate?: string[]; opclass?: string[]; span: Span };
+export type PartitionSpec = { strategy: "range" | "list" | "hash"; keys: PartitionKey[]; span: Span };
+
+// A range bound's datum: an expression, or MINVALUE / MAXVALUE. PG reads those
+// two as column references and picks them out afterwards — quoted or not — so
+// this does too, and the words stay names everywhere else.
+export type PartitionRangeDatum = Expr | { kind: "minvalue" | "maxvalue"; span: Span };
+
+// `FOR VALUES …` / `DEFAULT` — what a `PARTITION OF parent` table holds.
+export type PartitionBound =
+  | { kind: "range"; from: PartitionRangeDatum[]; to: PartitionRangeDatum[]; span: Span }
+  | { kind: "list"; values: Expr[]; span: Span }
+  | { kind: "hash"; modulus: number; remainder: number; span: Span }
+  | { kind: "default"; span: Span };
+
+export type PartitionOf = { parent: string[]; bound: PartitionBound };
 
 // One `[namespace.]name [[=] value]` entry of a parenthesised option list — the
 // storage parameters of `CREATE TABLE … WITH (…)`, and the shape PG reuses for
@@ -346,6 +397,18 @@ export type RelationOptionValue =
   | { kind: "optionList"; items: RelationOptionScalar[]; span: Span };
 export type RelationOption = { namespace?: string; name: string; value: RelationOptionValue | null; span: Span };
 
+// One element of CREATE INDEX's column list: PG's `index_elem`, an expression
+// followed by `[opclass [(parameter, …)]] [ASC | DESC] [NULLS {FIRST | LAST}]`.
+// A COLLATE clause stays on `expr`, as it does everywhere else. Every key but
+// `expr` is present only when its clause is written.
+export type IndexColumn = {
+  expr: Expr;
+  opclass?: string[];
+  opclassOptions?: RelationOption[];
+  dir?: "asc" | "desc";
+  nulls?: "first" | "last";
+};
+
 export type AlterAction =
   | { kind: "addColumn"; ifNotExists: boolean; column: ColumnDef }
   | { kind: "dropColumn"; name: string }
@@ -360,6 +423,43 @@ export type AlterAction =
   | { kind: "renameTable"; to: string }
   | { kind: "ownerTo"; owner: string }
   | { kind: "replicaIdentity"; mode: "default" | "full" | "nothing" | "usingIndex"; index: string | null };
+
+// The actions of ALTER {SCHEMA | DOMAIN | TYPE | INDEX}. `rename` is the object's
+// own (ALTER TABLE's is `renameTable`); a domain's `addConstraint` keeps its name
+// inside `constraint`, not beside it as ALTER TABLE's does.
+type AlterRenameTo = { kind: "rename"; to: string };
+type AlterOwnerTo = Extract<AlterAction, { kind: "ownerTo" }>;
+type AlterSetSchema = { kind: "setSchema"; schema: string };
+export type AlterSchemaAction = AlterRenameTo | AlterOwnerTo;
+export type AlterDomainAction =
+  | AlterRenameTo
+  | AlterOwnerTo
+  | AlterSetSchema
+  | { kind: "setDefault"; expr: Expr }
+  | { kind: "dropDefault" }
+  | { kind: "setNotNull" }
+  | { kind: "dropNotNull" }
+  | { kind: "addConstraint"; constraint: Extract<DomainConstraint, { kind: "check" }>; notValid: boolean }
+  | { kind: "dropConstraint"; ifExists: boolean; name: string; behavior: "cascade" | "restrict" | null }
+  | { kind: "renameConstraint"; from: string; to: string }
+  | { kind: "validateConstraint"; name: string };
+// `position` is the `{BEFORE | AFTER} 'existing'` placement of a new enum value.
+export type AlterTypeAction =
+  | AlterRenameTo
+  | AlterOwnerTo
+  | AlterSetSchema
+  | {
+      kind: "addValue";
+      ifNotExists: boolean;
+      value: string;
+      position: { placement: "before" | "after"; value: string } | null;
+    }
+  | { kind: "renameValue"; from: string; to: string };
+export type AlterIndexAction =
+  | AlterRenameTo
+  | { kind: "setTablespace"; tablespace: string }
+  | { kind: "setOptions"; options: RelationOption[] }
+  | { kind: "resetOptions"; options: RelationOption[] };
 
 // --- Phase 7: more CREATE objects ---
 
@@ -632,20 +732,27 @@ export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
   // UNLOGGED family). Omitted, not null, when there are none — and no word
   // qualifies yet (see CREATE_PREFIX_WORDS), so today it is always absent.
-  // The four clauses after the element list follow the same rule: each key is
+  // The clauses after the element list follow the same rule: each key is
   // present only when its clause is written (see parseTableClauses).
+  // `partitionOf` marks a `PARTITION OF parent … FOR VALUES …` table, whose
+  // `items` are `columnOptions` and table constraints — empty when it writes no
+  // element list.
   | {
       kind: "createTable";
       ifNotExists: boolean;
       name: string[];
       items: TableItem[];
+      partitionOf?: PartitionOf;
       inherits?: string[][];
+      partitionBy?: PartitionSpec;
       options?: RelationOption[];
       onCommit?: "preserveRows" | "deleteRows" | "drop";
       tablespace?: string;
       modifiers?: string[];
       span: Span;
     }
+  // `options` (WITH (…)) is present only when written; the older `include` and
+  // `where` keys stay null when absent.
   | {
       kind: "createIndex";
       unique: boolean;
@@ -654,8 +761,9 @@ export type Stmt =
       name: string | null;
       table: string[];
       using: string | null;
-      columns: Expr[];
+      columns: IndexColumn[];
       include: string[] | null;
+      options?: RelationOption[];
       where: Expr | null;
       span: Span;
     }
@@ -670,6 +778,11 @@ export type Stmt =
   // `ALTER TABLE [IF EXISTS] name action[, …]`. `actions` is never empty, and a
   // RENAME is always its only element — PG keeps those out of the action list.
   | { kind: "alterTable"; ifExists: boolean; name: string[]; actions: AlterAction[]; span: Span }
+  | { kind: "alterSchema"; name: string; action: AlterSchemaAction; span: Span }
+  | { kind: "alterDomain"; name: string[]; action: AlterDomainAction; span: Span }
+  | { kind: "alterType"; name: string[]; action: AlterTypeAction; span: Span }
+  // As on alterTable, `actions` is never empty and a RENAME stands alone.
+  | { kind: "alterIndex"; ifExists: boolean; name: string[]; actions: AlterIndexAction[]; span: Span }
   // Generalized DROP: `DROP {TABLE|VIEW|INDEX|TYPE|SEQUENCE|SCHEMA}
   // [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `objectType` is the
   // folded keyword; `behavior` is the trailing CASCADE/RESTRICT (null when absent).
@@ -805,8 +918,22 @@ export type FromItem =
   // `lateral` is present (and true) only for a `LATERAL (subquery)`.
   | { kind: "subquery"; query: Query; alias: string | null; columns?: string[]; lateral?: boolean }
   // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
-  // is the underlying `call` expression node.
-  | { kind: "function"; call: Expr; alias: string | null; columns?: string[]; lateral?: boolean }
+  // is the underlying `call` expression node. `ordinality` is present (and
+  // true) only for `WITH ORDINALITY`, as on a `rowsFrom` item.
+  | { kind: "function"; call: Expr; alias: string | null; columns?: string[]; lateral?: boolean; ordinality?: boolean }
+  // `ROWS FROM (f(…), g(…))` — several table functions zipped side by side,
+  // optionally LATERAL. `calls` are the underlying `call` expression nodes.
+  | {
+      kind: "rowsFrom";
+      calls: Expr[];
+      alias: string | null;
+      columns?: string[];
+      lateral?: boolean;
+      ordinality?: boolean;
+    }
+  // `alias` and `columns` are present only on a parenthesised join that carries
+  // an alias clause — `(a JOIN b ON …) AS x (c, d)`. A parenthesised join
+  // without one is the bare join node: the parentheses only group.
   | {
       kind: "join";
       joinType: FromItemJoinType;
@@ -814,6 +941,8 @@ export type FromItem =
       right: FromItem;
       on: Expr | null;
       using: string[] | null;
+      alias?: string;
+      columns?: string[];
     };
 
 // `using` is PG's sort-operator spelling (`ORDER BY a USING <`), which stands
@@ -851,19 +980,40 @@ export type Cte = {
   cycle?: CteCycle;
 };
 
+// One `column = value` item of a SET list, shared by UPDATE and ON CONFLICT DO
+// UPDATE.
+export type Assignment = { column: string; value: Expr };
+
+// `constraint` is present only for `ON CONFLICT ON CONSTRAINT name`, which
+// names the arbiter instead of listing its columns (`target` is then null).
 export type OnConflict = {
   target: string[] | null;
-  action: { kind: "nothing" } | { kind: "update"; set: { column: string; value: Expr }[]; where: Expr | null };
+  constraint?: string;
+  action: { kind: "nothing" } | { kind: "update"; set: Assignment[]; where: Expr | null };
 };
+
+// A bare DEFAULT standing for a column's default in an INSERT VALUES row. It
+// is a row item, not an expression. PG's a_expr also admits DEFAULT (e.g.
+// `UPDATE t SET a = DEFAULT`), but this grammar accepts it only here so far.
+export type DefaultValue = { kind: "default"; span: Span };
+
+// Which value wins for an identity column: `OVERRIDING {SYSTEM | USER} VALUE`.
+export type InsertOverriding = "system" | "user";
 
 // The three DML statements each accept a leading `WITH …` prefix. `with_` /
 // `recursive` are present only when one attaches (like FromItem's optional
-// `lateral`), so WITH-less DML keeps its original AST shape.
+// `lateral`), so WITH-less DML keeps its original AST shape. INSERT's `alias`
+// (`INSERT INTO t AS a`) and `overriding` follow the same rule.
 export type Insert = {
   kind: "insert";
   table: string[];
+  alias?: string;
   columns: string[] | null;
-  source: { kind: "values"; rows: Expr[][] } | { kind: "select"; query: Query };
+  overriding?: InsertOverriding;
+  source:
+    | { kind: "values"; rows: (Expr | DefaultValue)[][] }
+    | { kind: "select"; query: Query }
+    | { kind: "defaultValues" };
   onConflict: OnConflict | null;
   returning: SelectItem[] | null;
   with_?: Cte[];
@@ -875,7 +1025,7 @@ export type Update = {
   kind: "update";
   table: string[];
   alias: string | null;
-  set: { column: string; value: Expr }[];
+  set: Assignment[];
   from: FromItem[] | null;
   where: Expr | null;
   returning: SelectItem[] | null;
@@ -2421,7 +2571,7 @@ function atNotDeferrable(ctx: ParseContext<SqlTokenType>): boolean {
 }
 
 // `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. Only
-// UNIQUE, PRIMARY KEY and foreign keys read this tail, so PG's "misplaced
+// UNIQUE, PRIMARY KEY, foreign keys and EXCLUDE read this tail, so PG's "misplaced
 // DEFERRABLE clause" (`a int NOT NULL DEFERRABLE`) never parses.
 //
 // `not` is shared with a following column constraint's NOT NULL, so it is taken
@@ -2598,7 +2748,79 @@ const tableConstraintBody = custom<TableConstraint, SqlTokenType>(
   { expected: TABLE_CONSTRAINT_EXPECTED, first: dispatchFirst(TABLE_CONSTRAINTS) },
 );
 
-const namedConstraint = seq(skip(kw("constraint")), field("name", nameWord), field("body", tableConstraintBody)).map(
+// `element WITH operator`. PG's element is a column, a call or a parenthesised
+// expression; this takes any expression, more loosely. The expression grammar
+// never consumes the WITH. Per-element opclass / ASC / NULLS options and
+// `WITH OPERATOR(…)` are not parsed yet.
+const exclusionElement = seq(
+  field("expr", expression),
+  skip(kw("with")),
+  field(
+    "operator",
+    token("op").map((node) => node.value),
+  ),
+).map(({ expr, operator }, span): ExclusionElement => ({ expr, operator, span }));
+
+// At least one entry, as in PG: an empty `EXCLUDE ()` or `INCLUDE ()` is a
+// syntax error.
+const exclusionElements = sepBy(exclusionElement, P(","));
+const includeColumns = sepBy(nameWord, P(","));
+
+// True when the cursor sits on `EXCLUDE USING` or `EXCLUDE (` — neither of
+// which can begin a column definition, as `using` is reserved and `(` cannot
+// begin a type. The ident test keeps `exclude "using"` (a column of quoted type
+// "using") a column. The token after `exclude` is peeked plainly: a column
+// definition reads it next anyway, so a lex error there surfaces exactly as it
+// does after any other column name.
+function atExcludeConstraint(ctx: ParseContext<SqlTokenType>): boolean {
+  if (!ctx.is("ident", "exclude")) return false;
+  const next = ctx.peekAhead(1);
+  return (
+    next !== null && ((next.type === "ident" && next.value === "using") || (next.type === "punc" && next.value === "("))
+  );
+}
+
+// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WHERE
+// (pred)]` plus the DEFERRABLE/INITIALLY tail. Kept out of TABLE_CONSTRAINTS on
+// purpose: `exclude` is unreserved, and a key there would join tableItem's
+// value-specific first set and take the word away from columns (see tableItem).
+// PG's index parameters (`WITH (…)`, `USING INDEX TABLESPACE`) are not parsed
+// yet.
+const excludeBody = custom<ExcludeConstraint, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("exclude"));
+    const using = ctx.eat("ident", "using") !== null ? ctx.parse(nameWord) : null;
+    ctx.parse(punc("("));
+    const elements = ctx.parse(exclusionElements);
+    expectClose(ctx);
+    let include: string[] | null = null;
+    if (ctx.eat("ident", "include") !== null) {
+      ctx.parse(punc("("));
+      include = ctx.parse(includeColumns);
+      expectClose(ctx);
+    }
+    const where = ctx.eat("ident", "where") !== null ? ctx.parse(parenExpr) : null;
+    const attrs = parseConstraintAttrs(ctx, "table");
+    return {
+      kind: "exclude",
+      name: null,
+      using,
+      elements,
+      ...(include && { include }),
+      ...(where && { where }),
+      ...attrs,
+      span: ctx.spanFrom(start),
+    };
+  },
+  { expected: '"exclude"', first: [{ type: "ident", value: "exclude" }] },
+);
+
+// What follows `CONSTRAINT name`: a keyword-led constraint or EXCLUDE. Both may
+// commit here, as no column definition competes after CONSTRAINT.
+const constraintBody = oneOf(tableConstraintBody, excludeBody);
+
+const namedConstraint = seq(skip(kw("constraint")), field("name", nameWord), field("body", constraintBody)).map(
   ({ name, body }): TableConstraint => ({ ...body, name }),
 );
 
@@ -2609,6 +2831,15 @@ const columnDef = seq(
   field("dataType", typeRef),
   field("constraints", many(columnConstraint)),
 ).map(({ name, dataType, constraints }, span): ColumnDef => ({ kind: "column", name, dataType, constraints, span }));
+
+// A table item led by `exclude`: an EXCLUDE constraint when the lookahead says
+// so, else a column called `exclude`. Decided by peeking rather than by
+// `attempt`, so a malformed EXCLUDE reports its own error — a backtrack would
+// drop it, and a lex error inside it for good, then blame the column instead.
+const excludeItem = custom<ExcludeConstraint | ColumnDef, SqlTokenType>(
+  (ctx) => (atExcludeConstraint(ctx) ? ctx.parse(excludeBody) : ctx.parse(columnDef)),
+  { expected: '"exclude"', first: [{ type: "ident", value: "exclude" }] },
+);
 
 // The properties a LIKE option may copy, in the order PG's TableLikeOption
 // lists them — which is also the order the "Expected …" message names them in.
@@ -2647,18 +2878,21 @@ const likeBody = custom<LikeTable, SqlTokenType>(
   { expected: '"like"', first: [{ type: "ident", value: "like" }] },
 );
 
-// A table body item: a table constraint or a LIKE clause (both keyword-led, a
-// value-specific first set) or a column definition (name-led, type-only). oneOf's
+// A table body item: a table constraint, a LIKE clause or an `exclude`-led item
+// (an EXCLUDE, or a column of that name) — all keyword-led, a value-specific
+// first set — or a column definition (name-led, type-only). oneOf's
 // value-specific-first dispatch picks the constraint on `primary`/`unique`/…,
-// LIKE on `like`, and the column on any other name. A value-specific key wins
-// even over a word that could be a column name, so every key ahead of
-// `columnDef` takes its word away from columns; that is harmless only because
-// each is reserved anyway — `like` for exactly this reason (see RESERVED). A
-// key that is a legal column name needs a backtracking branch instead.
+// LIKE on `like`, excludeItem on `exclude`, and the column on any other name. A
+// value-specific key wins even over a word that could be a column name, so a
+// key ahead of `columnDef` takes its word away from columns. For the
+// constraint and LIKE keys that is harmless only because each is reserved
+// anyway — `like` for exactly this reason (see RESERVED). A key that is a legal
+// column name must parse that column itself, as excludeItem does for `exclude
+// text` and `exclude "using"`.
 //
 // Branch order is load-bearing: oneOf joins its `expected` in declaration order,
 // which the diagnostics golden pins.
-const tableItem = oneOf(tableConstraint, likeBody, columnDef);
+const tableItem = oneOf(tableConstraint, likeBody, excludeItem, columnDef);
 
 // --- statements ---
 
@@ -2780,17 +3014,18 @@ const relationOptions = custom<RelationOption[], SqlTokenType>(
 
 // The storage clauses, in the fixed order PG's CreateStmt gives them: `[WITH
 // (option, …)] [ON COMMIT {PRESERVE ROWS | DELETE ROWS | DROP}] [TABLESPACE
-// name]`. CREATE TABLE takes them after its element list (and after INHERITS,
-// below), CREATE TABLE AS ahead of its AS. Written out of order they are an
-// error, as in PG. Every key is set only when its clause is written, so a table
-// with none of them keeps exactly the node it had before they existed.
+// name]`. CREATE TABLE takes them last — after its element list, INHERITS and
+// PARTITION BY (below), or after a partition's bound and PARTITION BY — and
+// CREATE TABLE AS ahead of its AS. Written out of order they are an error, as
+// in PG. Every key is set only when its clause is written, so a table with none
+// of them keeps exactly the node it had before they existed.
 //
-// The lead words take no name away: `with` and `on` are reserved, and in either
-// position nothing else but `;` or `AS` could follow. PG accepts ON COMMIT on
-// any table in its grammar and rejects it on a permanent one only in analysis;
-// this parser has no analysis pass, so it accepts it everywhere.
+// The lead words take no name away: `with` and `on` are reserved, and in any of
+// these positions nothing else but `;` or `AS` could follow. PG accepts ON
+// COMMIT on any table in its grammar and rejects it on a permanent one only in
+// analysis; this parser has no analysis pass, so it accepts it everywhere.
 type StorageClauses = Pick<CreateTableAs, "options" | "onCommit" | "tablespace">;
-type TableClauses = Pick<Extract<Stmt, { kind: "createTable" }>, "inherits"> & StorageClauses;
+type TableClauses = Pick<Extract<Stmt, { kind: "createTable" }>, "inherits" | "partitionBy"> & StorageClauses;
 
 const onCommitAction = oneOf(
   kwseq("preserve", "rows").map(() => "preserveRows" as const),
@@ -2809,9 +3044,221 @@ function parseStorageClauses(ctx: ParseContext<SqlTokenType>): StorageClauses {
   return clauses;
 }
 
-// `[INHERITS (parent, …)]` and then the storage clauses — what this grammar
-// takes after a table's element list. PG also allows `PARTITION BY …` and
-// `USING method` between INHERITS and WITH; neither is parsed yet.
+// --- declarative partitioning ---
+//
+// Every word here is matched by value where no name could stand — past a
+// table's name or its element list's `)`, or inside a clause already begun —
+// so none of them is reserved, and each stays a name everywhere else.
+
+// PG reads the strategy as a ColId and compares it ignoring case, so a quoted
+// `"RANGE"` names it too.
+const PARTITION_STRATEGIES = ["range", "list", "hash"] as const;
+
+function partitionStrategy(ctx: ParseContext<SqlTokenType>): PartitionSpec["strategy"] {
+  const tok = ctx.peek();
+  const word = tok?.type === "ident" || tok?.type === "qident" ? tok.value.toLowerCase() : null;
+  const strategy = PARTITION_STRATEGIES.find((s) => s === word);
+  if (strategy === undefined) {
+    return ctx.croak(`Expected ${quoteList([...PARTITION_STRATEGIES])} but found ${describeFound(tok)}`);
+  }
+  ctx.next();
+  return strategy;
+}
+
+// The expression forms PG's `part_elem` takes unparenthesised: a column (its
+// ColId, so one part) or a function call, the special-syntax ones (EXTRACT,
+// CURRENT_DATE, …) included, as PG's func_expr_windowless includes them. CAST
+// is one of those too, but its node is a `::` cast's as well, so partitionKey
+// tells the two apart by the lead word instead.
+const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
+  "name",
+  "call",
+  "extract",
+  "substring",
+  "position",
+  "trim",
+  "overlay",
+  "sqlValueFunction",
+]);
+
+// `column | func(…) | (expr)`, then `[COLLATE collation] [opclass]`. A bare key
+// goes through the full expression rule, whose COLLATE postfix takes the
+// collation; it is lifted off the node here, since in PG it belongs to the key,
+// not the expression. Anything else unparenthesised — `a + b`, `t.a`, `a::int`
+// — is PG's syntax error, and so is it here. A `CAST(…)` key is a cast node led
+// by `cast` whose operand starts after it: `CAST(a AS int)::text` is led by
+// `cast` too, but its outer cast's operand starts where it does.
+function partitionKey(ctx: ParseContext<SqlTokenType>): PartitionKey {
+  const start = ctx.position();
+  let expr: Expr;
+  let collate: string[] | null = null;
+  if (ctx.is("punc", "(")) {
+    expr = ctx.parse(parenExpr);
+    if (ctx.eat("ident", "collate") !== null) collate = ctx.parse(qualName);
+  } else {
+    const castCall = ctx.is("ident", "cast");
+    expr = ctx.parse(expression);
+    if (expr.kind === "collate") {
+      collate = expr.collation;
+      expr = expr.expr;
+    }
+    const bare =
+      expr.kind === "cast"
+        ? castCall &&
+          (expr.expr.span.start.row !== expr.span.start.row || expr.expr.span.start.col !== expr.span.start.col)
+        : BARE_PARTITION_KEYS.has(expr.kind) && !(expr.kind === "name" && expr.parts.length > 1);
+    if (!bare) {
+      return ctx.croak("a partition key expression must be parenthesised", start, ctx.lastEnd());
+    }
+  }
+  // An opclass is a name, so a reserved word (a stray `DESC`, say) is left for
+  // the list's own "Expected …" rather than read as one.
+  const next = ctx.peek();
+  const opclass =
+    next?.type === "qident" || (next?.type === "ident" && !RESERVED.has(next.value)) ? ctx.parse(qualName) : null;
+  return { expr, ...(collate && { collate }), ...(opclass && { opclass }), span: ctx.spanFrom(start) };
+}
+
+// `[PARTITION BY {RANGE | LIST | HASH} (key, …)]`. `partition` can only lead
+// this clause here: after the element list (or a partition's bound) nothing
+// but a clause or `;` follows.
+function parsePartitionBy(ctx: ParseContext<SqlTokenType>): Pick<TableClauses, "partitionBy"> {
+  if (!ctx.is("ident", "partition")) return {};
+  const start = ctx.position();
+  ctx.parse(kwseq("partition", "by"));
+  const strategy = partitionStrategy(ctx);
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const keys: PartitionKey[] = [];
+  do {
+    keys.push(partitionKey(ctx));
+  } while (ctx.eat("punc", ",") !== null);
+  expectClose(ctx);
+  // PG's analysis-time check, made here as hashBound's are.
+  if (strategy === "list" && keys.length > 1) {
+    ctx.croak('cannot use "list" partition strategy with more than one column', start, ctx.lastEnd());
+  }
+  return { partitionBy: { strategy, keys, span: ctx.spanFrom(start) } };
+}
+
+// `(datum, …)` of a range bound. MINVALUE / MAXVALUE are read the way PG reads
+// them: as a one-part column reference, recognised by name afterwards. As in
+// PG's validateInfiniteBounds, only the same word may follow either one.
+function rangeDatums(ctx: ParseContext<SqlTokenType>): PartitionRangeDatum[] {
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const datums: PartitionRangeDatum[] = [];
+  do {
+    const e = ctx.parse(expression);
+    const word = e.kind === "name" && e.parts.length === 1 ? e.parts[0] : null;
+    const datum: PartitionRangeDatum = word === "minvalue" || word === "maxvalue" ? { kind: word, span: e.span } : e;
+    const prev = datums[datums.length - 1];
+    if ((prev?.kind === "minvalue" || prev?.kind === "maxvalue") && datum.kind !== prev.kind) {
+      const label = prev.kind.toUpperCase();
+      ctx.croak(`every bound following ${label} must also be ${label}`, e.span.start, e.span.end);
+    }
+    datums.push(datum);
+  } while (ctx.eat("punc", ",") !== null);
+  expectClose(ctx);
+  return datums;
+}
+
+// `WITH (MODULUS n, REMAINDER m)` — read as a generic option list, then held to
+// what PG's PartitionBoundSpec action enforces for a hash bound: both names,
+// each once, nothing else. The value checks, `remainder < modulus` among them, are PG's
+// analysis-time ones; with no analysis pass, this is the only place they can be
+// made. PG takes each value as an unsigned int4 literal; the option list keeps
+// only the number, so `4.0` and `4e0` pass for 4 here, but the int4 range holds.
+const INT4_MAX = 2 ** 31 - 1;
+
+function hashBound(ctx: ParseContext<SqlTokenType>, start: Position): PartitionBound {
+  const options = ctx.parse(relationOptions);
+  const seen: { modulus?: number; remainder?: number } = {};
+  for (const opt of options) {
+    const label = opt.namespace !== undefined ? `${opt.namespace}.${opt.name}` : opt.name;
+    if (opt.namespace !== undefined || (opt.name !== "modulus" && opt.name !== "remainder")) {
+      return ctx.croak(`unrecognized hash partition bound specification "${label}"`, opt.span.start, opt.span.end);
+    }
+    if (seen[opt.name] !== undefined) {
+      return ctx.croak(`${opt.name} for hash partition provided more than once`, opt.span.start, opt.span.end);
+    }
+    const value = opt.value?.kind === "number" ? opt.value.value : null;
+    // What stands in for PG's Iconst syntax is checked here, in source order;
+    // a zero modulus is an analysis-time error, so it waits for the loop's end.
+    if (value === null || !Number.isInteger(value) || value < 0) {
+      const bound = opt.name === "modulus" ? "greater than zero" : "greater than or equal to zero";
+      return ctx.croak(
+        `${opt.name} for hash partition must be an integer value ${bound}`,
+        opt.span.start,
+        opt.span.end,
+      );
+    }
+    if (value > INT4_MAX) {
+      return ctx.croak(`${opt.name} for hash partition is out of range for type integer`, opt.span.start, opt.span.end);
+    }
+    seen[opt.name] = value + 0; // `-0` is 0
+  }
+  for (const key of ["modulus", "remainder"] as const) {
+    if (seen[key] === undefined) ctx.croak(`${key} for hash partition must be specified`, start, ctx.lastEnd());
+  }
+  if (seen.modulus === 0) {
+    ctx.croak("modulus for hash partition must be an integer value greater than zero", start, ctx.lastEnd());
+  }
+  if (seen.remainder! >= seen.modulus!) {
+    ctx.croak("remainder for hash partition must be less than modulus", start, ctx.lastEnd());
+  }
+  return { kind: "hash", modulus: seen.modulus!, remainder: seen.remainder!, span: ctx.spanFrom(start) };
+}
+
+// `FOR VALUES {IN (…) | FROM (…) TO (…) | WITH (…)} | DEFAULT`. The WITH here
+// is the bound's own, read before any storage clause could claim it.
+function parsePartitionBound(ctx: ParseContext<SqlTokenType>): PartitionBound {
+  const start = ctx.position();
+  if (ctx.eat("ident", "default") !== null) return { kind: "default", span: ctx.spanFrom(start) };
+  if (!ctx.is("ident", "for")) {
+    return ctx.croak(`Expected ${quoteList(["for values", "default"])} but found ${describeFound(ctx.peek())}`);
+  }
+  ctx.parse(kwseq("for", "values"));
+  if (ctx.eat("ident", "in") !== null) {
+    if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+    ctx.next(); // "("
+    const values: Expr[] = [];
+    do {
+      values.push(ctx.parse(expression));
+    } while (ctx.eat("punc", ",") !== null);
+    expectClose(ctx);
+    return { kind: "list", values, span: ctx.spanFrom(start) };
+  }
+  if (ctx.eat("ident", "from") !== null) {
+    const from = rangeDatums(ctx);
+    ctx.parse(kw("to"));
+    return { kind: "range", from, to: rangeDatums(ctx), span: ctx.spanFrom(start) };
+  }
+  if (ctx.eat("ident", "with") !== null) return hashBound(ctx, start);
+  return ctx.croak(`Expected ${quoteList(["in", "from", "with"])} but found ${describeFound(ctx.peek())}`);
+}
+
+// A `PARTITION OF` element: a table constraint, or a column the parent already
+// types, given `[WITH OPTIONS]` and constraints only. Dispatched as tableItem
+// is — the constraint's lead words first, any other name a column.
+const columnOptions = custom<ColumnOptions, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const name = ctx.parse(nameWord);
+    // `with` is reserved and leads no column constraint, so it can only be this.
+    const withOptions = ctx.is("ident", "with");
+    if (withOptions) ctx.parse(kwseq("with", "options"));
+    const constraints = ctx.parse(many(columnConstraint));
+    return { kind: "columnOptions", name, ...(withOptions && { withOptions }), constraints, span: ctx.spanFrom(start) };
+  },
+  { expected: nameWord.expected(), first: nameWord.first() },
+);
+
+const partitionItem = oneOf(tableConstraint, columnOptions);
+
+// `[INHERITS (parent, …)] [PARTITION BY …]` and then the storage clauses — what
+// this grammar takes after a table's element list. PG also allows `USING
+// method` between PARTITION BY and WITH; that is not parsed yet.
 function parseTableClauses(ctx: ParseContext<SqlTokenType>): TableClauses {
   const clauses: TableClauses = {};
   if (ctx.eat("ident", "inherits") !== null) {
@@ -2824,7 +3271,7 @@ function parseTableClauses(ctx: ParseContext<SqlTokenType>): TableClauses {
     expectClose(ctx);
     clauses.inherits = parents;
   }
-  return { ...clauses, ...parseStorageClauses(ctx) };
+  return { ...clauses, ...parsePartitionBy(ctx), ...parseStorageClauses(ctx) };
 }
 
 // A CTAS column-name list `(a, b) [storage clauses] AS` — bare names, ending in
@@ -2872,6 +3319,37 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
       span: ctx.spanFrom(start),
     };
   }
+  // `CREATE TABLE name PARTITION OF parent [(items)] bound [PARTITION BY …]
+  // [storage clauses]`. The element list is optional, and INHERITS is not
+  // allowed, as in PG.
+  if (ctx.is("ident", "partition")) {
+    ctx.parse(kwseq("partition", "of"));
+    const parent = ctx.parse(qualName);
+    // Unlike the classic form's, this list may not be empty: `()` croaks as the
+    // missing first item.
+    // The peek goes through peekOrReport, and only on a `(`: lexing is lazy, and
+    // a bad first item must reach delimited()'s recovery rather than escape it.
+    const close = ctx.is("punc", "(") ? peekOrReport(ctx, 1) : null;
+    if (close?.type === "punc" && close.value === ")") {
+      ctx.next(); // "("
+      ctx.parse(partitionItem);
+    }
+    const items = ctx.is("punc", "(")
+      ? ctx.parse(delimited(P("("), P(")"), P(","), partitionItem, { interleaved: true, recover: true }))
+      : [];
+    const partitionOf = { parent, bound: parsePartitionBound(ctx) };
+    return {
+      kind: "createTable",
+      ifNotExists,
+      name,
+      items,
+      partitionOf,
+      ...parsePartitionBy(ctx),
+      ...parseStorageClauses(ctx),
+      ...(modifiers.length > 0 && { modifiers }),
+      span: ctx.spanFrom(start),
+    };
+  }
   // `CREATE TABLE name (cols) [storage clauses] AS query` — the `(cols) … AS`
   // prefix backtracks (via ctasColumns) when the `(` really opens a
   // column-definition list.
@@ -2902,6 +3380,46 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
   };
 }
 
+// `NULLS FIRST | NULLS LAST`. Only a `nulls` with one of the two after it starts
+// the clause, so `nulls` alone stays an operator-class name, as in PG.
+function isNullsOrder(ctx: ParseContext<SqlTokenType>): boolean {
+  const after = ctx.peekAhead(1);
+  return ctx.is("ident", "nulls") && after?.type === "ident" && (after.value === "first" || after.value === "last");
+}
+
+const nullsPosition = oneOf(kw("first"), kw("last")).map((n) => n.value as "first" | "last");
+
+// One index column (see IndexColumn). A local rule rather than an edit to
+// exprList, which other statements share. The operator class is any unreserved
+// or quoted name after the expression: `asc` and `desc` are reserved, so they
+// can never be read as one, and `nulls` is not one only when FIRST or LAST
+// follows it (see isNullsOrder).
+const indexColumn = custom<IndexColumn, SqlTokenType>(
+  (ctx) => {
+    const expr = ctx.parse(expression);
+    const tok = ctx.peek();
+    const hasOpclass =
+      tok !== null &&
+      (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value) && !isNullsOrder(ctx)));
+    const opclass = hasOpclass ? ctx.parse(qualName) : null;
+    const opclassOptions = opclass !== null && ctx.is("punc", "(") ? ctx.parse(relationOptions) : null;
+    const dir = ctx.eat("ident", "asc") !== null ? "asc" : ctx.eat("ident", "desc") !== null ? "desc" : null;
+    let nulls: "first" | "last" | null = null;
+    if (ctx.eat("ident", "nulls") !== null) {
+      nulls = ctx.parse(nullsPosition);
+    }
+    return {
+      expr,
+      ...(opclass !== null && { opclass }),
+      ...(opclassOptions !== null && { opclassOptions }),
+      ...(dir !== null && { dir }),
+      ...(nulls !== null && { nulls }),
+    };
+  },
+  { expected: expression.expected(), first: expression.first() },
+);
+const indexColumns = delimited(P("("), P(")"), P(","), indexColumn, { interleaved: true });
+
 const createIndexRest = seq(
   field(
     "unique",
@@ -2924,12 +3442,15 @@ const createIndexRest = seq(
   skip(kw("on")),
   field("table", qualName),
   field("using", optional(seq(skip(kw("using")), field("m", nameWord)).map((s) => s.m))),
-  field("columns", exprList),
+  field("columns", indexColumns),
   // `INCLUDE (col, …)` covering columns — plain names, kept null when absent.
   field("include", optional(seq(skip(kw("include")), field("cols", columnList)).map((s) => s.cols))),
+  // `WITH (storage_parameter = value, …)`, omitted when absent. `with` is
+  // reserved, so it cannot be the start of anything else here.
+  field("options", optional(seq(skip(kw("with")), field("o", relationOptions)).map((s) => s.o))),
   field("where", optional(seq(skip(kw("where")), field("e", expression)).map((s) => s.e))),
 ).map(
-  ({ unique, concurrently, ifNotExists, name, table, using, columns, include, where }, span): Stmt => ({
+  ({ unique, concurrently, ifNotExists, name, table, using, columns, include, options, where }, span): Stmt => ({
     kind: "createIndex",
     unique,
     concurrently,
@@ -2939,6 +3460,7 @@ const createIndexRest = seq(
     using,
     columns,
     include,
+    ...(options !== null && { options }),
     where,
     span,
   }),
@@ -3553,6 +4075,13 @@ function parseAddColumn(ctx: ParseContext<SqlTokenType>): AlterAction {
   return { kind: "addColumn", ifNotExists, column: ctx.parse(columnDef) };
 }
 
+// `OWNER TO role` — ALTER TABLE's action, and the same words on every other
+// ALTER target that has an owner.
+function parseOwnerTo(ctx: ParseContext<SqlTokenType>): AlterOwnerTo {
+  ctx.parse(kwseq("owner", "to"));
+  return { kind: "ownerTo", owner: ctx.parse(nameWord) };
+}
+
 // The ALTER TABLE actions. Dispatch peeks; each handler consumes its own lead
 // word and owns whatever lookahead its own shapes need — `ADD [COLUMN] …` vs
 // `ADD [CONSTRAINT name] …` vs a bare table constraint all begin with `add`, and
@@ -3569,7 +4098,7 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       if (after?.value === "constraint") {
         ctx.next(); // CONSTRAINT
         const name = ctx.parse(nameWord);
-        return { kind: "addConstraint", name, constraint: ctx.parse(tableConstraintBody) };
+        return { kind: "addConstraint", name, constraint: ctx.parse(constraintBody) };
       }
       // A bare value test, not a rule: these four are reserved, so an *unquoted*
       // one is never the name of a column being added. A quoted `"primary"` is a
@@ -3577,6 +4106,11 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       // with the `column`/`constraint` tests above, that this keeps as it was.
       if (after !== null && Object.hasOwn(TABLE_CONSTRAINTS, after.value)) {
         return { kind: "addConstraint", name: null, constraint: ctx.parse(tableConstraintBody) };
+      }
+      // `exclude` is unreserved, so it joins the list above only through a
+      // lookahead (see atExcludeConstraint); `ADD exclude text` stays a column.
+      if (atExcludeConstraint(ctx)) {
+        return { kind: "addConstraint", name: null, constraint: ctx.parse(excludeBody) };
       }
       return parseAddColumn(ctx);
     },
@@ -3635,12 +4169,7 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       return { kind: "renameColumn", from, to: ctx.parse(nameWord) };
     },
   },
-  owner: {
-    parse: (ctx) => {
-      ctx.parse(kwseq("owner", "to"));
-      return { kind: "ownerTo", owner: ctx.parse(nameWord) };
-    },
-  },
+  owner: { parse: parseOwnerTo },
   // `REPLICA IDENTITY {DEFAULT | FULL | NOTHING | USING INDEX name}`.
   replica: {
     parse: (ctx) => {
@@ -3676,37 +4205,209 @@ const SOLO_ALTER_ACTIONS: Partial<Record<AlterAction["kind"], string>> = {
   renameTable: "RENAME",
 };
 
-// `TABLE [IF EXISTS] name action[, …]` — TABLE consumed here, ALTER by the
-// caller, whose `start` the node spans from. IF EXISTS is decided by peeking,
-// like ADD's IF NOT EXISTS: `exists` leads no action, so a table called `if`
-// is never followed by it.
-function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
-  ctx.next(); // TABLE
+// An optional `IF EXISTS`, decided by peeking like ADD's IF NOT EXISTS: `exists`
+// leads no action, so an object called `if` is never followed by it.
+function parseIfExists(ctx: ParseContext<SqlTokenType>): boolean {
   const next = ctx.peekAhead(1);
   const ifExists = ctx.is("ident", "if") && next?.type === "ident" && next.value === "exists";
   if (ifExists) ctx.parse(kwseq("if", "exists"));
+  return ifExists;
+}
+
+// `TABLE [IF EXISTS] name action[, …]` — TABLE consumed here, ALTER by the
+// caller, whose `start` the node spans from.
+function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // TABLE
+  const ifExists = parseIfExists(ctx);
   const name = ctx.parse(qualName);
-  const actions: AlterAction[] = [];
+  const actions = parseActionList(ctx, "TABLE", (c) => c.parse(alterAction), ALTER_ACTIONS, SOLO_ALTER_ACTIONS);
+  return { kind: "alterTable", ifExists, name, actions, span: ctx.spanFrom(start) };
+}
+
+// The `action[, …]` list of ALTER TABLE and ALTER INDEX, whose lead words are
+// `map`'s keys. A `solo` kind is fine alone and rejected beside any other.
+function parseActionList<A extends { kind: string }>(
+  ctx: ParseContext<SqlTokenType>,
+  target: string,
+  parseAction: (ctx: ParseContext<SqlTokenType>) => A,
+  map: DispatchMap<A>,
+  solo: Partial<Record<A["kind"], string>>,
+): A[] {
+  const actions: A[] = [];
   do {
     const actionStart = ctx.position();
-    const action = ctx.parse(alterAction);
-    const solo = SOLO_ALTER_ACTIONS[action.kind];
-    if (solo !== undefined) {
+    const action = parseAction(ctx);
+    const label = solo[action.kind as A["kind"]];
+    if (label !== undefined) {
       // Rejected beside another action: one already parsed, or one whose lead
       // word follows the comma after it. A comma followed by no action word is
       // no second action, so it is left to fail as the stray comma it is.
-      const leadsOn = ctx.is("punc", ",") && lookup(ALTER_ACTIONS, ctx.peekAhead(1)) !== undefined;
+      const leadsOn = ctx.is("punc", ",") && lookup(map, ctx.peekAhead(1)) !== undefined;
       if (actions.length > 0 || leadsOn) {
         const { end } = ctx.spanFrom(actionStart);
-        ctx.croak(`${solo} cannot be combined with other ALTER TABLE actions`, actionStart, end);
+        ctx.croak(`${label} cannot be combined with other ALTER ${target} actions`, actionStart, end);
       }
       actions.push(action);
       break;
     }
     actions.push(action);
   } while (ctx.eat("punc", ",") !== null);
-  return { kind: "alterTable", ifExists, name, actions, span: ctx.spanFrom(start) };
+  return actions;
 }
+
+// The `TO name` of a RENAME whose RENAME has been consumed. `others` are the
+// words the caller already tried there, named in the croak beside TO.
+function parseTo(ctx: ParseContext<SqlTokenType>, ...others: string[]): AlterRenameTo {
+  if (ctx.eat("ident", "to") === null) {
+    ctx.croak(`Expected ${quoteList([...others, "to"])} but found ${describeFound(ctx.peek())}`);
+  }
+  return { kind: "rename", to: ctx.parse(nameWord) };
+}
+
+// `RENAME TO name` and `SET SCHEMA name`, the actions most ALTER targets share.
+// SET SCHEMA is entered past its SET, which leads other actions too.
+function parseRenameTo(ctx: ParseContext<SqlTokenType>): AlterRenameTo {
+  ctx.next(); // RENAME
+  return parseTo(ctx);
+}
+
+function parseSetSchema(ctx: ParseContext<SqlTokenType>): AlterSetSchema {
+  ctx.parse(kw("schema"));
+  return { kind: "setSchema", schema: ctx.parse(nameWord) };
+}
+
+// A map per target; only INDEX takes a list, as ALTER TABLE does. Each croak is
+// the comma form over its own keys, as ALTER_ACTIONS' is.
+const SCHEMA_ACTIONS: DispatchMap<AlterSchemaAction> = {
+  rename: { parse: parseRenameTo },
+  owner: { parse: parseOwnerTo },
+};
+
+// After a DOMAIN action's lead word, choices fall on reserved words or a fixed
+// slot, bar DROP CONSTRAINT's IF EXISTS, which is peeked as ALTER INDEX's is.
+const DOMAIN_ACTIONS: DispatchMap<AlterDomainAction> = {
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      if (ctx.eat("ident", "default") !== null) return { kind: "setDefault", expr: ctx.parse(expression) };
+      if (ctx.is("ident", "not")) {
+        ctx.parse(kwseq("not", "null"));
+        return { kind: "setNotNull" };
+      }
+      if (!ctx.is("ident", "schema")) {
+        ctx.croak(`Expected ${quoteList(["default", "not", "schema"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return parseSetSchema(ctx);
+    },
+  },
+  drop: {
+    parse: (ctx) => {
+      ctx.next(); // DROP
+      if (ctx.eat("ident", "default") !== null) return { kind: "dropDefault" };
+      if (ctx.is("ident", "not")) {
+        ctx.parse(kwseq("not", "null"));
+        return { kind: "dropNotNull" };
+      }
+      if (ctx.eat("ident", "constraint") === null) {
+        ctx.croak(`Expected ${quoteList(["default", "not", "constraint"])} but found ${describeFound(ctx.peek())}`);
+      }
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(nameWord);
+      return { kind: "dropConstraint", ifExists, name, behavior: ctx.parse(dropBehavior) };
+    },
+  },
+  add: {
+    parse: (ctx) => {
+      ctx.next(); // ADD
+      const name = ctx.eat("ident", "constraint") !== null ? ctx.parse(nameWord) : null;
+      ctx.parse(kw("check"));
+      const constraint = { kind: "check" as const, name, expr: ctx.parse(parenExpr) };
+      const notValid = ctx.is("ident", "not");
+      if (notValid) ctx.parse(kwseq("not", "valid"));
+      return { kind: "addConstraint", constraint, notValid };
+    },
+  },
+  rename: {
+    parse: (ctx) => {
+      ctx.next(); // RENAME
+      if (ctx.eat("ident", "constraint") === null) return parseTo(ctx, "constraint");
+      const from = ctx.parse(nameWord);
+      ctx.parse(kw("to"));
+      return { kind: "renameConstraint", from, to: ctx.parse(nameWord) };
+    },
+  },
+  owner: { parse: parseOwnerTo },
+  validate: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("validate", "constraint"));
+      return { kind: "validateConstraint", name: ctx.parse(nameWord) };
+    },
+  },
+};
+
+// No choice after a TYPE action's lead word is against a bare name: RENAME's
+// VALUE vs TO included, since no RENAME form takes one there.
+const TYPE_ACTIONS: DispatchMap<AlterTypeAction> = {
+  add: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("add", "value"));
+      const ifNotExists = ctx.is("ident", "if");
+      if (ifNotExists) ctx.parse(kwseq("if", "not", "exists"));
+      const value = ctx.parse(strValue);
+      const placement = ctx.eat("ident", "before") ?? ctx.eat("ident", "after");
+      const position =
+        placement === null ? null : { placement: placement.value as "before" | "after", value: ctx.parse(strValue) };
+      return { kind: "addValue", ifNotExists, value, position };
+    },
+  },
+  rename: {
+    parse: (ctx) => {
+      ctx.next(); // RENAME
+      if (ctx.eat("ident", "value") === null) return parseTo(ctx, "value");
+      const from = ctx.parse(strValue);
+      ctx.parse(kw("to"));
+      return { kind: "renameValue", from, to: ctx.parse(strValue) };
+    },
+  },
+  owner: { parse: parseOwnerTo },
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      return parseSetSchema(ctx);
+    },
+  },
+};
+
+// RESET shares SET's option-list rule and, as PG does, refuses a value in it.
+const INDEX_ACTIONS: DispatchMap<AlterIndexAction> = {
+  rename: { parse: parseRenameTo },
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
+      if (ctx.eat("ident", "tablespace") === null) {
+        ctx.croak(`Expected ${quoteList(["(", "tablespace"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return { kind: "setTablespace", tablespace: ctx.parse(nameWord) };
+    },
+  },
+  reset: {
+    parse: (ctx) => {
+      ctx.next(); // RESET
+      const options = ctx.parse(relationOptions);
+      const valued = options.find((option) => option.value !== null);
+      if (valued !== undefined) {
+        ctx.croak("RESET must not include values for parameters", valued.span.start, valued.span.end);
+      }
+      return { kind: "resetOptions", options };
+    },
+  },
+};
+
+const SCHEMA_ACTION_EXPECTED = keyList(SCHEMA_ACTIONS);
+const DOMAIN_ACTION_EXPECTED = keyList(DOMAIN_ACTIONS);
+const TYPE_ACTION_EXPECTED = keyList(TYPE_ACTIONS);
+const INDEX_ACTION_EXPECTED = keyList(INDEX_ACTIONS);
 
 // The ALTER targets. Dispatch peeks, as PLAIN_CREATE's does: each handler
 // consumes its own lead word, and is handed the position before ALTER so its
@@ -3714,6 +4415,40 @@ function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt 
 // oneOf, so it takes the comma form over the keys, as ALTER_ACTIONS' does.
 const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
   table: { parse: alterTableRest },
+  schema: {
+    parse: (ctx, start) => {
+      ctx.next(); // SCHEMA
+      const name = ctx.parse(nameWord);
+      const action = dispatch(SCHEMA_ACTIONS, SCHEMA_ACTION_EXPECTED, ctx);
+      return { kind: "alterSchema", name, action, span: ctx.spanFrom(start) };
+    },
+  },
+  domain: {
+    parse: (ctx, start) => {
+      ctx.next(); // DOMAIN
+      const name = ctx.parse(qualName);
+      const action = dispatch(DOMAIN_ACTIONS, DOMAIN_ACTION_EXPECTED, ctx);
+      return { kind: "alterDomain", name, action, span: ctx.spanFrom(start) };
+    },
+  },
+  type: {
+    parse: (ctx, start) => {
+      ctx.next(); // TYPE
+      const name = ctx.parse(qualName);
+      const action = dispatch(TYPE_ACTIONS, TYPE_ACTION_EXPECTED, ctx);
+      return { kind: "alterType", name, action, span: ctx.spanFrom(start) };
+    },
+  },
+  index: {
+    parse: (ctx, start) => {
+      ctx.next(); // INDEX
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(qualName);
+      const parseAction = (c: ParseContext<SqlTokenType>) => dispatch(INDEX_ACTIONS, INDEX_ACTION_EXPECTED, c);
+      const actions = parseActionList(ctx, "INDEX", parseAction, INDEX_ACTIONS, { rename: "RENAME" });
+      return { kind: "alterIndex", ifExists, name, actions, span: ctx.spanFrom(start) };
+    },
+  },
 };
 const ALTER_TARGET_EXPECTED = keyList(ALTER_TARGETS);
 
@@ -3726,7 +4461,7 @@ const alterStmt = custom<Stmt, SqlTokenType>(
   { expected: '"alter"', first: [{ type: "ident", value: "alter" }] },
 );
 
-// CASCADE / RESTRICT drop behavior, shared by DROP and TRUNCATE (null when absent).
+// CASCADE / RESTRICT drop behavior, shared by DROP, TRUNCATE and ALTER DOMAIN (null when absent).
 const dropBehavior = optional(oneOf(kw("cascade"), kw("restrict"))).map(
   (n) => (n?.value ?? null) as "cascade" | "restrict" | null,
 );
@@ -4176,10 +4911,9 @@ const asAlias = custom<string | null, SqlTokenType>(
 );
 
 const eq = token("op", { values: ["="] });
-const assignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(({ column, value }) => ({
-  column,
-  value,
-}));
+const assignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(
+  ({ column, value }): Assignment => ({ column, value }),
+);
 const setAssignments = seq(skip(kw("set")), field("items", sepBy(assignment, P(",")))).map((s) => s.items);
 
 const whereClause = seq(skip(kw("where")), field("e", expression)).map((s) => s.e);
@@ -4470,16 +5204,176 @@ function tableTail(ctx: ParseContext<SqlTokenType>, name: string[], only: boolea
   };
 }
 
-// A single FROM entry: a (LATERAL) subquery, a (LATERAL) table function, or a
-// table name — optionally ONLY — with an optional TABLESAMPLE. A leading `(` is
-// always a subquery (parenthesised joins are out of scope); after a dotted name,
-// a `(` opens a table-function call. `lateral` and `only` are reserved, so a
-// preceding table never eats either as an alias. ONLY takes only a table name,
-// bare or parenthesised (`ONLY (t)`) — PG's `relation_expr` — so a `(` right
-// after the word is that name's parenthesis, never a subquery, and no call
-// parenthesis is read after the name. The `only`/`columns`/`lateral`/
-// `tablesample` keys are omitted when absent so ordinary items keep their prior
-// shape.
+// A table-function call in FROM — `name(arg, …)`, positioned on the name.
+function parseFromCall(ctx: ParseContext<SqlTokenType>): Expr {
+  const start = ctx.position();
+  const nameParts = ctx.parse(qualName);
+  return parseFromCallArgs(ctx, nameParts, start);
+}
+// The argument list of a FROM call whose name is read. The call's span runs
+// from `start`, which tableRef passes so a plain item's span keeps covering a
+// leading LATERAL.
+function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[], start: Position): Expr {
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const args: Expr[] = [];
+  if (!ctx.is("punc", ")")) {
+    args.push(ctx.parse(functionArg));
+    while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(functionArg));
+  }
+  expectClose(ctx);
+  return { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
+}
+
+// `WITH ORDINALITY` after a table function. Keyed on the word pair, since a
+// bare `with` after a FROM item can also open an enclosing materialized view's
+// `WITH [NO] DATA`; `ordinality` itself stays unreserved.
+const eatOrdinality = (ctx: ParseContext<SqlTokenType>): boolean => {
+  if (!ctx.is("ident", "with")) return false;
+  const after = ctx.peekAhead(1);
+  if (after === null || after.type !== "ident" || after.value !== "ordinality") return false;
+  ctx.next(); // "with"
+  ctx.next(); // "ordinality"
+  return true;
+};
+
+// `ROWS FROM (f(…), …) [WITH ORDINALITY] [alias clause]`, positioned on `rows`.
+function parseRowsFrom(ctx: ParseContext<SqlTokenType>, lateral: boolean): FromItem {
+  ctx.next(); // "rows"
+  ctx.next(); // "from"
+  ctx.next(); // "("
+  const calls: Expr[] = [parseFromCall(ctx)];
+  while (ctx.eat("punc", ",") !== null) calls.push(parseFromCall(ctx));
+  expectClose(ctx);
+  const ordinality = eatOrdinality(ctx);
+  const { alias, columns } = parseAliasClause(ctx);
+  return {
+    kind: "rowsFrom",
+    calls,
+    alias,
+    ...(columns !== null && { columns }),
+    ...(lateral && { lateral: true }),
+    ...(ordinality && { ordinality: true }),
+  };
+}
+
+// `rows` is unreserved, so it opens ROWS FROM only ahead of `from (` — a table
+// named `rows` is never followed by the reserved `from`.
+const startsRowsFrom = (ctx: ParseContext<SqlTokenType>): boolean => {
+  if (!ctx.is("ident", "rows")) return false;
+  const from = ctx.peekAhead(1);
+  const open = ctx.peekAhead(2);
+  return from?.type === "ident" && from.value === "from" && open?.type === "punc" && open.value === "(";
+};
+
+// `(query) [alias clause]`, positioned on the `(` — a FROM subquery, LATERAL
+// or not.
+function parseParenSubquery(ctx: ParseContext<SqlTokenType>, lateral: boolean): FromItem {
+  ctx.next(); // "("
+  const q = ctx.parse(query);
+  expectClose(ctx);
+  const { alias, columns } = parseAliasClause(ctx);
+  return { kind: "subquery", query: q, alias, ...(columns !== null && { columns }), ...(lateral && { lateral: true }) };
+}
+
+const QUERY_WORDS: ReadonlySet<string> = new Set(["select", "with", "values"]);
+// The reserved words a FROM item can open with.
+const FROM_LEAD_WORDS: ReadonlySet<string> = new Set(["lateral", "only"]);
+// The words that continue a parenthesised query in PG — set-ops and the
+// trailing clauses of `select_with_parens`. All reserved, so never an alias.
+const QUERY_TAIL_WORDS: ReadonlySet<string> = new Set([
+  "union",
+  "intersect",
+  "except",
+  "order",
+  "limit",
+  "offset",
+  "fetch",
+  "for",
+]);
+
+const isPuncToken = (tok: Token<SqlTokenType> | null, value: string): boolean =>
+  tok?.type === "punc" && tok.value === value;
+
+// Whether a run of `depth` `(` ahead of a query word opens a query (see
+// parenFromItem). A level whose `)` never arrives before the statement's `;`
+// reads as a query, keeping the query reading's error.
+function parenRunIsQuery(ctx: ParseContext<SqlTokenType>, depth: number): boolean {
+  const closeAt: number[] = [];
+  const open: number[] = [];
+  for (let i = 0, tok = ctx.peekAhead(0); tok !== null; tok = ctx.peekAhead(++i)) {
+    if (isPuncToken(tok, ";")) break;
+    if (isPuncToken(tok, "(")) open.push(i);
+    else if (isPuncToken(tok, ")")) {
+      const at = open.pop();
+      if (at === undefined) break;
+      if (at < depth) closeAt[at] = i;
+      if (at === 0) break;
+    }
+  }
+  if (closeAt[0] === undefined) return true;
+  for (let level = depth - 1; level >= 1; level--) {
+    const close = closeAt[level];
+    if (close === undefined) return true;
+    const after = ctx.peekAhead(close + 1);
+    if (after !== null && !isPuncToken(after, ")") && !(after.type === "ident" && QUERY_TAIL_WORDS.has(after.value))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// A `(` in FROM opens either a subquery or a parenthesised join, and a run of
+// them can stack either way: `((SELECT 1) UNION (SELECT 2)) x` is a subquery,
+// `((SELECT 1) s JOIN t ON …)` a join. So the dispatch scans past the run: with
+// no query word (select/with/values, all reserved) after it, only a join can
+// follow. With one, the innermost group is a query, and each enclosing group is
+// one too only while the group it holds is a query followed by `)`, a set-op
+// word or a trailing query clause — anything else there follows a FROM item,
+// which makes it and every group around it a join. One bracket-matching pass
+// finds each level's closing `)`. A token scan rather than a tryParse, which
+// would re-read every nested level on the fallback (exponential in the nesting)
+// and leave its failures behind for preferFarthest to report. A run ahead of a
+// token that starts neither a query nor a FROM item — not a name, or a reserved
+// word other than `lateral`/`only` — goes to the query reading, for its error.
+function parenFromItem(ctx: ParseContext<SqlTokenType>): FromItem {
+  let depth = 1;
+  while (isPuncToken(ctx.peekAhead(depth), "(")) depth++;
+  const word = ctx.peekAhead(depth);
+  if (word?.type === "ident" && QUERY_WORDS.has(word.value)) {
+    if (depth === 1 || parenRunIsQuery(ctx, depth)) return parseParenSubquery(ctx, false);
+  } else if (
+    word === null ||
+    (word.type !== "qident" &&
+      (word.type !== "ident" || (RESERVED.has(word.value) && !FROM_LEAD_WORDS.has(word.value))))
+  ) {
+    return parseParenSubquery(ctx, false);
+  }
+  ctx.next(); // "("
+  const inner = ctx.parse(joinTail);
+  // PG's `joined_table`: the parentheses must hold a join, and one that is not
+  // itself aliased — `((a JOIN b) x)` is rejected, as PG rejects it.
+  if (inner.kind !== "join") ctx.croak(`Expected a join but found ${describeFound(ctx.peek())}`);
+  if (inner.alias !== undefined) {
+    ctx.croak(`Expected a join without an alias but found ${describeFound(ctx.peek())}`);
+  }
+  expectClose(ctx);
+  const { alias, columns } = parseAliasClause(ctx);
+  if (alias === null) return inner;
+  return { ...inner, alias, ...(columns !== null && { columns }) };
+}
+
+// A single FROM entry: a (LATERAL) subquery, a (LATERAL) table function or ROWS
+// FROM, a parenthesised join, or a table name — optionally ONLY — with an
+// optional TABLESAMPLE. A leading `(` is a subquery or a parenthesised join (see
+// parenFromItem); after a dotted name, a `(` opens a table-function call.
+// `lateral` and `only` are reserved, so a preceding table never eats either as
+// an alias. ONLY takes only a table name, bare or parenthesised (`ONLY (t)`) —
+// PG's `relation_expr` — so a `(` right after the word is that name's
+// parenthesis, never a subquery, and no call parenthesis is read after the
+// name. LATERAL takes no parenthesised join, so its `(` is always a subquery.
+// The `only`/`columns`/`lateral`/`tablesample`/`ordinality` keys are omitted
+// when absent so ordinary items keep their prior shape.
 const tableRef = custom<FromItem, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -4492,30 +5386,22 @@ const tableRef = custom<FromItem, SqlTokenType>(
       return tableTail(ctx, nameParts, true);
     }
     if (ctx.is("punc", "(")) {
-      ctx.next(); // "("
-      const q = ctx.parse(query);
-      expectClose(ctx);
+      return lateral ? parseParenSubquery(ctx, true) : parenFromItem(ctx);
+    }
+    if (startsRowsFrom(ctx)) return parseRowsFrom(ctx, lateral);
+    const nameParts = ctx.parse(qualName);
+    if (ctx.is("punc", "(")) {
+      const call = parseFromCallArgs(ctx, nameParts, start);
+      const ordinality = eatOrdinality(ctx);
       const { alias, columns } = parseAliasClause(ctx);
       return {
-        kind: "subquery",
-        query: q,
+        kind: "function",
+        call,
         alias,
         ...(columns !== null && { columns }),
         ...(lateral && { lateral: true }),
+        ...(ordinality && { ordinality: true }),
       };
-    }
-    const nameParts = ctx.parse(qualName);
-    if (ctx.is("punc", "(")) {
-      ctx.next(); // "("
-      const args: Expr[] = [];
-      if (!ctx.is("punc", ")")) {
-        args.push(ctx.parse(functionArg));
-        while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(functionArg));
-      }
-      expectClose(ctx);
-      const call: Expr = { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
-      const { alias, columns } = parseAliasClause(ctx);
-      return { kind: "function", call, alias, ...(columns !== null && { columns }), ...(lateral && { lateral: true }) };
     }
     if (lateral) {
       return ctx.croak(`Expected a subquery or function after "lateral" but found ${describeFound(ctx.peek())}`);
@@ -4864,7 +5750,15 @@ const queryRule = custom<Query, SqlTokenType>(
 
 // --- INSERT / UPDATE / DELETE ---
 
-const valuesSource = seq(skip(kw("values")), field("rows", sepBy(exprList, P(",")))).map(({ rows }) => ({
+// One item of an INSERT VALUES row: an expression or a bare DEFAULT. A local
+// row rule rather than `exprList`, whose other consumers must not take DEFAULT.
+// `default` is reserved, so the keyword branch never shadows an expression.
+const insertValue = oneOf(
+  kw("default").map((_, span): DefaultValue => ({ kind: "default", span })),
+  expression,
+);
+const insertValuesRow = delimited(P("("), P(")"), P(","), insertValue, { interleaved: true });
+const valuesSource = seq(skip(kw("values")), field("rows", sepBy(insertValuesRow, P(",")))).map(({ rows }) => ({
   kind: "values" as const,
   rows,
 }));
@@ -4883,10 +5777,61 @@ const insertSource = custom<Insert["source"], SqlTokenType>(
     ],
   },
 );
+const insertSourceFirst = insertSource.first();
+const defaultValues = kwseq("default", "values").map(() => ({ kind: "defaultValues" as const }));
+// `OVERRIDING {SYSTEM | USER} VALUE`. `overriding`, `system` and `value` are
+// unreserved and matched by value, here after the optional column list (`user` is
+// reserved anyway).
+const overridingClause = seq(
+  skip(kw("overriding")),
+  field("kind", oneOf(kw("system"), kw("user"))),
+  skip(kw("value")),
+).map(({ kind }) => kind.value as InsertOverriding);
+
+// What follows the target: PG's insert_rest. DEFAULT VALUES stands alone — no
+// column list or OVERRIDING may precede it — so it is dispatched up front and
+// a `(a) DEFAULT VALUES` fails on `default` where a source was expected. That
+// failure, and any other where the source should start, is reported here with
+// the insert_rest forms still open at that point (DEFAULT VALUES only up front,
+// OVERRIDING until it is read), rather than as the query's narrower message.
+const insertColumns = optional(attempt(columnList));
+const insertOverriding = optional(overridingClause);
+type InsertRest = Pick<Insert, "columns" | "overriding" | "source">;
+const insertRest = custom<InsertRest, SqlTokenType>(
+  (ctx) => {
+    if (ctx.is("ident", "default")) return { columns: null, source: ctx.parse(defaultValues) };
+    // A `(` here is a column list unless it opens a parenthesised query source;
+    // attempt() rolls the column-list read back when the `(` is really a SELECT.
+    const columns = ctx.parse(insertColumns) ?? null;
+    const overriding = ctx.parse(insertOverriding) ?? null;
+    if (!matchesFirst(ctx.peek(), insertSourceFirst)) {
+      const open =
+        overriding !== null ? "" : columns === null ? '"default values" or "overriding" or ' : '"overriding" or ';
+      return ctx.croak(`Expected ${open}"values" or a query but found ${describeFound(ctx.peek())}`);
+    }
+    const source = ctx.parse(insertSource);
+    return { columns, ...(overriding && { overriding }), source };
+  },
+  {
+    expected: '"default values" or "overriding" or "values" or a query',
+    first: [{ type: "ident", value: "default" }, { type: "ident", value: "overriding" }, ...insertSourceFirst],
+  },
+);
+
+// `ON CONSTRAINT name` names the arbiter constraint in place of a column list.
+const conflictConstraint = seq(skip(kwseq("on", "constraint")), field("name", nameWord)).map((s) => s.name);
 
 const onConflict = seq(
   skip(kwseq("on", "conflict")),
-  field("target", optional(columnList)),
+  field(
+    "target",
+    optional(
+      oneOf(
+        columnList.map((columns) => ({ columns })),
+        conflictConstraint.map((name) => ({ name })),
+      ),
+    ),
+  ),
   skip(kw("do")),
   field(
     "action",
@@ -4897,24 +5842,34 @@ const onConflict = seq(
       ),
     ),
   ),
-).map(({ target, action }): OnConflict => ({ target: target ?? null, action }));
+).map(
+  ({ target, action }): OnConflict => ({
+    target: target && "columns" in target ? target.columns : null,
+    ...(target && "name" in target && { constraint: target.name }),
+    action,
+  }),
+);
+
+// `INSERT INTO t AS a`: PG requires the AS here (its insert_target notes that
+// a bare alias would make `VALUES` a shift/reduce conflict), so no asAlias.
+const insertAlias = optional(seq(skip(kw("as")), field("name", nameWord)).map((s) => s.name));
 
 const insertStmt = seq(
   skip(kw("insert")),
   skip(kw("into")),
   field("table", qualName),
-  // A `(` here is a column list unless it opens a parenthesised query source;
-  // attempt() rolls the column-list read back when the `(` is really a SELECT.
-  field("columns", optional(attempt(columnList))),
-  field("source", insertSource),
+  field("alias", insertAlias),
+  field("rest", insertRest),
   field("onConflict", optional(onConflict)),
   field("returning", optional(returningClause)),
 ).map(
-  ({ table, columns, source, onConflict: oc, returning }, span): Insert => ({
+  ({ table, alias, rest, onConflict: oc, returning }, span): Insert => ({
     kind: "insert",
     table,
-    columns: columns ?? null,
-    source,
+    ...(typeof alias === "string" && { alias }),
+    columns: rest.columns,
+    ...(rest.overriding && { overriding: rest.overriding }),
+    source: rest.source,
     onConflict: oc ?? null,
     returning: returning ?? null,
     span,

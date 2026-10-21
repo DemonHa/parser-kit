@@ -41,6 +41,9 @@ const SUPPLEMENTAL = [
   // Column-alias lists after an alias, on each leaf item kind, and ONLY.
   "SELECT * FROM ONLY t AS x (a, b) TABLESAMPLE system (10), (VALUES (1, 2)) AS v (c, d);",
   "SELECT * FROM generate_series(1, 3) g (n) JOIN ONLY (s.u) ON true, LATERAL (SELECT 1) l (one);",
+  // Parenthesised joins, nested-paren subqueries, ROWS FROM and WITH ORDINALITY.
+  "SELECT * FROM ((a JOIN b ON true) j JOIN c USING (id)) AS x (p, q), ((SELECT 1) UNION (SELECT 2)) s;",
+  "SELECT * FROM ROWS FROM (f(1), g()) WITH ORDINALITY AS r (a, b, n), unnest(arr) WITH ORDINALITY u;",
   // --- the expression grammar: pratt levels and the special-call dispatch ---
   "SELECT -a, NOT b FROM t;",
   "SELECT +a, -2 ^ 2, a ^ b ^ c, a % b, a::int ^ 2 FROM t;",
@@ -123,6 +126,15 @@ const SUPPLEMENTAL = [
   "ALTER TABLE t REPLICA IDENTITY USING INDEX t_pkey;",
   "ALTER TABLE IF EXISTS s.t ADD COLUMN IF NOT EXISTS a int, ADD IF NOT EXISTS b text, DROP c, OWNER TO bob;",
   "ALTER TABLE IF EXISTS t RENAME TO t2;",
+  // The other ALTER targets; only INDEX takes an action list.
+  "ALTER SCHEMA s RENAME TO s2;",
+  "ALTER DOMAIN app.d ADD CONSTRAINT pos CHECK (VALUE > 0) NOT VALID;",
+  "ALTER DOMAIN d DROP CONSTRAINT IF EXISTS pos CASCADE;",
+  "ALTER DOMAIN d SET DEFAULT 0;",
+  "ALTER TYPE mood ADD VALUE IF NOT EXISTS 'meh' BEFORE 'sad';",
+  "ALTER TYPE mood RENAME VALUE 'sad' TO 'blue';",
+  "ALTER TYPE mood SET SCHEMA archive;",
+  "ALTER INDEX IF EXISTS i SET (fillfactor = 70), RESET (deduplicate_items), SET TABLESPACE ts;",
   "CREATE TABLE t (id int NOT NULL DEFAULT 0, u text UNIQUE, parent int REFERENCES p (id) ON DELETE CASCADE, CHECK (id > 0));",
   "CREATE TABLE t (a int NULL, b int, FOREIGN KEY (b) REFERENCES p (id));",
   // LIKE as a table item and the clauses after the element list, each a key the
@@ -131,6 +143,14 @@ const SUPPLEMENTAL = [
   "CREATE TABLE t (id int) WITH (fillfactor = 70, autovacuum_enabled, x -1, y = 'z') ON COMMIT DELETE ROWS TABLESPACE ts;",
   "CREATE TABLE t (id int) WITH (toast.autovacuum_enabled = false, force_quote *, force_null (a, 'b'));",
   "CREATE TABLE t (a, b) WITH (fillfactor = 70) ON COMMIT DROP TABLESPACE ts AS SELECT 1, 2 WITH NO DATA;",
+  // Declarative partitioning: PARTITION BY after the element list, and each
+  // PARTITION OF bound, DEFAULT included, with and without an element list of
+  // its own.
+  'CREATE TABLE m (a int, b text) INHERITS (p) PARTITION BY RANGE (a, lower(b) COLLATE "C" text_pattern_ops, (a + 1)) WITH (fillfactor = 70) TABLESPACE ts;',
+  "CREATE TABLE m_lo PARTITION OF m FOR VALUES FROM (0, MINVALUE) TO (100, MAXVALUE);",
+  "CREATE TABLE m_ab PARTITION OF m (a WITH OPTIONS NOT NULL, b DEFAULT 'x', CONSTRAINT k CHECK (a > 0)) FOR VALUES IN ('a', 'b') PARTITION BY HASH (a);",
+  "CREATE TABLE m_h0 PARTITION OF m FOR VALUES WITH (MODULUS 4, REMAINDER 0) WITH (fillfactor = 70) ON COMMIT DROP;",
+  "CREATE TABLE IF NOT EXISTS m_rest PARTITION OF app.m DEFAULT;",
   // The foreign-key tail (MATCH, ON DELETE / ON UPDATE in either order) and the
   // DEFERRABLE / INITIALLY attributes, column- and table-level. Each new key is
   // present only when its clause is, so the pre-existing constraint rows stay
@@ -175,6 +195,18 @@ const SUPPLEMENTAL = [
   "EXECUTE ins;",
   "INSERT INTO t (a) VALUES (1) ON CONFLICT DO UPDATE SET a = 2 WHERE t.a > 0;",
   "CREATE TABLE t (flags bit DEFAULT B'1011', mask bit DEFAULT X'ff', label text DEFAULT U&'\\0041');",
+  // Index columns with an operator class, ordering and NULLS placement, and an
+  // index's storage parameters.
+  "CREATE UNIQUE INDEX i ON t USING btree (lower(a) text_pattern_ops DESC NULLS LAST, b NULLS FIRST, c ASC) INCLUDE (d) WITH (fillfactor = 70, deduplicate_items = off) WHERE d > 0;",
+  // --- EXCLUDE table constraints ---
+  "CREATE TABLE t (r tsrange, EXCLUDE USING gist (r WITH &&) INCLUDE (r) WHERE (r IS NOT NULL) DEFERRABLE);",
+  "ALTER TABLE t ADD CONSTRAINT no_overlap EXCLUDE (a WITH =, b WITH <>), ADD exclude text;",
+  // INSERT's DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON
+  // CONFLICT ON CONSTRAINT; the INSERT rows above pin the keys they omit.
+  "INSERT INTO t AS x DEFAULT VALUES RETURNING x.id;",
+  "INSERT INTO t (a, b) VALUES (DEFAULT, 1), (2, DEFAULT);",
+  "INSERT INTO t AS x (a) OVERRIDING SYSTEM VALUE VALUES (1) ON CONFLICT ON CONSTRAINT t_pkey DO UPDATE SET a = x.a + 1;",
+  "INSERT INTO t OVERRIDING USER VALUE SELECT * FROM u ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING;",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind
@@ -278,6 +310,15 @@ const MALFORMED = [
   // A failure inside a LIKE item recovers like one inside a column: the
   // element-list siblings around it survive.
   "CREATE TABLE t (id int, LIKE src INCLUDING everything, ok text);\nSELECT 12;",
+  // So does one inside a PARTITION OF element list, the second list a CREATE
+  // TABLE can carry.
+  "CREATE TABLE p PARTITION OF m (a NOT NULL, b DEFAULT, c DEFAULT 0) DEFAULT;\nSELECT 13;",
+  // The empty-list check peeks past the `(`, which must report a lex error on
+  // the first item rather than throw it past recovery: the table survives.
+  "CREATE TABLE p PARTITION OF m (é a NOT NULL, b DEFAULT 1) DEFAULT;\nSELECT 14;",
+  // A `(` in FROM ahead of no query word is read as a parenthesised join, so a
+  // lone table in parentheses fails at its `)`.
+  "SELECT * FROM (a);\nSELECT 15;",
 ];
 
 // Record a throw rather than propagating it, so one bad case doesn't abort the
