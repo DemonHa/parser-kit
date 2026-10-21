@@ -261,7 +261,8 @@ export type WindowSpec = {
 export type NamedWindow = { name: string; spec: WindowSpec };
 
 // The `[NOT] DEFERRABLE` / `INITIALLY DEFERRED | IMMEDIATE` attributes PG allows
-// on a UNIQUE, PRIMARY KEY or foreign-key constraint, column- or table-level.
+// on a UNIQUE, PRIMARY KEY or foreign-key constraint, column- or table-level,
+// and on a table-level EXCLUDE constraint.
 // Each key is omitted entirely when its clause is absent — so a missing
 // `deferrable` is PG's default, not NOT DEFERRABLE, and `initially: "deferred"`
 // alone still means deferrable, as INITIALLY DEFERRED implies it.
@@ -307,7 +308,25 @@ export type TableConstraint =
       refColumns: string[] | null;
       span: Span;
     } & ForeignKeyTail &
-      ConstraintAttrs);
+      ConstraintAttrs)
+  | ExcludeConstraint;
+
+// One `element WITH operator` pair of an EXCLUDE constraint. `operator` is the
+// operator's text (`=`, `&&`).
+export type ExclusionElement = { expr: Expr; operator: string; span: Span };
+
+// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WHERE
+// (pred)]`. `using` is null when PG's default (btree) applies, as on
+// createIndex; `include` and `where` are omitted when absent.
+export type ExcludeConstraint = {
+  kind: "exclude";
+  name: string | null;
+  using: string | null;
+  elements: ExclusionElement[];
+  include?: string[];
+  where?: Expr;
+  span: Span;
+} & ConstraintAttrs;
 
 // One `{INCLUDING | EXCLUDING} property` option of a `LIKE source` table item.
 export type LikeOption = {
@@ -2421,7 +2440,7 @@ function atNotDeferrable(ctx: ParseContext<SqlTokenType>): boolean {
 }
 
 // `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. Only
-// UNIQUE, PRIMARY KEY and foreign keys read this tail, so PG's "misplaced
+// UNIQUE, PRIMARY KEY, foreign keys and EXCLUDE read this tail, so PG's "misplaced
 // DEFERRABLE clause" (`a int NOT NULL DEFERRABLE`) never parses.
 //
 // `not` is shared with a following column constraint's NOT NULL, so it is taken
@@ -2598,7 +2617,79 @@ const tableConstraintBody = custom<TableConstraint, SqlTokenType>(
   { expected: TABLE_CONSTRAINT_EXPECTED, first: dispatchFirst(TABLE_CONSTRAINTS) },
 );
 
-const namedConstraint = seq(skip(kw("constraint")), field("name", nameWord), field("body", tableConstraintBody)).map(
+// `element WITH operator`. PG's element is a column, a call or a parenthesised
+// expression; this takes any expression, more loosely. The expression grammar
+// never consumes the WITH. Per-element opclass / ASC / NULLS options and
+// `WITH OPERATOR(…)` are not parsed yet.
+const exclusionElement = seq(
+  field("expr", expression),
+  skip(kw("with")),
+  field(
+    "operator",
+    token("op").map((node) => node.value),
+  ),
+).map(({ expr, operator }, span): ExclusionElement => ({ expr, operator, span }));
+
+// At least one entry, as in PG: an empty `EXCLUDE ()` or `INCLUDE ()` is a
+// syntax error.
+const exclusionElements = sepBy(exclusionElement, P(","));
+const includeColumns = sepBy(nameWord, P(","));
+
+// True when the cursor sits on `EXCLUDE USING` or `EXCLUDE (` — neither of
+// which can begin a column definition, as `using` is reserved and `(` cannot
+// begin a type. The ident test keeps `exclude "using"` (a column of quoted type
+// "using") a column. The token after `exclude` is peeked plainly: a column
+// definition reads it next anyway, so a lex error there surfaces exactly as it
+// does after any other column name.
+function atExcludeConstraint(ctx: ParseContext<SqlTokenType>): boolean {
+  if (!ctx.is("ident", "exclude")) return false;
+  const next = ctx.peekAhead(1);
+  return (
+    next !== null && ((next.type === "ident" && next.value === "using") || (next.type === "punc" && next.value === "("))
+  );
+}
+
+// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WHERE
+// (pred)]` plus the DEFERRABLE/INITIALLY tail. Kept out of TABLE_CONSTRAINTS on
+// purpose: `exclude` is unreserved, and a key there would join tableItem's
+// value-specific first set and take the word away from columns (see tableItem).
+// PG's index parameters (`WITH (…)`, `USING INDEX TABLESPACE`) are not parsed
+// yet.
+const excludeBody = custom<ExcludeConstraint, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("exclude"));
+    const using = ctx.eat("ident", "using") !== null ? ctx.parse(nameWord) : null;
+    ctx.parse(punc("("));
+    const elements = ctx.parse(exclusionElements);
+    expectClose(ctx);
+    let include: string[] | null = null;
+    if (ctx.eat("ident", "include") !== null) {
+      ctx.parse(punc("("));
+      include = ctx.parse(includeColumns);
+      expectClose(ctx);
+    }
+    const where = ctx.eat("ident", "where") !== null ? ctx.parse(parenExpr) : null;
+    const attrs = parseConstraintAttrs(ctx, "table");
+    return {
+      kind: "exclude",
+      name: null,
+      using,
+      elements,
+      ...(include && { include }),
+      ...(where && { where }),
+      ...attrs,
+      span: ctx.spanFrom(start),
+    };
+  },
+  { expected: '"exclude"', first: [{ type: "ident", value: "exclude" }] },
+);
+
+// What follows `CONSTRAINT name`: a keyword-led constraint or EXCLUDE. Both may
+// commit here, as no column definition competes after CONSTRAINT.
+const constraintBody = oneOf(tableConstraintBody, excludeBody);
+
+const namedConstraint = seq(skip(kw("constraint")), field("name", nameWord), field("body", constraintBody)).map(
   ({ name, body }): TableConstraint => ({ ...body, name }),
 );
 
@@ -2609,6 +2700,15 @@ const columnDef = seq(
   field("dataType", typeRef),
   field("constraints", many(columnConstraint)),
 ).map(({ name, dataType, constraints }, span): ColumnDef => ({ kind: "column", name, dataType, constraints, span }));
+
+// A table item led by `exclude`: an EXCLUDE constraint when the lookahead says
+// so, else a column called `exclude`. Decided by peeking rather than by
+// `attempt`, so a malformed EXCLUDE reports its own error — a backtrack would
+// drop it, and a lex error inside it for good, then blame the column instead.
+const excludeItem = custom<ExcludeConstraint | ColumnDef, SqlTokenType>(
+  (ctx) => (atExcludeConstraint(ctx) ? ctx.parse(excludeBody) : ctx.parse(columnDef)),
+  { expected: '"exclude"', first: [{ type: "ident", value: "exclude" }] },
+);
 
 // The properties a LIKE option may copy, in the order PG's TableLikeOption
 // lists them — which is also the order the "Expected …" message names them in.
@@ -2647,18 +2747,21 @@ const likeBody = custom<LikeTable, SqlTokenType>(
   { expected: '"like"', first: [{ type: "ident", value: "like" }] },
 );
 
-// A table body item: a table constraint or a LIKE clause (both keyword-led, a
-// value-specific first set) or a column definition (name-led, type-only). oneOf's
+// A table body item: a table constraint, a LIKE clause or an `exclude`-led item
+// (an EXCLUDE, or a column of that name) — all keyword-led, a value-specific
+// first set — or a column definition (name-led, type-only). oneOf's
 // value-specific-first dispatch picks the constraint on `primary`/`unique`/…,
-// LIKE on `like`, and the column on any other name. A value-specific key wins
-// even over a word that could be a column name, so every key ahead of
-// `columnDef` takes its word away from columns; that is harmless only because
-// each is reserved anyway — `like` for exactly this reason (see RESERVED). A
-// key that is a legal column name needs a backtracking branch instead.
+// LIKE on `like`, excludeItem on `exclude`, and the column on any other name. A
+// value-specific key wins even over a word that could be a column name, so a
+// key ahead of `columnDef` takes its word away from columns. For the
+// constraint and LIKE keys that is harmless only because each is reserved
+// anyway — `like` for exactly this reason (see RESERVED). A key that is a legal
+// column name must parse that column itself, as excludeItem does for `exclude
+// text` and `exclude "using"`.
 //
 // Branch order is load-bearing: oneOf joins its `expected` in declaration order,
 // which the diagnostics golden pins.
-const tableItem = oneOf(tableConstraint, likeBody, columnDef);
+const tableItem = oneOf(tableConstraint, likeBody, excludeItem, columnDef);
 
 // --- statements ---
 
@@ -3613,7 +3716,7 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       if (after?.value === "constraint") {
         ctx.next(); // CONSTRAINT
         const name = ctx.parse(nameWord);
-        return { kind: "addConstraint", name, constraint: ctx.parse(tableConstraintBody) };
+        return { kind: "addConstraint", name, constraint: ctx.parse(constraintBody) };
       }
       // A bare value test, not a rule: these four are reserved, so an *unquoted*
       // one is never the name of a column being added. A quoted `"primary"` is a
@@ -3621,6 +3724,11 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       // with the `column`/`constraint` tests above, that this keeps as it was.
       if (after !== null && Object.hasOwn(TABLE_CONSTRAINTS, after.value)) {
         return { kind: "addConstraint", name: null, constraint: ctx.parse(tableConstraintBody) };
+      }
+      // `exclude` is unreserved, so it joins the list above only through a
+      // lookahead (see atExcludeConstraint); `ADD exclude text` stays a column.
+      if (atExcludeConstraint(ctx)) {
+        return { kind: "addConstraint", name: null, constraint: ctx.parse(excludeBody) };
       }
       return parseAddColumn(ctx);
     },

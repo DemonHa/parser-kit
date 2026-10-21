@@ -3255,7 +3255,7 @@ describe("SQL-lite keyword dispatch maps", () => {
 
   it("names the table-item alternatives in the join form", () => {
     expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(
-      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or "like" or a name but found "42"/,
+      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or "like" or "exclude" or a name but found "42"/,
     );
   });
 
@@ -4268,6 +4268,154 @@ describe("SQL-lite index column options and storage parameters", () => {
     expect(() => sqlLite.parse("CREATE INDEX i ON t (a DESC ASC);")).toThrow(/Expected "," but found "asc"/);
     expect(() => sqlLite.parse("CREATE INDEX i ON t (a) WITH fillfactor = 70;")).toThrow(
       /Expected "\(" but found "fillfactor"/,
+    );
+  });
+});
+
+// --- EXCLUDE table constraints ---
+
+describe("SQL-lite EXCLUDE table constraints", () => {
+  const items = (src: string) => (firstStmt(`CREATE TABLE t (${src});`) as any).items as Record<string, unknown>[];
+  const addAction = (src: string) => (firstStmt(`ALTER TABLE t ADD ${src};`) as any).actions[0];
+
+  it("parses EXCLUDE [USING method] (element WITH operator, …)", () => {
+    expect(items("c int, EXCLUDE USING gist (c WITH =)")[1]).toEqual({
+      kind: "exclude",
+      name: null,
+      using: "gist",
+      elements: [{ expr: name("c"), operator: "=" }],
+    });
+    // No USING is PG's default btree; several elements, any operator.
+    expect(items("EXCLUDE (a WITH =, b WITH &&)")).toEqual([
+      {
+        kind: "exclude",
+        name: null,
+        using: null,
+        elements: [
+          { expr: name("a"), operator: "=" },
+          { expr: name("b"), operator: "&&" },
+        ],
+      },
+    ]);
+    // An element may be a call or a parenthesised expression.
+    const [call, paren] = (items("EXCLUDE USING gist (tsrange(s, e) WITH &&, (a + 1) WITH =)")[0] as any).elements;
+    expect(call.expr.kind).toBe("call");
+    expect(call.operator).toBe("&&");
+    expect(paren.expr).toMatchObject({ kind: "binary", op: "+" });
+  });
+
+  it("takes INCLUDE, WHERE and the DEFERRABLE / INITIALLY tail", () => {
+    expect(
+      items("EXCLUDE USING gist (r WITH &&) INCLUDE (a, b) WHERE (active) DEFERRABLE INITIALLY DEFERRED")[0],
+    ).toEqual({
+      kind: "exclude",
+      name: null,
+      using: "gist",
+      elements: [{ expr: name("r"), operator: "&&" }],
+      include: ["a", "b"],
+      where: name("active"),
+      deferrable: true,
+      initially: "deferred",
+    });
+    expect(items("EXCLUDE (a WITH =) NOT DEFERRABLE")[0]).toMatchObject({ deferrable: false });
+    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE (a WITH =) NOT DEFERRABLE INITIALLY DEFERRED);")).toThrow(
+      /constraint declared INITIALLY DEFERRED must be DEFERRABLE/,
+    );
+  });
+
+  it("names the constraint with CONSTRAINT n, in CREATE TABLE and ALTER TABLE ADD", () => {
+    expect(items("CONSTRAINT no_overlap EXCLUDE USING gist (r WITH &&)")[0]).toMatchObject({
+      kind: "exclude",
+      name: "no_overlap",
+      using: "gist",
+    });
+    expect(addAction("CONSTRAINT no_overlap EXCLUDE USING gist (r WITH &&)")).toEqual({
+      kind: "addConstraint",
+      name: "no_overlap",
+      constraint: { kind: "exclude", name: null, using: "gist", elements: [{ expr: name("r"), operator: "&&" }] },
+    });
+    // The keyword-led constraints still reach CONSTRAINT n unchanged.
+    expect(addAction("CONSTRAINT u UNIQUE (a)")).toMatchObject({ name: "u", constraint: { kind: "unique" } });
+  });
+
+  it("parses a bare ALTER TABLE … ADD EXCLUDE", () => {
+    expect(addAction("EXCLUDE USING gist (r WITH &&)")).toMatchObject({
+      kind: "addConstraint",
+      name: null,
+      constraint: { kind: "exclude", using: "gist" },
+    });
+    expect(addAction("EXCLUDE (a WITH =)")).toMatchObject({
+      kind: "addConstraint",
+      constraint: { kind: "exclude", using: null },
+    });
+  });
+
+  it("keeps a column called exclude a column definition", () => {
+    const column = (dataType: string, array = false) => ({
+      kind: "column",
+      name: "exclude",
+      dataType: { name: dataType, args: [], array },
+      constraints: [],
+    });
+    expect(items("exclude text")).toEqual([column("text")]);
+    expect(items("exclude int[]")).toEqual([column("int", true)]);
+    expect(items('exclude "using"')).toEqual([column("using")]);
+    expect(items("exclude int, EXCLUDE (exclude WITH =)").map((i) => i.kind)).toEqual(["column", "exclude"]);
+    expect(addAction("exclude text")).toEqual({
+      kind: "addColumn",
+      ifNotExists: false,
+      column: column("text"),
+    });
+    expect(addAction('exclude "using"')).toMatchObject({ kind: "addColumn", column: { name: "exclude" } });
+    expect(addAction("COLUMN exclude text")).toMatchObject({ kind: "addColumn", column: { name: "exclude" } });
+    expect(
+      (firstStmt("ALTER TABLE t ADD EXCLUDE (a WITH =), ADD exclude text;") as any).actions.map((a: any) => a.kind),
+    ).toEqual(["addConstraint", "addColumn"]);
+    // A quoted "exclude" is a name, never the keyword.
+    expect(() => sqlLite.parse('CREATE TABLE t ("exclude" (a WITH =));')).toThrow(/Expected a name but found "\("/);
+  });
+
+  it("keeps exclude and include unreserved as names and aliases", () => {
+    expect((firstStmt("SELECT exclude, include FROM t;") as any).columns).toEqual([
+      col(name("exclude")),
+      col(name("include")),
+    ]);
+    expect((firstStmt("SELECT a AS exclude, b include FROM t;") as any).columns).toEqual([
+      col(name("a"), "exclude"),
+      col(name("b"), "include"),
+    ]);
+    expect(items("include int").map((i) => i.name)).toEqual(["include"]);
+  });
+
+  it("reports a bad character after exclude as after any column name", () => {
+    const { ast, errors } = sqlLite.diagnose("CREATE TABLE t (id int, exclude é, ok text);");
+    expect(errors.map((e) => e.message)).toEqual(['Unexpected character "é" (1:32)']);
+    expect((stripSpans(ast) as any)[0].items.map((i: any) => i.name)).toEqual(["id", "ok"]);
+    expect(sqlLite.diagnose("CREATE TABLE t (EXCLUDE (a WITH é));").errors[0]!.message).toBe(
+      'Unexpected character "é" (1:32)',
+    );
+  });
+
+  it("rejects a malformed EXCLUDE", () => {
+    // In a table body the EXCLUDE reports its own error, not a column's.
+    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE (a));")).toThrow(/Expected "with" but found "\)" \(1:26\)/);
+    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE USING gist);")).toThrow(/Expected "\(" but found "\)"/);
+    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE (a WITH =) INCLUDE ());")).toThrow(
+      /Expected a name but found "\)"/,
+    );
+    expect(() => sqlLite.parse("CREATE TABLE t (CONSTRAINT c 42);")).toThrow(
+      /Expected "primary key" or "unique" or "check" or "foreign key" or "exclude" but found "42"/,
+    );
+    expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE (a);")).toThrow(/Expected "with" but found "\)"/);
+    expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE USING gist (a WITH b);")).toThrow(
+      /Expected an operator but found "b"/,
+    );
+    expect(() => sqlLite.parse("ALTER TABLE t ADD CONSTRAINT c EXCLUDE (a WITH =) WHERE a;")).toThrow(
+      /Expected "\(" but found "a"/,
+    );
+    // An EXCLUDE with no elements is a syntax error, as in PG.
+    expect(() => sqlLite.parse("ALTER TABLE t ADD CONSTRAINT c EXCLUDE ();")).toThrow(
+      /Expected a number or .* or a name but found "\)" \(1:40\)/,
     );
   });
 });

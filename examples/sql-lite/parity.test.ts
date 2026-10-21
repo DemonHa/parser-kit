@@ -172,6 +172,9 @@ const SUPPLEMENTAL = [
   // Index columns with an operator class, ordering and NULLS placement, and an
   // index's storage parameters.
   "CREATE UNIQUE INDEX i ON t USING btree (lower(a) text_pattern_ops DESC NULLS LAST, b NULLS FIRST, c ASC) INCLUDE (d) WITH (fillfactor = 70, deduplicate_items = off) WHERE d > 0;",
+  // --- EXCLUDE table constraints ---
+  "CREATE TABLE t (r tsrange, EXCLUDE USING gist (r WITH &&) INCLUDE (r) WHERE (r IS NOT NULL) DEFERRABLE);",
+  "ALTER TABLE t ADD CONSTRAINT no_overlap EXCLUDE (a WITH =, b WITH <>), ADD exclude text;",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind
