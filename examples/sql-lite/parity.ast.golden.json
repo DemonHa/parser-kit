@@ -3755,6 +3755,325 @@
     ]
   },
   {
+    "source": "SELECT * FROM ONLY t AS x (a, b) TABLESAMPLE system (10), (VALUES (1, 2)) AS v (c, d);",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": "x",
+            "columns": [
+              "a",
+              "b"
+            ],
+            "tablesample": {
+              "method": "system",
+              "args": [
+                {
+                  "kind": "number",
+                  "value": 10,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 53
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 55
+                    }
+                  }
+                }
+              ],
+              "repeatable": null
+            },
+            "only": true
+          },
+          {
+            "kind": "subquery",
+            "query": {
+              "kind": "values",
+              "rows": [
+                [
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 67
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 68
+                      }
+                    }
+                  },
+                  {
+                    "kind": "number",
+                    "value": 2,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 70
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 71
+                      }
+                    }
+                  }
+                ]
+              ],
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 59
+                },
+                "end": {
+                  "row": 1,
+                  "col": 72
+                }
+              }
+            },
+            "alias": "v",
+            "columns": [
+              "c",
+              "d"
+            ]
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 85
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT * FROM generate_series(1, 3) g (n) JOIN ONLY (s.u) ON true, LATERAL (SELECT 1) l (one);",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "join",
+            "joinType": "inner",
+            "left": {
+              "kind": "function",
+              "call": {
+                "kind": "call",
+                "name": "generate_series",
+                "args": [
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 30
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 31
+                      }
+                    }
+                  },
+                  {
+                    "kind": "number",
+                    "value": 3,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 33
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 34
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 14
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 35
+                  }
+                }
+              },
+              "alias": "g",
+              "columns": [
+                "n"
+              ]
+            },
+            "right": {
+              "kind": "table",
+              "name": [
+                "s",
+                "u"
+              ],
+              "alias": null,
+              "only": true
+            },
+            "on": {
+              "kind": "bool",
+              "value": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 61
+                },
+                "end": {
+                  "row": 1,
+                  "col": 65
+                }
+              }
+            },
+            "using": null
+          },
+          {
+            "kind": "subquery",
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 83
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 84
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": null,
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 76
+                },
+                "end": {
+                  "row": 1,
+                  "col": 84
+                }
+              }
+            },
+            "alias": "l",
+            "columns": [
+              "one"
+            ],
+            "lateral": true
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 93
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "SELECT -a, NOT b FROM t;",
     "ast": [
       {
@@ -7658,6 +7977,450 @@
     ]
   },
   {
+    "source": "SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "window",
+              "fn": {
+                "kind": "call",
+                "name": "sum",
+                "args": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "x"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 11
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 12
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 13
+                  }
+                }
+              },
+              "name": null,
+              "partitionBy": null,
+              "orderBy": [
+                {
+                  "expr": {
+                    "kind": "name",
+                    "parts": [
+                      "id"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 29
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 31
+                      }
+                    }
+                  },
+                  "dir": null,
+                  "nulls": null
+                }
+              ],
+              "frame": {
+                "mode": "rows",
+                "start": {
+                  "kind": "preceding",
+                  "offset": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 45
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 46
+                      }
+                    }
+                  }
+                },
+                "end": {
+                  "kind": "following",
+                  "offset": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 61
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 62
+                      }
+                    }
+                  }
+                },
+                "exclude": "currentRow"
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 93
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 100
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT sum(x) OVER (GROUPS 1 PRECEDING EXCLUDE TIES), sum(x) OVER (RANGE CURRENT ROW EXCLUDE NO OTHERS) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "window",
+              "fn": {
+                "kind": "call",
+                "name": "sum",
+                "args": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "x"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 11
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 12
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 13
+                  }
+                }
+              },
+              "name": null,
+              "partitionBy": null,
+              "orderBy": null,
+              "frame": {
+                "mode": "groups",
+                "start": {
+                  "kind": "preceding",
+                  "offset": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 27
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 28
+                      }
+                    }
+                  }
+                },
+                "end": null,
+                "exclude": "ties"
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 52
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "window",
+              "fn": {
+                "kind": "call",
+                "name": "sum",
+                "args": [
+                  {
+                    "kind": "name",
+                    "parts": [
+                      "x"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 58
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 59
+                      }
+                    }
+                  }
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 54
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 60
+                  }
+                }
+              },
+              "name": null,
+              "partitionBy": null,
+              "orderBy": null,
+              "frame": {
+                "mode": "range",
+                "start": {
+                  "kind": "currentRow"
+                },
+                "end": null,
+                "exclude": "noOthers"
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 54
+                },
+                "end": {
+                  "row": 1,
+                  "col": 103
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 110
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT a FROM t ORDER BY a USING <, b USING > NULLS FIRST, c DESC;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "a"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 8
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "a"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 25
+                },
+                "end": {
+                  "row": 1,
+                  "col": 26
+                }
+              }
+            },
+            "dir": null,
+            "using": "<",
+            "nulls": null
+          },
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "b"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 36
+                },
+                "end": {
+                  "row": 1,
+                  "col": 37
+                }
+              }
+            },
+            "dir": null,
+            "using": ">",
+            "nulls": "first"
+          },
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "c"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 59
+                },
+                "end": {
+                  "row": 1,
+                  "col": 60
+                }
+              }
+            },
+            "dir": "desc",
+            "nulls": null
+          }
+        ],
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 65
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "SELECT a FROM t GROUP BY CUBE (a, b), ROLLUP (c), GROUPING SETS ((a), ());",
     "ast": [
       {
@@ -8343,6 +9106,331 @@
           "end": {
             "row": 1,
             "col": 59
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "WITH a AS MATERIALIZED (SELECT 1), b AS NOT MATERIALIZED (SELECT 2) SELECT * FROM a, b;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": [
+          {
+            "name": "a",
+            "columns": null,
+            "materialized": true,
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 31
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 32
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": null,
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 24
+                },
+                "end": {
+                  "row": 1,
+                  "col": 32
+                }
+              }
+            }
+          },
+          {
+            "name": "b",
+            "columns": null,
+            "materialized": false,
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "number",
+                    "value": 2,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 65
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 66
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": null,
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 58
+                },
+                "end": {
+                  "row": 1,
+                  "col": 66
+                }
+              }
+            }
+          }
+        ],
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 75
+                },
+                "end": {
+                  "row": 1,
+                  "col": 76
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "a"
+            ],
+            "alias": null
+          },
+          {
+            "kind": "table",
+            "name": [
+              "b"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 68
+          },
+          "end": {
+            "row": 1,
+            "col": 86
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "WITH RECURSIVE t (id) AS (SELECT 1) SEARCH BREADTH FIRST BY id SET ord CYCLE id SET is_cycle TO 'Y' DEFAULT 'N' USING path SELECT * FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": [
+          {
+            "name": "t",
+            "columns": [
+              "id"
+            ],
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 33
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 34
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": null,
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 26
+                },
+                "end": {
+                  "row": 1,
+                  "col": 34
+                }
+              }
+            },
+            "search": {
+              "order": "breadth",
+              "by": [
+                "id"
+              ],
+              "set": "ord"
+            },
+            "cycle": {
+              "columns": [
+                "id"
+              ],
+              "set": "is_cycle",
+              "mark": {
+                "to": {
+                  "kind": "string",
+                  "value": "Y",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 97
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 98
+                    }
+                  }
+                },
+                "default": {
+                  "kind": "string",
+                  "value": "N",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 109
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 110
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 93
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 110
+                  }
+                }
+              },
+              "using": "path"
+            }
+          }
+        ],
+        "recursive": true,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 130
+                },
+                "end": {
+                  "row": 1,
+                  "col": 131
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 123
+          },
+          "end": {
+            "row": 1,
+            "col": 138
           }
         }
       }
