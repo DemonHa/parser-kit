@@ -1412,5 +1412,339 @@
         }
       }
     ]
+  },
+  {
+    "source": "CREATE TABLE p PARTITION OF m (a NOT NULL, b DEFAULT, c DEFAULT 0) DEFAULT;\nSELECT 13;",
+    "errors": [
+      {
+        "message": "Expected a number or a string or a bit string or a hex string or \"true\" or \"false\" or \"null\" or a parameter or \"case\" or \"exists\" or \"cast\" or \"array\" or a keyword like \"current_date\" or \"(\" or a name but found \",\" (1:52)",
+        "end": {
+          "row": 1,
+          "col": 53
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "p"
+        ],
+        "items": [
+          {
+            "kind": "columnOptions",
+            "name": "a",
+            "constraints": [
+              {
+                "kind": "notNull",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 33
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 41
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 31
+              },
+              "end": {
+                "row": 1,
+                "col": 41
+              }
+            }
+          },
+          {
+            "kind": "columnOptions",
+            "name": "c",
+            "constraints": [
+              {
+                "kind": "default",
+                "expr": {
+                  "kind": "number",
+                  "value": 0,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 64
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 65
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 56
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 65
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 54
+              },
+              "end": {
+                "row": 1,
+                "col": 65
+              }
+            }
+          }
+        ],
+        "partitionOf": {
+          "parent": [
+            "m"
+          ],
+          "bound": {
+            "kind": "default",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 67
+              },
+              "end": {
+                "row": 1,
+                "col": 74
+              }
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 74
+          }
+        }
+      },
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 13,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 9
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 9
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE p PARTITION OF m (é a NOT NULL, b DEFAULT 1) DEFAULT;\nSELECT 14;",
+    "errors": [
+      {
+        "message": "Unexpected character \"é\" (1:31)",
+        "end": {
+          "row": 1,
+          "col": 32
+        }
+      }
+    ],
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "p"
+        ],
+        "items": [
+          {
+            "kind": "columnOptions",
+            "name": "a",
+            "constraints": [
+              {
+                "kind": "notNull",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 35
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 43
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 33
+              },
+              "end": {
+                "row": 1,
+                "col": 43
+              }
+            }
+          },
+          {
+            "kind": "columnOptions",
+            "name": "b",
+            "constraints": [
+              {
+                "kind": "default",
+                "expr": {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 55
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 56
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 47
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 56
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 45
+              },
+              "end": {
+                "row": 1,
+                "col": 56
+              }
+            }
+          }
+        ],
+        "partitionOf": {
+          "parent": [
+            "m"
+          ],
+          "bound": {
+            "kind": "default",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 58
+              },
+              "end": {
+                "row": 1,
+                "col": 65
+              }
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 65
+          }
+        }
+      },
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 14,
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 7
+                },
+                "end": {
+                  "row": 2,
+                  "col": 9
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": null,
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 2,
+            "col": 0
+          },
+          "end": {
+            "row": 2,
+            "col": 9
+          }
+        }
+      }
+    ]
   }
 ]

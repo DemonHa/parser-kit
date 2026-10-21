@@ -131,6 +131,14 @@ const SUPPLEMENTAL = [
   "CREATE TABLE t (id int) WITH (fillfactor = 70, autovacuum_enabled, x -1, y = 'z') ON COMMIT DELETE ROWS TABLESPACE ts;",
   "CREATE TABLE t (id int) WITH (toast.autovacuum_enabled = false, force_quote *, force_null (a, 'b'));",
   "CREATE TABLE t (a, b) WITH (fillfactor = 70) ON COMMIT DROP TABLESPACE ts AS SELECT 1, 2 WITH NO DATA;",
+  // Declarative partitioning: PARTITION BY after the element list, and each
+  // PARTITION OF bound, DEFAULT included, with and without an element list of
+  // its own.
+  'CREATE TABLE m (a int, b text) INHERITS (p) PARTITION BY RANGE (a, lower(b) COLLATE "C" text_pattern_ops, (a + 1)) WITH (fillfactor = 70) TABLESPACE ts;',
+  "CREATE TABLE m_lo PARTITION OF m FOR VALUES FROM (0, MINVALUE) TO (100, MAXVALUE);",
+  "CREATE TABLE m_ab PARTITION OF m (a WITH OPTIONS NOT NULL, b DEFAULT 'x', CONSTRAINT k CHECK (a > 0)) FOR VALUES IN ('a', 'b') PARTITION BY HASH (a);",
+  "CREATE TABLE m_h0 PARTITION OF m FOR VALUES WITH (MODULUS 4, REMAINDER 0) WITH (fillfactor = 70) ON COMMIT DROP;",
+  "CREATE TABLE IF NOT EXISTS m_rest PARTITION OF app.m DEFAULT;",
   // The foreign-key tail (MATCH, ON DELETE / ON UPDATE in either order) and the
   // DEFERRABLE / INITIALLY attributes, column- and table-level. Each new key is
   // present only when its clause is, so the pre-existing constraint rows stay
@@ -278,6 +286,12 @@ const MALFORMED = [
   // A failure inside a LIKE item recovers like one inside a column: the
   // element-list siblings around it survive.
   "CREATE TABLE t (id int, LIKE src INCLUDING everything, ok text);\nSELECT 12;",
+  // So does one inside a PARTITION OF element list, the second list a CREATE
+  // TABLE can carry.
+  "CREATE TABLE p PARTITION OF m (a NOT NULL, b DEFAULT, c DEFAULT 0) DEFAULT;\nSELECT 13;",
+  // The empty-list check peeks past the `(`, which must report a lex error on
+  // the first item rather than throw it past recovery: the table survives.
+  "CREATE TABLE p PARTITION OF m (é a NOT NULL, b DEFAULT 1) DEFAULT;\nSELECT 14;",
 ];
 
 // Record a throw rather than propagating it, so one bad case doesn't abort the
