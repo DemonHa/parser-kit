@@ -512,6 +512,147 @@ describe("SQL-lite DROP family & TRUNCATE", () => {
   });
 });
 
+// --- DROP: the remaining object types ---
+
+describe("SQL-lite DROP object types", () => {
+  const drop = (text: string) => firstStmt(text) as Extract<Stmt, { kind: "drop" }>;
+  const arg = (type: string, extra: Record<string, unknown> = {}) => ({
+    mode: null,
+    name: null,
+    type: { name: type, args: [], array: false },
+    defaultValue: null,
+    ...extra,
+  });
+
+  it("drops functions and procedures with optional signatures", () => {
+    expect(drop("DROP FUNCTION IF EXISTS f(int, double precision), s.g, h() CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "function",
+      concurrently: false,
+      ifExists: true,
+      names: [["f"], ["s", "g"], ["h"]],
+      behavior: "cascade",
+      signatures: [{ star: false, args: [arg("int"), arg("double precision")] }, null, { star: false, args: [] }],
+    });
+    expect(drop("DROP PROCEDURE p(IN a int, OUT b text) RESTRICT;")).toMatchObject({
+      objectType: "procedure",
+      names: [["p"]],
+      behavior: "restrict",
+      signatures: [
+        { star: false, args: [arg("int", { mode: "in", name: "a" }), arg("text", { mode: "out", name: "b" })] },
+      ],
+    });
+  });
+
+  it("drops aggregates by their (*) or typed signature", () => {
+    expect(drop("DROP AGGREGATE IF EXISTS myavg(*), s.agg(int);")).toEqual({
+      kind: "drop",
+      objectType: "aggregate",
+      concurrently: false,
+      ifExists: true,
+      names: [["myavg"], ["s", "agg"]],
+      behavior: null,
+      signatures: [
+        { star: true, args: [] },
+        { star: false, args: [arg("int")] },
+      ],
+    });
+  });
+
+  it("drops a trigger from its table", () => {
+    expect(drop("DROP TRIGGER IF EXISTS trg ON s.t CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "trigger",
+      concurrently: false,
+      ifExists: true,
+      names: [["trg"]],
+      behavior: "cascade",
+      table: ["s", "t"],
+    });
+  });
+
+  it("drops a database, with and without FORCE", () => {
+    const base = { kind: "drop", objectType: "database", concurrently: false, names: [["db"]], behavior: null };
+    expect(drop("DROP DATABASE db;")).toEqual({ ...base, ifExists: false });
+    expect(drop("DROP DATABASE IF EXISTS db WITH (FORCE);")).toEqual({ ...base, ifExists: true, force: true });
+    expect(drop("DROP DATABASE db (force, FORCE);")).toEqual({ ...base, ifExists: false, force: true });
+  });
+
+  it("drops domains, extensions, materialized views, roles and users", () => {
+    expect(drop("DROP DOMAIN IF EXISTS s.d, e RESTRICT;")).toEqual({
+      kind: "drop",
+      objectType: "domain",
+      concurrently: false,
+      ifExists: true,
+      names: [["s", "d"], ["e"]],
+      behavior: "restrict",
+    });
+    expect(drop("DROP EXTENSION hstore, pgcrypto CASCADE;")).toMatchObject({
+      objectType: "extension",
+      names: [["hstore"], ["pgcrypto"]],
+      behavior: "cascade",
+    });
+    expect(drop("DROP MATERIALIZED VIEW IF EXISTS s.mv;")).toMatchObject({
+      objectType: "materialized view",
+      ifExists: true,
+      names: [["s", "mv"]],
+    });
+    expect(drop("DROP ROLE a, b;")).toMatchObject({ objectType: "role", names: [["a"], ["b"]], behavior: null });
+    expect(drop("DROP USER IF EXISTS u;")).toMatchObject({ objectType: "user", ifExists: true, names: [["u"]] });
+  });
+
+  it("omits the per-kind keys on the original object kinds", () => {
+    const stmt = drop("DROP VIEW v CASCADE;");
+    expect(stmt).not.toHaveProperty("signatures");
+    expect(stmt).not.toHaveProperty("table");
+    expect(stmt).not.toHaveProperty("force");
+  });
+
+  it("keeps the DROP object words unreserved as names", () => {
+    expect((firstStmt("SELECT function, procedure, aggregate, trigger, domain FROM t;") as any).columns).toHaveLength(
+      5,
+    );
+    expect((firstStmt("SELECT database, extension, materialized, role, force FROM t;") as any).columns).toHaveLength(5);
+    expect(drop("DROP FUNCTION function(procedure int);")).toMatchObject({
+      names: [["function"]],
+      signatures: [{ star: false, args: [arg("int", { name: "procedure" })] }],
+    });
+    expect(drop("DROP TRIGGER trigger ON aggregate;")).toMatchObject({ names: [["trigger"]], table: ["aggregate"] });
+    expect(drop("DROP DATABASE force;")).toMatchObject({ names: [["force"]] });
+    expect(drop("DROP ROLE role;")).toMatchObject({ names: [["role"]] });
+    expect(drop("DROP EXTENSION extension;")).toMatchObject({ names: [["extension"]] });
+    expect(drop("DROP DOMAIN domain;")).toMatchObject({ names: [["domain"]] });
+    expect(drop("DROP TABLE database, materialized;")).toMatchObject({ names: [["database"], ["materialized"]] });
+    // `if` is a name wherever `exists` does not follow it.
+    expect(drop("DROP DATABASE if;")).toMatchObject({ ifExists: false, names: [["if"]] });
+    expect(drop("DROP TRIGGER if ON t;")).toMatchObject({ ifExists: false, names: [["if"]] });
+  });
+
+  it("rejects malformed DROP statements", () => {
+    const fails = (text: string) => () => sqlLite.parse(text);
+    expect(fails("DROP TRIGGER t;")).toThrow(/Expected "on" but found ";"/);
+    expect(fails("DROP frobnicate x;")).toThrow(
+      /Expected "table", "view", "index", "type", "sequence", "schema", "materialized", "function", "procedure", "aggregate", "trigger", "domain", "extension", "database", "role" or "user" but found "frobnicate"/,
+    );
+    expect(fails("DROP AGGREGATE a;")).toThrow(/Expected "\(" but found ";"/);
+    expect(fails("DROP MATERIALIZED t;")).toThrow(/Expected "view" but found "t"/);
+    expect(fails("DROP DATABASE d WITH force;")).toThrow(/Expected "\(" but found "force"/);
+    expect(fails("DROP DATABASE d (cascade);")).toThrow(/Expected "force" but found "cascade"/);
+    // PG takes no CASCADE / RESTRICT on roles or databases.
+    expect(fails("DROP ROLE r CASCADE;")).toThrow(/Expected ";" but found "cascade"/);
+    expect(fails("DROP DATABASE a, b;")).toThrow(/Expected ";" but found ","/);
+    expect(fails("DROP DATABASE d WITH ();")).toThrow(/Expected "force" but found "\)"/);
+    // CONCURRENTLY stays an INDEX-family word; trigger names are unqualified.
+    expect(fails("DROP FUNCTION CONCURRENTLY f;")).toThrow(/Expected ";" but found "f"/);
+    expect(fails("DROP TRIGGER s.trg ON t;")).toThrow(/Expected "on" but found "\."/);
+    // Signatures name types only: no `*` outside aggregates, no defaults, no empty aggregate list.
+    expect(fails("DROP FUNCTION f(*);")).toThrow(/Expected a name but found "\*"/);
+    expect(fails("DROP FUNCTION f(a int = 2) CASCADE;")).toThrow(/takes no argument defaults, but found "=" \(1:22\)/);
+    expect(fails("DROP AGGREGATE a(x int DEFAULT 1);")).toThrow(/takes no argument defaults, but found "default"/);
+    expect(fails("DROP AGGREGATE a();")).toThrow(/Expected "\*" or a function argument but found "\)"/);
+  });
+});
+
 // --- Phase 7: more CREATE objects ---
 
 describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
