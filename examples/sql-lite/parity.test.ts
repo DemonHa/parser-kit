@@ -114,6 +114,8 @@ const SUPPLEMENTAL = [
   "ALTER TABLE t RENAME TO t2;",
   "ALTER TABLE t OWNER TO admin;",
   "ALTER TABLE t REPLICA IDENTITY USING INDEX t_pkey;",
+  "ALTER TABLE IF EXISTS s.t ADD COLUMN IF NOT EXISTS a int, ADD IF NOT EXISTS b text, DROP c, OWNER TO bob;",
+  "ALTER TABLE IF EXISTS t RENAME TO t2;",
   "CREATE TABLE t (id int NOT NULL DEFAULT 0, u text UNIQUE, parent int REFERENCES p (id) ON DELETE CASCADE, CHECK (id > 0));",
   "CREATE TABLE t (a int NULL, b int, FOREIGN KEY (b) REFERENCES p (id));",
   // LIKE as a table item and the clauses after the element list, each a key the

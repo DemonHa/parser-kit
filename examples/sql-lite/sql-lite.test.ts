@@ -228,7 +228,11 @@ describe("SQL-lite statements", () => {
 // --- ALTER TABLE (peekAhead / phrase dispatch) ---
 
 describe("SQL-lite ALTER TABLE", () => {
-  const action = (text: string) => (firstStmt(text) as any).action;
+  const action = (text: string) => {
+    const { actions } = firstStmt(text) as any;
+    expect(actions).toHaveLength(1);
+    return actions[0];
+  };
 
   it("adds a column, with or without the COLUMN keyword", () => {
     expect(action("ALTER TABLE t ADD COLUMN age int;")).toMatchObject({
@@ -275,7 +279,11 @@ describe("SQL-lite ALTER TABLE", () => {
 // --- Phase 6: richer ALTER TABLE actions ---
 
 describe("SQL-lite ALTER TABLE (Phase 6 actions)", () => {
-  const action = (text: string) => (firstStmt(text) as any).action;
+  const action = (text: string) => {
+    const { actions } = firstStmt(text) as any;
+    expect(actions).toHaveLength(1);
+    return actions[0];
+  };
 
   it("sets and drops NOT NULL", () => {
     expect(action("ALTER TABLE t ALTER COLUMN email SET NOT NULL;")).toEqual({ kind: "setNotNull", column: "email" });
@@ -332,6 +340,118 @@ describe("SQL-lite ALTER TABLE (Phase 6 actions)", () => {
     expect(() => sqlLite.parse("ALTER TABLE t frobnicate;")).toThrow(
       /Expected "add", "drop", "alter", "rename", "owner" or "replica"/,
     );
+  });
+});
+
+// --- ALTER TABLE action lists and IF [NOT] EXISTS ---
+
+describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
+  const alter = (text: string) => firstStmt(text) as any;
+  const addColumn = (name: string, ifNotExists = false) => ({
+    kind: "addColumn",
+    ifNotExists,
+    column: { kind: "column", name, dataType: { name: "int", args: [], array: false }, constraints: [] },
+  });
+
+  it("parses comma-separated actions in source order", () => {
+    expect(alter("ALTER TABLE t ADD a int, DROP COLUMN b, ALTER c SET NOT NULL, OWNER TO bob;")).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["t"],
+      actions: [
+        addColumn("a"),
+        { kind: "dropColumn", name: "b" },
+        { kind: "setNotNull", column: "c" },
+        { kind: "ownerTo", owner: "bob" },
+      ],
+    });
+  });
+
+  it("ends each action at the comma, inside or outside parentheses", () => {
+    expect(
+      alter("ALTER TABLE t ADD CONSTRAINT k CHECK (f(a, b)), ADD UNIQUE (a, b), ALTER a TYPE numeric(10, 2);").actions,
+    ).toMatchObject([
+      { kind: "addConstraint", name: "k", constraint: { kind: "check" } },
+      { kind: "addConstraint", name: null, constraint: { kind: "unique", columns: ["a", "b"] } },
+      { kind: "setDataType", column: "a", dataType: { name: "numeric", args: [10, 2] } },
+    ]);
+    // A comma straight after an expression or a column constraint's tail.
+    expect(alter("ALTER TABLE t ALTER a SET DEFAULT f(1, 2) + 3, DROP b;").actions).toMatchObject([
+      { kind: "setDefault", column: "a", expr: { kind: "binary", op: "+" } },
+      { kind: "dropColumn", name: "b" },
+    ]);
+    expect(alter("ALTER TABLE t ADD a int REFERENCES p (id) ON DELETE CASCADE, DROP c;").actions).toMatchObject([
+      { kind: "addColumn", column: { name: "a", constraints: [{ kind: "references", onDelete: "cascade" }] } },
+      { kind: "dropColumn", name: "c" },
+    ]);
+  });
+
+  it("records IF EXISTS on the statement", () => {
+    expect(alter("ALTER TABLE IF EXISTS s.t ADD a int;")).toMatchObject({ ifExists: true, name: ["s", "t"] });
+    expect(alter("ALTER TABLE IF EXISTS t RENAME TO u;")).toMatchObject({
+      ifExists: true,
+      actions: [{ kind: "renameTable", to: "u" }],
+    });
+  });
+
+  it("records IF NOT EXISTS on ADD, with or without COLUMN", () => {
+    expect(alter("ALTER TABLE t ADD COLUMN IF NOT EXISTS a int, ADD IF NOT EXISTS b int, ADD c int;").actions).toEqual([
+      addColumn("a", true),
+      addColumn("b", true),
+      addColumn("c"),
+    ]);
+  });
+
+  it("keeps IF / EXISTS usable as table and column names", () => {
+    expect(alter("ALTER TABLE if ADD a int;")).toMatchObject({ ifExists: false, name: ["if"] });
+    expect(alter("ALTER TABLE IF EXISTS if ADD a int;")).toMatchObject({ ifExists: true, name: ["if"] });
+    expect(alter("ALTER TABLE exists ADD a int;")).toMatchObject({ ifExists: false, name: ["exists"] });
+    expect(alter("ALTER TABLE t ADD if int;").actions).toEqual([addColumn("if")]);
+    expect(alter("ALTER TABLE t ADD COLUMN if int;").actions).toEqual([addColumn("if")]);
+    expect(alter("ALTER TABLE t ADD COLUMN IF NOT EXISTS exists int;").actions).toEqual([addColumn("exists", true)]);
+    expect(alter("ALTER TABLE t ADD COLUMN IF NOT EXISTS if int;").actions).toEqual([addColumn("if", true)]);
+    // A quoted "not" is an ordinary type name, so it does not start IF NOT EXISTS.
+    expect(alter('ALTER TABLE t ADD if "not";').actions).toMatchObject([
+      { kind: "addColumn", ifNotExists: false, column: { name: "if", dataType: { name: "not" } } },
+    ]);
+  });
+
+  it("spans the whole statement, from ALTER through the last action", () => {
+    const [stmt] = sqlLite.parse("ALTER TABLE t ADD a int, DROP b;") as Record<string, any>[];
+    expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 31 } });
+  });
+
+  it("rejects RENAME beside any other action, on either side", () => {
+    expect(() => sqlLite.parse("ALTER TABLE t RENAME TO u, ADD a int;")).toThrow(
+      /RENAME cannot be combined with other ALTER TABLE actions \(1:14\)/,
+    );
+    expect(() => sqlLite.parse("ALTER TABLE t ADD a int, RENAME COLUMN a TO b;")).toThrow(
+      /RENAME cannot be combined with other ALTER TABLE actions \(1:25\)/,
+    );
+  });
+
+  it("reports a combined RENAME over the whole action and recovers after it", () => {
+    const { ast, errors } = sqlLite.diagnose("ALTER TABLE t ADD a int, RENAME a TO b;\nSELECT 1;");
+    expect(errors.map((e) => ({ message: e.message, end: e.end }))).toEqual([
+      { message: "RENAME cannot be combined with other ALTER TABLE actions (1:25)", end: { row: 1, col: 38 } },
+    ]);
+    expect((ast as Stmt[]).map((s) => s.kind)).toEqual(["select"]);
+  });
+
+  // Only a comma followed by an action's lead word counts as a second action; a
+  // stray one after a RENAME fails as a stray comma.
+  it("rejects a stray comma after RENAME as a comma, not as a combination", () => {
+    for (const text of ["ALTER TABLE t RENAME TO u,;", "ALTER TABLE t RENAME TO u, 42;"]) {
+      expect(() => sqlLite.parse(text)).toThrow(/Expected ";" but found "," \(1:25\)/);
+    }
+  });
+
+  it("rejects a trailing comma, a misspelt IF NOT EXISTS and an unknown ALTER target", () => {
+    expect(() => sqlLite.parse("ALTER TABLE t ADD a int,;")).toThrow(/Expected "add", "drop".* but found ";"/);
+    expect(() => sqlLite.parse("ALTER TABLE t ADD COLUMN IF NOT EXIST a int;")).toThrow(
+      /Expected "exists" but found "exist"/,
+    );
+    expect(() => sqlLite.parse("ALTER frobnicate t;")).toThrow(/Expected "table" but found "frobnicate"/);
   });
 });
 
@@ -3668,7 +3788,7 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
   it("reaches ALTER TABLE ADD [CONSTRAINT] through the shared table-constraint body", () => {
     expect(
       (firstStmt("ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES p ON UPDATE CASCADE DEFERRABLE;") as any)
-        .action,
+        .actions[0],
     ).toEqual({
       kind: "addConstraint",
       name: "fk",
@@ -3683,7 +3803,7 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
         deferrable: true,
       },
     });
-    expect((firstStmt("ALTER TABLE t ADD UNIQUE (a) INITIALLY DEFERRED;") as any).action.constraint).toEqual({
+    expect((firstStmt("ALTER TABLE t ADD UNIQUE (a) INITIALLY DEFERRED;") as any).actions[0].constraint).toEqual({
       kind: "unique",
       name: null,
       columns: ["a"],
@@ -3691,7 +3811,8 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
     });
     // And the column-level form, through ADD COLUMN.
     expect(
-      (firstStmt("ALTER TABLE t ADD COLUMN a int REFERENCES p ON UPDATE SET NULL;") as any).action.column.constraints,
+      (firstStmt("ALTER TABLE t ADD COLUMN a int REFERENCES p ON UPDATE SET NULL;") as any).actions[0].column
+        .constraints,
     ).toEqual([{ kind: "references", table: ["p"], columns: null, onDelete: null, onUpdate: "set null" }]);
   });
 

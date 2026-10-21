@@ -317,7 +317,7 @@ export type RelationOptionValue =
 export type RelationOption = { namespace?: string; name: string; value: RelationOptionValue | null; span: Span };
 
 export type AlterAction =
-  | { kind: "addColumn"; column: ColumnDef }
+  | { kind: "addColumn"; ifNotExists: boolean; column: ColumnDef }
   | { kind: "dropColumn"; name: string }
   | { kind: "addConstraint"; name: string | null; constraint: TableConstraint }
   | { kind: "setDefault"; column: string; expr: Expr }
@@ -624,7 +624,9 @@ export type Stmt =
   | CreateFunction
   | CreateAggregate
   | CreateTrigger
-  | { kind: "alterTable"; name: string[]; action: AlterAction; span: Span }
+  // `ALTER TABLE [IF EXISTS] name action[, …]`. `actions` is never empty, and a
+  // RENAME is always its only element — PG keeps those out of the action list.
+  | { kind: "alterTable"; ifExists: boolean; name: string[]; actions: AlterAction[]; span: Span }
   // Generalized DROP: `DROP {TABLE|VIEW|INDEX|TYPE|SEQUENCE|SCHEMA}
   // [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `objectType` is the
   // folded keyword; `behavior` is the trailing CASCADE/RESTRICT (null when absent).
@@ -2077,17 +2079,17 @@ const bExprRule = pratt<Expr, SqlTokenType>({
 });
 
 // --- keyword dispatch maps ---
-// Five rules below (column constraints, a foreign key's referential actions,
-// table constraints, ALTER TABLE actions and the CREATE targets) all answer the
-// same question — "which keyword leads here?" — and all grow one entry at a
-// time. Each keeps that answer in a plain record keyed by the lead word instead
-// of an `oneOf` chain or a ladder of `if`s, so extending one is a single entry
-// and the `expected` string is *derived* from the record rather than restated
-// alongside it.
+// Six rules below (column constraints, a foreign key's referential actions,
+// table constraints, ALTER TABLE actions and the CREATE and ALTER targets) all
+// answer the same question — "which keyword leads here?" — and all grow one
+// entry at a time. Each keeps that answer in a plain record keyed by the lead
+// word instead of an `oneOf` chain or a ladder of `if`s, so extending one is a
+// single entry and the `expected` string is *derived* from the record rather
+// than restated alongside it.
 //
 // Dispatch peeks; every handler consumes its own lead word, and every one that
-// builds a node captures its own `start`, so the nodes keep opening their spans
-// on the keyword.
+// builds a node captures its own `start` unless one is handed in, so the nodes
+// keep opening their spans on the keyword.
 type DispatchEntry<T, A extends unknown[]> = {
   // How this branch names itself in an "Expected …" message. Defaults to the
   // quoted key, so it is spelled out only where the two differ — a multi-word
@@ -3353,6 +3355,17 @@ const createStmt = custom<Stmt, SqlTokenType>(
   { expected: '"create"', first: [{ type: "ident", value: "create" }] },
 );
 
+// `[IF NOT EXISTS] column-def`, the tail of `ADD [COLUMN]`. Decided by peeking
+// rather than by `attempt`, so a column that happens to be called `if` costs no
+// backtrack: `not` is reserved, so an unquoted one can never be the type of such
+// a column. The `ident` test is what keeps a quoted `"not"`, which can, out.
+function parseAddColumn(ctx: ParseContext<SqlTokenType>): AlterAction {
+  const next = ctx.peekAhead(1);
+  const ifNotExists = ctx.is("ident", "if") && next?.type === "ident" && next.value === "not";
+  if (ifNotExists) ctx.parse(kwseq("if", "not", "exists"));
+  return { kind: "addColumn", ifNotExists, column: ctx.parse(columnDef) };
+}
+
 // The ALTER TABLE actions. Dispatch peeks; each handler consumes its own lead
 // word and owns whatever lookahead its own shapes need — `ADD [COLUMN] …` vs
 // `ADD [CONSTRAINT name] …` vs a bare table constraint all begin with `add`, and
@@ -3364,7 +3377,7 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       ctx.next(); // ADD
       if (after?.value === "column") {
         ctx.next(); // COLUMN
-        return { kind: "addColumn", column: ctx.parse(columnDef) };
+        return parseAddColumn(ctx);
       }
       if (after?.value === "constraint") {
         ctx.next(); // CONSTRAINT
@@ -3378,7 +3391,7 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       if (after !== null && Object.hasOwn(TABLE_CONSTRAINTS, after.value)) {
         return { kind: "addConstraint", name: null, constraint: ctx.parse(tableConstraintBody) };
       }
-      return { kind: "addColumn", column: ctx.parse(columnDef) };
+      return parseAddColumn(ctx);
     },
   },
   drop: {
@@ -3467,8 +3480,63 @@ const alterAction = custom<AlterAction, SqlTokenType>((ctx) => dispatch(ALTER_AC
   first: dispatchFirst(ALTER_ACTIONS),
 });
 
-const alterStmt = seq(skip(kw("alter")), skip(kw("table")), field("name", qualName), field("action", alterAction)).map(
-  ({ name, action }, span): Stmt => ({ kind: "alterTable", name, action, span }),
+// The actions PG parses as a statement of their own rather than as an entry in
+// the action list, keyed by kind and labelled for the croak. Such an action is
+// fine alone and is rejected beside any other, on either side of it.
+const SOLO_ALTER_ACTIONS: Partial<Record<AlterAction["kind"], string>> = {
+  renameColumn: "RENAME",
+  renameConstraint: "RENAME",
+  renameTable: "RENAME",
+};
+
+// `TABLE [IF EXISTS] name action[, …]` — TABLE consumed here, ALTER by the
+// caller, whose `start` the node spans from. IF EXISTS is decided by peeking,
+// like ADD's IF NOT EXISTS: `exists` leads no action, so a table called `if`
+// is never followed by it.
+function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // TABLE
+  const next = ctx.peekAhead(1);
+  const ifExists = ctx.is("ident", "if") && next?.type === "ident" && next.value === "exists";
+  if (ifExists) ctx.parse(kwseq("if", "exists"));
+  const name = ctx.parse(qualName);
+  const actions: AlterAction[] = [];
+  do {
+    const actionStart = ctx.position();
+    const action = ctx.parse(alterAction);
+    const solo = SOLO_ALTER_ACTIONS[action.kind];
+    if (solo !== undefined) {
+      // Rejected beside another action: one already parsed, or one whose lead
+      // word follows the comma after it. A comma followed by no action word is
+      // no second action, so it is left to fail as the stray comma it is.
+      const leadsOn = ctx.is("punc", ",") && lookup(ALTER_ACTIONS, ctx.peekAhead(1)) !== undefined;
+      if (actions.length > 0 || leadsOn) {
+        const { end } = ctx.spanFrom(actionStart);
+        ctx.croak(`${solo} cannot be combined with other ALTER TABLE actions`, actionStart, end);
+      }
+      actions.push(action);
+      break;
+    }
+    actions.push(action);
+  } while (ctx.eat("punc", ",") !== null);
+  return { kind: "alterTable", ifExists, name, actions, span: ctx.spanFrom(start) };
+}
+
+// The ALTER targets. Dispatch peeks, as PLAIN_CREATE's does: each handler
+// consumes its own lead word, and is handed the position before ALTER so its
+// node spans the whole statement. The croak is hand-written and replaces no
+// oneOf, so it takes the comma form over the keys, as ALTER_ACTIONS' does.
+const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
+  table: { parse: alterTableRest },
+};
+const ALTER_TARGET_EXPECTED = keyList(ALTER_TARGETS);
+
+const alterStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("alter"));
+    return dispatch(ALTER_TARGETS, ALTER_TARGET_EXPECTED, ctx, start);
+  },
+  { expected: '"alter"', first: [{ type: "ident", value: "alter" }] },
 );
 
 // CASCADE / RESTRICT drop behavior, shared by DROP and TRUNCATE (null when absent).

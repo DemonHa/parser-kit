@@ -10511,42 +10511,46 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "addColumn",
-          "column": {
-            "kind": "column",
-            "name": "age",
-            "dataType": {
-              "name": "int",
-              "args": [],
-              "array": false,
+        "actions": [
+          {
+            "kind": "addColumn",
+            "ifNotExists": false,
+            "column": {
+              "kind": "column",
+              "name": "age",
+              "dataType": {
+                "name": "int",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 29
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 32
+                  }
+                }
+              },
+              "constraints": [],
               "span": {
                 "start": {
                   "row": 1,
-                  "col": 29
+                  "col": 25
                 },
                 "end": {
                   "row": 1,
                   "col": 32
                 }
               }
-            },
-            "constraints": [],
-            "span": {
-              "start": {
-                "row": 1,
-                "col": 25
-              },
-              "end": {
-                "row": 1,
-                "col": 32
-              }
             }
           }
-        },
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10565,30 +10569,33 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "addConstraint",
-          "name": "pk",
-          "constraint": {
-            "kind": "primaryKey",
-            "name": null,
-            "columns": [
-              "id"
-            ],
-            "span": {
-              "start": {
-                "row": 1,
-                "col": 32
-              },
-              "end": {
-                "row": 1,
-                "col": 48
+        "actions": [
+          {
+            "kind": "addConstraint",
+            "name": "pk",
+            "constraint": {
+              "kind": "primaryKey",
+              "name": null,
+              "columns": [
+                "id"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 32
+                },
+                "end": {
+                  "row": 1,
+                  "col": 48
+                }
               }
             }
           }
-        },
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10607,13 +10614,16 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "setNotNull",
-          "column": "email"
-        },
+        "actions": [
+          {
+            "kind": "setNotNull",
+            "column": "email"
+          }
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10632,13 +10642,16 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "dropDefault",
-          "column": "status"
-        },
+        "actions": [
+          {
+            "kind": "dropDefault",
+            "column": "status"
+          }
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10657,14 +10670,17 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "renameColumn",
-          "from": "old",
-          "to": "new"
-        },
+        "actions": [
+          {
+            "kind": "renameColumn",
+            "from": "old",
+            "to": "new"
+          }
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10683,14 +10699,17 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "renameConstraint",
-          "from": "pk_old",
-          "to": "pk_new"
-        },
+        "actions": [
+          {
+            "kind": "renameConstraint",
+            "from": "pk_old",
+            "to": "pk_new"
+          }
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10709,13 +10728,16 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "dropColumn",
-          "name": "age"
-        },
+        "actions": [
+          {
+            "kind": "dropColumn",
+            "name": "age"
+          }
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10734,13 +10756,16 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "dropNotNull",
-          "column": "email"
-        },
+        "actions": [
+          {
+            "kind": "dropNotNull",
+            "column": "email"
+          }
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10759,27 +10784,30 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "setDefault",
-          "column": "status",
-          "expr": {
-            "kind": "string",
-            "value": "active",
-            "span": {
-              "start": {
-                "row": 1,
-                "col": 47
-              },
-              "end": {
-                "row": 1,
-                "col": 53
+        "actions": [
+          {
+            "kind": "setDefault",
+            "column": "status",
+            "expr": {
+              "kind": "string",
+              "value": "active",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 47
+                },
+                "end": {
+                  "row": 1,
+                  "col": 53
+                }
               }
             }
           }
-        },
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10798,28 +10826,31 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "setDataType",
-          "column": "n",
-          "dataType": {
-            "name": "bigint",
-            "args": [],
-            "array": false,
-            "span": {
-              "start": {
-                "row": 1,
-                "col": 43
-              },
-              "end": {
-                "row": 1,
-                "col": 49
+        "actions": [
+          {
+            "kind": "setDataType",
+            "column": "n",
+            "dataType": {
+              "name": "bigint",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 43
+                },
+                "end": {
+                  "row": 1,
+                  "col": 49
+                }
               }
             }
           }
-        },
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10879,13 +10910,16 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "renameTable",
-          "to": "t2"
-        },
+        "actions": [
+          {
+            "kind": "renameTable",
+            "to": "t2"
+          }
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10904,13 +10938,16 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "ownerTo",
-          "owner": "admin"
-        },
+        "actions": [
+          {
+            "kind": "ownerTo",
+            "owner": "admin"
+          }
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10929,14 +10966,17 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "replicaIdentity",
-          "mode": "usingIndex",
-          "index": "t_pkey"
-        },
+        "actions": [
+          {
+            "kind": "replicaIdentity",
+            "mode": "usingIndex",
+            "index": "t_pkey"
+          }
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -10945,6 +10985,135 @@
           "end": {
             "row": 1,
             "col": 49
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE IF EXISTS s.t ADD COLUMN IF NOT EXISTS a int, ADD IF NOT EXISTS b text, DROP c, OWNER TO bob;",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "ifExists": true,
+        "name": [
+          "s",
+          "t"
+        ],
+        "actions": [
+          {
+            "kind": "addColumn",
+            "ifNotExists": true,
+            "column": {
+              "kind": "column",
+              "name": "a",
+              "dataType": {
+                "name": "int",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 53
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 56
+                  }
+                }
+              },
+              "constraints": [],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 51
+                },
+                "end": {
+                  "row": 1,
+                  "col": 56
+                }
+              }
+            }
+          },
+          {
+            "kind": "addColumn",
+            "ifNotExists": true,
+            "column": {
+              "kind": "column",
+              "name": "b",
+              "dataType": {
+                "name": "text",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 78
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 82
+                  }
+                }
+              },
+              "constraints": [],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 76
+                },
+                "end": {
+                  "row": 1,
+                  "col": 82
+                }
+              }
+            }
+          },
+          {
+            "kind": "dropColumn",
+            "name": "c"
+          },
+          {
+            "kind": "ownerTo",
+            "owner": "bob"
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 104
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TABLE IF EXISTS t RENAME TO t2;",
+    "ast": [
+      {
+        "kind": "alterTable",
+        "ifExists": true,
+        "name": [
+          "t"
+        ],
+        "actions": [
+          {
+            "kind": "renameTable",
+            "to": "t2"
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 36
           }
         }
       }
@@ -12035,38 +12204,41 @@
     "ast": [
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "addConstraint",
-          "name": "fk",
-          "constraint": {
-            "kind": "foreignKey",
-            "name": null,
-            "columns": [
-              "a"
-            ],
-            "refTable": [
-              "p"
-            ],
-            "refColumns": null,
-            "match": "simple",
-            "onDelete": null,
-            "onUpdate": "restrict",
-            "deferrable": false,
-            "span": {
-              "start": {
-                "row": 1,
-                "col": 32
-              },
-              "end": {
-                "row": 1,
-                "col": 107
+        "actions": [
+          {
+            "kind": "addConstraint",
+            "name": "fk",
+            "constraint": {
+              "kind": "foreignKey",
+              "name": null,
+              "columns": [
+                "a"
+              ],
+              "refTable": [
+                "p"
+              ],
+              "refColumns": null,
+              "match": "simple",
+              "onDelete": null,
+              "onUpdate": "restrict",
+              "deferrable": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 32
+                },
+                "end": {
+                  "row": 1,
+                  "col": 107
+                }
               }
             }
           }
-        },
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -14720,42 +14892,46 @@
       },
       {
         "kind": "alterTable",
+        "ifExists": false,
         "name": [
           "t"
         ],
-        "action": {
-          "kind": "addColumn",
-          "column": {
-            "kind": "column",
-            "name": "age",
-            "dataType": {
-              "name": "int",
-              "args": [],
-              "array": false,
+        "actions": [
+          {
+            "kind": "addColumn",
+            "ifNotExists": false,
+            "column": {
+              "kind": "column",
+              "name": "age",
+              "dataType": {
+                "name": "int",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 5,
+                    "col": 29
+                  },
+                  "end": {
+                    "row": 5,
+                    "col": 32
+                  }
+                }
+              },
+              "constraints": [],
               "span": {
                 "start": {
                   "row": 5,
-                  "col": 29
+                  "col": 25
                 },
                 "end": {
                   "row": 5,
                   "col": 32
                 }
               }
-            },
-            "constraints": [],
-            "span": {
-              "start": {
-                "row": 5,
-                "col": 25
-              },
-              "end": {
-                "row": 5,
-                "col": 32
-              }
             }
           }
-        },
+        ],
         "span": {
           "start": {
             "row": 5,
