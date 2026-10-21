@@ -22773,6 +22773,578 @@
     ]
   },
   {
+    "source": "UPDATE t SET (a, b) = (1, DEFAULT), c = 3, (d, e) = ROW(c + 1, DEFAULT) WHERE id = 1;",
+    "ast": [
+      {
+        "kind": "update",
+        "table": [
+          "t"
+        ],
+        "alias": null,
+        "set": [
+          {
+            "columns": [
+              "a",
+              "b"
+            ],
+            "value": {
+              "kind": "row",
+              "items": [
+                {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 23
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 24
+                    }
+                  }
+                },
+                {
+                  "kind": "default",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 26
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 33
+                    }
+                  }
+                }
+              ],
+              "implicit": true,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 22
+                },
+                "end": {
+                  "row": 1,
+                  "col": 34
+                }
+              }
+            }
+          },
+          {
+            "column": "c",
+            "value": {
+              "kind": "number",
+              "value": 3,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 40
+                },
+                "end": {
+                  "row": 1,
+                  "col": 41
+                }
+              }
+            }
+          },
+          {
+            "columns": [
+              "d",
+              "e"
+            ],
+            "value": {
+              "kind": "row",
+              "items": [
+                {
+                  "kind": "binary",
+                  "op": "+",
+                  "left": {
+                    "kind": "name",
+                    "parts": [
+                      "c"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 56
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 57
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 60
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 61
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 56
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 61
+                    }
+                  }
+                },
+                {
+                  "kind": "default",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 63
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 70
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 52
+                },
+                "end": {
+                  "row": 1,
+                  "col": 71
+                }
+              }
+            }
+          }
+        ],
+        "from": null,
+        "where": {
+          "kind": "binary",
+          "op": "=",
+          "left": {
+            "kind": "name",
+            "parts": [
+              "id"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 78
+              },
+              "end": {
+                "row": 1,
+                "col": 80
+              }
+            }
+          },
+          "right": {
+            "kind": "number",
+            "value": 1,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 83
+              },
+              "end": {
+                "row": 1,
+                "col": 84
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 78
+            },
+            "end": {
+              "row": 1,
+              "col": 84
+            }
+          }
+        },
+        "returning": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 84
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "UPDATE t SET (a, b) = (SELECT x, y FROM u WHERE u.id = t.id), (c) = ROW(2) RETURNING a;",
+    "ast": [
+      {
+        "kind": "update",
+        "table": [
+          "t"
+        ],
+        "alias": null,
+        "set": [
+          {
+            "columns": [
+              "a",
+              "b"
+            ],
+            "value": {
+              "kind": "subquery",
+              "query": {
+                "kind": "select",
+                "with_": null,
+                "recursive": false,
+                "distinct": false,
+                "columns": [
+                  {
+                    "expr": {
+                      "kind": "name",
+                      "parts": [
+                        "x"
+                      ],
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 30
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 31
+                        }
+                      }
+                    },
+                    "alias": null
+                  },
+                  {
+                    "expr": {
+                      "kind": "name",
+                      "parts": [
+                        "y"
+                      ],
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 33
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 34
+                        }
+                      }
+                    },
+                    "alias": null
+                  }
+                ],
+                "from": [
+                  {
+                    "kind": "table",
+                    "name": [
+                      "u"
+                    ],
+                    "alias": null
+                  }
+                ],
+                "where": {
+                  "kind": "binary",
+                  "op": "=",
+                  "left": {
+                    "kind": "name",
+                    "parts": [
+                      "u",
+                      "id"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 48
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 52
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "name",
+                    "parts": [
+                      "t",
+                      "id"
+                    ],
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 55
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 59
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 48
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 59
+                    }
+                  }
+                },
+                "groupBy": null,
+                "having": null,
+                "window": null,
+                "orderBy": null,
+                "limit": null,
+                "offset": null,
+                "locking": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 23
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 59
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 22
+                },
+                "end": {
+                  "row": 1,
+                  "col": 60
+                }
+              }
+            }
+          },
+          {
+            "columns": [
+              "c"
+            ],
+            "value": {
+              "kind": "row",
+              "items": [
+                {
+                  "kind": "number",
+                  "value": 2,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 72
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 73
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 68
+                },
+                "end": {
+                  "row": 1,
+                  "col": 74
+                }
+              }
+            }
+          }
+        ],
+        "from": null,
+        "where": null,
+        "returning": [
+          {
+            "expr": {
+              "kind": "name",
+              "parts": [
+                "a"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 85
+                },
+                "end": {
+                  "row": 1,
+                  "col": 86
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 86
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "INSERT INTO t VALUES (1, 2) ON CONFLICT (id) DO UPDATE SET (a, b) = (excluded.a, DEFAULT), c = 4;",
+    "ast": [
+      {
+        "kind": "insert",
+        "table": [
+          "t"
+        ],
+        "columns": null,
+        "source": {
+          "kind": "values",
+          "rows": [
+            [
+              {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 22
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 23
+                  }
+                }
+              },
+              {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 25
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 26
+                  }
+                }
+              }
+            ]
+          ]
+        },
+        "onConflict": {
+          "target": [
+            "id"
+          ],
+          "action": {
+            "kind": "update",
+            "set": [
+              {
+                "columns": [
+                  "a",
+                  "b"
+                ],
+                "value": {
+                  "kind": "row",
+                  "items": [
+                    {
+                      "kind": "name",
+                      "parts": [
+                        "excluded",
+                        "a"
+                      ],
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 69
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 79
+                        }
+                      }
+                    },
+                    {
+                      "kind": "default",
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 81
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 88
+                        }
+                      }
+                    }
+                  ],
+                  "implicit": true,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 68
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 89
+                    }
+                  }
+                }
+              },
+              {
+                "column": "c",
+                "value": {
+                  "kind": "number",
+                  "value": 4,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 95
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 96
+                    }
+                  }
+                }
+              }
+            ],
+            "where": null
+          }
+        },
+        "returning": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 96
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {
