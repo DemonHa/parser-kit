@@ -12136,6 +12136,328 @@
     ]
   },
   {
+    "source": "ALTER SCHEMA s RENAME TO s2;",
+    "ast": [
+      {
+        "kind": "alterSchema",
+        "name": "s",
+        "action": {
+          "kind": "rename",
+          "to": "s2"
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 27
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER DOMAIN app.d ADD CONSTRAINT pos CHECK (VALUE > 0) NOT VALID;",
+    "ast": [
+      {
+        "kind": "alterDomain",
+        "name": [
+          "app",
+          "d"
+        ],
+        "action": {
+          "kind": "addConstraint",
+          "constraint": {
+            "kind": "check",
+            "name": "pos",
+            "expr": {
+              "kind": "binary",
+              "op": ">",
+              "left": {
+                "kind": "name",
+                "parts": [
+                  "value"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 45
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 50
+                  }
+                }
+              },
+              "right": {
+                "kind": "number",
+                "value": 0,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 53
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 54
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 45
+                },
+                "end": {
+                  "row": 1,
+                  "col": 54
+                }
+              }
+            }
+          },
+          "notValid": true
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 65
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER DOMAIN d DROP CONSTRAINT IF EXISTS pos CASCADE;",
+    "ast": [
+      {
+        "kind": "alterDomain",
+        "name": [
+          "d"
+        ],
+        "action": {
+          "kind": "dropConstraint",
+          "ifExists": true,
+          "name": "pos",
+          "behavior": "cascade"
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 52
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER DOMAIN d SET DEFAULT 0;",
+    "ast": [
+      {
+        "kind": "alterDomain",
+        "name": [
+          "d"
+        ],
+        "action": {
+          "kind": "setDefault",
+          "expr": {
+            "kind": "number",
+            "value": 0,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 27
+              },
+              "end": {
+                "row": 1,
+                "col": 28
+              }
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 28
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TYPE mood ADD VALUE IF NOT EXISTS 'meh' BEFORE 'sad';",
+    "ast": [
+      {
+        "kind": "alterType",
+        "name": [
+          "mood"
+        ],
+        "action": {
+          "kind": "addValue",
+          "ifNotExists": true,
+          "value": "meh",
+          "position": {
+            "placement": "before",
+            "value": "sad"
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 57
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TYPE mood RENAME VALUE 'sad' TO 'blue';",
+    "ast": [
+      {
+        "kind": "alterType",
+        "name": [
+          "mood"
+        ],
+        "action": {
+          "kind": "renameValue",
+          "from": "sad",
+          "to": "blue"
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 43
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER TYPE mood SET SCHEMA archive;",
+    "ast": [
+      {
+        "kind": "alterType",
+        "name": [
+          "mood"
+        ],
+        "action": {
+          "kind": "setSchema",
+          "schema": "archive"
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 34
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "ALTER INDEX IF EXISTS i SET (fillfactor = 70), RESET (deduplicate_items), SET TABLESPACE ts;",
+    "ast": [
+      {
+        "kind": "alterIndex",
+        "ifExists": true,
+        "name": [
+          "i"
+        ],
+        "actions": [
+          {
+            "kind": "setOptions",
+            "options": [
+              {
+                "name": "fillfactor",
+                "value": {
+                  "kind": "number",
+                  "value": 70,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 42
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 44
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 29
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 44
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "kind": "resetOptions",
+            "options": [
+              {
+                "name": "deduplicate_items",
+                "value": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 54
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 71
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "kind": "setTablespace",
+            "tablespace": "ts"
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 91
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE TABLE t (id int NOT NULL DEFAULT 0, u text UNIQUE, parent int REFERENCES p (id) ON DELETE CASCADE, CHECK (id > 0));",
     "ast": [
       {
