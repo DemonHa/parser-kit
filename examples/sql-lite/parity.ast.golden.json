@@ -18595,6 +18595,407 @@
     ]
   },
   {
+    "source": "DROP FUNCTION IF EXISTS f(int, double precision), s.g CASCADE;",
+    "ast": [
+      {
+        "kind": "drop",
+        "objectType": "function",
+        "concurrently": false,
+        "ifExists": true,
+        "names": [
+          [
+            "f"
+          ],
+          [
+            "s",
+            "g"
+          ]
+        ],
+        "behavior": "cascade",
+        "signatures": [
+          {
+            "star": false,
+            "args": [
+              {
+                "mode": null,
+                "name": null,
+                "type": {
+                  "name": "int",
+                  "args": [],
+                  "array": false,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 26
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 29
+                    }
+                  }
+                },
+                "defaultValue": null
+              },
+              {
+                "mode": null,
+                "name": null,
+                "type": {
+                  "name": "double precision",
+                  "args": [],
+                  "array": false,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 31
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 47
+                    }
+                  }
+                },
+                "defaultValue": null
+              }
+            ]
+          },
+          null
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 61
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "DROP PROCEDURE p(IN a int, OUT b text);",
+    "ast": [
+      {
+        "kind": "drop",
+        "objectType": "procedure",
+        "concurrently": false,
+        "ifExists": false,
+        "names": [
+          [
+            "p"
+          ]
+        ],
+        "behavior": null,
+        "signatures": [
+          {
+            "star": false,
+            "args": [
+              {
+                "mode": "in",
+                "name": "a",
+                "type": {
+                  "name": "int",
+                  "args": [],
+                  "array": false,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 22
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 25
+                    }
+                  }
+                },
+                "defaultValue": null
+              },
+              {
+                "mode": "out",
+                "name": "b",
+                "type": {
+                  "name": "text",
+                  "args": [],
+                  "array": false,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 33
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 37
+                    }
+                  }
+                },
+                "defaultValue": null
+              }
+            ]
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 38
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "DROP AGGREGATE myavg(*), s.agg(int) RESTRICT;",
+    "ast": [
+      {
+        "kind": "drop",
+        "objectType": "aggregate",
+        "concurrently": false,
+        "ifExists": false,
+        "names": [
+          [
+            "myavg"
+          ],
+          [
+            "s",
+            "agg"
+          ]
+        ],
+        "behavior": "restrict",
+        "signatures": [
+          {
+            "star": true,
+            "args": []
+          },
+          {
+            "star": false,
+            "args": [
+              {
+                "mode": null,
+                "name": null,
+                "type": {
+                  "name": "int",
+                  "args": [],
+                  "array": false,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 31
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 34
+                    }
+                  }
+                },
+                "defaultValue": null
+              }
+            ]
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 44
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "DROP TRIGGER IF EXISTS trg ON s.t CASCADE;",
+    "ast": [
+      {
+        "kind": "drop",
+        "objectType": "trigger",
+        "concurrently": false,
+        "ifExists": true,
+        "names": [
+          [
+            "trg"
+          ]
+        ],
+        "behavior": "cascade",
+        "table": [
+          "s",
+          "t"
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 41
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "DROP DATABASE IF EXISTS db WITH (FORCE);",
+    "ast": [
+      {
+        "kind": "drop",
+        "objectType": "database",
+        "concurrently": false,
+        "ifExists": true,
+        "names": [
+          [
+            "db"
+          ]
+        ],
+        "behavior": null,
+        "force": true,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 39
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "DROP MATERIALIZED VIEW IF EXISTS mv, s.mv2;",
+    "ast": [
+      {
+        "kind": "drop",
+        "objectType": "materialized view",
+        "concurrently": false,
+        "ifExists": true,
+        "names": [
+          [
+            "mv"
+          ],
+          [
+            "s",
+            "mv2"
+          ]
+        ],
+        "behavior": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 42
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "DROP DOMAIN d; DROP EXTENSION IF EXISTS hstore CASCADE; DROP ROLE a, b; DROP USER u;",
+    "ast": [
+      {
+        "kind": "drop",
+        "objectType": "domain",
+        "concurrently": false,
+        "ifExists": false,
+        "names": [
+          [
+            "d"
+          ]
+        ],
+        "behavior": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 13
+          }
+        }
+      },
+      {
+        "kind": "drop",
+        "objectType": "extension",
+        "concurrently": false,
+        "ifExists": true,
+        "names": [
+          [
+            "hstore"
+          ]
+        ],
+        "behavior": "cascade",
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 15
+          },
+          "end": {
+            "row": 1,
+            "col": 54
+          }
+        }
+      },
+      {
+        "kind": "drop",
+        "objectType": "role",
+        "concurrently": false,
+        "ifExists": false,
+        "names": [
+          [
+            "a"
+          ],
+          [
+            "b"
+          ]
+        ],
+        "behavior": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 56
+          },
+          "end": {
+            "row": 1,
+            "col": 70
+          }
+        }
+      },
+      {
+        "kind": "drop",
+        "objectType": "user",
+        "concurrently": false,
+        "ifExists": false,
+        "names": [
+          [
+            "u"
+          ]
+        ],
+        "behavior": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 72
+          },
+          "end": {
+            "row": 1,
+            "col": 83
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE DATABASE d WITH OWNER = bob TEMPLATE template0 ENCODING 'UTF8' CONNECTION LIMIT -1 IS_TEMPLATE false;",
     "ast": [
       {

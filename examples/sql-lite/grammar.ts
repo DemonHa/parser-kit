@@ -634,6 +634,10 @@ export type FunctionArg = {
   defaultValue: Expr | null;
 };
 
+// A routine's argument list as DROP identifies it, and an aggregate's as CREATE,
+// ALTER and DROP AGGREGATE parse it: `(*)` (aggregates only) is `star` with no args.
+export type DropSignature = { star: boolean; args: FunctionArg[] };
+
 // `RETURNS [SETOF] type` or `RETURNS TABLE (col type, …)`.
 export type FunctionReturns =
   | { kind: "type"; setof: boolean; type: ColType }
@@ -899,9 +903,16 @@ export type Stmt =
       span: Span;
     }
   | { kind: "alterSequence"; ifExists: boolean; name: string[]; action: AlterSequenceAction; span: Span }
-  // Generalized DROP: `DROP {TABLE|VIEW|INDEX|TYPE|SEQUENCE|SCHEMA}
-  // [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `objectType` is the
-  // folded keyword; `behavior` is the trailing CASCADE/RESTRICT (null when absent).
+  // Generalized DROP: `DROP <object> [CONCURRENTLY] [IF EXISTS] name[, …]
+  // [CASCADE|RESTRICT]`. `objectType` is the folded keyword (`"materialized
+  // view"` for the two-word one); `behavior` is the trailing CASCADE/RESTRICT
+  // (null when absent, and always null where PG takes none: DATABASE, ROLE,
+  // USER). CONCURRENTLY is only accepted on the original six object kinds.
+  // The remaining keys belong to one object kind each and are omitted elsewhere:
+  // - `signatures` (FUNCTION / PROCEDURE / AGGREGATE): one entry per name, null
+  //   where a function or procedure name carries no argument list;
+  // - `table` (TRIGGER): the `ON table` the trigger belongs to;
+  // - `force` (DATABASE): present, as true, only when `(FORCE)` is written.
   | {
       kind: "drop";
       objectType: string;
@@ -909,6 +920,9 @@ export type Stmt =
       ifExists: boolean;
       names: string[][];
       behavior: "cascade" | "restrict" | null;
+      signatures?: (DropSignature | null)[];
+      table?: string[];
+      force?: true;
       span: Span;
     }
   // `TRUNCATE [TABLE] name[, …] [RESTART|CONTINUE IDENTITY] [CASCADE|RESTRICT]`.
@@ -3953,7 +3967,9 @@ const ARG_MODES: ReadonlySet<string> = new Set(["in", "out", "inout", "variadic"
 
 // One `[mode] [name] type [DEFAULT expr]` argument. See `FunctionArg` for the
 // mode/name recovery heuristic.
-function parseFunctionArg(ctx: ParseContext<SqlTokenType>): FunctionArg {
+// `allowDefault` is false for DROP, whose signatures name types only: PG
+// refuses a default there, so one is croaked at its own DEFAULT / `=`.
+function parseFunctionArg(ctx: ParseContext<SqlTokenType>, allowDefault = true): FunctionArg {
   let mode: FunctionArg["mode"] = null;
   const cur = ctx.peek();
   if (cur !== null && cur.type === "ident" && ARG_MODES.has(cur.value)) {
@@ -3987,19 +4003,30 @@ function parseFunctionArg(ctx: ParseContext<SqlTokenType>): FunctionArg {
   }
   const type = ctx.parse(typeRef);
   let defaultValue: Expr | null = null;
+  if (!allowDefault && (ctx.is("ident", "default") || ctx.is("op", "="))) {
+    ctx.croak(`A DROP signature takes no argument defaults, but found ${describeFound(ctx.peek())}`);
+  }
   if (ctx.eat("ident", "default") !== null || ctx.eat("op", "=") !== null) {
     defaultValue = ctx.parse(expression);
   }
   return { mode, name, type, defaultValue };
 }
 
-const signatureArg = custom<FunctionArg, SqlTokenType>(parseFunctionArg, {
-  expected: "a function argument",
-  first: [{ type: "ident" }, { type: "qident" }],
-});
-
-// The parenthesised argument signature — possibly empty `()`.
-const functionArgs = delimited(P("("), P(")"), P(","), signatureArg, { interleaved: true });
+// The parenthesised argument signature — possibly empty `()`. CREATE takes
+// argument defaults; DROP's `dropFunctionArgs` does not.
+const signatureArgs = (allowDefault: boolean) =>
+  delimited(
+    P("("),
+    P(")"),
+    P(","),
+    custom<FunctionArg, SqlTokenType>((ctx) => parseFunctionArg(ctx, allowDefault), {
+      expected: "a function argument",
+      first: [{ type: "ident" }, { type: "qident" }],
+    }),
+    { interleaved: true },
+  );
+const functionArgs = signatureArgs(true);
+const dropFunctionArgs = signatureArgs(false);
 
 // `RETURNS [SETOF] type` | `RETURNS TABLE (col type, …)`, or null when absent.
 function parseFunctionReturns(ctx: ParseContext<SqlTokenType>): FunctionReturns | null {
@@ -4188,14 +4215,15 @@ function parseAggregateBody(ctx: ParseContext<SqlTokenType>, start: Position, or
 }
 
 // An aggregate's `( * )` or `( type, … )` signature, its `(` not yet consumed.
-function parseAggregateSignature(ctx: ParseContext<SqlTokenType>): { star: boolean; args: FunctionArg[] } {
+// DROP passes its default-free `dropFunctionArgs` as `args`.
+function parseAggregateSignature(ctx: ParseContext<SqlTokenType>, args = functionArgs): DropSignature {
   if (ctx.is("punc", "(") && ctx.peekAhead(1)?.type === "op" && ctx.peekAhead(1)?.value === "*") {
     ctx.next(); // "("
     ctx.next(); // "*"
     expectClose(ctx);
     return { star: true, args: [] };
   }
-  return { star: false, args: ctx.parse(functionArgs) };
+  return { star: false, args: ctx.parse(args) };
 }
 
 // One trigger event: INSERT / DELETE / TRUNCATE, or UPDATE with an optional
@@ -4968,37 +4996,145 @@ const dropBehavior = optional(oneOf(kw("cascade"), kw("restrict"))).map(
   (n) => (n?.value ?? null) as "cascade" | "restrict" | null,
 );
 
-// The object kinds a bare DROP can target. Each is an unreserved keyword matched
-// by value; `table` is reserved but still matches here via `kw`.
-const dropObjectType = oneOf(kw("table"), kw("view"), kw("index"), kw("type"), kw("sequence"), kw("schema")).map(
-  (n) => n.value,
+// `DROP <object> …`, dispatched on the object keyword like ALTER. Every lead
+// word is matched by value, so none of them stops being usable as a name;
+// `table` and `user` are reserved but match here all the same.
+type DropStmt = Extract<Stmt, { kind: "drop" }>;
+type DropEntry = DispatchEntry<Stmt, [Position]>;
+
+// The `[IF EXISTS] item[, …]` run shared by every DROP form, with each item
+// already shaped into a `names` entry by `item`.
+function parseDropNames<T>(ctx: ParseContext<SqlTokenType>, item: Rule<T, SqlTokenType>) {
+  const ifExists = parseIfExists(ctx);
+  return { ifExists, items: ctx.parse(sepBy(item, P(","))) };
+}
+
+// The node every DROP form builds; `extra` carries the per-kind keys, which are
+// omitted when absent so the original object kinds keep their shape.
+const dropNode = (
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  objectType: string,
+  fields: Pick<DropStmt, "concurrently" | "ifExists" | "names" | "behavior">,
+  extra: Pick<DropStmt, "signatures" | "table" | "force"> = {},
+): Stmt => ({ kind: "drop", objectType, ...fields, ...extra, span: ctx.spanFrom(start) });
+
+const unqualName = nameWord.map((n) => [n]);
+
+// `DROP kind [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `lead`
+// is the object keyword(s) consumed before the list. CONCURRENTLY is meant for
+// INDEX but stays accepted on the original six kinds, as it always was.
+const listDrop = (
+  objectType: string,
+  name: Rule<string[], SqlTokenType>,
+  opts: { lead?: Rule<unknown, SqlTokenType>; concurrently?: boolean; behavior?: boolean } = {},
+): DropEntry => ({
+  parse: (ctx, start) => {
+    if (opts.lead !== undefined) ctx.parse(opts.lead);
+    else ctx.next(); // the object keyword
+    const concurrently = opts.concurrently === true && ctx.eat("ident", "concurrently") !== null;
+    const { ifExists, items: names } = parseDropNames(ctx, name);
+    const behavior = opts.behavior === false ? null : ctx.parse(dropBehavior);
+    return dropNode(ctx, start, objectType, { concurrently, ifExists, names, behavior });
+  },
+});
+
+type RoutineRef = { name: string[]; signature: DropSignature | null };
+
+// A function or procedure name, with its argument list when one is written.
+const routineRef = custom<RoutineRef, SqlTokenType>(
+  (ctx) => {
+    const name = ctx.parse(qualName);
+    const signature = ctx.is("punc", "(") ? { star: false, args: ctx.parse(dropFunctionArgs) } : null;
+    return { name, signature };
+  },
+  { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
 );
 
-const dropStmt = seq(
-  skip(kw("drop")),
-  field("objectType", dropObjectType),
-  // CONCURRENTLY is only meaningful for DROP INDEX, but we accept it after any
-  // object kind; it precedes IF EXISTS (PG order).
-  field(
-    "concurrently",
-    optional(kw("concurrently")).map((x) => x !== null),
-  ),
-  field(
-    "ifExists",
-    optional(attempt(kwseq("if", "exists"))).map((x) => x !== null),
-  ),
-  field("names", sepBy(qualName, P(","))),
-  field("behavior", dropBehavior),
-).map(
-  ({ objectType, concurrently, ifExists, names, behavior }, span): Stmt => ({
-    kind: "drop",
-    objectType,
-    concurrently,
-    ifExists,
-    names,
-    behavior,
-    span,
-  }),
+// An aggregate name and its required `(*)` / `(type, …)` signature, which PG
+// never lets be empty: a zero-argument aggregate is spelled `(*)`.
+const aggregateRef = custom<{ name: string[]; signature: DropSignature }, SqlTokenType>(
+  (ctx) => {
+    const name = ctx.parse(qualName);
+    const close = ctx.peekAhead(1);
+    if (ctx.is("punc", "(") && close?.type === "punc" && close.value === ")") {
+      ctx.next(); // "("
+      ctx.croak(`Expected "*" or a function argument but found ${describeFound(close)}`);
+    }
+    return { name, signature: parseAggregateSignature(ctx, dropFunctionArgs) };
+  },
+  { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
+);
+
+// `DROP {FUNCTION|PROCEDURE|AGGREGATE} [IF EXISTS] name [(args)][, …]
+// [CASCADE|RESTRICT]`; `signatures` runs parallel to `names`.
+const routineDrop = (objectType: string, ref: Rule<RoutineRef, SqlTokenType>): DropEntry => ({
+  parse: (ctx, start) => {
+    ctx.next(); // the object keyword
+    const { ifExists, items } = parseDropNames(ctx, ref);
+    const behavior = ctx.parse(dropBehavior);
+    const names = items.map((i) => i.name);
+    const signatures = items.map((i) => i.signature);
+    return dropNode(ctx, start, objectType, { concurrently: false, ifExists, names, behavior }, { signatures });
+  },
+});
+
+const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
+  table: listDrop("table", qualName, { concurrently: true }),
+  view: listDrop("view", qualName, { concurrently: true }),
+  index: listDrop("index", qualName, { concurrently: true }),
+  type: listDrop("type", qualName, { concurrently: true }),
+  sequence: listDrop("sequence", qualName, { concurrently: true }),
+  schema: listDrop("schema", qualName, { concurrently: true }),
+  materialized: listDrop("materialized view", qualName, { lead: kwseq("materialized", "view") }),
+  function: routineDrop("function", routineRef),
+  procedure: routineDrop("procedure", routineRef),
+  aggregate: routineDrop("aggregate", aggregateRef),
+  // `DROP TRIGGER [IF EXISTS] name ON table [CASCADE|RESTRICT]` — one trigger.
+  trigger: {
+    parse: (ctx, start) => {
+      ctx.next(); // TRIGGER
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(nameWord);
+      ctx.parse(kw("on"));
+      const table = ctx.parse(qualName);
+      const behavior = ctx.parse(dropBehavior);
+      return dropNode(ctx, start, "trigger", { concurrently: false, ifExists, names: [[name]], behavior }, { table });
+    },
+  },
+  domain: listDrop("domain", qualName),
+  extension: listDrop("extension", unqualName),
+  // `DROP DATABASE [IF EXISTS] name [[WITH] (FORCE[, …])]` — one database, and
+  // no CASCADE / RESTRICT. FORCE is PG's only option, so the list holds just it.
+  database: {
+    parse: (ctx, start) => {
+      ctx.next(); // DATABASE
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(nameWord);
+      const force = ctx.eat("ident", "with") !== null || ctx.is("punc", "(");
+      if (force) {
+        if (ctx.eat("punc", "(") === null) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+        ctx.parse(sepBy(kw("force"), P(",")));
+        expectClose(ctx);
+      }
+      const fields = { concurrently: false, ifExists, names: [[name]], behavior: null };
+      return dropNode(ctx, start, "database", fields, force ? { force } : {});
+    },
+  },
+  role: listDrop("role", unqualName, { behavior: false }),
+  // USER only; `DROP USER MAPPING` is not supported and reads as a user named
+  // `mapping` followed by stray words.
+  user: listDrop("user", unqualName, { behavior: false }),
+};
+const DROP_TARGET_EXPECTED = keyList(DROP_TARGETS);
+
+const dropStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("drop"));
+    return dispatch(DROP_TARGETS, DROP_TARGET_EXPECTED, ctx, start);
+  },
+  { expected: '"drop"', first: [{ type: "ident", value: "drop" }] },
 );
 
 const truncateStmt = seq(
