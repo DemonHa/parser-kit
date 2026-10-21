@@ -529,6 +529,51 @@ export type CreateDomain = {
   span: Span;
 };
 
+// `CREATE DATABASE name [[WITH] option …]`. The options are PG's space-separated
+// `name [=] value` list, kept in written order with PG's two-word `CONNECTION
+// LIMIT` folded into one name — `[]` when none is written.
+export type CreateDatabase = { kind: "createDatabase"; name: string; options: RelationOption[]; span: Span };
+
+// `CREATE SCHEMA [IF NOT EXISTS] {name [AUTHORIZATION role] | AUTHORIZATION
+// role} [element …]`. `name` is null in the AUTHORIZATION-only form (PG names
+// the schema after the role), `authorization` null when no AUTHORIZATION is
+// written, and `elements` the CREATE / GRANT statements nested in it, `[]` when
+// none is.
+export type CreateSchema = {
+  kind: "createSchema";
+  ifNotExists: boolean;
+  name: string | null;
+  authorization: string | null;
+  elements: Stmt[];
+  span: Span;
+};
+
+// One `CREATE EXTENSION` option, in written order (PG takes them in any).
+export type ExtensionOption =
+  | { kind: "schema"; schema: string }
+  | { kind: "version"; version: string }
+  | { kind: "cascade" };
+
+// `CREATE EXTENSION [IF NOT EXISTS] name [WITH] option*`.
+export type CreateExtension = {
+  kind: "createExtension";
+  ifNotExists: boolean;
+  name: string;
+  options: ExtensionOption[];
+  span: Span;
+};
+
+// `CREATE TABLESPACE name [OWNER role] LOCATION 'dir' [WITH (option, …)]`.
+// `options` is `[]` when no WITH list is written.
+export type CreateTablespace = {
+  kind: "createTablespace";
+  name: string;
+  owner: string | null;
+  location: string;
+  options: RelationOption[];
+  span: Span;
+};
+
 // `CREATE TABLE [IF NOT EXISTS] name [(cols)] AS query [WITH [NO] DATA]` — the
 // query-backed table. Distinct kind from `createTable` so its `query` payload is
 // unmistakable. `columns` is the optional output-column-name list.
@@ -771,6 +816,10 @@ export type Stmt =
   | CreateView
   | CreateSequence
   | CreateDomain
+  | CreateDatabase
+  | CreateSchema
+  | CreateExtension
+  | CreateTablespace
   | CreateTableAs
   | CreateFunction
   | CreateAggregate
@@ -3630,6 +3679,171 @@ const createDomainRest = custom<Stmt, SqlTokenType>(
   { expected: '"domain"', first: [{ type: "ident", value: "domain" }] },
 );
 
+// The handlers below parse their own lead word and span from it, as the three
+// above do. None takes `IF NOT EXISTS` by attempt(): DATABASE and TABLESPACE
+// have none in PG, and SCHEMA / EXTENSION peek for `not` after `if`, which is
+// reserved, so no name can be read there in its place — a schema or extension
+// called `if` costs no backtrack.
+function parseIfNotExists(ctx: ParseContext<SqlTokenType>): boolean {
+  const next = ctx.peekAhead(1);
+  const ifNotExists = ctx.is("ident", "if") && next?.type === "ident" && next.value === "not";
+  if (ifNotExists) ctx.parse(kwseq("if", "not", "exists"));
+  return ifNotExists;
+}
+
+// A role: a name, or one of the CURRENT_ / SESSION_ pseudo-roles, which are
+// reserved and so matched by value ahead of `nameWord` (as parseGrantee does).
+const ROLE_KEYWORDS: ReadonlySet<string> = new Set(["current_user", "current_role", "session_user"]);
+function parseRoleSpec(ctx: ParseContext<SqlTokenType>): string {
+  const tok = ctx.peek();
+  if (tok !== null && tok.type === "ident" && ROLE_KEYWORDS.has(tok.value)) {
+    ctx.next();
+    return tok.value;
+  }
+  return ctx.parse(nameWord);
+}
+
+// One CREATE DATABASE option: the entry `relationOption` parses inside a
+// parenthesised `WITH (…)` list, or PG's two-word `CONNECTION LIMIT [=] n`,
+// which it cannot (see optionName). Reusing the entry takes its shape whole, so
+// the namespace form and the `*` and list values pass here too, as PG's grammar
+// would not have them; one shape for every list is the trade relationOption
+// already makes. So is a lone `CONNECTION = n`, read as an ordinary option
+// named `connection`. The list has no delimiter, so it runs while a name leads:
+// an unreserved word or a quoted one, as PG's own option names are IDENT bar a
+// few.
+function isDatabaseOptionStart(ctx: ParseContext<SqlTokenType>): boolean {
+  const tok = ctx.peek();
+  return tok !== null && (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value)));
+}
+
+function parseDatabaseOption(ctx: ParseContext<SqlTokenType>): RelationOption {
+  const next = ctx.peekAhead(1);
+  if (!(ctx.is("ident", "connection") && next?.type === "ident" && next.value === "limit")) {
+    return ctx.parse(relationOption);
+  }
+  const start = ctx.position();
+  ctx.parse(kwseq("connection", "limit"));
+  ctx.eat("op", "=");
+  return { name: "connection limit", value: optionScalar(ctx), span: ctx.spanFrom(start) };
+}
+
+function createDatabaseRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("database"));
+  const name = ctx.parse(nameWord);
+  // `with` is reserved, so it can only open the list; PG lets the list after it
+  // be empty too.
+  ctx.eat("ident", "with");
+  const options: RelationOption[] = [];
+  while (isDatabaseOptionStart(ctx)) options.push(parseDatabaseOption(ctx));
+  return { kind: "createDatabase", name, options, span: ctx.spanFrom(start) };
+}
+
+// One schema element: a GRANT of privileges ON an object, or a CREATE of one of
+// the kinds PG's schema_stmt list has — TABLE / [UNIQUE] INDEX / SEQUENCE / VIEW
+// / TRIGGER, only the last two after OR REPLACE. CREATE and OR REPLACE are
+// consumed here so that a wrong target croaks at the target word itself, and
+// the entry is then entered straight from createStmt's two maps, with the same
+// two starts createStmt gives it. A nested CREATE SCHEMA can therefore never
+// swallow the elements after it. CREATE TABLE AS and a role GRANT share their
+// lead words with an admitted form, so only the finished node tells them apart.
+const SCHEMA_ELEMENT_TARGETS = ["table", "unique", "index", "sequence", "view", "trigger"];
+const SCHEMA_REPLACEABLE_TARGETS = ["view", "trigger"];
+function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
+  if (ctx.is("ident", "grant")) {
+    const grant = ctx.parse(grantStmt);
+    if (grant.kind === "grant" && grant.on === null) {
+      const message = "A schema element GRANT must grant privileges ON an object, not a role";
+      return ctx.croak(message, grant.span.start, grant.span.end);
+    }
+    return grant;
+  }
+  const start = ctx.position();
+  ctx.parse(kw("create"));
+  const tailStart = ctx.position();
+  const orReplace = ctx.is("ident", "or");
+  if (orReplace) ctx.parse(kwseq("or", "replace"));
+  const allowed = orReplace ? SCHEMA_REPLACEABLE_TARGETS : SCHEMA_ELEMENT_TARGETS;
+  const tok = ctx.peek();
+  if (tok === null || tok.type !== "ident" || !allowed.includes(tok.value)) {
+    return ctx.croak(`Expected ${quoteList(allowed)} but found ${describeFound(tok)}`);
+  }
+  if (SCHEMA_REPLACEABLE_TARGETS.includes(tok.value)) {
+    ctx.next(); // the target's lead word, as createStmt consumes it
+    return REPLACEABLE_CREATE[tok.value]!.parse(ctx, start, orReplace);
+  }
+  const element = PLAIN_CREATE[tok.value]!.parse(ctx, tailStart, []);
+  if (element.kind === "createTableAs") {
+    return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", element.span.start, element.span.end);
+  }
+  return element;
+}
+
+function createSchemaRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("schema"));
+  const ifNotExists = parseIfNotExists(ctx);
+  // `authorization` is reserved in PG and leads the role-only form there; this
+  // parser keeps it a name everywhere else and reads it as the clause only here.
+  const name = ctx.is("ident", "authorization") ? null : ctx.parse(nameWord);
+  let authorization: string | null = null;
+  if (name === null || ctx.is("ident", "authorization")) {
+    ctx.parse(kw("authorization"));
+    authorization = parseRoleSpec(ctx);
+  }
+  // Schema elements follow with no `;` between them. PG's grammar takes none
+  // after IF NOT EXISTS.
+  const elements: Stmt[] = [];
+  while (ctx.is("ident", "create") || ctx.is("ident", "grant")) {
+    if (ifNotExists) return ctx.croak("CREATE SCHEMA IF NOT EXISTS cannot include schema elements");
+    elements.push(parseSchemaElement(ctx));
+  }
+  return { kind: "createSchema", ifNotExists, name, authorization, elements, span: ctx.spanFrom(start) };
+}
+
+// `SCHEMA s`, `VERSION v` and `CASCADE`, in any order, after an optional WITH.
+// A version is a string or a word (PG's NonReservedWord_or_Sconst).
+function parseExtensionOptions(ctx: ParseContext<SqlTokenType>): ExtensionOption[] {
+  ctx.eat("ident", "with");
+  const options: ExtensionOption[] = [];
+  while (true) {
+    if (ctx.eat("ident", "schema") !== null) {
+      options.push({ kind: "schema", schema: ctx.parse(nameWord) });
+    } else if (ctx.eat("ident", "version") !== null) {
+      const tok = ctx.peek();
+      const version = tok?.type === "string" ? ctx.next()!.value : ctx.parse(nameWord);
+      options.push({ kind: "version", version });
+    } else if (ctx.eat("ident", "cascade") !== null) {
+      options.push({ kind: "cascade" });
+    } else {
+      return options;
+    }
+  }
+}
+
+function createExtensionRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("extension"));
+  const ifNotExists = parseIfNotExists(ctx);
+  const name = ctx.parse(nameWord);
+  return { kind: "createExtension", ifNotExists, name, options: parseExtensionOptions(ctx), span: ctx.spanFrom(start) };
+}
+
+function createTablespaceRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("tablespace"));
+  const name = ctx.parse(nameWord);
+  const owner = ctx.eat("ident", "owner") !== null ? parseRoleSpec(ctx) : null;
+  ctx.parse(kw("location"));
+  const tok = ctx.peek();
+  if (tok?.type !== "string") return ctx.croak(`Expected a string but found ${describeFound(tok)}`);
+  ctx.next();
+  // `with` is reserved, so it can only open the option list here.
+  const options = ctx.eat("ident", "with") !== null ? ctx.parse(relationOptions) : [];
+  return { kind: "createTablespace", name, owner, location: tok.value, options, span: ctx.spanFrom(start) };
+}
+
 // The body of a (MATERIALIZED) VIEW after the VIEW keyword: `[IF NOT EXISTS] name
 // [(cols)] AS query [WITH [NO] DATA]`. The query reuses the shared `query` rule.
 function parseViewBody(
@@ -3974,7 +4188,7 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
 // PLAIN_CREATE dispatch PEEKS: each handler parses its own lead keyword, so its
 // node's span still opens on `TABLE` / `INDEX` / …. Every handler is offered the
 // position just after CREATE and the prefix-modifier bag, but only `table` reads
-// them — the other five build their own span from their own keyword and drop the
+// them — the others build their own span from their own keyword and drop the
 // bag. A word added to CREATE_PREFIX_WORDS is therefore silently swallowed for
 // everything but TABLE, so widen those handlers in the same breath.
 const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
@@ -3986,6 +4200,10 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   type: { parse: (ctx) => ctx.parse(createTypeRest) },
   sequence: { parse: (ctx) => ctx.parse(createSequenceRest) },
   domain: { parse: (ctx) => ctx.parse(createDomainRest) },
+  database: { parse: createDatabaseRest },
+  schema: { parse: createSchemaRest },
+  extension: { parse: createExtensionRest },
+  tablespace: { parse: createTablespaceRest },
 };
 
 // REPLACEABLE_CREATE dispatch CONSUMES the lead word: these bodies are entered
@@ -4020,6 +4238,17 @@ for (const key of Object.keys(PLAIN_CREATE)) {
   }
 }
 
+// Every admitted target must lead an entry in the map parseSchemaElement looks
+// it up in, or its `!` would find nothing, and an OR REPLACE target must be
+// admitted without it too; checked at load, as the overlap above is.
+for (const target of SCHEMA_ELEMENT_TARGETS) {
+  const map: Record<string, unknown> = SCHEMA_REPLACEABLE_TARGETS.includes(target) ? REPLACEABLE_CREATE : PLAIN_CREATE;
+  if (!Object.hasOwn(map, target)) throw new Error(`Schema element target "${target}" leads no CREATE entry`);
+}
+for (const target of SCHEMA_REPLACEABLE_TARGETS) {
+  if (!SCHEMA_ELEMENT_TARGETS.includes(target)) throw new Error(`Schema element target "${target}" is not admitted`);
+}
+
 // Prefix modifier words between CREATE and its target — PG's TEMP / TEMPORARY /
 // UNLOGGED / GLOBAL / LOCAL family. None of them is spelled yet, so the loop
 // below never runs and `modifiers` is always empty; what ships now is the seam,
@@ -4031,8 +4260,9 @@ const CREATE_PREFIX_WORDS = new Set<string>();
 // After CREATE: an optional `OR REPLACE`, then one of the objects that permit it
 // (VIEW / MATERIALIZED VIEW / FUNCTION / AGGREGATE / TRIGGER) — or, with no such
 // prefix, any prefix modifiers followed by one of the remaining keyword-led
-// targets (TABLE / [UNIQUE] INDEX / TYPE / SEQUENCE / DOMAIN). `OR REPLACE`
-// before a non-replaceable object croaks.
+// targets (TABLE / [UNIQUE] INDEX / TYPE / SEQUENCE / DOMAIN / DATABASE /
+// SCHEMA / EXTENSION / TABLESPACE). `OR REPLACE` before a non-replaceable
+// object croaks.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
