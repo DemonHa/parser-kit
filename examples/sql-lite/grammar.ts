@@ -715,6 +715,19 @@ export type Do = { kind: "do"; language: string | null; body: string; span: Span
 // DEALLOCATE [PREPARE] {name | ALL} — `name` is null for DEALLOCATE ALL.
 export type Deallocate = { kind: "deallocate"; name: string | null; span: Span };
 
+// PREPARE name [(type, …)] AS statement — `types` is null when the list is
+// omitted. The body is any statement dmlStatement accepts (a query or DML),
+// named `query` as a CTE's body of the same union is (and as PG names it).
+export type Prepare = {
+  kind: "prepare";
+  name: string;
+  types: ColType[] | null;
+  query: Query | Insert | Update | Delete;
+  span: Span;
+};
+// EXECUTE name [(expr, …)] — `args` is null when the list is omitted.
+export type Execute = { kind: "execute"; name: string; args: Expr[] | null; span: Span };
+
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
   // UNLOGGED family). Omitted, not null, when there are none — and no word
@@ -800,6 +813,8 @@ export type Stmt =
   | Reset
   | Do
   | Deallocate
+  | Prepare
+  | Execute
   // A top-level query or DML statement is a statement too.
   | Query
   | Insert
@@ -5932,6 +5947,56 @@ const dmlStatement = custom<Stmt, SqlTokenType>(
   },
 );
 
+// --- PREPARE / EXECUTE ---
+//
+// Both lead words stay UNRESERVED, matched by value like the Phase 9 utility
+// words. The list rules are local rather than exprList, which accepts the empty
+// `()` a function call needs: in PG a written list here must hold at least one item.
+const prepareTypes = sepBy(typeRef, P(","));
+const executeArgs = sepBy(expression, P(","));
+// An optional `( list )`: null when no `(` follows; the list itself is non-empty.
+function optParenList<T>(ctx: ParseContext<SqlTokenType>, list: Rule<T[], SqlTokenType>): T[] | null {
+  if (!ctx.is("punc", "(")) return null;
+  ctx.next(); // "("
+  const items = ctx.parse(list);
+  expectClose(ctx);
+  return items;
+}
+
+// PG's PreparableStmt: a query or INSERT/UPDATE/DELETE, each with an optional
+// WITH prefix — exactly dmlStatement's first set (PG's MERGE and `TABLE name`
+// aside, which sql-lite doesn't parse; PREPARE should take them once it does).
+// Checked up front so a DDL or utility body reports what PREPARE accepts rather
+// than dmlStatement's generic "a statement" (which CREATE TABLE is).
+const PREPARABLE = "a SELECT, VALUES, INSERT, UPDATE or DELETE statement";
+const PREPARABLE_FIRST = dmlStatement.first();
+const prepareStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("prepare"));
+    const name = ctx.parse(nameWord);
+    const types = optParenList(ctx, prepareTypes);
+    ctx.parse(kw("as"));
+    if (!matchesFirst(ctx.peek(), PREPARABLE_FIRST)) {
+      return ctx.croak(`Expected ${PREPARABLE} but found ${describeFound(ctx.peek())}`);
+    }
+    const query = ctx.parse(dmlStatement) as Prepare["query"];
+    return { kind: "prepare", name, types, query, span: ctx.spanFrom(start) };
+  },
+  { expected: '"prepare"', first: [{ type: "ident", value: "prepare" }] },
+);
+
+const executeStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("execute"));
+    const name = ctx.parse(nameWord);
+    const args = optParenList(ctx, executeArgs);
+    return { kind: "execute", name, args, span: ctx.spanFrom(start) };
+  },
+  { expected: '"execute"', first: [{ type: "ident", value: "execute" }] },
+);
+
 // First-sets: the DDL and utility rules each dispatch on their own lead keyword;
 // dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
 //
@@ -5940,7 +6005,7 @@ const dmlStatement = custom<Stmt, SqlTokenType>(
 // oneOf's first() is a flatMap, and the inner groups catch collisions within a
 // family — and the composed `expected` is overridden by describe() anyway.
 const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt);
-const utilityStmt = oneOf(grantStmt, transactionStmt, sessionStmt, doStmt, deallocateStmt);
+const utilityStmt = oneOf(grantStmt, transactionStmt, sessionStmt, doStmt, deallocateStmt, prepareStmt, executeStmt);
 const statementBody = oneOf(ddlStmt, utilityStmt, dmlStatement).describe("a statement");
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.
 const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
