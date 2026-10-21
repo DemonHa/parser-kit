@@ -361,6 +361,43 @@ export type AlterAction =
   | { kind: "ownerTo"; owner: string }
   | { kind: "replicaIdentity"; mode: "default" | "full" | "nothing" | "usingIndex"; index: string | null };
 
+// The actions of ALTER {SCHEMA | DOMAIN | TYPE | INDEX}. `rename` is the object's
+// own (ALTER TABLE's is `renameTable`); a domain's `addConstraint` keeps its name
+// inside `constraint`, not beside it as ALTER TABLE's does.
+type AlterRenameTo = { kind: "rename"; to: string };
+type AlterOwnerTo = Extract<AlterAction, { kind: "ownerTo" }>;
+type AlterSetSchema = { kind: "setSchema"; schema: string };
+export type AlterSchemaAction = AlterRenameTo | AlterOwnerTo;
+export type AlterDomainAction =
+  | AlterRenameTo
+  | AlterOwnerTo
+  | AlterSetSchema
+  | { kind: "setDefault"; expr: Expr }
+  | { kind: "dropDefault" }
+  | { kind: "setNotNull" }
+  | { kind: "dropNotNull" }
+  | { kind: "addConstraint"; constraint: Extract<DomainConstraint, { kind: "check" }>; notValid: boolean }
+  | { kind: "dropConstraint"; ifExists: boolean; name: string; behavior: "cascade" | "restrict" | null }
+  | { kind: "renameConstraint"; from: string; to: string }
+  | { kind: "validateConstraint"; name: string };
+// `position` is the `{BEFORE | AFTER} 'existing'` placement of a new enum value.
+export type AlterTypeAction =
+  | AlterRenameTo
+  | AlterOwnerTo
+  | AlterSetSchema
+  | {
+      kind: "addValue";
+      ifNotExists: boolean;
+      value: string;
+      position: { placement: "before" | "after"; value: string } | null;
+    }
+  | { kind: "renameValue"; from: string; to: string };
+export type AlterIndexAction =
+  | AlterRenameTo
+  | { kind: "setTablespace"; tablespace: string }
+  | { kind: "setOptions"; options: RelationOption[] }
+  | { kind: "resetOptions"; options: RelationOption[] };
+
 // --- Phase 7: more CREATE objects ---
 
 // `CREATE TYPE` in its three body shapes, all sharing the `createType` kind and
@@ -657,6 +694,11 @@ export type Stmt =
   // `ALTER TABLE [IF EXISTS] name action[, …]`. `actions` is never empty, and a
   // RENAME is always its only element — PG keeps those out of the action list.
   | { kind: "alterTable"; ifExists: boolean; name: string[]; actions: AlterAction[]; span: Span }
+  | { kind: "alterSchema"; name: string; action: AlterSchemaAction; span: Span }
+  | { kind: "alterDomain"; name: string[]; action: AlterDomainAction; span: Span }
+  | { kind: "alterType"; name: string[]; action: AlterTypeAction; span: Span }
+  // As on alterTable, `actions` is never empty and a RENAME stands alone.
+  | { kind: "alterIndex"; ifExists: boolean; name: string[]; actions: AlterIndexAction[]; span: Span }
   // Generalized DROP: `DROP {TABLE|VIEW|INDEX|TYPE|SEQUENCE|SCHEMA}
   // [CONCURRENTLY] [IF EXISTS] name[, …] [CASCADE|RESTRICT]`. `objectType` is the
   // folded keyword; `behavior` is the trailing CASCADE/RESTRICT (null when absent).
@@ -3538,6 +3580,13 @@ function parseAddColumn(ctx: ParseContext<SqlTokenType>): AlterAction {
   return { kind: "addColumn", ifNotExists, column: ctx.parse(columnDef) };
 }
 
+// `OWNER TO role` — ALTER TABLE's action, and the same words on every other
+// ALTER target that has an owner.
+function parseOwnerTo(ctx: ParseContext<SqlTokenType>): AlterOwnerTo {
+  ctx.parse(kwseq("owner", "to"));
+  return { kind: "ownerTo", owner: ctx.parse(nameWord) };
+}
+
 // The ALTER TABLE actions. Dispatch peeks; each handler consumes its own lead
 // word and owns whatever lookahead its own shapes need — `ADD [COLUMN] …` vs
 // `ADD [CONSTRAINT name] …` vs a bare table constraint all begin with `add`, and
@@ -3620,12 +3669,7 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       return { kind: "renameColumn", from, to: ctx.parse(nameWord) };
     },
   },
-  owner: {
-    parse: (ctx) => {
-      ctx.parse(kwseq("owner", "to"));
-      return { kind: "ownerTo", owner: ctx.parse(nameWord) };
-    },
-  },
+  owner: { parse: parseOwnerTo },
   // `REPLICA IDENTITY {DEFAULT | FULL | NOTHING | USING INDEX name}`.
   replica: {
     parse: (ctx) => {
@@ -3661,37 +3705,209 @@ const SOLO_ALTER_ACTIONS: Partial<Record<AlterAction["kind"], string>> = {
   renameTable: "RENAME",
 };
 
-// `TABLE [IF EXISTS] name action[, …]` — TABLE consumed here, ALTER by the
-// caller, whose `start` the node spans from. IF EXISTS is decided by peeking,
-// like ADD's IF NOT EXISTS: `exists` leads no action, so a table called `if`
-// is never followed by it.
-function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
-  ctx.next(); // TABLE
+// An optional `IF EXISTS`, decided by peeking like ADD's IF NOT EXISTS: `exists`
+// leads no action, so an object called `if` is never followed by it.
+function parseIfExists(ctx: ParseContext<SqlTokenType>): boolean {
   const next = ctx.peekAhead(1);
   const ifExists = ctx.is("ident", "if") && next?.type === "ident" && next.value === "exists";
   if (ifExists) ctx.parse(kwseq("if", "exists"));
+  return ifExists;
+}
+
+// `TABLE [IF EXISTS] name action[, …]` — TABLE consumed here, ALTER by the
+// caller, whose `start` the node spans from.
+function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // TABLE
+  const ifExists = parseIfExists(ctx);
   const name = ctx.parse(qualName);
-  const actions: AlterAction[] = [];
+  const actions = parseActionList(ctx, "TABLE", (c) => c.parse(alterAction), ALTER_ACTIONS, SOLO_ALTER_ACTIONS);
+  return { kind: "alterTable", ifExists, name, actions, span: ctx.spanFrom(start) };
+}
+
+// The `action[, …]` list of ALTER TABLE and ALTER INDEX, whose lead words are
+// `map`'s keys. A `solo` kind is fine alone and rejected beside any other.
+function parseActionList<A extends { kind: string }>(
+  ctx: ParseContext<SqlTokenType>,
+  target: string,
+  parseAction: (ctx: ParseContext<SqlTokenType>) => A,
+  map: DispatchMap<A>,
+  solo: Partial<Record<A["kind"], string>>,
+): A[] {
+  const actions: A[] = [];
   do {
     const actionStart = ctx.position();
-    const action = ctx.parse(alterAction);
-    const solo = SOLO_ALTER_ACTIONS[action.kind];
-    if (solo !== undefined) {
+    const action = parseAction(ctx);
+    const label = solo[action.kind as A["kind"]];
+    if (label !== undefined) {
       // Rejected beside another action: one already parsed, or one whose lead
       // word follows the comma after it. A comma followed by no action word is
       // no second action, so it is left to fail as the stray comma it is.
-      const leadsOn = ctx.is("punc", ",") && lookup(ALTER_ACTIONS, ctx.peekAhead(1)) !== undefined;
+      const leadsOn = ctx.is("punc", ",") && lookup(map, ctx.peekAhead(1)) !== undefined;
       if (actions.length > 0 || leadsOn) {
         const { end } = ctx.spanFrom(actionStart);
-        ctx.croak(`${solo} cannot be combined with other ALTER TABLE actions`, actionStart, end);
+        ctx.croak(`${label} cannot be combined with other ALTER ${target} actions`, actionStart, end);
       }
       actions.push(action);
       break;
     }
     actions.push(action);
   } while (ctx.eat("punc", ",") !== null);
-  return { kind: "alterTable", ifExists, name, actions, span: ctx.spanFrom(start) };
+  return actions;
 }
+
+// The `TO name` of a RENAME whose RENAME has been consumed. `others` are the
+// words the caller already tried there, named in the croak beside TO.
+function parseTo(ctx: ParseContext<SqlTokenType>, ...others: string[]): AlterRenameTo {
+  if (ctx.eat("ident", "to") === null) {
+    ctx.croak(`Expected ${quoteList([...others, "to"])} but found ${describeFound(ctx.peek())}`);
+  }
+  return { kind: "rename", to: ctx.parse(nameWord) };
+}
+
+// `RENAME TO name` and `SET SCHEMA name`, the actions most ALTER targets share.
+// SET SCHEMA is entered past its SET, which leads other actions too.
+function parseRenameTo(ctx: ParseContext<SqlTokenType>): AlterRenameTo {
+  ctx.next(); // RENAME
+  return parseTo(ctx);
+}
+
+function parseSetSchema(ctx: ParseContext<SqlTokenType>): AlterSetSchema {
+  ctx.parse(kw("schema"));
+  return { kind: "setSchema", schema: ctx.parse(nameWord) };
+}
+
+// A map per target; only INDEX takes a list, as ALTER TABLE does. Each croak is
+// the comma form over its own keys, as ALTER_ACTIONS' is.
+const SCHEMA_ACTIONS: DispatchMap<AlterSchemaAction> = {
+  rename: { parse: parseRenameTo },
+  owner: { parse: parseOwnerTo },
+};
+
+// After a DOMAIN action's lead word, choices fall on reserved words or a fixed
+// slot, bar DROP CONSTRAINT's IF EXISTS, which is peeked as ALTER INDEX's is.
+const DOMAIN_ACTIONS: DispatchMap<AlterDomainAction> = {
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      if (ctx.eat("ident", "default") !== null) return { kind: "setDefault", expr: ctx.parse(expression) };
+      if (ctx.is("ident", "not")) {
+        ctx.parse(kwseq("not", "null"));
+        return { kind: "setNotNull" };
+      }
+      if (!ctx.is("ident", "schema")) {
+        ctx.croak(`Expected ${quoteList(["default", "not", "schema"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return parseSetSchema(ctx);
+    },
+  },
+  drop: {
+    parse: (ctx) => {
+      ctx.next(); // DROP
+      if (ctx.eat("ident", "default") !== null) return { kind: "dropDefault" };
+      if (ctx.is("ident", "not")) {
+        ctx.parse(kwseq("not", "null"));
+        return { kind: "dropNotNull" };
+      }
+      if (ctx.eat("ident", "constraint") === null) {
+        ctx.croak(`Expected ${quoteList(["default", "not", "constraint"])} but found ${describeFound(ctx.peek())}`);
+      }
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(nameWord);
+      return { kind: "dropConstraint", ifExists, name, behavior: ctx.parse(dropBehavior) };
+    },
+  },
+  add: {
+    parse: (ctx) => {
+      ctx.next(); // ADD
+      const name = ctx.eat("ident", "constraint") !== null ? ctx.parse(nameWord) : null;
+      ctx.parse(kw("check"));
+      const constraint = { kind: "check" as const, name, expr: ctx.parse(parenExpr) };
+      const notValid = ctx.is("ident", "not");
+      if (notValid) ctx.parse(kwseq("not", "valid"));
+      return { kind: "addConstraint", constraint, notValid };
+    },
+  },
+  rename: {
+    parse: (ctx) => {
+      ctx.next(); // RENAME
+      if (ctx.eat("ident", "constraint") === null) return parseTo(ctx, "constraint");
+      const from = ctx.parse(nameWord);
+      ctx.parse(kw("to"));
+      return { kind: "renameConstraint", from, to: ctx.parse(nameWord) };
+    },
+  },
+  owner: { parse: parseOwnerTo },
+  validate: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("validate", "constraint"));
+      return { kind: "validateConstraint", name: ctx.parse(nameWord) };
+    },
+  },
+};
+
+// No choice after a TYPE action's lead word is against a bare name: RENAME's
+// VALUE vs TO included, since no RENAME form takes one there.
+const TYPE_ACTIONS: DispatchMap<AlterTypeAction> = {
+  add: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("add", "value"));
+      const ifNotExists = ctx.is("ident", "if");
+      if (ifNotExists) ctx.parse(kwseq("if", "not", "exists"));
+      const value = ctx.parse(strValue);
+      const placement = ctx.eat("ident", "before") ?? ctx.eat("ident", "after");
+      const position =
+        placement === null ? null : { placement: placement.value as "before" | "after", value: ctx.parse(strValue) };
+      return { kind: "addValue", ifNotExists, value, position };
+    },
+  },
+  rename: {
+    parse: (ctx) => {
+      ctx.next(); // RENAME
+      if (ctx.eat("ident", "value") === null) return parseTo(ctx, "value");
+      const from = ctx.parse(strValue);
+      ctx.parse(kw("to"));
+      return { kind: "renameValue", from, to: ctx.parse(strValue) };
+    },
+  },
+  owner: { parse: parseOwnerTo },
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      return parseSetSchema(ctx);
+    },
+  },
+};
+
+// RESET shares SET's option-list rule and, as PG does, refuses a value in it.
+const INDEX_ACTIONS: DispatchMap<AlterIndexAction> = {
+  rename: { parse: parseRenameTo },
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
+      if (ctx.eat("ident", "tablespace") === null) {
+        ctx.croak(`Expected ${quoteList(["(", "tablespace"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return { kind: "setTablespace", tablespace: ctx.parse(nameWord) };
+    },
+  },
+  reset: {
+    parse: (ctx) => {
+      ctx.next(); // RESET
+      const options = ctx.parse(relationOptions);
+      const valued = options.find((option) => option.value !== null);
+      if (valued !== undefined) {
+        ctx.croak("RESET must not include values for parameters", valued.span.start, valued.span.end);
+      }
+      return { kind: "resetOptions", options };
+    },
+  },
+};
+
+const SCHEMA_ACTION_EXPECTED = keyList(SCHEMA_ACTIONS);
+const DOMAIN_ACTION_EXPECTED = keyList(DOMAIN_ACTIONS);
+const TYPE_ACTION_EXPECTED = keyList(TYPE_ACTIONS);
+const INDEX_ACTION_EXPECTED = keyList(INDEX_ACTIONS);
 
 // The ALTER targets. Dispatch peeks, as PLAIN_CREATE's does: each handler
 // consumes its own lead word, and is handed the position before ALTER so its
@@ -3699,6 +3915,40 @@ function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt 
 // oneOf, so it takes the comma form over the keys, as ALTER_ACTIONS' does.
 const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
   table: { parse: alterTableRest },
+  schema: {
+    parse: (ctx, start) => {
+      ctx.next(); // SCHEMA
+      const name = ctx.parse(nameWord);
+      const action = dispatch(SCHEMA_ACTIONS, SCHEMA_ACTION_EXPECTED, ctx);
+      return { kind: "alterSchema", name, action, span: ctx.spanFrom(start) };
+    },
+  },
+  domain: {
+    parse: (ctx, start) => {
+      ctx.next(); // DOMAIN
+      const name = ctx.parse(qualName);
+      const action = dispatch(DOMAIN_ACTIONS, DOMAIN_ACTION_EXPECTED, ctx);
+      return { kind: "alterDomain", name, action, span: ctx.spanFrom(start) };
+    },
+  },
+  type: {
+    parse: (ctx, start) => {
+      ctx.next(); // TYPE
+      const name = ctx.parse(qualName);
+      const action = dispatch(TYPE_ACTIONS, TYPE_ACTION_EXPECTED, ctx);
+      return { kind: "alterType", name, action, span: ctx.spanFrom(start) };
+    },
+  },
+  index: {
+    parse: (ctx, start) => {
+      ctx.next(); // INDEX
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(qualName);
+      const parseAction = (c: ParseContext<SqlTokenType>) => dispatch(INDEX_ACTIONS, INDEX_ACTION_EXPECTED, c);
+      const actions = parseActionList(ctx, "INDEX", parseAction, INDEX_ACTIONS, { rename: "RENAME" });
+      return { kind: "alterIndex", ifExists, name, actions, span: ctx.spanFrom(start) };
+    },
+  },
 };
 const ALTER_TARGET_EXPECTED = keyList(ALTER_TARGETS);
 
@@ -3711,7 +3961,7 @@ const alterStmt = custom<Stmt, SqlTokenType>(
   { expected: '"alter"', first: [{ type: "ident", value: "alter" }] },
 );
 
-// CASCADE / RESTRICT drop behavior, shared by DROP and TRUNCATE (null when absent).
+// CASCADE / RESTRICT drop behavior, shared by DROP, TRUNCATE and ALTER DOMAIN (null when absent).
 const dropBehavior = optional(oneOf(kw("cascade"), kw("restrict"))).map(
   (n) => (n?.value ?? null) as "cascade" | "restrict" | null,
 );

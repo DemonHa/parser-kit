@@ -451,7 +451,9 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
     expect(() => sqlLite.parse("ALTER TABLE t ADD COLUMN IF NOT EXIST a int;")).toThrow(
       /Expected "exists" but found "exist"/,
     );
-    expect(() => sqlLite.parse("ALTER frobnicate t;")).toThrow(/Expected "table" but found "frobnicate"/);
+    expect(() => sqlLite.parse("ALTER frobnicate t;")).toThrow(
+      /Expected "table", "schema", "domain", "type" or "index" but found "frobnicate"/,
+    );
   });
 });
 
@@ -4195,6 +4197,152 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
     expect(create("CHECK (c > 0) DEFERRABLE")).toThrow(/Expected "," but found "deferrable"/);
     expect(() => sqlLite.parse("CREATE TABLE t (c int, CHECK (c > 0) INITIALLY DEFERRED);")).toThrow(
       /Expected "," but found "initially"/,
+    );
+  });
+});
+
+// --- ALTER SCHEMA, DOMAIN, TYPE and INDEX ---
+
+describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
+  const alter = (text: string) => firstStmt(text) as any;
+  const action = (text: string) => alter(text).action;
+  const fails = (text: string) => () => sqlLite.parse(text);
+
+  it("parses ALTER SCHEMA RENAME TO and OWNER TO", () => {
+    expect(alter("ALTER SCHEMA s RENAME TO n;")).toEqual({
+      kind: "alterSchema",
+      name: "s",
+      action: { kind: "rename", to: "n" },
+    });
+    expect(action("ALTER SCHEMA s OWNER TO r;")).toEqual({ kind: "ownerTo", owner: "r" });
+  });
+
+  it("parses the ALTER DOMAIN default, NOT NULL and constraint actions", () => {
+    const domain = (src: string) => action(`ALTER DOMAIN d ${src};`);
+    expect(alter("ALTER DOMAIN s.d SET DEFAULT 1;")).toEqual({
+      kind: "alterDomain",
+      name: ["s", "d"],
+      action: { kind: "setDefault", expr: num(1) },
+    });
+    expect(domain("DROP DEFAULT")).toEqual({ kind: "dropDefault" });
+    expect(domain("SET NOT NULL")).toEqual({ kind: "setNotNull" });
+    expect(domain("DROP NOT NULL")).toEqual({ kind: "dropNotNull" });
+    expect(domain("ADD CONSTRAINT c CHECK (VALUE > 0) NOT VALID")).toEqual({
+      kind: "addConstraint",
+      constraint: { kind: "check", name: "c", expr: bin(">", name("value"), num(0)) },
+      notValid: true,
+    });
+    expect(domain("ADD CHECK (VALUE <> '')")).toMatchObject({ constraint: { name: null }, notValid: false });
+    const drop = { kind: "dropConstraint", ifExists: true, name: "c", behavior: "cascade" };
+    expect(domain("DROP CONSTRAINT IF EXISTS c CASCADE")).toEqual(drop);
+    expect(domain("DROP CONSTRAINT c")).toEqual({ ...drop, ifExists: false, behavior: null });
+    expect(domain("RENAME CONSTRAINT a TO b")).toEqual({ kind: "renameConstraint", from: "a", to: "b" });
+    expect(domain("VALIDATE CONSTRAINT c")).toEqual({ kind: "validateConstraint", name: "c" });
+  });
+
+  it("parses RENAME TO, OWNER TO and SET SCHEMA on a domain and a type", () => {
+    for (const target of ["DOMAIN", "TYPE"]) {
+      expect(action(`ALTER ${target} x RENAME TO y;`)).toEqual({ kind: "rename", to: "y" });
+      expect(action(`ALTER ${target} x OWNER TO r;`)).toEqual({ kind: "ownerTo", owner: "r" });
+      expect(action(`ALTER ${target} x SET SCHEMA s;`)).toEqual({ kind: "setSchema", schema: "s" });
+    }
+  });
+
+  it("parses ALTER TYPE ADD VALUE and RENAME VALUE", () => {
+    const addValue = { kind: "addValue", ifNotExists: false, value: "meh", position: null };
+    expect(alter("ALTER TYPE s.mood ADD VALUE 'meh';")).toEqual({
+      kind: "alterType",
+      name: ["s", "mood"],
+      action: addValue,
+    });
+    expect(action("ALTER TYPE mood ADD VALUE IF NOT EXISTS 'meh' BEFORE 'sad';")).toEqual({
+      ...addValue,
+      ifNotExists: true,
+      position: { placement: "before", value: "sad" },
+    });
+    const after = action("ALTER TYPE mood ADD VALUE 'meh' AFTER 'ok';");
+    expect(after.position).toEqual({ placement: "after", value: "ok" });
+    const rename = action("ALTER TYPE mood RENAME VALUE 'sad' TO 'blue';");
+    expect(rename).toEqual({ kind: "renameValue", from: "sad", to: "blue" });
+  });
+
+  it("parses ALTER INDEX [IF EXISTS] RENAME, and SET TABLESPACE / SET / RESET as a list", () => {
+    expect(alter("ALTER INDEX IF EXISTS s.i RENAME TO j;")).toEqual({
+      kind: "alterIndex",
+      ifExists: true,
+      name: ["s", "i"],
+      actions: [{ kind: "rename", to: "j" }],
+    });
+    const opt = (name: string, value: unknown = null) => ({ name, value });
+    expect(
+      alter("ALTER INDEX i SET TABLESPACE fast, SET (fillfactor = 70, d = off), RESET (fillfactor);").actions,
+    ).toEqual([
+      { kind: "setTablespace", tablespace: "fast" },
+      { kind: "setOptions", options: [opt("fillfactor", num(70)), opt("d", name("off"))] },
+      { kind: "resetOptions", options: [opt("fillfactor")] },
+    ]);
+  });
+
+  it("spans the whole statement, from ALTER through the action", () => {
+    const [stmt] = sqlLite.parse("ALTER DOMAIN d SET SCHEMA archive;") as Record<string, any>[];
+    expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 33 } });
+  });
+
+  it("keeps the new ALTER words unreserved as names and aliases", () => {
+    const words = ["schema", "domain", "value", "before", "after", "owner", "tablespace", "validate", "valid", "reset"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS value, 2 before FROM schema AS domain;")).toMatchObject({
+      columns: [{ alias: "value" }, { alias: "before" }],
+      from: [{ name: ["schema"], alias: "domain" }],
+    });
+    // …and as the names of the objects being altered.
+    expect(alter("ALTER SCHEMA schema RENAME TO domain;")).toMatchObject({ name: "schema", action: { to: "domain" } });
+    expect(alter("ALTER DOMAIN domain DROP CONSTRAINT valid RESTRICT;")).toMatchObject({
+      name: ["domain"],
+      action: { name: "valid", behavior: "restrict" },
+    });
+    expect(alter("ALTER TYPE value ADD VALUE 'before' AFTER 'after';")).toMatchObject({ name: ["value"] });
+    expect(alter("ALTER INDEX reset SET TABLESPACE tablespace;")).toMatchObject({
+      name: ["reset"],
+      actions: [{ tablespace: "tablespace" }],
+    });
+    // IF / EXISTS stay usable as an index or constraint name.
+    expect(alter("ALTER INDEX if RENAME TO exists;")).toMatchObject({ ifExists: false, name: ["if"] });
+    expect(action("ALTER DOMAIN d DROP CONSTRAINT if;")).toMatchObject({ ifExists: false, name: "if" });
+  });
+
+  it("rejects an unknown action, a misplaced word and a valued RESET", () => {
+    expect(fails("ALTER SCHEMA s SET SCHEMA t;")).toThrow(/Expected "rename" or "owner" but found "set"/);
+    expect(fails("ALTER DOMAIN d frobnicate;")).toThrow(
+      /Expected "set", "drop", "add", "rename", "owner" or "validate" but found "frobnicate"/,
+    );
+    expect(fails("ALTER TYPE t frobnicate;")).toThrow(
+      /Expected "add", "rename", "owner" or "set" but found "frobnicate"/,
+    );
+    expect(fails("ALTER INDEX i frobnicate;")).toThrow(/Expected "rename", "set" or "reset" but found "frobnicate"/);
+    expect(fails("ALTER DOMAIN d SET frob;")).toThrow(/Expected "default", "not" or "schema" but found "frob"/);
+    expect(fails("ALTER DOMAIN d DROP frob;")).toThrow(/Expected "default", "not" or "constraint" but found "frob"/);
+    expect(fails("ALTER DOMAIN d ADD UNIQUE (a);")).toThrow(/Expected "check" but found "unique"/);
+    expect(fails("ALTER TYPE t ADD VALUE meh;")).toThrow(/Expected a string but found "meh"/);
+    expect(fails("ALTER TYPE t ADD VALUE 'a' BEFORE b;")).toThrow(/Expected a string but found "b"/);
+    expect(fails("ALTER INDEX i SET TABLESPACE t, RENAME TO j;")).toThrow(
+      /RENAME cannot be combined with other ALTER INDEX actions/,
+    );
+    expect(fails("ALTER INDEX i SET frob;")).toThrow(/Expected "\(" or "tablespace" but found "frob"/);
+    // One action only, and a quoted word is a name, never a keyword.
+    expect(fails("ALTER SCHEMA s RENAME TO n, OWNER TO r;")).toThrow(/Expected ";" but found ","/);
+    expect(fails('ALTER DOMAIN d RENAME "constraint" a TO b;')).toThrow(
+      /Expected "constraint" or "to" but found "constraint"/,
+    );
+    expect(fails("ALTER TYPE t RENAME \"value\" 'a' TO 'b';")).toThrow(/Expected "value" or "to" but found "value"/);
+    expect(fails("ALTER TYPE t RENAME ATTRIBUTE a TO b;")).toThrow(/Expected "value" or "to" but found "attribute"/);
+    expect(fails("ALTER TYPE t SET frob;")).toThrow(/Expected "schema" but found "frob"/);
+    expect(fails("ALTER DOMAIN d ADD CHECK (VALUE > 0) NOT frob;")).toThrow(/Expected "valid" but found "frob"/);
+    expect(fails("ALTER TYPE t ADD VALUE 'a' BEFORE 'b' AFTER 'c';")).toThrow(/Expected ";" but found "after"/);
+    expect(fails("ALTER INDEX i RESET (a, fillfactor = 70);")).toThrow(
+      /RESET must not include values for parameters \(1:24\)/,
     );
   });
 });
