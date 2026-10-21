@@ -2709,6 +2709,12 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     );
   });
 
+  it("names them in the expected-an-expression message", () => {
+    expect(() => sqlLite.parse("SELECT 1 + ;")).toThrow(
+      /or "array" or a keyword like "current_date" or "\(" or a name but found ";" \(1:11\)/,
+    );
+  });
+
   it("records the precision the time-valued ones take, and only theirs", () => {
     expect(colExpr("current_timestamp(3)")).toEqual(svf("current_timestamp", { precision: 3 }));
     expect(colExpr("current_time(6)")).toEqual(svf("current_time", { precision: 6 }));
@@ -2856,6 +2862,8 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     expect(colExpr("overlay(DISTINCT s ORDER BY s)")).toMatchObject({ kind: "call", name: "overlay", distinct: true });
     expect(colExpr("overlay(s, 'x', 1) OVER ()")).toMatchObject({ kind: "window", fn: { name: "overlay" } });
     expect(colExpr("overlay()")).toEqual({ kind: "call", name: "overlay", args: [] });
+    // A qualified star is an ordinary operand; only a bare `*` is refused.
+    expect(colExpr("overlay(t.* PLACING 'x' FROM 1)")).toMatchObject({ kind: "overlay", value: star(["t"]) });
   });
 
   it("rejects a malformed OVERLAY", () => {

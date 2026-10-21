@@ -42,11 +42,12 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // — CAST / EXTRACT / SUBSTRING / POSITION / TRIM / OVERLAY, ARRAY[…] / ROW(…),
 // array subscripts & slices, INTERVAL and DATE / TIME / TIMESTAMP literals, the
 // niladic keyword functions (CURRENT_DATE, CURRENT_USER, …), and the COLLATE /
-// AT TIME ZONE postfixes — plus window functions: `fn(…) [WITHIN GROUP (ORDER BY …)] [IGNORE|RESPECT
-// NULLS] [FILTER (WHERE …)] [OVER (…) | OVER name]`, with named windows via a
-// `WINDOW w AS (…)` clause. Calls also carry the aggregate modifiers that live
-// *inside* the argument list — `count(DISTINCT x)`, `array_agg(a ORDER BY b)` —
-// and PG's named-argument notation is accepted in argument position, `f(a => 1)`.
+// AT TIME ZONE postfixes — plus window functions: `fn(…) [WITHIN GROUP (ORDER
+// BY …)] [IGNORE|RESPECT NULLS] [FILTER (WHERE …)] [OVER (…) | OVER name]`,
+// with named windows via a `WINDOW w AS (…)` clause. Calls also carry the
+// aggregate modifiers that live *inside* the argument list — `count(DISTINCT
+// x)`, `array_agg(a ORDER BY b)` — and PG's named-argument notation is accepted
+// in argument position, `f(a => 1)`.
 //
 // The SELECT surface also carries the remaining query clauses: LATERAL /
 // table-function / TABLESAMPLE FROM items, VALUES as a standalone query and
@@ -1265,15 +1266,16 @@ const columnRef = custom<Expr, SqlTokenType>(
         // OVER, …), which PG would reject on OVERLAY's comma form — no narrower
         // than this grammar is for any other call. `placing` is reserved, so
         // no first argument can end in one — before this check, it was a
-        // syntax error here, and it still is after a `*` or a named argument,
-        // which PG's keyword form does not take either.
+        // syntax error here, and it still is after a bare `*` or a named
+        // argument, which PG's keyword form does not take either (a `t.*` is an
+        // ordinary operand to it, as to SUBSTRING's FROM form).
         const value = args[0]!;
         if (
           bareLead &&
           parts.length === 1 &&
           parts[0] === "overlay" &&
           !distinct &&
-          value.kind !== "star" &&
+          !(value.kind === "star" && value.table === null) &&
           value.kind !== "namedArg" &&
           ctx.is("ident", "placing")
         ) {
