@@ -6130,6 +6130,664 @@
     ]
   },
   {
+    "source": "SELECT current_date, current_timestamp(3), localtime(0), user, session_user FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "sqlValueFunction",
+              "name": "current_date",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 19
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "sqlValueFunction",
+              "name": "current_timestamp",
+              "precision": 3,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 21
+                },
+                "end": {
+                  "row": 1,
+                  "col": 41
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "sqlValueFunction",
+              "name": "localtime",
+              "precision": 0,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 43
+                },
+                "end": {
+                  "row": 1,
+                  "col": 55
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "sqlValueFunction",
+              "name": "user",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 57
+                },
+                "end": {
+                  "row": 1,
+                  "col": 61
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "sqlValueFunction",
+              "name": "session_user",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 63
+                },
+                "end": {
+                  "row": 1,
+                  "col": 75
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 82
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT date '2024-01-01', time '10:00', timestamp(3) with time zone '2024-01-01 00:00' FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "typedLiteral",
+              "type": {
+                "name": "date",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 7
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 11
+                  }
+                }
+              },
+              "value": "2024-01-01",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 23
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "typedLiteral",
+              "type": {
+                "name": "time",
+                "args": [],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 26
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 30
+                  }
+                }
+              },
+              "value": "10:00",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 26
+                },
+                "end": {
+                  "row": 1,
+                  "col": 37
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "typedLiteral",
+              "type": {
+                "name": "timestamp with time zone",
+                "args": [
+                  3
+                ],
+                "array": false,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 40
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 67
+                  }
+                }
+              },
+              "value": "2024-01-01 00:00",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 40
+                },
+                "end": {
+                  "row": 1,
+                  "col": 85
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 93
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "SELECT overlay(s PLACING 'ab' FROM 2 FOR 3), overlay(s PLACING 'x' FROM 1), overlay(s, 'x', 1) FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": null,
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "overlay",
+              "value": {
+                "kind": "name",
+                "parts": [
+                  "s"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 15
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 16
+                  }
+                }
+              },
+              "placing": {
+                "kind": "string",
+                "value": "ab",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 26
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 28
+                  }
+                }
+              },
+              "from": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 35
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 36
+                  }
+                }
+              },
+              "for_": {
+                "kind": "number",
+                "value": 3,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 41
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 42
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 7
+                },
+                "end": {
+                  "row": 1,
+                  "col": 43
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "overlay",
+              "value": {
+                "kind": "name",
+                "parts": [
+                  "s"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 53
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 54
+                  }
+                }
+              },
+              "placing": {
+                "kind": "string",
+                "value": "x",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 64
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 65
+                  }
+                }
+              },
+              "from": {
+                "kind": "number",
+                "value": 1,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 72
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 73
+                  }
+                }
+              },
+              "for_": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 45
+                },
+                "end": {
+                  "row": 1,
+                  "col": 74
+                }
+              }
+            },
+            "alias": null
+          },
+          {
+            "expr": {
+              "kind": "call",
+              "name": "overlay",
+              "args": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "s"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 84
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 85
+                    }
+                  }
+                },
+                {
+                  "kind": "string",
+                  "value": "x",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 88
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 89
+                    }
+                  }
+                },
+                {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 92
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 93
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 76
+                },
+                "end": {
+                  "row": 1,
+                  "col": 94
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 101
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE TABLE t (at timestamp DEFAULT current_timestamp, d date DEFAULT date '2020-01-01');",
+    "ast": [
+      {
+        "kind": "createTable",
+        "ifNotExists": false,
+        "name": [
+          "t"
+        ],
+        "items": [
+          {
+            "kind": "column",
+            "name": "at",
+            "dataType": {
+              "name": "timestamp",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 19
+                },
+                "end": {
+                  "row": 1,
+                  "col": 28
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "default",
+                "expr": {
+                  "kind": "sqlValueFunction",
+                  "name": "current_timestamp",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 37
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 54
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 29
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 54
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 16
+              },
+              "end": {
+                "row": 1,
+                "col": 54
+              }
+            }
+          },
+          {
+            "kind": "column",
+            "name": "d",
+            "dataType": {
+              "name": "date",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 58
+                },
+                "end": {
+                  "row": 1,
+                  "col": 62
+                }
+              }
+            },
+            "constraints": [
+              {
+                "kind": "default",
+                "expr": {
+                  "kind": "typedLiteral",
+                  "type": {
+                    "name": "date",
+                    "args": [],
+                    "array": false,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 71
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 75
+                      }
+                    }
+                  },
+                  "value": "2020-01-01",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 71
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 87
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 63
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 87
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 56
+              },
+              "end": {
+                "row": 1,
+                "col": 87
+              }
+            }
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 89
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "SELECT count(*) FILTER (WHERE a > 1) FROM t;",
     "ast": [
       {

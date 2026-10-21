@@ -2675,3 +2675,186 @@ describe("SQL-lite multi-word type names", () => {
     ]);
   });
 });
+
+// --- niladic keyword functions, typed datetime literals and OVERLAY ---
+
+describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLAY", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const svf = (name: string, over: Record<string, unknown> = {}) => ({ kind: "sqlValueFunction", name, ...over });
+  const typed = (type: unknown, value: string) => ({ kind: "typedLiteral", type, value });
+
+  it("parses the nine niladic keyword functions as expressions", () => {
+    const words = [
+      "current_date",
+      "current_time",
+      "current_timestamp",
+      "localtime",
+      "localtimestamp",
+      "current_role",
+      "current_user",
+      "session_user",
+      "user",
+    ];
+    // All nine are reserved, and until now were usable nowhere as a value.
+    expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(svf(w))));
+    // They are ordinary operands from there on.
+    expect(colExpr("current_date - 1")).toEqual(bin("-", svf("current_date"), num(1)));
+    expect(colExpr("current_timestamp AT TIME ZONE 'utc'")).toEqual({
+      kind: "atTimeZone",
+      expr: svf("current_timestamp"),
+      zone: str("utc"),
+    });
+    expect((firstStmt("CREATE TABLE t (at timestamp DEFAULT current_timestamp);") as any).items[0].constraints).toEqual(
+      [{ kind: "default", expr: svf("current_timestamp") }],
+    );
+  });
+
+  it("records the precision the time-valued ones take, and only theirs", () => {
+    expect(colExpr("current_timestamp(3)")).toEqual(svf("current_timestamp", { precision: 3 }));
+    expect(colExpr("current_time(6)")).toEqual(svf("current_time", { precision: 6 }));
+    expect(colExpr("localtimestamp(2)")).toEqual(svf("localtimestamp", { precision: 2 }));
+    // Zero is a precision, not an absent one.
+    expect(colExpr("localtime(0)")).toEqual(svf("localtime", { precision: 0 }));
+    // Without a list the key is omitted, not null.
+    expect(colExpr("current_timestamp")).not.toHaveProperty("precision");
+    // PG takes no argument list at all on the others, not even an empty one.
+    expect(() => sqlLite.parse("SELECT current_date();")).toThrow(/Expected ";" but found "\(" \(1:19\)/);
+    expect(() => sqlLite.parse("SELECT current_user(1);")).toThrow(/Expected ";" but found "\("/);
+    // …and nothing but an integer as the precision.
+    expect(() => sqlLite.parse("SELECT current_timestamp(1.5);")).toThrow(
+      /Expected an integer precision but found "1.5"/,
+    );
+    expect(() => sqlLite.parse("SELECT current_timestamp(3e0);")).toThrow(
+      /Expected an integer precision but found "3e0"/,
+    );
+    expect(() => sqlLite.parse("SELECT current_timestamp(x);")).toThrow(/Expected an integer precision but found "x"/);
+    expect(() => sqlLite.parse("SELECT current_timestamp(3;")).toThrow(/Expected "\)" but found ";"/);
+  });
+
+  it("leaves the grantee spellings of the role words alone", () => {
+    // GRANT / REVOKE read `current_user` and friends as grantee keywords, never
+    // through the expression grammar, so those nodes keep their string form.
+    expect((firstStmt("GRANT SELECT ON t TO current_user, session_user;") as any).grantees).toEqual([
+      "current_user",
+      "session_user",
+    ]);
+  });
+
+  it("parses DATE, TIME and TIMESTAMP string literals", () => {
+    expect(colExpr("date '2024-01-01'")).toEqual(typed(ct("date"), "2024-01-01"));
+    expect(colExpr("time '10:00'")).toEqual(typed(ct("time"), "10:00"));
+    expect(colExpr("TIMESTAMP '2024-01-01 00:00'")).toEqual(typed(ct("timestamp"), "2024-01-01 00:00"));
+    // The type is a full typeRef: multi-word spellings and the pre-tail
+    // precision come out exactly as they do in a cast.
+    expect(colExpr("timestamp with time zone '2024-01-01'")).toEqual(
+      typed(ct("timestamp with time zone"), "2024-01-01"),
+    );
+    expect(colExpr("time(3) without time zone '10:00'")).toEqual(
+      typed(ct("time without time zone", { args: [3] }), "10:00"),
+    );
+    expect(colExpr("timestamp(2) 'x'")).toEqual(typed(ct("timestamp", { args: [2] }), "x"));
+    // A typed literal is an atom, so the postfixes and operators bind around it.
+    expect(colExpr("date '2024-01-01'::text")).toEqual({
+      kind: "cast",
+      expr: typed(ct("date"), "2024-01-01"),
+      type: ct("text"),
+    });
+    expect(colExpr("extract(epoch FROM timestamp 'x')")).toEqual({
+      kind: "extract",
+      field: "epoch",
+      source: typed(ct("timestamp"), "x"),
+    });
+  });
+
+  it("spans a typed literal from its type word to its string", () => {
+    const expr = (sqlLite.parse("SELECT timestamp(3) with time zone 'x';")[0] as any).columns[0].expr;
+    expect(expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 37 } });
+    expect(expr.type.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 34 } });
+  });
+
+  it("reads a typed literal only when the whole spelling is followed by a string", () => {
+    // A quoted lead is an ordinary name, as it is in typeRef.
+    expect(() => sqlLite.parse(`SELECT "date" 'x';`)).toThrow(/Expected ";" but found "x"/);
+    // So is a lead whose tail is not followed by a string — no word is taken.
+    expect(() => sqlLite.parse("SELECT timestamp with time zone FROM t;")).toThrow(/Expected ";" but found "with"/);
+    // PG writes the precision before the tail, never after it.
+    expect(() => sqlLite.parse("SELECT timestamp with time zone(3) 'x';")).toThrow(/Expected ";" but found "with"/);
+    // DATE takes no precision, so `date(3)` is a call and the string a stray.
+    expect(() => sqlLite.parse("SELECT date(3) 'x';")).toThrow(/Expected ";" but found "x"/);
+  });
+
+  it("keeps date / time / timestamp unreserved as names, calls and aliases", () => {
+    expect((firstStmt("SELECT date, time, timestamp FROM t;") as any).columns).toEqual([
+      col(name("date")),
+      col(name("time")),
+      col(name("timestamp")),
+    ]);
+    expect((firstStmt("SELECT date(x), timestamp(3), time.x FROM t;") as any).columns).toEqual([
+      col({ kind: "call", name: "date", args: [name("x")] }),
+      col({ kind: "call", name: "timestamp", args: [num(3)] }),
+      col(name("time", "x")),
+    ]);
+    expect((firstStmt("SELECT a date, b AS time, c timestamp FROM t;") as any).columns).toEqual([
+      col(name("a"), "date"),
+      col(name("b"), "time"),
+      col(name("c"), "timestamp"),
+    ]);
+    expect((firstStmt("CREATE TABLE t (date date, time time, overlay text);") as any).items).toEqual([
+      { kind: "column", name: "date", dataType: ct("date"), constraints: [] },
+      { kind: "column", name: "time", dataType: ct("time"), constraints: [] },
+      { kind: "column", name: "overlay", dataType: ct("text"), constraints: [] },
+    ]);
+  });
+
+  it("parses OVERLAY in both the PLACING and the comma form", () => {
+    expect(colExpr("OVERLAY(s PLACING 'ab' FROM 2 FOR 3)")).toEqual({
+      kind: "overlay",
+      value: name("s"),
+      placing: str("ab"),
+      from: num(2),
+      for_: num(3),
+    });
+    expect(colExpr("overlay(a || b PLACING 'x' FROM n + 1)")).toEqual({
+      kind: "overlay",
+      value: bin("||", name("a"), name("b")),
+      placing: str("x"),
+      from: bin("+", name("n"), num(1)),
+      for_: null,
+    });
+    // The comma form is an ordinary call, and keeps everything one carries.
+    expect(colExpr("overlay(s, 'x', 1)")).toEqual({
+      kind: "call",
+      name: "overlay",
+      args: [name("s"), str("x"), num(1)],
+    });
+    expect(colExpr("overlay(DISTINCT s ORDER BY s)")).toMatchObject({ kind: "call", name: "overlay", distinct: true });
+    expect(colExpr("overlay(s, 'x', 1) OVER ()")).toMatchObject({ kind: "window", fn: { name: "overlay" } });
+    expect(colExpr("overlay()")).toEqual({ kind: "call", name: "overlay", args: [] });
+  });
+
+  it("rejects a malformed OVERLAY", () => {
+    expect(() => sqlLite.parse("SELECT overlay(s PLACING 'x');")).toThrow(/Expected "from" but found "\)"/);
+    expect(() => sqlLite.parse("SELECT overlay(s PLACING 'x' FROM 1 FOR);")).toThrow(ParseError);
+    // PLACING may follow only the first argument of a bare OVERLAY, and only a plain one.
+    expect(() => sqlLite.parse("SELECT overlay(a, b PLACING 'x' FROM 1);")).toThrow(
+      /Expected "\)" but found "placing"/,
+    );
+    expect(() => sqlLite.parse("SELECT overlay(DISTINCT s PLACING 'x' FROM 1);")).toThrow(
+      /Expected "\)" but found "placing"/,
+    );
+    expect(() => sqlLite.parse("SELECT overlay(* PLACING 'x' FROM 1);")).toThrow(/Expected "\)" but found "placing"/);
+    expect(() => sqlLite.parse("SELECT overlay(v => s PLACING 'x' FROM 1);")).toThrow(
+      /Expected "\)" but found "placing"/,
+    );
+    expect(() => sqlLite.parse("SELECT pg_catalog.overlay(s PLACING 'x' FROM 1);")).toThrow(
+      /Expected "\)" but found "placing"/,
+    );
+  });
+
+  it("keeps overlay unreserved as a name and an alias", () => {
+    expect((firstStmt("SELECT overlay, a overlay FROM t;") as any).columns).toEqual([
+      col(name("overlay")),
+      col(name("a"), "overlay"),
+    ]);
+  });
+});

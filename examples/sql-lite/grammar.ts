@@ -39,8 +39,10 @@ import { type SqlTokenType, sqlLexer } from "./lexer";
 // operator reader, the fold-and-match keyword strategy, match-based and non-associative
 // pratt operators, mutual expr↔query recursion via lazy(), and farthest-failure
 // / nested recovery. The expression sublanguage also covers the PG special forms
-// — CAST / EXTRACT / SUBSTRING / POSITION / TRIM, ARRAY[…] / ROW(…), array
-// subscripts & slices, INTERVAL literals, and COLLATE / AT TIME ZONE postfixes —
+// — CAST / EXTRACT / SUBSTRING / POSITION / TRIM / OVERLAY, ARRAY[…] / ROW(…),
+// array subscripts & slices, INTERVAL and DATE / TIME / TIMESTAMP literals, the
+// niladic keyword functions (CURRENT_DATE, CURRENT_USER, …), and COLLATE / AT
+// TIME ZONE postfixes —
 // plus window functions: `fn(…) [WITHIN GROUP (ORDER BY …)] [IGNORE|RESPECT
 // NULLS] [FILTER (WHERE …)] [OVER (…) | OVER name]`, with named windows via a
 // `WINDOW w AS (…)` clause. Calls also carry the aggregate modifiers that live
@@ -160,7 +162,36 @@ export type Expr =
   // produced them, since the two differ in width per digit rather than in
   // value. The third new literal form, `U&'\0041'`, needs no node: it decodes
   // in the lexer to an ordinary `string` token, exactly as an E-string does.
-  | { kind: "bitString"; value: string; hex: boolean; span: Span };
+  | { kind: "bitString"; value: string; hex: boolean; span: Span }
+  // --- niladic keyword functions, typed datetime literals and OVERLAY ---
+  // `CURRENT_DATE`, `CURRENT_TIMESTAMP(3)`, `USER`, … — the reserved keywords PG
+  // evaluates as functions without an argument list (its SQLValueFunction).
+  // `precision` is the optional fractional-seconds precision that the four
+  // time-valued ones take, omitted when none is written.
+  | { kind: "sqlValueFunction"; name: SqlValueFunctionName; precision?: number; span: Span }
+  // `DATE '2024-01-01'`, `TIMESTAMP(3) WITH TIME ZONE '…'` — a string literal
+  // prefixed by the type it is read as. `type` is the full typeRef node, so the
+  // multi-word spellings and the hoisted precision come out exactly as they do
+  // in a cast. INTERVAL keeps its own node: its field spec trails the literal.
+  | { kind: "typedLiteral"; type: ColType; value: string; span: Span }
+  // `OVERLAY(value PLACING placing FROM from [FOR for_])`. The comma spelling,
+  // `overlay(a, b, 1)`, stays an ordinary call node.
+  | { kind: "overlay"; value: Expr; placing: Expr; from: Expr; for_: Expr | null; span: Span };
+
+// The nine niladic keyword functions. All are reserved words, so none of them
+// was usable as a bare name before it became an expression either.
+const SQL_VALUE_FUNCTIONS = [
+  "current_date",
+  "current_time",
+  "current_timestamp",
+  "localtime",
+  "localtimestamp",
+  "current_role",
+  "current_user",
+  "session_user",
+  "user",
+] as const;
+export type SqlValueFunctionName = (typeof SQL_VALUE_FUNCTIONS)[number];
 
 // One bound of a window frame (`ROWS/RANGE/GROUPS` extent). `preceding` /
 // `following` carry the offset expression; the others are nullary.
@@ -1016,6 +1047,19 @@ function parseSubstring(ctx: ParseContext<SqlTokenType>, start: Position): Expr 
   return { kind: "call", name: "substring", args, span: ctx.spanFrom(start) };
 }
 
+// OVERLAY(value PLACING placing FROM from [FOR for_]). Not a SPECIAL_CALLS
+// entry — columnRef's call branch reads the first argument itself and hands it
+// over only once a PLACING has shown this is the keyword form; see there.
+function parseOverlay(ctx: ParseContext<SqlTokenType>, value: Expr, start: Position): Expr {
+  ctx.parse(kw("placing"));
+  const placing = ctx.parse(expression);
+  ctx.parse(kw("from"));
+  const from = ctx.parse(expression);
+  const for_ = ctx.eat("ident", "for") !== null ? ctx.parse(expression) : null;
+  expectClose(ctx);
+  return { kind: "overlay", value, placing, from, for_, span: ctx.spanFrom(start) };
+}
+
 const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Position) => Expr> = {
   extract: parseExtract,
   position: parsePosition,
@@ -1156,8 +1200,9 @@ function applyCallModifiers(ctx: ParseContext<SqlTokenType>, fn: Expr, start: Po
 // custom rule (no attempt): walk the `name (. name)*` chain, then dispatch on
 // whether `.*` / `(` follows. Subsumes the old nameOrCall — `s.t.c`, `foo(a,b)`,
 // `now()`, and now `t.*`, `count(*)`, `count(distinct x)`. Also the entry point
-// for `INTERVAL 'literal' [field]` (an unreserved word that leads a literal) and
-// the keyword-argument functions in SPECIAL_CALLS.
+// for `INTERVAL 'literal' [field]` and `DATE / TIME / TIMESTAMP 'literal'`
+// (unreserved words that lead a literal), the keyword-argument functions in
+// SPECIAL_CALLS, and OVERLAY's PLACING form.
 const columnRef = custom<Expr, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -1176,6 +1221,14 @@ const columnRef = custom<Expr, SqlTokenType>(
         ...(units.length > 0 && { fields: units.join(" ") }),
         span: ctx.spanFrom(start),
       };
+    }
+    // DATE / TIME / TIMESTAMP 'literal' — the same idiom, for the same reason:
+    // all three words are unreserved, so they lead a literal only when the
+    // whole type spelling is followed by a string, and are names otherwise.
+    if (startsTypedLiteral(ctx)) {
+      const type = ctx.parse(typeRef);
+      const value = ctx.next()!.value; // the string literal
+      return { kind: "typedLiteral", type, value, span: ctx.spanFrom(start) };
     }
     const parts: string[] = [ctx.parse(nameWord)];
     while (ctx.is("punc", ".")) {
@@ -1202,6 +1255,25 @@ const columnRef = custom<Expr, SqlTokenType>(
       let orderBy: OrderItem[] = [];
       if (!ctx.is("punc", ")")) {
         args.push(ctx.parse(functionArg));
+        // OVERLAY's keyword form is told apart from its comma form only by a
+        // PLACING after the first argument, so unlike the SPECIAL_CALLS it
+        // cannot claim the call up front: the comma form is an ordinary call in
+        // every respect (DISTINCT, named arguments, OVER), and keeps all of it by
+        // never leaving this path. `placing` is reserved, so no first argument
+        // can end in one — before this check, it was a syntax error here, and
+        // it still is after a `*` or a named argument, which PG's keyword form
+        // does not take either.
+        const value = args[0]!;
+        if (
+          parts.length === 1 &&
+          parts[0] === "overlay" &&
+          !distinct &&
+          value.kind !== "star" &&
+          value.kind !== "namedArg" &&
+          ctx.is("ident", "placing")
+        ) {
+          return parseOverlay(ctx, value, start);
+        }
         while (ctx.is("punc", ",")) {
           ctx.next(); // ","
           args.push(ctx.parse(functionArg));
@@ -1287,6 +1359,43 @@ const arrayExpr = seq(
   field("elements", delimited(P("["), P("]"), P(","), expression, { interleaved: true })),
 ).map(({ elements }, span): Expr => ({ kind: "array", elements, span }));
 
+// CURRENT_DATE, CURRENT_TIMESTAMP[(p)], USER, … — the niladic keyword
+// functions. Each is reserved, so it can be a value-specific atom key without
+// taking a name from anyone. Only the four time-valued ones accept a precision,
+// and PG spells it as a bare integer: `current_date()` and `current_user()` are
+// syntax errors there, and the stray `(` is left for the caller to reject here.
+const PRECISION_FUNCTIONS: ReadonlySet<string> = new Set([
+  "current_time",
+  "current_timestamp",
+  "localtime",
+  "localtimestamp",
+]);
+const sqlValueFunction = custom<Expr, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const name = ctx.next()!.value as SqlValueFunctionName;
+    let precision: number | null = null;
+    if (PRECISION_FUNCTIONS.has(name) && ctx.is("punc", "(")) {
+      ctx.next(); // "("
+      // Plain decimal digits only. PG caps the precision at 6, so the lexer's
+      // hex and digit-separator spellings are rejected rather than decoded, and
+      // so is `3e0`, which PG lexes as a float rather than an integer.
+      const tok = ctx.peek();
+      if (tok === null || tok.type !== "number" || !/^[0-9]+$/.test(tok.value)) {
+        ctx.croak(`Expected an integer precision but found ${describeFound(tok)}`);
+      }
+      precision = Number(ctx.next()!.value);
+      expectClose(ctx);
+    }
+    // `!== null`, not truthiness: `current_timestamp(0)` is a real precision.
+    return { kind: "sqlValueFunction", name, ...(precision !== null && { precision }), span: ctx.spanFrom(start) };
+  },
+  {
+    expected: "a niladic keyword function",
+    first: SQL_VALUE_FUNCTIONS.map((value): FirstEntry<SqlTokenType> => ({ type: "ident", value })),
+  },
+);
+
 const atom = oneOf(
   numberLit,
   stringLit,
@@ -1299,6 +1408,7 @@ const atom = oneOf(
   existsExpr,
   castExpr,
   arrayExpr,
+  sqlValueFunction,
   parenOrSubquery,
   columnRef,
 );
@@ -1428,6 +1538,31 @@ function findTypeTail(ctx: ParseContext<SqlTokenType>, lead: string, offset: num
 // tail, so `timestamp` is a name again, exactly as typeRef would have it.
 const startsMultiWordType = (ctx: ParseContext<SqlTokenType>, lead: Token<SqlTokenType> | null): boolean =>
   lead !== null && lead.type === "ident" && findTypeTail(ctx, lead.value, 1) !== null;
+
+// The type words that may prefix a string literal (`DATE '2024-01-01'`).
+// INTERVAL is the fourth, but has its own branch and node — its unit spec
+// trails the literal rather than leading it.
+const TYPED_LITERAL_LEADS: ReadonlySet<string> = new Set(["date", "time", "timestamp"]);
+
+// True when the cursor sits on a typed datetime literal: a bare lead word, the
+// pre-tail precision and the multi-word tail where its type has them, then a
+// string. Every token is checked before columnRef commits, and nothing else
+// may sit between them — so `date(x)` and `timestamp(3)` stay calls, and a
+// type with an array suffix or a trailing arg list is never a literal's.
+function startsTypedLiteral(ctx: ParseContext<SqlTokenType>): boolean {
+  const lead = ctx.peek();
+  if (lead === null || lead.type !== "ident" || !TYPED_LITERAL_LEADS.has(lead.value)) return false;
+  let offset = 1;
+  const isPunc = (index: number, value: string) => {
+    const ahead = ctx.peekAhead(index);
+    return ahead !== null && ahead.type === "punc" && ahead.value === value;
+  };
+  if (ARGS_BEFORE_TAIL.has(lead.value) && isPunc(1, "(") && ctx.peekAhead(2)?.type === "number" && isPunc(3, ")")) {
+    offset = 4;
+  }
+  offset += findTypeTail(ctx, lead.value, offset)?.length ?? 0;
+  return ctx.peekAhead(offset)?.type === "string";
+}
 
 // Consume the longest continuation of `lead` that is present, or nothing. The
 // whole candidate is checked before a single token is consumed — `phrase()`
