@@ -240,6 +240,10 @@ const SUPPLEMENTAL = [
   "CREATE UNLOGGED TABLE IF NOT EXISTS s.t (id int, note text);",
   "CREATE GLOBAL TEMPORARY TABLE t (id int);",
   "CREATE LOCAL TEMP TABLE snap AS SELECT 1 AS one;",
+  // --- CREATE ROLE, USER and PROCEDURE ---
+  "CREATE ROLE admin WITH LOGIN NOSUPERUSER CREATEDB CONNECTION LIMIT 5 ENCRYPTED PASSWORD 'pw' VALID UNTIL '2030-01-01' IN ROLE staff ADMIN bob;",
+  "CREATE USER bob PASSWORD NULL NOINHERIT ROLE a, b;",
+  "CREATE OR REPLACE PROCEDURE p(IN a integer, b text DEFAULT 'x') LANGUAGE plpgsql SECURITY DEFINER AS $$BEGIN NULL; END$$;",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind

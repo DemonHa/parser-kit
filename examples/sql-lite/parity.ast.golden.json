@@ -19607,6 +19607,201 @@
     ]
   },
   {
+    "source": "CREATE ROLE admin WITH LOGIN NOSUPERUSER CREATEDB CONNECTION LIMIT 5 ENCRYPTED PASSWORD 'pw' VALID UNTIL '2030-01-01' IN ROLE staff ADMIN bob;",
+    "ast": [
+      {
+        "kind": "createRole",
+        "user": false,
+        "name": "admin",
+        "options": [
+          {
+            "kind": "flag",
+            "name": "login",
+            "value": true
+          },
+          {
+            "kind": "flag",
+            "name": "superuser",
+            "value": false
+          },
+          {
+            "kind": "flag",
+            "name": "createdb",
+            "value": true
+          },
+          {
+            "kind": "connectionLimit",
+            "limit": 5
+          },
+          {
+            "kind": "password",
+            "encrypted": true,
+            "password": "pw"
+          },
+          {
+            "kind": "validUntil",
+            "timestamp": "2030-01-01"
+          },
+          {
+            "kind": "inRole",
+            "roles": [
+              "staff"
+            ]
+          },
+          {
+            "kind": "admin",
+            "roles": [
+              "bob"
+            ]
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 141
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE USER bob PASSWORD NULL NOINHERIT ROLE a, b;",
+    "ast": [
+      {
+        "kind": "createRole",
+        "user": true,
+        "name": "bob",
+        "options": [
+          {
+            "kind": "password",
+            "encrypted": false,
+            "password": null
+          },
+          {
+            "kind": "flag",
+            "name": "inherit",
+            "value": false
+          },
+          {
+            "kind": "role",
+            "roles": [
+              "a",
+              "b"
+            ]
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 7
+          },
+          "end": {
+            "row": 1,
+            "col": 49
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "CREATE OR REPLACE PROCEDURE p(IN a integer, b text DEFAULT 'x') LANGUAGE plpgsql SECURITY DEFINER AS $$BEGIN NULL; END$$;",
+    "ast": [
+      {
+        "kind": "createProcedure",
+        "orReplace": true,
+        "name": [
+          "p"
+        ],
+        "args": [
+          {
+            "mode": "in",
+            "name": "a",
+            "type": {
+              "name": "integer",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 35
+                },
+                "end": {
+                  "row": 1,
+                  "col": 42
+                }
+              }
+            },
+            "defaultValue": null
+          },
+          {
+            "mode": null,
+            "name": "b",
+            "type": {
+              "name": "text",
+              "args": [],
+              "array": false,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 46
+                },
+                "end": {
+                  "row": 1,
+                  "col": 50
+                }
+              }
+            },
+            "defaultValue": {
+              "kind": "string",
+              "value": "x",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 60
+                },
+                "end": {
+                  "row": 1,
+                  "col": 61
+                }
+              }
+            }
+          }
+        ],
+        "options": [
+          {
+            "kind": "language",
+            "name": "plpgsql"
+          },
+          {
+            "kind": "security",
+            "external": false,
+            "definer": true
+          },
+          {
+            "kind": "as",
+            "parts": [
+              "BEGIN NULL; END"
+            ]
+          }
+        ],
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 118
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {

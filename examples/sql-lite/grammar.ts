@@ -600,6 +600,24 @@ export type CreateTablespace = {
   span: Span;
 };
 
+// One `CREATE ROLE` option, in written order. A `flag` folds each attribute's
+// `NO`-prefixed spelling into `value: false`; `password` is null for `PASSWORD
+// NULL`, and `encrypted` marks the (PG-ignored) `ENCRYPTED` noise word.
+export type RoleOption =
+  | {
+      kind: "flag";
+      name: "superuser" | "createdb" | "createrole" | "inherit" | "login" | "replication" | "bypassrls";
+      value: boolean;
+    }
+  | { kind: "connectionLimit"; limit: number }
+  | { kind: "password"; encrypted: boolean; password: string | null }
+  | { kind: "validUntil"; timestamp: string }
+  | { kind: "inRole" | "role" | "admin"; roles: string[] };
+
+// `CREATE {ROLE|USER} name [[WITH] option …]`. `user` marks the USER spelling,
+// which PG reads as ROLE with LOGIN defaulted on.
+export type CreateRole = { kind: "createRole"; user: boolean; name: string; options: RoleOption[]; span: Span };
+
 // `CREATE TABLE [IF NOT EXISTS] name [(cols)] AS query [WITH [NO] DATA]` — the
 // query-backed table. Distinct kind from `createTable` so its `query` payload is
 // unmistakable. `columns` is the optional output-column-name list.
@@ -673,6 +691,18 @@ export type CreateFunction = {
   name: string[];
   args: FunctionArg[];
   returns: FunctionReturns | null;
+  options: FunctionOption[];
+  span: Span;
+};
+
+// `CREATE [OR REPLACE] PROCEDURE name (args) option*` — a function with no
+// RETURNS, whose options are those of CREATE FUNCTION's that PG also admits on
+// a procedure (LANGUAGE, AS, [EXTERNAL] SECURITY and SET).
+export type CreateProcedure = {
+  kind: "createProcedure";
+  orReplace: boolean;
+  name: string[];
+  args: FunctionArg[];
   options: FunctionOption[];
   span: Span;
 };
@@ -849,8 +879,10 @@ export type Stmt =
   | CreateSchema
   | CreateExtension
   | CreateTablespace
+  | CreateRole
   | CreateTableAs
   | CreateFunction
+  | CreateProcedure
   | CreateAggregate
   | CreateTrigger
   // `ALTER TABLE [IF EXISTS] name action[, …]`. `actions` is never empty, and a
@@ -3959,6 +3991,88 @@ function createTablespaceRest(ctx: ParseContext<SqlTokenType>): Stmt {
   return { kind: "createTablespace", name, owner, location: tok.value, options, span: ctx.spanFrom(start) };
 }
 
+// The single-word role attributes. Each is negated by its `NO`-prefixed
+// spelling (`NOLOGIN`), which PG lexes as one word too.
+const ROLE_FLAGS: ReadonlySet<string> = new Set([
+  "superuser",
+  "createdb",
+  "createrole",
+  "inherit",
+  "login",
+  "replication",
+  "bypassrls",
+]);
+
+// PG's SignedIconst: an integer constant with an optional sign.
+function parseSignedInt(ctx: ParseContext<SqlTokenType>): number {
+  const tok = ctx.peek();
+  const sign = tok?.type === "op" && (tok.value === "-" || tok.value === "+") ? tok.value : null;
+  if (!isIntegerConstant(sign === null ? tok : ctx.peekAhead(1))) {
+    return ctx.croak(`Expected an integer but found ${describeFound(sign === null ? tok : ctx.peekAhead(1))}`);
+  }
+  if (sign !== null) ctx.next();
+  const value = Number(ctx.next()!.value);
+  return sign === "-" ? -value : value;
+}
+
+// One CREATE ROLE option, or null when the next token leads none. Every option
+// word is matched by value and stays unreserved (bar `in`, `group`, `limit`,
+// `null` and `user`, reserved already); the list has no delimiter, so it simply
+// runs until a word leads no option. PG's legacy spellings `IN GROUP` and
+// `USER` read as `IN ROLE` and `ROLE`; its SYSID is not taken.
+function parseRoleOption(ctx: ParseContext<SqlTokenType>): RoleOption | null {
+  const tok = ctx.peek();
+  if (tok === null || tok.type !== "ident") return null;
+  const flag = tok.value.startsWith("no") ? tok.value.slice(2) : tok.value;
+  if (ROLE_FLAGS.has(flag)) {
+    ctx.next();
+    return { kind: "flag", name: flag as Extract<RoleOption, { kind: "flag" }>["name"], value: flag === tok.value };
+  }
+  switch (tok.value) {
+    case "connection":
+      ctx.parse(kwseq("connection", "limit"));
+      return { kind: "connectionLimit", limit: parseSignedInt(ctx) };
+    case "encrypted":
+      // PG takes no `ENCRYPTED PASSWORD NULL`: only a bare PASSWORD may be null.
+      ctx.parse(kwseq("encrypted", "password"));
+      return { kind: "password", encrypted: true, password: ctx.parse(strValue) };
+    case "password":
+      ctx.next();
+      return { kind: "password", encrypted: false, password: ctx.eat("ident", "null") ? null : ctx.parse(strValue) };
+    case "valid":
+      ctx.parse(kwseq("valid", "until"));
+      return { kind: "validUntil", timestamp: ctx.parse(strValue) };
+    case "in":
+      ctx.next();
+      if (ctx.eat("ident", "role") === null && ctx.eat("ident", "group") === null) {
+        return ctx.croak(`Expected ${quoteList(["role", "group"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return { kind: "inRole", roles: commaList(ctx, parseRoleSpec) };
+    case "role":
+    case "user":
+      ctx.next();
+      return { kind: "role", roles: commaList(ctx, parseRoleSpec) };
+    case "admin":
+      ctx.next();
+      return { kind: "admin", roles: commaList(ctx, parseRoleSpec) };
+    default:
+      return null;
+  }
+}
+
+// `CREATE {ROLE|USER} name [[WITH] option …]` — the lead word is consumed here,
+// as every PLAIN_CREATE handler's is.
+function createRoleRest(ctx: ParseContext<SqlTokenType>, user: boolean): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw(user ? "user" : "role"));
+  const name = ctx.parse(nameWord);
+  // `with` is reserved, so it can only open the list.
+  ctx.eat("ident", "with");
+  const options: RoleOption[] = [];
+  for (let option = parseRoleOption(ctx); option !== null; option = parseRoleOption(ctx)) options.push(option);
+  return { kind: "createRole", user, name, options, span: ctx.spanFrom(start) };
+}
+
 // The body of a (MATERIALIZED) VIEW after the VIEW keyword: `[IF NOT EXISTS] name
 // [(cols)] AS query [WITH [NO] DATA]`. The query reuses the shared `query` rule.
 function parseViewBody(
@@ -4193,6 +4307,21 @@ function parseFunctionBody(ctx: ParseContext<SqlTokenType>, start: Position, orR
   return { kind: "createFunction", orReplace, name, args, returns, options, span: ctx.spanFrom(start) };
 }
 
+// The option words of parseFunctionOptions that PG also admits on a procedure
+// (its TRANSFORM and RESET are not parsed for a function either). The rest
+// (volatility, strictness, COST, ROWS, …) describe a value-returning call, so
+// the loop stops before them and the statement then croaks on the word.
+const PROCEDURE_OPTIONS: ReadonlySet<string> = new Set(["language", "as", "external", "security", "set"]);
+
+// `CREATE [OR REPLACE] PROCEDURE` — `PROCEDURE` consumed by the caller. As
+// FUNCTION's body, with no RETURNS.
+function parseProcedureBody(ctx: ParseContext<SqlTokenType>, start: Position, orReplace: boolean): Stmt {
+  const name = ctx.parse(qualName);
+  const args = ctx.parse(functionArgs);
+  const options = parseFunctionOptions(ctx, PROCEDURE_OPTIONS);
+  return { kind: "createProcedure", orReplace, name, args, options, span: ctx.spanFrom(start) };
+}
+
 // `( NAME [= value] , … )` — the aggregate definition list. `value` is a type/
 // function-name (typeRef) or a literal (string/number), or null for a bare flag.
 function parseAggregateOptions(ctx: ParseContext<SqlTokenType>): AggregateOption[] {
@@ -4369,6 +4498,8 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   schema: { parse: createSchemaRest },
   extension: { parse: createExtensionRest },
   tablespace: { parse: createTablespaceRest },
+  role: { parse: (ctx) => createRoleRest(ctx, false) },
+  user: { parse: (ctx) => createRoleRest(ctx, true) },
 };
 
 // REPLACEABLE_CREATE dispatch CONSUMES the lead word: these bodies are entered
@@ -4383,6 +4514,7 @@ const REPLACEABLE_CREATE: DispatchMap<Stmt, [Position, boolean]> = {
     },
   },
   function: { parse: (ctx, start, orReplace) => parseFunctionBody(ctx, start, orReplace) },
+  procedure: { parse: (ctx, start, orReplace) => parseProcedureBody(ctx, start, orReplace) },
   aggregate: { parse: (ctx, start, orReplace) => parseAggregateBody(ctx, start, orReplace) },
   trigger: { parse: (ctx, start, orReplace) => parseTriggerBody(ctx, start, orReplace) },
 };
@@ -4415,12 +4547,12 @@ for (const target of SCHEMA_REPLACEABLE_TARGETS) {
 }
 
 // After CREATE: an optional `OR REPLACE`, then one of the objects that permit it
-// (VIEW / MATERIALIZED VIEW / FUNCTION / AGGREGATE / TRIGGER) — or, with no such
-// prefix, one of the remaining keyword-led targets (TABLE / [UNIQUE] INDEX /
-// TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION / TABLESPACE), TABLE
-// alone taking the TEMP / UNLOGGED prefix. `OR REPLACE` before a non-replaceable
-// object croaks, as does a prefix before anything but TABLE — PG's TEMP VIEW and
-// TEMP SEQUENCE are not parsed.
+// (VIEW / MATERIALIZED VIEW / FUNCTION / PROCEDURE / AGGREGATE / TRIGGER) — or,
+// with no such prefix, one of the remaining keyword-led targets (TABLE /
+// [UNIQUE] INDEX / TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION /
+// TABLESPACE / ROLE / USER), TABLE alone taking the TEMP / UNLOGGED prefix. `OR
+// REPLACE` before a non-replaceable object croaks, as does a prefix before
+// anything but TABLE — PG's TEMP VIEW and TEMP SEQUENCE are not parsed.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();

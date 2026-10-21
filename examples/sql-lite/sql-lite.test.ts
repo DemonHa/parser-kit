@@ -696,7 +696,7 @@ describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
 
   it("rejects OR REPLACE before a non-replaceable object", () => {
     expect(() => sqlLite.parse("CREATE OR REPLACE TABLE t (id int);")).toThrow(
-      /Expected "view", "materialized", "function", "aggregate" or "trigger"/,
+      /Expected "view", "materialized", "function", "procedure", "aggregate" or "trigger"/,
     );
   });
 });
@@ -3392,7 +3392,7 @@ describe("SQL-lite keyword dispatch maps", () => {
 
   it("names the keyword-led CREATE targets in the join form", () => {
     expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
-      /Expected "table" or "unique" or "type" or "sequence" or "domain" or "database" or "schema" or "extension" or "tablespace" but found "frobnicate"/,
+      /Expected "table" or "unique" or "type" or "sequence" or "domain" or "database" or "schema" or "extension" or "tablespace" or "role" or "user" but found "frobnicate"/,
     );
   });
 
@@ -6012,5 +6012,167 @@ describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
     expect(bad("CREATE OR REPLACE TEMP VIEW v AS SELECT 1;")).toThrow(/Expected "view", "materialized"/);
     expect(bad("CREATE TEMP;")).toThrow(/Expected "table" but found ";"/);
     expect(bad("CREATE GLOBAL")).toThrow(/Expected "temp" or "temporary" but found end of input/);
+  });
+});
+
+// --- CREATE ROLE, USER and PROCEDURE ---
+
+describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
+  const flag = (flagName: string, value = true) => ({ kind: "flag", name: flagName, value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses CREATE ROLE and CREATE USER with no options", () => {
+    expect(firstStmt("CREATE ROLE r;")).toEqual({ kind: "createRole", user: false, name: "r", options: [] });
+    expect(firstStmt('CREATE USER "Bob" WITH;')).toEqual({ kind: "createRole", user: true, name: "Bob", options: [] });
+  });
+
+  it("parses every role attribute and its NO spelling", () => {
+    const words = ["superuser", "createdb", "createrole", "inherit", "login", "replication", "bypassrls"];
+    const on = words.join(" ");
+    const off = words.map((word) => `no${word}`).join(" ");
+    expect(firstStmt(`CREATE ROLE r WITH ${on};`).options).toEqual(words.map((word) => flag(word)));
+    expect(firstStmt(`CREATE USER u ${off.toUpperCase()};`).options).toEqual(words.map((word) => flag(word, false)));
+  });
+
+  it("parses CONNECTION LIMIT, PASSWORD, VALID UNTIL and the role lists, in written order", () => {
+    expect(
+      firstStmt(
+        "CREATE ROLE r LOGIN CONNECTION LIMIT -1 ENCRYPTED PASSWORD 'pw' VALID UNTIL '2030-01-01' " +
+          "IN ROLE a, b ROLE c ADMIN d, CURRENT_USER NOLOGIN;",
+      ).options,
+    ).toEqual([
+      flag("login"),
+      { kind: "connectionLimit", limit: -1 },
+      { kind: "password", encrypted: true, password: "pw" },
+      { kind: "validUntil", timestamp: "2030-01-01" },
+      { kind: "inRole", roles: ["a", "b"] },
+      { kind: "role", roles: ["c"] },
+      { kind: "admin", roles: ["d", "current_user"] },
+      flag("login", false),
+    ]);
+    expect(firstStmt("CREATE USER u PASSWORD NULL CONNECTION LIMIT 10;").options).toEqual([
+      { kind: "password", encrypted: false, password: null },
+      { kind: "connectionLimit", limit: 10 },
+    ]);
+    expect(firstStmt("CREATE ROLE r CONNECTION LIMIT +5;").options).toEqual([{ kind: "connectionLimit", limit: 5 }]);
+    expect(firstStmt("CREATE USER u PASSWORD 'x';").options).toEqual([
+      { kind: "password", encrypted: false, password: "x" },
+    ]);
+    // PG's legacy IN GROUP and USER spellings fold into IN ROLE and ROLE.
+    expect(firstStmt("CREATE ROLE r IN GROUP a USER b, c;").options).toEqual([
+      { kind: "inRole", roles: ["a"] },
+      { kind: "role", roles: ["b", "c"] },
+    ]);
+  });
+
+  it("parses CREATE [OR REPLACE] PROCEDURE over CREATE FUNCTION's signature and options", () => {
+    expect(
+      firstStmt(
+        "CREATE OR REPLACE PROCEDURE app.p(IN a integer, INOUT b double precision DEFAULT 1, text) " +
+          "LANGUAGE plpgsql SECURITY DEFINER SET search_path = app AS $$BEGIN NULL; END$$;",
+      ),
+    ).toEqual({
+      kind: "createProcedure",
+      orReplace: true,
+      name: ["app", "p"],
+      args: [
+        { mode: "in", name: "a", type: ct("integer"), defaultValue: null },
+        { mode: "inout", name: "b", type: ct("double precision"), defaultValue: num(1) },
+        { mode: null, name: null, type: ct("text"), defaultValue: null },
+      ],
+      options: [
+        { kind: "language", name: "plpgsql" },
+        { kind: "security", external: false, definer: true },
+        { kind: "set", parameter: "search_path", value: { kind: "list", values: [name("app")] } },
+        { kind: "as", parts: ["BEGIN NULL; END"] },
+      ],
+    });
+    expect(firstStmt("CREATE PROCEDURE p() AS 'obj', 'sym' LANGUAGE c EXTERNAL SECURITY INVOKER;")).toEqual({
+      kind: "createProcedure",
+      orReplace: false,
+      name: ["p"],
+      args: [],
+      options: [
+        { kind: "as", parts: ["obj", "sym"] },
+        { kind: "language", name: "c" },
+        { kind: "security", external: true, definer: false },
+      ],
+    });
+  });
+
+  it("spans ROLE and USER from their keyword and PROCEDURE from CREATE", () => {
+    for (const src of ["CREATE TABLE t (id int);", "CREATE ROLE r LOGIN;", "CREATE USER u IN ROLE a, b;"]) {
+      const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+      expect(stmt!.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: src.length - 1 } });
+    }
+    const src = "CREATE OR REPLACE PROCEDURE p() AS 'SELECT 1' LANGUAGE sql;";
+    const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+    expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: src.length - 1 } });
+  });
+
+  it("keeps the new CREATE words unreserved as names", () => {
+    const words = [
+      "role",
+      "procedure",
+      "superuser",
+      "nosuperuser",
+      "createdb",
+      "createrole",
+      "inherit",
+      "login",
+      "nocreatedb",
+      "nocreaterole",
+      "noinherit",
+      "nologin",
+      "replication",
+      "noreplication",
+      "nobypassrls",
+      "bypassrls",
+      "encrypted",
+      "password",
+      "valid",
+      "until",
+      "admin",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM role;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    const cols = words.map((word) => `${word} text`).join(", ");
+    expect(firstStmt(`CREATE TABLE procedure (${cols});`).items.map((i: any) => i.name)).toEqual(words);
+    // …and as the names these statements create and list.
+    expect(firstStmt("CREATE ROLE role ROLE login, admin ADMIN password;")).toMatchObject({
+      name: "role",
+      options: [
+        { kind: "role", roles: ["login", "admin"] },
+        { kind: "admin", roles: ["password"] },
+      ],
+    });
+    expect(firstStmt("CREATE USER login LOGIN;")).toMatchObject({ name: "login", options: [flag("login")] });
+    expect(firstStmt("CREATE PROCEDURE procedure(role text) LANGUAGE sql AS '';")).toMatchObject({
+      name: ["procedure"],
+      args: [{ name: "role" }],
+    });
+  });
+
+  it("rejects malformed CREATE ROLE, USER and PROCEDURE", () => {
+    expect(bad("CREATE ROLE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CREATE USER user;")).toThrow(/Expected a name but found "user"/);
+    expect(bad("CREATE ROLE r frobnicate;")).toThrow(/Expected ";" but found "frobnicate"/);
+    expect(bad("CREATE ROLE r CONNECTION 5;")).toThrow(/Expected "limit" but found "5"/);
+    expect(bad("CREATE ROLE r CONNECTION LIMIT many;")).toThrow(/Expected an integer but found "many"/);
+    expect(bad("CREATE ROLE r CONNECTION LIMIT 1.5;")).toThrow(/Expected an integer but found "1.5"/);
+    expect(bad("CREATE ROLE r CONNECTION LIMIT - x;")).toThrow(/Expected an integer but found "x"/);
+    expect(bad("CREATE ROLE r ENCRYPTED PASSWORD NULL;")).toThrow(/found "null"/);
+    expect(bad("CREATE ROLE r PASSWORD pw;")).toThrow(/found "pw"/);
+    expect(bad("CREATE ROLE r VALID '2030-01-01';")).toThrow(/Expected "until" but found/);
+    expect(bad("CREATE ROLE r IN SCHEMA g;")).toThrow(/Expected "role" or "group" but found "schema"/);
+    expect(bad("CREATE ROLE r ADMIN;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CREATE ROLE r ROLE a,;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CREATE OR REPLACE ROLE r;")).toThrow(/Expected "view", "materialized"/);
+    expect(bad("CREATE PROCEDURE p;")).toThrow(/Expected "\(" but found ";"/);
+    // A procedure returns nothing, and takes none of a function's call traits.
+    expect(bad("CREATE PROCEDURE p() RETURNS int LANGUAGE sql AS '';")).toThrow(/Expected ";" but found "returns"/);
+    expect(bad("CREATE PROCEDURE p() LANGUAGE sql IMMUTABLE AS '';")).toThrow(/Expected ";" but found "immutable"/);
+    expect(bad("CREATE PROCEDURE p() NOT LEAKPROOF;")).toThrow(/Expected ";" but found "not"/);
   });
 });
