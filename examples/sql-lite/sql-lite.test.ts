@@ -1010,6 +1010,190 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
   });
 });
 
+// --- OVERLAPS, BETWEEN SYMMETRIC and IS JSON ---
+
+describe("SQL-lite OVERLAPS, BETWEEN SYMMETRIC and IS JSON", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const row = (...items: unknown[]) => ({ kind: "row", items });
+  const overlaps = (left: unknown, right: unknown) => ({ kind: "overlaps", left, right });
+  const ab_cd = overlaps(row(name("a"), name("b")), row(name("c"), name("d")));
+  const between = (over: Record<string, unknown>) => ({
+    kind: "between",
+    expr: name("a"),
+    lo: num(1),
+    hi: num(2),
+    negated: false,
+    ...over,
+  });
+  const isJson = (over: Record<string, unknown> = {}) => ({
+    kind: "isJson",
+    expr: name("x"),
+    itemType: null,
+    uniqueKeys: null,
+    negated: false,
+    ...over,
+  });
+
+  it("builds an implicit row from a parenthesised list, and only from one", () => {
+    expect(colExpr("(a, b)")).toEqual(row(name("a"), name("b")));
+    expect(colExpr("(1, 'x', c + 1)")).toEqual(row(num(1), str("x"), bin("+", name("c"), num(1))));
+    // The implicit and explicit spellings are one construct, so one node.
+    expect(colExpr("(a, b)")).toEqual(colExpr("ROW(a, b)"));
+    // A lone parenthesised expression is still just that expression.
+    expect(colExpr("(a)")).toEqual(name("a"));
+    expect(colExpr("((a, b))")).toEqual(row(name("a"), name("b")));
+    // Rows compose like any other operand.
+    expect(colExpr("(a, b) = (1, 2)")).toEqual(bin("=", row(name("a"), name("b")), row(num(1), num(2))));
+    expect((firstStmt("SELECT 1 FROM t WHERE (a, b) IN ((1, 2));") as any).where).toEqual({
+      kind: "in",
+      expr: row(name("a"), name("b")),
+      list: [row(num(1), num(2))],
+      negated: false,
+    });
+    // The atom is also the right-hand side of a quantified comparison.
+    expect(colExpr("x = ANY (a, b)")).toEqual({
+      kind: "anyAll",
+      op: "=",
+      quantifier: "any",
+      left: name("x"),
+      right: row(name("a"), name("b")),
+    });
+  });
+
+  it("spans an implicit row over its parentheses but leaves a lone (a) on the inner expression", () => {
+    const rawCol = (src: string) => (sqlLite.parse(`SELECT ${src} FROM t;`)[0] as any).columns[0].expr;
+    expect(rawCol("(a, b)").span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 13 } });
+    expect(rawCol("(a)").span).toEqual({ start: { row: 1, col: 8 }, end: { row: 1, col: 9 } });
+  });
+
+  it("parses OVERLAPS between two periods in either row spelling", () => {
+    expect(colExpr("(a, b) OVERLAPS (c, d)")).toEqual(ab_cd);
+    expect(colExpr("ROW(a, b) OVERLAPS ROW(c, d)")).toEqual(ab_cd);
+    expect(colExpr("(a, b) OVERLAPS ROW(c, d)")).toEqual(ab_cd);
+    expect(colExpr("ROW(a, b) OVERLAPS (c, d)")).toEqual(ab_cd);
+    // The period bounds are full expressions.
+    expect(colExpr("(s, s + 1) OVERLAPS (e, e * 2)")).toEqual(
+      overlaps(row(name("s"), bin("+", name("s"), num(1))), row(name("e"), bin("*", name("e"), num(2)))),
+    );
+  });
+
+  it("binds OVERLAPS at the atom: looser operators wrap it, postfixes take the whole predicate", () => {
+    expect(exprOf("(a, b) OVERLAPS (c, d) AND x")).toEqual(bin("and", ab_cd, name("x")));
+    expect(exprOf("x OR (a, b) OVERLAPS (c, d)")).toEqual(bin("or", name("x"), ab_cd));
+    // NOT is a prefix, so the atom has already absorbed the tail.
+    expect(exprOf("NOT (a, b) OVERLAPS (c, d)")).toEqual({ kind: "unary", op: "not", operand: ab_cd });
+    expect(exprOf("(a, b) OVERLAPS (c, d) IS TRUE")).toEqual({
+      kind: "isTest",
+      expr: ab_cd,
+      test: "true",
+      negated: false,
+    });
+    // A trailing cast binds to the predicate, not to the right-hand row — PG's
+    // reading too, since its operands are rows rather than expressions.
+    expect(exprOf("(a, b) OVERLAPS (c, d)::text")).toEqual({ kind: "cast", expr: ab_cd, type: ct("text") });
+  });
+
+  it("parses BETWEEN SYMMETRIC and ASYMMETRIC, recording only what was written", () => {
+    expect(exprOf("a BETWEEN SYMMETRIC 1 AND 2")).toEqual(between({ symmetric: true }));
+    expect(exprOf("a BETWEEN ASYMMETRIC 1 AND 2")).toEqual(between({ symmetric: false }));
+    expect(exprOf("a NOT BETWEEN SYMMETRIC 1 AND 2")).toEqual(between({ negated: true, symmetric: true }));
+    expect(exprOf("a NOT BETWEEN ASYMMETRIC 1 AND 2")).toEqual(between({ negated: true, symmetric: false }));
+    // A bare BETWEEN carries no `symmetric` key at all.
+    expect(exprOf("a BETWEEN 1 AND 2")).toEqual(between({}));
+    expect(exprOf("a BETWEEN 1 AND 2")).not.toHaveProperty("symmetric");
+    // The bounds keep their bp-11 re-entry, so the AND after them is the outer one.
+    expect(exprOf("a BETWEEN SYMMETRIC 1 AND 2 AND b")).toEqual(bin("and", between({ symmetric: true }), name("b")));
+  });
+
+  it("parses the IS [NOT] JSON predicate family", () => {
+    expect(colExpr("x IS JSON")).toEqual(isJson());
+    expect(colExpr("x IS NOT JSON")).toEqual(isJson({ negated: true }));
+    for (const itemType of ["value", "scalar", "array", "object"]) {
+      expect(colExpr(`x IS JSON ${itemType.toUpperCase()}`)).toEqual(isJson({ itemType }));
+    }
+    expect(colExpr("x IS JSON WITH UNIQUE KEYS")).toEqual(isJson({ uniqueKeys: true }));
+    expect(colExpr("x IS JSON WITH UNIQUE")).toEqual(isJson({ uniqueKeys: true }));
+    expect(colExpr("x IS JSON WITHOUT UNIQUE KEYS")).toEqual(isJson({ uniqueKeys: false }));
+    expect(colExpr("x IS NOT JSON OBJECT WITHOUT UNIQUE")).toEqual(
+      isJson({ negated: true, itemType: "object", uniqueKeys: false }),
+    );
+    // IS binds tighter than AND, as for the other IS forms.
+    expect(exprOf("x IS JSON ARRAY AND y")).toEqual(bin("and", isJson({ itemType: "array" }), name("y")));
+  });
+
+  it("claims a uniqueness clause only when UNIQUE follows its lead word", () => {
+    // `with` also opens a materialized view's data clause, which must survive.
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv AS SELECT x IS JSON WITH NO DATA;")).toMatchObject({
+      kind: "createView",
+      query: { columns: [col(isJson())] },
+      withData: false,
+    });
+    // `without` and `keys` are unreserved, so after a bare IS JSON they are aliases.
+    expect((firstStmt("SELECT x IS JSON without FROM t;") as any).columns).toEqual([col(isJson(), "without")]);
+    expect((firstStmt("SELECT x IS JSON keys FROM t;") as any).columns).toEqual([col(isJson(), "keys")]);
+  });
+
+  it("keeps overlaps and the IS JSON words unreserved as names and aliases", () => {
+    // Every word this PR matches by value that was not already reserved.
+    // (`symmetric`, `asymmetric`, `with`, `array` and `unique` were reserved
+    // long before; `json` only means anything straight after IS.)
+    const words = ["overlaps", "json", "value", "scalar", "object", "without", "keys"];
+    expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(name(w))));
+    // …as column names,
+    expect((firstStmt("CREATE TABLE t (overlaps int, json jsonb);") as any).items).toEqual([
+      { kind: "column", name: "overlaps", dataType: ct("int"), constraints: [] },
+      { kind: "column", name: "json", dataType: ct("jsonb"), constraints: [] },
+    ]);
+    // …and as aliases — including straight after a row, where `overlaps` is
+    // claimed only when a row follows it.
+    expect((firstStmt("SELECT a overlaps FROM t;") as any).columns).toEqual([col(name("a"), "overlaps")]);
+    expect((firstStmt("SELECT (a, b) overlaps FROM t;") as any).columns).toEqual([
+      col(row(name("a"), name("b")), "overlaps"),
+    ]);
+    expect((firstStmt("SELECT ROW(a, b) overlaps, c AS json FROM t;") as any).columns).toEqual([
+      col(row(name("a"), name("b")), "overlaps"),
+      col(name("c"), "json"),
+    ]);
+  });
+
+  it("takes the item-type word after IS JSON unconditionally, as PG does", () => {
+    // PG's grammar reads `value` here as the VALUE form, not as an alias; so
+    // does this one. Spelled with AS, the alias is unambiguous.
+    expect((firstStmt("SELECT x IS JSON value FROM t;") as any).columns).toEqual([col(isJson({ itemType: "value" }))]);
+    expect((firstStmt("SELECT x IS JSON AS value FROM t;") as any).columns).toEqual([col(isJson(), "value")]);
+  });
+
+  it("rejects malformed rows and periods of the wrong arity", () => {
+    expect(() => sqlLite.parse("SELECT (a,) FROM t;")).toThrow(/but found "\)" \(1:10\)/);
+    expect(() => sqlLite.parse("SELECT (,b) FROM t;")).toThrow(/but found "," \(1:8\)/);
+    expect(() => sqlLite.parse("SELECT (a b) FROM t;")).toThrow(/Expected "\)" but found "b"/);
+    expect(() => sqlLite.parse("SELECT () FROM t;")).toThrow(/but found "\)" \(1:8\)/);
+    // PG checks both arities in its grammar; the error covers the offending row.
+    expect(() => sqlLite.parse("SELECT (a, b, c) OVERLAPS (d, e) FROM t;")).toThrow(
+      /Expected 2 items on the left of OVERLAPS but found 3 \(1:7\)/,
+    );
+    expect(() => sqlLite.parse("SELECT (a) OVERLAPS (d, e) FROM t;")).toThrow(
+      /Expected 2 items on the left of OVERLAPS but found 1 \(1:7\)/,
+    );
+    expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (d) FROM t;")).toThrow(
+      /Expected 2 items on the right of OVERLAPS but found 1 \(1:23\)/,
+    );
+    expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS ROW() FROM t;")).toThrow(
+      /Expected 2 items on the right of OVERLAPS but found 0/,
+    );
+    // A row OVERLAPS row predicate does not chain.
+    expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (c, d) OVERLAPS (e, f) FROM t;")).toThrow(/but found "\("/);
+    // A subquery is not a period.
+    expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (SELECT 1) FROM t;")).toThrow(/but found "select"/);
+  });
+
+  it("rejects a dangling BETWEEN modifier or IS JSON clause", () => {
+    expect(() => sqlLite.parse("SELECT a BETWEEN SYMMETRIC AND 2 FROM t;")).toThrow(/but found "and"/);
+    expect(() => sqlLite.parse("SELECT x IS JSON WITH KEYS FROM t;")).toThrow(/but found "with"/);
+    expect(() => sqlLite.parse("SELECT x IS JSONB FROM t;")).toThrow(/Expected "null" but found "jsonb"/);
+  });
+});
+
 // --- expression special forms (Phase 2) ---
 
 describe("SQL-lite expression special forms", () => {
