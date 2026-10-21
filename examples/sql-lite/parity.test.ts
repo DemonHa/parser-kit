@@ -235,6 +235,11 @@ const SUPPLEMENTAL = [
   "CREATE SCHEMA AUTHORIZATION bob;",
   "CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public VERSION '1.4' CASCADE;",
   "CREATE TABLESPACE ts OWNER bob LOCATION '/data' WITH (seq_page_cost = 1.5);",
+  // --- TEMPORARY, UNLOGGED and scoped CREATE TABLE ---
+  "CREATE TEMP TABLE t (id int) ON COMMIT DELETE ROWS;",
+  "CREATE UNLOGGED TABLE IF NOT EXISTS s.t (id int, note text);",
+  "CREATE GLOBAL TEMPORARY TABLE t (id int);",
+  "CREATE LOCAL TEMP TABLE snap AS SELECT 1 AS one;",
 ];
 
 // Every span in the corpus above starts and ends on row 1, which makes it blind

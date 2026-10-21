@@ -5936,3 +5936,81 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
     expect(bad("CREATE OR REPLACE SCHEMA s;")).toThrow(/Expected "view", "materialized"/);
   });
 });
+
+// --- TEMPORARY, UNLOGGED and scoped CREATE TABLE ---
+
+describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
+  const rawFirst = (text: string) => sqlLite.parse(text)[0] as Record<string, any>;
+  const modifiersOf = (src: string) => firstStmt(src).modifiers;
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("keeps the PG prefix words in source order, as written", () => {
+    expect(modifiersOf("CREATE TEMP TABLE t (id int);")).toEqual(["temp"]);
+    expect(modifiersOf("CREATE TEMPORARY TABLE t (id int);")).toEqual(["temporary"]);
+    expect(modifiersOf("CREATE UNLOGGED TABLE t (id int);")).toEqual(["unlogged"]);
+    expect(modifiersOf("CREATE GLOBAL TEMPORARY TABLE t (id int);")).toEqual(["global", "temporary"]);
+    expect(modifiersOf("create local temp table t (id int);")).toEqual(["local", "temp"]);
+  });
+
+  it("carries the prefix through every createTable shape and CREATE TABLE AS", () => {
+    expect(firstStmt("CREATE TEMP TABLE IF NOT EXISTS s.t (id int) ON COMMIT DROP;")).toMatchObject({
+      kind: "createTable",
+      ifNotExists: true,
+      name: ["s", "t"],
+      onCommit: "drop",
+      modifiers: ["temp"],
+    });
+    expect(firstStmt("CREATE UNLOGGED TABLE p PARTITION OF q DEFAULT;")).toMatchObject({
+      partitionOf: { parent: ["q"] },
+      modifiers: ["unlogged"],
+    });
+    expect(firstStmt("CREATE LOCAL TEMPORARY TABLE snap AS SELECT 1;")).toMatchObject({
+      kind: "createTableAs",
+      modifiers: ["local", "temporary"],
+    });
+  });
+
+  it("opens the span on the first modifier, and on TABLE without one", () => {
+    expect(rawFirst("CREATE TABLE t (id int);").span.start).toEqual({ row: 1, col: 7 });
+    expect(rawFirst("CREATE TEMP TABLE t (id int);").span).toEqual({
+      start: { row: 1, col: 7 },
+      end: { row: 1, col: 28 },
+    });
+    expect(rawFirst("CREATE GLOBAL TEMP TABLE t AS SELECT 1;").span.start).toEqual({ row: 1, col: 7 });
+  });
+
+  it("keeps temp, temporary, unlogged, global and local unreserved", () => {
+    const words = ["temp", "temporary", "unlogged", "global", "local"];
+    for (const word of words) {
+      expect(firstStmt(`CREATE TABLE ${word} (${word} int);`)).toMatchObject({
+        name: [word],
+        items: [{ kind: "column", name: word }],
+      });
+      expect(firstStmt(`CREATE TEMP TABLE ${word} (id int);`)).toMatchObject({ name: [word], modifiers: ["temp"] });
+    }
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM local;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["local"])] }),
+    );
+    // SELECT … INTO shares the word lists, and still reads these as names.
+    expect(firstStmt("SELECT a INTO temp FROM t;").into).toEqual({ name: ["temp"] });
+    expect(firstStmt("SELECT a INTO GLOBAL TEMP unlogged FROM t;").into).toEqual({
+      name: ["unlogged"],
+      modifiers: ["global", "temp"],
+    });
+  });
+
+  it("rejects a bare scope word, stacked storage words and a non-TABLE target", () => {
+    expect(bad("CREATE GLOBAL TABLE t (id int);")).toThrow(/Expected "temp" or "temporary" but found "table" \(1:14\)/);
+    expect(bad("CREATE LOCAL UNLOGGED TABLE t (id int);")).toThrow(
+      /Expected "temp" or "temporary" but found "unlogged"/,
+    );
+    expect(bad("CREATE TEMP UNLOGGED TABLE t (id int);")).toThrow(/Expected "table" but found "unlogged" \(1:12\)/);
+    expect(bad("CREATE TEMP TEMP TABLE t (id int);")).toThrow(/Expected "table" but found "temp"/);
+    expect(bad("CREATE UNLOGGED INDEX i ON t (a);")).toThrow(/Expected "table" but found "index"/);
+    expect(bad("CREATE TEMP VIEW v AS SELECT 1;")).toThrow(/Expected "table" but found "view"/);
+    expect(bad("CREATE TEMPORARY SEQUENCE s;")).toThrow(/Expected "table" but found "sequence"/);
+    expect(bad("CREATE OR REPLACE TEMP VIEW v AS SELECT 1;")).toThrow(/Expected "view", "materialized"/);
+    expect(bad("CREATE TEMP;")).toThrow(/Expected "table" but found ";"/);
+    expect(bad("CREATE GLOBAL")).toThrow(/Expected "temp" or "temporary" but found end of input/);
+  });
+});
