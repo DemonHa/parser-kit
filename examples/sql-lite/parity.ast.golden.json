@@ -8349,6 +8349,331 @@
     ]
   },
   {
+    "source": "WITH a AS MATERIALIZED (SELECT 1), b AS NOT MATERIALIZED (SELECT 2) SELECT * FROM a, b;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": [
+          {
+            "name": "a",
+            "columns": null,
+            "materialized": true,
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 31
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 32
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": null,
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 24
+                },
+                "end": {
+                  "row": 1,
+                  "col": 32
+                }
+              }
+            }
+          },
+          {
+            "name": "b",
+            "columns": null,
+            "materialized": false,
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "number",
+                    "value": 2,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 65
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 66
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": null,
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 58
+                },
+                "end": {
+                  "row": 1,
+                  "col": 66
+                }
+              }
+            }
+          }
+        ],
+        "recursive": false,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 75
+                },
+                "end": {
+                  "row": 1,
+                  "col": 76
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "a"
+            ],
+            "alias": null
+          },
+          {
+            "kind": "table",
+            "name": [
+              "b"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 68
+          },
+          "end": {
+            "row": 1,
+            "col": 86
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "WITH RECURSIVE t (id) AS (SELECT 1) SEARCH BREADTH FIRST BY id SET ord CYCLE id SET is_cycle TO 'Y' DEFAULT 'N' USING path SELECT * FROM t;",
+    "ast": [
+      {
+        "kind": "select",
+        "with_": [
+          {
+            "name": "t",
+            "columns": [
+              "id"
+            ],
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "number",
+                    "value": 1,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 33
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 34
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": null,
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 26
+                },
+                "end": {
+                  "row": 1,
+                  "col": 34
+                }
+              }
+            },
+            "search": {
+              "order": "breadth",
+              "by": [
+                "id"
+              ],
+              "set": "ord"
+            },
+            "cycle": {
+              "columns": [
+                "id"
+              ],
+              "set": "is_cycle",
+              "mark": {
+                "to": {
+                  "kind": "string",
+                  "value": "Y",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 97
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 98
+                    }
+                  }
+                },
+                "default": {
+                  "kind": "string",
+                  "value": "N",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 109
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 110
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 93
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 110
+                  }
+                }
+              },
+              "using": "path"
+            }
+          }
+        ],
+        "recursive": true,
+        "distinct": false,
+        "columns": [
+          {
+            "expr": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 130
+                },
+                "end": {
+                  "row": 1,
+                  "col": 131
+                }
+              }
+            },
+            "alias": null
+          }
+        ],
+        "from": [
+          {
+            "kind": "table",
+            "name": [
+              "t"
+            ],
+            "alias": null
+          }
+        ],
+        "where": null,
+        "groupBy": null,
+        "having": null,
+        "window": null,
+        "orderBy": null,
+        "limit": null,
+        "offset": null,
+        "locking": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 123
+          },
+          "end": {
+            "row": 1,
+            "col": 138
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "ALTER TABLE t ADD COLUMN age int;",
     "ast": [
       {

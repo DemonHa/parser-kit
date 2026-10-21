@@ -79,6 +79,10 @@ const SUPPLEMENTAL = [
   "SELECT 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;",
   "SELECT 1 UNION VALUES (2);",
   "SELECT * FROM t FOR NO KEY UPDATE FOR KEY SHARE SKIP LOCKED;",
+  // CTE materialization and the recursive-CTE SEARCH / CYCLE tails, each a key
+  // the CTE node carries only when written (the plain-CTE corpus rows pin the omission).
+  "WITH a AS MATERIALIZED (SELECT 1), b AS NOT MATERIALIZED (SELECT 2) SELECT * FROM a, b;",
+  "WITH RECURSIVE t (id) AS (SELECT 1) SEARCH BREADTH FIRST BY id SET ord CYCLE id SET is_cycle TO 'Y' DEFAULT 'N' USING path SELECT * FROM t;",
   // --- statement families and clause tails the benchmark corpus misses ---
   "ALTER TABLE t ADD COLUMN age int;",
   "ALTER TABLE t ADD CONSTRAINT pk PRIMARY KEY (id);",
