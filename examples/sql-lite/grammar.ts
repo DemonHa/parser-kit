@@ -1260,9 +1260,11 @@ const columnRef = custom<Expr, SqlTokenType>(
         args.push(ctx.parse(functionArg));
         // OVERLAY's keyword form is told apart from its comma form only by a
         // PLACING after the first argument, so unlike the SPECIAL_CALLS it
-        // cannot claim the call up front: the comma form is an ordinary call in
-        // every respect (DISTINCT, named arguments, OVER), and keeps all of it by
-        // never leaving this path. `placing` is reserved, so no first argument
+        // cannot claim the call up front: the comma form stays on this path and
+        // so parses exactly as it did before the keyword form existed. That
+        // includes the modifiers every call here accepts (DISTINCT, ORDER BY,
+        // OVER, …), which PG would reject on OVERLAY's comma form — no narrower
+        // than this grammar is for any other call. `placing` is reserved, so no first argument
         // can end in one — before this check, it was a syntax error here, and
         // it still is after a `*` or a named argument, which PG's keyword form
         // does not take either.
@@ -1374,6 +1376,17 @@ const PRECISION_FUNCTIONS: ReadonlySet<string> = new Set([
   "localtime",
   "localtimestamp",
 ]);
+// An integer constant, as PG lexes one: decimal or hex digits (the lexer has
+// already dropped any `_` separators) that fit in an int4 — PG lexes `1.5` and
+// `3e0` as floats, and a wider integer as a numeric, and its precision slots take
+// neither. The value itself is not range-checked: PG only warns above 6, and
+// clamps.
+const isIntegerConstant = (tok: Token<SqlTokenType> | null): boolean =>
+  tok !== null &&
+  tok.type === "number" &&
+  /^(?:[0-9]+|0[xX][0-9a-fA-F]+)$/.test(tok.value) &&
+  Number(tok.value) <= 2147483647;
+
 const sqlValueFunction = custom<Expr, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -1381,14 +1394,8 @@ const sqlValueFunction = custom<Expr, SqlTokenType>(
     let precision: number | null = null;
     if (PRECISION_FUNCTIONS.has(name) && ctx.is("punc", "(")) {
       ctx.next(); // "("
-      // An integer constant, as PG lexes one: decimal or hex digits (the lexer
-      // has already dropped any `_` separators), but not `1.5` or `3e0`, which
-      // PG reads as floats. The value is not range-checked — PG only warns
-      // above 6 and clamps.
       const tok = ctx.peek();
-      if (tok === null || tok.type !== "number" || !/^(?:[0-9]+|0[xX][0-9a-fA-F]+)$/.test(tok.value)) {
-        ctx.croak(`Expected an integer precision but found ${describeFound(tok)}`);
-      }
+      if (!isIntegerConstant(tok)) ctx.croak(`Expected an integer precision but found ${describeFound(tok)}`);
       precision = Number(ctx.next()!.value);
       expectClose(ctx);
     }
@@ -1560,11 +1567,13 @@ const TYPED_LITERAL_LEADS: ReadonlySet<string> = new Set(["date", "time", "times
 // may sit between them — so `date(x)` and `timestamp(3)` stay calls, and a
 // type with an array suffix or a trailing arg list is never a literal's.
 //
-// The token straight after the lead is peeked plainly, as INTERVAL's is: a name
-// or call is about to peek it anyway, so a lex error there surfaces exactly as
-// it always did. Everything further out is lookahead nothing else would have
-// done, and goes through peekOrReport — under diagnose() the syntax error that
-// follows (`SELECT time with time zone é;` still reports `with`) is kept.
+// The token straight after the lead is peeked plainly, as INTERVAL's is, and so
+// is a `(n)` behind it together with the token past its `)`: the name or call
+// these otherwise become peeks all of them anyway, so a lex error there
+// surfaces exactly as it always did. Everything further out is lookahead the
+// old parse need not have done, and goes through peekOrReport — under
+// diagnose() the syntax error that follows (`SELECT time with time zone é;`
+// still reports `with`) is kept.
 function startsTypedLiteral(ctx: ParseContext<SqlTokenType>): boolean {
   const lead = ctx.peek();
   if (lead === null || lead.type !== "ident" || !TYPED_LITERAL_LEADS.has(lead.value)) return false;
@@ -1574,13 +1583,14 @@ function startsTypedLiteral(ctx: ParseContext<SqlTokenType>): boolean {
   if (
     ARGS_BEFORE_TAIL.has(lead.value) &&
     isPunc(ctx.peekAhead(1), "(") &&
-    peekOrReport(ctx, 2)?.type === "number" &&
-    isPunc(peekOrReport(ctx, 3), ")")
+    isIntegerConstant(ctx.peekAhead(2)) &&
+    isPunc(ctx.peekAhead(3), ")")
   ) {
+    ctx.peekAhead(4); // the token a call's modifier checks read past its ")"
     offset = 4;
   }
   offset += findTypeTail(ctx, lead.value, offset)?.length ?? 0;
-  return (offset === 1 ? ctx.peekAhead(1) : peekOrReport(ctx, offset))?.type === "string";
+  return peekOrReport(ctx, offset)?.type === "string";
 }
 
 // Consume the longest continuation of `lead` that is present, or nothing. The

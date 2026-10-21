@@ -2731,6 +2731,9 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     expect(() => sqlLite.parse("SELECT current_timestamp(3e0);")).toThrow(
       /Expected an integer precision but found "3e0"/,
     );
+    expect(() => sqlLite.parse("SELECT current_timestamp(2147483648);")).toThrow(
+      /Expected an integer precision but found "2147483648"/,
+    );
     expect(() => sqlLite.parse("SELECT current_timestamp(x);")).toThrow(/Expected an integer precision but found "x"/);
     expect(() => sqlLite.parse("SELECT current_timestamp(3;")).toThrow(/Expected "\)" but found ";"/);
   });
@@ -2789,6 +2792,8 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     ]);
     // PG writes the precision before the tail, never after it.
     expect(() => sqlLite.parse("SELECT timestamp with time zone(3) 'x';")).toThrow(/Expected ";" but found "with"/);
+    // Nor does it take anything but an integer one.
+    expect(() => sqlLite.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
     // DATE takes no precision, so `date(3)` is a call and the string a stray.
     expect(() => sqlLite.parse("SELECT date(3) 'x';")).toThrow(/Expected ";" but found "x"/);
   });
@@ -2831,7 +2836,9 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
       from: bin("+", name("n"), num(1)),
       for_: null,
     });
-    // The comma form is an ordinary call, and keeps everything one carries.
+    // The comma form is an ordinary call, and parses exactly as it did before
+    // the keyword form existed — including the call modifiers, which PG would
+    // reject on OVERLAY but which this grammar accepts on any call.
     expect(colExpr("overlay(s, 'x', 1)")).toEqual({
       kind: "call",
       name: "overlay",
