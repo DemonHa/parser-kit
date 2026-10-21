@@ -2751,6 +2751,10 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
       "current_user",
       "session_user",
     ]);
+    expect((firstStmt("REVOKE SELECT ON t FROM current_user, session_user;") as any).grantees).toEqual([
+      "current_user",
+      "session_user",
+    ]);
   });
 
   it("parses DATE, TIME and TIMESTAMP string literals", () => {
@@ -2869,7 +2873,8 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
   it("rejects a malformed OVERLAY", () => {
     expect(() => sqlLite.parse("SELECT overlay(s PLACING 'x');")).toThrow(/Expected "from" but found "\)"/);
     expect(() => sqlLite.parse("SELECT overlay(s PLACING 'x' FROM 1 FOR);")).toThrow(/but found "\)" \(1:39\)/);
-    // PLACING may follow only the first argument of a bare OVERLAY, and only a plain one.
+    // PLACING may follow only the first argument of a bare OVERLAY, and only
+    // a plain one.
     expect(() => sqlLite.parse("SELECT overlay(a, b PLACING 'x' FROM 1);")).toThrow(
       /Expected "\)" but found "placing"/,
     );
