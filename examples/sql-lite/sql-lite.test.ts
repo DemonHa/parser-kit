@@ -5676,3 +5676,127 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
     expect(bad("CREATE OR REPLACE SCHEMA s;")).toThrow(/Expected "view", "materialized"/);
   });
 });
+
+// --- COPY ---
+
+describe("SQL-lite COPY", () => {
+  const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
+  const word = (w: string) => ({ kind: "name", parts: [w] });
+  const copy = (over: Record<string, unknown>) => ({
+    kind: "copy",
+    table: null,
+    columns: null,
+    query: null,
+    direction: "from",
+    location: { kind: "stdin" },
+    options: null,
+    where: null,
+    ...over,
+  });
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses COPY FROM each location, with a column list and WHERE", () => {
+    expect(firstStmt("COPY t FROM STDIN;")).toEqual(copy({ table: ["t"] }));
+    expect(firstStmt("COPY s.t (a, b) FROM '/data/t.csv' WHERE a > 1;")).toEqual(
+      copy({
+        table: ["s", "t"],
+        columns: ["a", "b"],
+        location: { kind: "file", path: "/data/t.csv" },
+        where: bin(">", name("a"), num(1)),
+      }),
+    );
+    expect(firstStmt("COPY t FROM PROGRAM 'zcat t.gz';").location).toEqual({ kind: "program", command: "zcat t.gz" });
+  });
+
+  it("parses COPY TO from a table or any preparable query", () => {
+    expect(firstStmt("COPY t (a) TO STDOUT;")).toEqual(
+      copy({ table: ["t"], columns: ["a"], direction: "to", location: { kind: "stdout" } }),
+    );
+    expect(firstStmt("COPY (SELECT 1) TO '/tmp/x';")).toEqual(
+      copy({
+        query: sel({ columns: [col(num(1))] }),
+        direction: "to",
+        location: { kind: "file", path: "/tmp/x" },
+      }),
+    );
+    const queryOf = (src: string) => firstStmt(`COPY (${src}) TO STDOUT;`).query;
+    expect(queryOf("VALUES (1)").kind).toBe("values");
+    expect(queryOf("(SELECT 1) UNION SELECT 2")).toMatchObject({ kind: "setOp", op: "union" });
+    expect(queryOf("WITH x AS (SELECT 1) SELECT * FROM x")).toMatchObject({ kind: "select", with_: [{ name: "x" }] });
+    expect(queryOf("INSERT INTO t VALUES (1) RETURNING id")).toMatchObject({ kind: "insert", returning: [{}] });
+    expect(queryOf("UPDATE t SET a = 1 RETURNING *")).toMatchObject({ kind: "update" });
+    expect(queryOf("DELETE FROM t RETURNING id")).toMatchObject({ kind: "delete" });
+  });
+
+  it("reads the option list, with or without WITH, in every value shape", () => {
+    const optionsOf = (src: string) => firstStmt(`COPY t FROM STDIN ${src};`).options;
+    expect(
+      optionsOf(
+        "WITH (FORMAT csv, FREEZE, DELIMITER ',', NULL '', DEFAULT '\\D', HEADER MATCH, QUOTE '\"', ESCAPE '\\', ENCODING 'UTF8')",
+      ),
+    ).toEqual([
+      opt("format", word("csv")),
+      opt("freeze"),
+      opt("delimiter", str(",")),
+      opt("null", str("")),
+      opt("default", str("\\D")),
+      opt("header", word("match")),
+      opt("quote", str('"')),
+      opt("escape", str("\\")),
+      opt("encoding", str("UTF8")),
+    ]);
+    expect(optionsOf("(HEADER true, FORCE_NOT_NULL (a, b), FORCE_NULL (c))")).toEqual([
+      opt("header", { kind: "bool", value: true }),
+      opt("force_not_null", { kind: "optionList", items: [word("a"), word("b")] }),
+      opt("force_null", { kind: "optionList", items: [word("c")] }),
+    ]);
+    expect(firstStmt("COPY t TO STDOUT (FORCE_QUOTE *);").options).toEqual([opt("force_quote", star())]);
+    // Options come before WHERE.
+    expect(firstStmt("COPY t FROM STDIN (FREEZE) WHERE a;")).toMatchObject({
+      options: [opt("freeze")],
+      where: name("a"),
+    });
+  });
+
+  it("keeps copy, program, stdin, stdout and the option words unreserved", () => {
+    const words = [
+      "copy",
+      "program",
+      "stdin",
+      "stdout",
+      "delimiter",
+      "header",
+      "format",
+      "quote",
+      "escape",
+      "encoding",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM copy;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["copy"])] }),
+    );
+    expect(
+      firstStmt(`CREATE TABLE stdin (${words.map((w) => `${w} int`).join(", ")});`).items.map((i: any) => i.name),
+    ).toEqual(words);
+    // …and as the names COPY itself takes.
+    expect(firstStmt("COPY copy (program, stdout) FROM stdin;")).toEqual(
+      copy({ table: ["copy"], columns: ["program", "stdout"] }),
+    );
+    expect(firstStmt("COPY stdout TO stdout;")).toMatchObject({ table: ["stdout"], location: { kind: "stdout" } });
+  });
+
+  it("rejects a mismatched direction, a bad location and a malformed tail", () => {
+    expect(bad("COPY t TO STDIN;")).toThrow(/Expected a file name, "program" or "stdout" but found "stdin" \(1:10\)/);
+    expect(bad("COPY t FROM STDOUT;")).toThrow(/Expected a file name, "program" or "stdin" but found "stdout"/);
+    expect(bad("COPY (SELECT 1) FROM 'f';")).toThrow(/Expected "to" but found "from" \(1:16\)/);
+    expect(bad("COPY t 'f';")).toThrow(/Expected "from" or "to" but found "f"/);
+    expect(bad("COPY (CREATE TABLE t (a int)) TO STDOUT;")).toThrow(
+      /Expected a SELECT, VALUES, INSERT, UPDATE or DELETE statement but found "create"/,
+    );
+    expect(bad("COPY (SELECT 1) (a) TO STDOUT;")).toThrow(/Expected "to" but found "\("/);
+    expect(bad("COPY t FROM PROGRAM gzip;")).toThrow(/Expected a string but found "gzip"/);
+    expect(bad("COPY t TO STDOUT WHERE a;")).toThrow(/Expected ";" but found "where"/);
+    expect(bad("COPY t FROM STDIN WITH CSV HEADER;")).toThrow(/Expected "\(" but found "csv"/);
+    expect(bad("COPY t () FROM STDIN;")).toThrow(/Expected a name but found "\)"/);
+    expect(bad("COPY t FROM STDIN ();")).toThrow(/Expected an option name but found "\)"/);
+  });
+});

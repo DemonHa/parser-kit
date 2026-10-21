@@ -18542,6 +18542,718 @@
     ]
   },
   {
+    "source": "COPY s.t (a, b) FROM STDIN WITH (FORMAT csv, HEADER MATCH, NULL '', FORCE_NOT_NULL (a, b), FREEZE) WHERE a > 0;",
+    "ast": [
+      {
+        "kind": "copy",
+        "table": [
+          "s",
+          "t"
+        ],
+        "columns": [
+          "a",
+          "b"
+        ],
+        "query": null,
+        "direction": "from",
+        "location": {
+          "kind": "stdin"
+        },
+        "options": [
+          {
+            "name": "format",
+            "value": {
+              "kind": "name",
+              "parts": [
+                "csv"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 40
+                },
+                "end": {
+                  "row": 1,
+                  "col": 43
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 33
+              },
+              "end": {
+                "row": 1,
+                "col": 43
+              }
+            }
+          },
+          {
+            "name": "header",
+            "value": {
+              "kind": "name",
+              "parts": [
+                "match"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 52
+                },
+                "end": {
+                  "row": 1,
+                  "col": 57
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 45
+              },
+              "end": {
+                "row": 1,
+                "col": 57
+              }
+            }
+          },
+          {
+            "name": "null",
+            "value": {
+              "kind": "string",
+              "value": "",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 65
+                },
+                "end": {
+                  "row": 1,
+                  "col": 65
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 59
+              },
+              "end": {
+                "row": 1,
+                "col": 65
+              }
+            }
+          },
+          {
+            "name": "force_not_null",
+            "value": {
+              "kind": "optionList",
+              "items": [
+                {
+                  "kind": "name",
+                  "parts": [
+                    "a"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 84
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 85
+                    }
+                  }
+                },
+                {
+                  "kind": "name",
+                  "parts": [
+                    "b"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 87
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 88
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 83
+                },
+                "end": {
+                  "row": 1,
+                  "col": 89
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 68
+              },
+              "end": {
+                "row": 1,
+                "col": 89
+              }
+            }
+          },
+          {
+            "name": "freeze",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 91
+              },
+              "end": {
+                "row": 1,
+                "col": 97
+              }
+            }
+          }
+        ],
+        "where": {
+          "kind": "binary",
+          "op": ">",
+          "left": {
+            "kind": "name",
+            "parts": [
+              "a"
+            ],
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 105
+              },
+              "end": {
+                "row": 1,
+                "col": 106
+              }
+            }
+          },
+          "right": {
+            "kind": "number",
+            "value": 0,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 109
+              },
+              "end": {
+                "row": 1,
+                "col": 110
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 105
+            },
+            "end": {
+              "row": 1,
+              "col": 110
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 110
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "COPY t TO PROGRAM 'gzip > /tmp/t.gz' (FORMAT csv, FORCE_QUOTE *, DELIMITER ';', ENCODING 'UTF8');",
+    "ast": [
+      {
+        "kind": "copy",
+        "table": [
+          "t"
+        ],
+        "columns": null,
+        "query": null,
+        "direction": "to",
+        "location": {
+          "kind": "program",
+          "command": "gzip > /tmp/t.gz"
+        },
+        "options": [
+          {
+            "name": "format",
+            "value": {
+              "kind": "name",
+              "parts": [
+                "csv"
+              ],
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 45
+                },
+                "end": {
+                  "row": 1,
+                  "col": 48
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 38
+              },
+              "end": {
+                "row": 1,
+                "col": 48
+              }
+            }
+          },
+          {
+            "name": "force_quote",
+            "value": {
+              "kind": "star",
+              "table": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 62
+                },
+                "end": {
+                  "row": 1,
+                  "col": 63
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 50
+              },
+              "end": {
+                "row": 1,
+                "col": 63
+              }
+            }
+          },
+          {
+            "name": "delimiter",
+            "value": {
+              "kind": "string",
+              "value": ";",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 76
+                },
+                "end": {
+                  "row": 1,
+                  "col": 77
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 65
+              },
+              "end": {
+                "row": 1,
+                "col": 77
+              }
+            }
+          },
+          {
+            "name": "encoding",
+            "value": {
+              "kind": "string",
+              "value": "UTF8",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 90
+                },
+                "end": {
+                  "row": 1,
+                  "col": 94
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 80
+              },
+              "end": {
+                "row": 1,
+                "col": 94
+              }
+            }
+          }
+        ],
+        "where": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 96
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "COPY (WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x RETURNING id) TO STDOUT;",
+    "ast": [
+      {
+        "kind": "copy",
+        "table": null,
+        "columns": null,
+        "query": {
+          "kind": "insert",
+          "table": [
+            "t"
+          ],
+          "columns": null,
+          "source": {
+            "kind": "select",
+            "query": {
+              "kind": "select",
+              "with_": null,
+              "recursive": false,
+              "distinct": false,
+              "columns": [
+                {
+                  "expr": {
+                    "kind": "star",
+                    "table": null,
+                    "span": {
+                      "start": {
+                        "row": 1,
+                        "col": 48
+                      },
+                      "end": {
+                        "row": 1,
+                        "col": 49
+                      }
+                    }
+                  },
+                  "alias": null
+                }
+              ],
+              "from": [
+                {
+                  "kind": "table",
+                  "name": [
+                    "x"
+                  ],
+                  "alias": null
+                }
+              ],
+              "where": null,
+              "groupBy": null,
+              "having": null,
+              "window": null,
+              "orderBy": null,
+              "limit": null,
+              "offset": null,
+              "locking": null,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 41
+                },
+                "end": {
+                  "row": 1,
+                  "col": 56
+                }
+              }
+            }
+          },
+          "onConflict": null,
+          "returning": [
+            {
+              "expr": {
+                "kind": "name",
+                "parts": [
+                  "id"
+                ],
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 67
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 69
+                  }
+                }
+              },
+              "alias": null
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 27
+            },
+            "end": {
+              "row": 1,
+              "col": 69
+            }
+          },
+          "with_": [
+            {
+              "name": "x",
+              "columns": null,
+              "query": {
+                "kind": "select",
+                "with_": null,
+                "recursive": false,
+                "distinct": false,
+                "columns": [
+                  {
+                    "expr": {
+                      "kind": "number",
+                      "value": 1,
+                      "span": {
+                        "start": {
+                          "row": 1,
+                          "col": 24
+                        },
+                        "end": {
+                          "row": 1,
+                          "col": 25
+                        }
+                      }
+                    },
+                    "alias": null
+                  }
+                ],
+                "from": null,
+                "where": null,
+                "groupBy": null,
+                "having": null,
+                "window": null,
+                "orderBy": null,
+                "limit": null,
+                "offset": null,
+                "locking": null,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 17
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 25
+                  }
+                }
+              }
+            }
+          ],
+          "recursive": false
+        },
+        "direction": "to",
+        "location": {
+          "kind": "stdout"
+        },
+        "options": null,
+        "where": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 80
+          }
+        }
+      }
+    ]
+  },
+  {
+    "source": "COPY (SELECT a FROM t UNION SELECT b FROM u) TO '/tmp/out.csv' (HEADER);",
+    "ast": [
+      {
+        "kind": "copy",
+        "table": null,
+        "columns": null,
+        "query": {
+          "kind": "setOp",
+          "op": "union",
+          "left": {
+            "kind": "select",
+            "with_": null,
+            "recursive": false,
+            "distinct": false,
+            "columns": [
+              {
+                "expr": {
+                  "kind": "name",
+                  "parts": [
+                    "a"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 13
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 14
+                    }
+                  }
+                },
+                "alias": null
+              }
+            ],
+            "from": [
+              {
+                "kind": "table",
+                "name": [
+                  "t"
+                ],
+                "alias": null
+              }
+            ],
+            "where": null,
+            "groupBy": null,
+            "having": null,
+            "window": null,
+            "orderBy": null,
+            "limit": null,
+            "offset": null,
+            "locking": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 6
+              },
+              "end": {
+                "row": 1,
+                "col": 21
+              }
+            }
+          },
+          "right": {
+            "kind": "select",
+            "with_": null,
+            "recursive": false,
+            "distinct": false,
+            "columns": [
+              {
+                "expr": {
+                  "kind": "name",
+                  "parts": [
+                    "b"
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 35
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 36
+                    }
+                  }
+                },
+                "alias": null
+              }
+            ],
+            "from": [
+              {
+                "kind": "table",
+                "name": [
+                  "u"
+                ],
+                "alias": null
+              }
+            ],
+            "where": null,
+            "groupBy": null,
+            "having": null,
+            "window": null,
+            "orderBy": null,
+            "limit": null,
+            "offset": null,
+            "locking": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 28
+              },
+              "end": {
+                "row": 1,
+                "col": 43
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 6
+            },
+            "end": {
+              "row": 1,
+              "col": 43
+            }
+          }
+        },
+        "direction": "to",
+        "location": {
+          "kind": "file",
+          "path": "/tmp/out.csv"
+        },
+        "options": [
+          {
+            "name": "header",
+            "value": null,
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 64
+              },
+              "end": {
+                "row": 1,
+                "col": 70
+              }
+            }
+          }
+        ],
+        "where": null,
+        "span": {
+          "start": {
+            "row": 1,
+            "col": 0
+          },
+          "end": {
+            "row": 1,
+            "col": 71
+          }
+        }
+      }
+    ]
+  },
+  {
     "source": "CREATE OR REPLACE FUNCTION add(a integer, b integer)\nRETURNS integer\nLANGUAGE sql AS $$\n  SELECT a + b;\n$$;\nSELECT 1;",
     "ast": [
       {

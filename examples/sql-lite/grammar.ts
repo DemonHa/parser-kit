@@ -793,6 +793,34 @@ export type Prepare = {
 // EXECUTE name [(expr, …)] — `args` is null when the list is omitted.
 export type Execute = { kind: "execute"; name: string; args: Expr[] | null; span: Span };
 
+// Where COPY reads from or writes to: a server-side file, a shell command's
+// pipe, or the client connection: STDIN for FROM, STDOUT for TO, as PG's docs
+// spell it. (PG's grammar takes either word in either direction; this parser
+// accepts only the matching one.)
+export type CopyLocation =
+  | { kind: "file"; path: string }
+  | { kind: "program"; command: string }
+  | { kind: "stdin" }
+  | { kind: "stdout" };
+// `COPY table [(col, …)] FROM location [[WITH] (option, …)] [WHERE cond]` or
+// `COPY {table [(col, …)] | (query)} TO location [[WITH] (option, …)]`.
+// Exactly one of `table` and `query` is set; `columns` is null without a list
+// (and always with a query), `options` without the parenthesised list, and
+// `where` unless a FROM writes one. The query is any statement PREPARE takes;
+// PG requires RETURNING on a DML query only in analysis, so without RETURNING it
+// is accepted here, as ON COMMIT on a permanent table is.
+export type Copy = {
+  kind: "copy";
+  table: string[] | null;
+  columns: string[] | null;
+  query: Query | Insert | Update | Delete | null;
+  direction: "from" | "to";
+  location: CopyLocation;
+  options: RelationOption[] | null;
+  where: Expr | null;
+  span: Span;
+};
+
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
   // UNLOGGED family). Omitted, not null, when there are none — and no word
@@ -905,6 +933,7 @@ export type Stmt =
   | Deallocate
   | Prepare
   | Execute
+  | Copy
   // A top-level query or DML statement is a statement too.
   | Query
   | Insert
@@ -6470,6 +6499,56 @@ const executeStmt = custom<Stmt, SqlTokenType>(
   { expected: '"execute"', first: [{ type: "ident", value: "execute" }] },
 );
 
+// --- COPY ---
+//
+// `copy`, `program`, `stdin` and `stdout` stay UNRESERVED, matched by value; so
+// do the option names, which relationOptions reads as any word. A `(` straight
+// after COPY opens a query (PG has no parenthesised table name here); the query
+// goes through dmlStatement, as PREPARE's body does. Only the parenthesised
+// option list is taken — PG's pre-9.0 bare-word options (`WITH CSV HEADER`), and
+// the bare `WITH` an empty one leaves, are not.
+
+function copyLocation(ctx: ParseContext<SqlTokenType>, direction: "from" | "to"): CopyLocation {
+  if (ctx.is("string")) return { kind: "file", path: ctx.parse(strValue) };
+  if (ctx.eat("ident", "program") !== null) return { kind: "program", command: ctx.parse(strValue) };
+  const client = direction === "from" ? "stdin" : "stdout";
+  if (ctx.eat("ident", client) !== null) return { kind: client };
+  return ctx.croak(`Expected a file name, "program" or "${client}" but found ${describeFound(ctx.peek())}`);
+}
+
+const copyStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("copy"));
+    let table: string[] | null = null;
+    let columns: string[] | null = null;
+    let query: Copy["query"] = null;
+    if (ctx.eat("punc", "(") !== null) {
+      if (!matchesFirst(ctx.peek(), PREPARABLE_FIRST)) {
+        return ctx.croak(`Expected ${PREPARABLE} but found ${describeFound(ctx.peek())}`);
+      }
+      query = ctx.parse(dmlStatement) as Copy["query"];
+      expectClose(ctx);
+    } else {
+      table = ctx.parse(qualName);
+      columns = optParenList(ctx, aliasColumns); // non-empty, as PG's opt_column_list is
+    }
+    // A query can only be copied out.
+    let direction: Copy["direction"] = "to";
+    if (query === null && ctx.eat("ident", "from") !== null) direction = "from";
+    else if (ctx.eat("ident", "to") === null) {
+      const expected = query === null ? '"from" or "to"' : '"to"';
+      return ctx.croak(`Expected ${expected} but found ${describeFound(ctx.peek())}`);
+    }
+    const location = copyLocation(ctx, direction);
+    const hasWith = ctx.eat("ident", "with") !== null;
+    const options = hasWith || ctx.is("punc", "(") ? ctx.parse(relationOptions) : null;
+    const where = direction === "from" && ctx.is("ident", "where") ? ctx.parse(whereClause) : null;
+    return { kind: "copy", table, columns, query, direction, location, options, where, span: ctx.spanFrom(start) };
+  },
+  { expected: '"copy"', first: [{ type: "ident", value: "copy" }] },
+);
+
 // First-sets: the DDL and utility rules each dispatch on their own lead keyword;
 // dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`.
 //
@@ -6478,7 +6557,16 @@ const executeStmt = custom<Stmt, SqlTokenType>(
 // oneOf's first() is a flatMap, and the inner groups catch collisions within a
 // family — and the composed `expected` is overridden by describe() anyway.
 const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt);
-const utilityStmt = oneOf(grantStmt, transactionStmt, sessionStmt, doStmt, deallocateStmt, prepareStmt, executeStmt);
+const utilityStmt = oneOf(
+  grantStmt,
+  transactionStmt,
+  sessionStmt,
+  doStmt,
+  deallocateStmt,
+  prepareStmt,
+  executeStmt,
+  copyStmt,
+);
 const statementBody = oneOf(ddlStmt, utilityStmt, dmlStatement).describe("a statement");
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.
 const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
