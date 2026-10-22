@@ -18,8 +18,8 @@ import { sqlLite } from "./index";
 // The PG syntax node-sql-parser rejects (DELETE ... RETURNING, FOR UPDATE SKIP
 // LOCKED, ALTER TABLE ... RENAME COLUMN, ...) is deliberately left out.
 //
-// These groups are not in `bench-baseline.json`, so `pnpm bench:compare` shows
-// them without a delta.
+// These groups were added after `bench-baseline.json` was last saved, so until
+// the next `pnpm bench:save` `pnpm bench:compare` shows them without a delta.
 
 const nodeParser = new Parser();
 const parseWithNode = (sql: string) => nodeParser.astify(sql, { database: "PostgreSQL" });

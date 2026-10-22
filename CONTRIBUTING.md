@@ -17,7 +17,7 @@ pnpm test
 |---|---|
 | `packages/core` | `@parser-kit/core` — the published toolkit |
 | `examples/js-lite` | A JavaScript subset. Not published |
-| `examples/sql-lite` | A PostgreSQL DDL/DML subset, plus the benchmarks. Not published |
+| `examples/sql-lite` | A PostgreSQL-flavoured SQL grammar, plus the benchmarks and the PostgreSQL coverage battery. Not published |
 
 `packages/*` means "things this repo publishes"; the examples are workspace packages so they import `@parser-kit/core` by name the way you would. Tests and typechecks resolve that specifier to core's **source**, so you never need to build before running them.
 

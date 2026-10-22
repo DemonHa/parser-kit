@@ -6,7 +6,7 @@ A PostgreSQL-flavoured SQL grammar built with [`@parser-kit/core`](../../package
 - **The kit's integration test.** Its 400+ unit tests, plus byte-exact AST and diagnostic goldens, are what catch a "generic" core change that quietly breaks a real grammar.
 - **A benchmark.** It is measured against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) (PostgreSQL mode), the most widely used JavaScript SQL parser.
 
-Despite the name, it covers most of the SQL applications send to PostgreSQL, though there are still gaps in dump-style DDL (see [PostgreSQL coverage](#postgresql-coverage)).
+Despite the name, it covers most of the SQL applications send to PostgreSQL, though gaps remain, most notably comments inside a statement and some pg_dump-style DDL (see [PostgreSQL coverage](#postgresql-coverage)).
 
 ## Usage
 
@@ -136,7 +136,8 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
   - `INCLUDE`, `WITH` and `USING INDEX TABLESPACE` on `UNIQUE` / `PRIMARY KEY`
   - `ON DELETE SET NULL (cols)`
   - `CHECK … NO INHERIT`
-- **Other `CREATE TABLE` options:** `COMPRESSION` / `STORAGE` on a column, typed tables (`OF type`), `USING heap`, `CREATE TABLE … AS TABLE` / `AS EXECUTE`.
+- **Other `CREATE TABLE` options:** `COMPRESSION` / `STORAGE` on a column, typed tables (`OF type`), `USING heap`, `WITHOUT OIDS`, `CREATE TABLE … AS TABLE` / `AS EXECUTE`.
+- `TABLESPACE` on `CREATE INDEX` and `CREATE MATERIALIZED VIEW` (`CREATE TABLE … TABLESPACE` works).
 - **`ON CONFLICT` targets that aren't plain columns:** expressions, a partial-index `WHERE`, or `COLLATE`.
 - **`UPDATE` targets:** `SET col = DEFAULT` (the multi-column form accepts `DEFAULT`), and subscript or field targets (`SET arr[1] = …`).
 - `WHERE CURRENT OF cursor` on `UPDATE` and `DELETE`.
@@ -254,4 +255,4 @@ The repo-wide workflow is in [CONTRIBUTING.md](../../CONTRIBUTING.md). Specific 
 - **Tests first, at the level the change lives.** New syntax gets a `describe` block in `sql-lite.test.ts` asserting the span-stripped AST with `toEqual`, plus the error message for the nearest malformed input.
 - **Prove new keywords stay unreserved.** PostgreSQL leaves most keywords usable as names, and so does this grammar: only the words in `RESERVED` are refused as bare names. Every feature that matches a new word by value comes with a "keeps … unreserved as names and aliases" test showing the word still works as a column, table and alias (for example `SELECT rows, ordinality FROM t AS rows;`). Don't add to `RESERVED` to make a parse work.
 - **Pin observable output in the parity golden.** `parity.test.ts` serialises the full AST, spans included, for every `corpus.ts` row and its own `SUPPLEMENTAL` / `MULTI_LINE` / `LEXER_EDGE_CASES` lists, plus `diagnose()` output for `MALFORMED`. New node shapes go in `SUPPLEMENTAL`, not `corpus.ts`: the benchmark's group names count the corpus's shared rows, `bench-baseline.json` keys on those names, and a new `pg: true` corpus row renames them, which silently disconnects `pnpm bench:compare`. When output is *meant* to move, regenerate with `pnpm test -- -u` (the `--` matters) and call the diff out in review. Never regenerate to make a refactor pass.
-- **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README.
+- **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README. Update the "Not yet supported", "Known wrong ASTs" and "Accepted, but PostgreSQL rejects" lists too: they aren't pinned by any test.
