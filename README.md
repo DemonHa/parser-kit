@@ -56,7 +56,7 @@ grammar.parse("answer 42");    // → ParseError: Expected ":" but found "42"
 Two runnable grammars that double as the kit's genericity and integration tests — and the fastest way to learn it. Read their `grammar.ts` top to bottom.
 
 - **[`examples/js-lite/`](examples/js-lite/)** — a JavaScript subset: `const`/`let`, functions, control flow, full expression precedence, arrow functions, template literals. Exercises root-rule dispatch, backtracking, and lexer modes.
-- **[`examples/sql-lite/`](examples/sql-lite/)** — a PostgreSQL-flavoured DDL/DML subset: `CREATE`/`ALTER`/`DROP`, `SELECT` with CTEs and window functions, folded identifiers, dollar-quoted strings, keyword operators. Benchmarked against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser).
+- **[`examples/sql-lite/`](examples/sql-lite/)** — a PostgreSQL-flavoured grammar: DDL, DML (`MERGE`, `COPY`, upserts), `SELECT` with CTEs and window functions, access control and utility statements, folded identifiers, dollar-quoted strings, keyword operators. Benchmarked against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser); its [README](examples/sql-lite/README.md) has the PostgreSQL coverage survey and the benchmark results.
 
 ## Development
 
