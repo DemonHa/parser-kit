@@ -8,8 +8,8 @@ import { type Bucket, PG_BATTERY } from "./pg-coverage";
 // every row's bucket. A row moving from "neither" to "sql-lite" is the point of
 // a grammar change; a row moving the other way is a regression. Either way the
 // failure lists the statement, and the fix is to update its recorded bucket
-// (and the README's coverage table, which is generated from the same numbers:
-// run with PG_COVERAGE_REPORT=1 to print it).
+// and the README's coverage table, which is copied from this test's report
+// (run with PG_COVERAGE_REPORT=1 to print it).
 
 const nodeParser = new Parser();
 
@@ -62,8 +62,9 @@ describe("PostgreSQL coverage battery", () => {
 });
 
 // "Parses" is necessary, not sufficient. These battery rows are the ones whose
-// shape is easiest to get subtly wrong while still parsing; each is checked
-// against the tree PostgreSQL itself builds.
+// shape is easiest to get subtly wrong while still parsing; each asserts the
+// structure PostgreSQL gives the statement (one type name, one call with its
+// modifiers, a distinct-from test rather than equality).
 describe("PostgreSQL coverage battery: AST spot checks", () => {
   const firstColumn = (sql: string) => (stripSpans(sqlLite.parse(sql)) as any)[0].columns;
 

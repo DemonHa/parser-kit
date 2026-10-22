@@ -6,7 +6,7 @@ A PostgreSQL-flavoured SQL grammar built with [`@parser-kit/core`](../../package
 - **The kit's integration test.** Its 400+ unit tests, plus byte-exact AST and diagnostic goldens, are what catch a "generic" core change that quietly breaks a real grammar.
 - **A benchmark.** It is measured against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) (PostgreSQL mode), the most widely used JavaScript SQL parser.
 
-Despite the name, it now covers most of the PostgreSQL that applications and migration tools actually emit (see [PostgreSQL coverage](#postgresql-coverage)).
+Despite the name, it covers most of the SQL applications send to PostgreSQL, though there are still gaps in dump-style DDL (see [PostgreSQL coverage](#postgresql-coverage)).
 
 ## Usage
 
@@ -60,20 +60,23 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 - **DDL.**
   - **`CREATE TABLE`:** column and table constraints, identity and stored generated columns, `COLLATE`, foreign-key actions / `MATCH` / `DEFERRABLE`, `EXCLUDE`, `LIKE … INCLUDING`, `INHERITS`, range / list / hash partitioning and `PARTITION OF … FOR VALUES`, `WITH (…)`, `TABLESPACE`, `ON COMMIT`, `TEMP` / `UNLOGGED`, `AS SELECT … WITH [NO] DATA`.
   - **`ALTER TABLE`:** action lists that add or drop columns and constraints, `ALTER COLUMN` type / default / not-null, renames, `SET SCHEMA`, `OWNER TO`, triggers, `ATTACH` / `DETACH PARTITION`, storage parameters, `REPLICA IDENTITY`, `CLUSTER ON`.
-  - **Other `CREATE` / `ALTER` / `DROP` targets:** indexes (with `CONCURRENTLY`, `USING`, opclasses, `INCLUDE`, partial `WHERE`, `WITH`), views and materialized views, sequences, enum / composite / range types, domains, schemas, databases, extensions, tablespaces, functions, procedures, aggregates, triggers, roles and users. Plus `COMMENT ON` and `REFRESH MATERIALIZED VIEW`.
+  - **Other `CREATE` targets:** indexes (with `CONCURRENTLY`, `USING`, opclasses, `INCLUDE`, partial `WHERE`, `WITH`), views and materialized views, sequences, enum / composite / range types, domains, schemas, databases, extensions, tablespaces, functions, procedures, aggregates, triggers, roles and users.
+  - **`DROP`:** all of those except tablespaces.
+  - **`ALTER`:** schemas, domains, types, indexes, functions, aggregates, views, materialized views and sequences.
+  - Plus `COMMENT ON` and `REFRESH MATERIALIZED VIEW`.
 - **Access control and utility.** `GRANT` / `REVOKE` on tables, columns, sequences, schemas, databases, types and `ALL … IN SCHEMA`, and role membership. Transactions with isolation modes, `AND [NO] CHAIN` and savepoints. `SET` / `SHOW` / `RESET`. `LOCK`, `CALL`, `DO`, `PREPARE` / `EXECUTE` / `DEALLOCATE`. Cursors (`DECLARE` / `FETCH` / `MOVE` / `CLOSE`). `EXPLAIN` (option list and legacy forms), `ANALYZE`, `VACUUM`.
 
 ### Compared with node-sql-parser
 
-The battery in `pg-coverage.ts` has 599 distinct, valid PostgreSQL 16/17 statements. They cover the command reference and the query and expression chapters, from everyday idioms (upserts, keyset pagination, `date_trunc` reports, pg_dump-style DDL) to the long tail. Each statement goes through `sqlLite.parse(sql)` and node-sql-parser 5.1.0's `new Parser().astify(sql, { database: "PostgreSQL" })`:
+The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically valid in PostgreSQL 17 (a few need 17 rather than 16). They cover the command reference and the query and expression chapters, from everyday idioms (upserts, pagination, `date_trunc` reports, pg_dump-style DDL) to the long tail. Each statement goes through `sqlLite.parse(sql)` and node-sql-parser 5.1.0's `new Parser().astify(sql, { database: "PostgreSQL" })`:
 
 | Area | Statements | Both | sql-lite only | node-sql-parser only | Neither |
 |---|---:|---:|---:|---:|---:|
 | Queries | 93 | 58 | 30 | 2 | 3 |
-| Expressions | 85 | 45 | 21 | 4 | 15 |
+| Expressions | 87 | 47 | 21 | 4 | 15 |
 | Types and lexical | 34 | 16 | 11 | 4 | 3 |
 | DML | 77 | 32 | 35 | 6 | 4 |
-| Transactions and session | 72 | 19 | 33 | 0 | 20 |
+| Transactions and session | 70 | 17 | 33 | 0 | 20 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
@@ -106,7 +109,8 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - `LISTEN` / `NOTIFY` / `UNLISTEN`, `DISCARD`.
 - `SET TRANSACTION`, `SET SESSION CHARACTERISTICS`, `SET CONSTRAINTS`, `SET` / `RESET SESSION AUTHORIZATION`, `SET … FROM CURRENT`, multi-word `SHOW TRANSACTION ISOLATION LEVEL`.
 - `END` and `ABORT` (the transaction synonyms), and two-phase commit (`PREPARE TRANSACTION`, `COMMIT PREPARED`, `ROLLBACK PREPARED`).
-- `ALTER DATABASE`, `ALTER EXTENSION`, `ALTER TRIGGER`, `ALTER SYSTEM`, `DROP TABLESPACE`.
+- `ALTER DATABASE`, `ALTER EXTENSION`, `ALTER PROCEDURE`, `ALTER TABLESPACE`, `ALTER TRIGGER`, `ALTER SYSTEM`, `DROP TABLESPACE`.
+- Some actions on objects that are otherwise supported: `ALTER INDEX … ATTACH PARTITION`, `ALTER MATERIALIZED VIEW … SET TABLESPACE`, `ALTER TYPE … ADD / DROP ATTRIBUTE`, and the shell type `CREATE TYPE name;`.
 - `COMMENT ON` anything but a table, column, index, type or schema (views, functions, constraints, triggers, roles, extensions, …).
 - The `TABLE name` command.
 - The long tail: `RULE`, `EVENT TRIGGER`, `PUBLICATION`, `SUBSCRIPTION`, `CAST`, `COLLATION`, `CONVERSION`, `OPERATOR [CLASS | FAMILY]`, `SERVER`, `USER MAPPING`, `FOREIGN TABLE`, `IMPORT FOREIGN SCHEMA`, `STATISTICS`, `TEXT SEARCH …`, `LANGUAGE`, `ACCESS METHOD`, `TRANSFORM`, `SECURITY LABEL`.
@@ -128,7 +132,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
   - `ALTER TABLE ALL IN TABLESPACE`
 - **Constraints:**
   - named column constraints (`qty int CONSTRAINT qty_pos CHECK (…)`; named *table* constraints work)
-  - `UNIQUE NULLS NOT DISTINCT`
+  - `UNIQUE NULLS NOT DISTINCT`, on a constraint and on `CREATE UNIQUE INDEX`
   - `INCLUDE`, `WITH` and `USING INDEX TABLESPACE` on `UNIQUE` / `PRIMARY KEY`
   - `ON DELETE SET NULL (cols)`
   - `CHECK … NO INHERIT`
@@ -152,7 +156,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - The postfix `ISNULL` / `NOTNULL` operators. The select-list form `a ISNULL` reads as an alias; see below.
 - `:=` named arguments (`=>` works), `VARIADIC` arguments, `count(ALL x)`.
 - SQL/JSON clause syntax: `JSON_OBJECT('a' VALUE 1)`, `JSON_VALUE(… RETURNING int)`, `JSON_TABLE(… COLUMNS (…))`. The plain-argument forms parse as ordinary calls.
-- XML keyword functions (`XMLELEMENT(NAME …)`, `XMLPARSE(DOCUMENT …)`), `normalize(… , NFC)` and `IS NFC NORMALIZED`.
+- XML keyword functions (`XMLELEMENT(NAME …)`, `XMLPARSE(DOCUMENT …)`) and `IS [NFC] NORMALIZED`. (`normalize(x, NFC)` parses as an ordinary call, with `nfc` read as a column name.)
 - `substring(… SIMILAR … ESCAPE …)` and PostgreSQL 17's `AT LOCAL`.
 
 **Types**
@@ -170,7 +174,7 @@ These statements parse without error, but the tree they produce is wrong:
 - **`WITH TIES` is dropped.** `FETCH FIRST 3 ROWS WITH TIES` yields the same `limit` as `FETCH FIRST 3 ROWS ONLY`.
 - **`SELECT a ISNULL FROM t` reads `isnull` as a column alias.** PostgreSQL reads it as the null test.
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
-- **Some `E'…'` escapes are left undecoded.** `\x41`, octal `\101` and `A` come through as text, not as `A`. `\n`, `\t` and `\'` are decoded.
+- **Some `E'…'` escapes are left undecoded.** The backslash is dropped and the rest kept as text: `E'\x41'` gives `x41`, `E'\101'` gives `101`, and `E'\u0041'` gives `u0041`, where PostgreSQL gives `A` for all three. `\n`, `\t` and `\'` are decoded.
 - **`DEFAULT 'x' COLLATE "C"` folds the collation into the default expression** instead of applying it to the column.
 - **Numeric literals become JavaScript numbers,** so integers beyond 2^53 lose precision (`12345678901234567890`).
 
@@ -185,16 +189,15 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **Empty lists:** `IN ()`, `USING ()`, `VALUES ()`.
 - **Subscripting a call without parentheses:** `f(x)[1]`. PostgreSQL requires `(f(x))[1]`.
 - **Impossible type modifiers and interval ranges:** `x::int(4)`, `interval '1' DAY TO YEAR`.
-- **Four-part names:** `a.b.c.d`.
 - **Junk after a number:** `SELECT 123abc` reads as `123 AS abc`. PostgreSQL 15+ rejects it.
 - **The zero-length identifier `""`.**
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
 
-Some errors PostgreSQL raises during analysis rather than parsing, such as `VALUES` rows of different lengths or `ON CONFLICT DO UPDATE` without a conflict target, are also accepted. node-sql-parser accepts most of these too.
+Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.
 
 ## Benchmarks
 
-Three bench files compare sql-lite with node-sql-parser 5.1.0 in PostgreSQL mode. **Every head-to-head group uses only input both parsers accept.** `sql-lite.workloads.bench.ts` checks this at load time and refuses to run if either parser rejects a workload. PostgreSQL syntax that node-sql-parser rejects (`DELETE … RETURNING`, `FOR UPDATE SKIP LOCKED`, `ALTER TABLE … RENAME COLUMN`, …) is left out of the comparisons. A real application's SQL would include some of it.
+Three bench files compare sql-lite with node-sql-parser 5.1.0 in PostgreSQL mode. **Every head-to-head group uses only input both parsers accept,** except the malformed-input group, whose inputs both parsers reject. `sql-lite.workloads.bench.ts` checks this at load time and refuses to run if either parser rejects a workload. PostgreSQL syntax that node-sql-parser rejects (`DELETE … RETURNING`, `FOR UPDATE SKIP LOCKED`, `ALTER TABLE … RENAME COLUMN`, …) is left out of the comparisons. A real application's SQL would include some of it.
 
 ### Real-world workloads (`sql-lite.workloads.bench.ts`)
 
@@ -242,7 +245,7 @@ pnpm vitest bench --run examples/sql-lite/sql-lite.workloads.bench.ts   # just t
 pnpm bench:compare                                                  # diff against bench-baseline.json
 ```
 
-`bench-baseline.json` only covers `sql-lite.bench.ts`, the per-construct corpus whose deltas track grammar changes. The large-file and workload groups aren't in it, so `bench:compare` prints them without a delta. Benchmarks don't run in CI.
+The committed `bench-baseline.json` currently covers only `sql-lite.bench.ts`, the per-construct corpus whose deltas track grammar changes. The large-file and workload groups aren't in it, so `bench:compare` prints them without a delta. The next `pnpm bench:save` will add them, because it runs every bench file. Benchmarks don't run in CI.
 
 ## Contributing
 
@@ -250,5 +253,5 @@ The repo-wide workflow is in [CONTRIBUTING.md](../../CONTRIBUTING.md). Specific 
 
 - **Tests first, at the level the change lives.** New syntax gets a `describe` block in `sql-lite.test.ts` asserting the span-stripped AST with `toEqual`, plus the error message for the nearest malformed input.
 - **Prove new keywords stay unreserved.** PostgreSQL leaves most keywords usable as names, and so does this grammar: only the words in `RESERVED` are refused as bare names. Every feature that matches a new word by value comes with a "keeps … unreserved as names and aliases" test showing the word still works as a column, table and alias (for example `SELECT rows, ordinality FROM t AS rows;`). Don't add to `RESERVED` to make a parse work.
-- **Pin observable output in the parity golden.** `parity.test.ts` serialises the full AST, spans included, for every `corpus.ts` row and its own `SUPPLEMENTAL` / `MULTI_LINE` / `LEXER_EDGE_CASES` lists, plus `diagnose()` output for `MALFORMED`. New node shapes go in `SUPPLEMENTAL`, not `corpus.ts`: the benchmark's group names count the corpus's shared rows, `bench-baseline.json` keys on those names, and a new corpus row silently disconnects `pnpm bench:compare`. When output is *meant* to move, regenerate with `pnpm test -- -u` (the `--` matters) and call the diff out in review. Never regenerate to make a refactor pass.
+- **Pin observable output in the parity golden.** `parity.test.ts` serialises the full AST, spans included, for every `corpus.ts` row and its own `SUPPLEMENTAL` / `MULTI_LINE` / `LEXER_EDGE_CASES` lists, plus `diagnose()` output for `MALFORMED`. New node shapes go in `SUPPLEMENTAL`, not `corpus.ts`: the benchmark's group names count the corpus's shared rows, `bench-baseline.json` keys on those names, and a new `pg: true` corpus row renames them, which silently disconnects `pnpm bench:compare`. When output is *meant* to move, regenerate with `pnpm test -- -u` (the `--` matters) and call the diff out in review. Never regenerate to make a refactor pass.
 - **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README.

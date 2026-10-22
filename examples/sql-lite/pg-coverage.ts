@@ -5,10 +5,12 @@
 // and node-sql-parser's PostgreSQL mode and fails when an outcome moves, so a
 // newly supported statement shows up as a diff here rather than going unnoticed.
 //
-// Every statement is valid PostgreSQL 16/17. "Accepts" only means "parses
-// without throwing"; it says nothing about the AST being right. The README's
-// coverage section lists the known cases where sql-lite parses a statement into
-// the wrong tree.
+// Every statement is syntactically valid PostgreSQL 17 (a few need 17 rather
+// than 16: JSON_TABLE, MERGE ... RETURNING, AT LOCAL, ...); a handful would
+// still fail PostgreSQL's later analysis against a real schema. "Accepts" only
+// means "parses without throwing"; it says nothing about the AST being right.
+// The README's coverage section lists the known cases where sql-lite parses a
+// statement into the wrong tree.
 //
 // This is deliberately not `corpus.ts`: the benchmark's group names, and so
 // `bench-baseline.json`, key on that file's rows.
@@ -270,6 +272,8 @@ export const PG_BATTERY: BatteryRow[] = [
     ["func", "neither", "SELECT count(ALL x) FROM t;"],
     ["func", "sql-lite", "SELECT sum(x ORDER BY y) FROM t;"],
     ["func", "node", "SELECT normalize('abc', NFC), 'abc' IS NFC NORMALIZED;"],
+    ["func", "both", "SELECT pg_advisory_xact_lock(hashtext('job'));"],
+    ["func", "both", "SELECT set_config('app.user_id', '42', true);"],
     ["json", "both", "SELECT data->'user'->>'name' FROM events;"],
     ["json", "both", "SELECT data#>'{a,b}', data#>>'{a,b,0}' FROM events;"],
     ["json", "both", 'SELECT * FROM events WHERE data @> \'{"type":"click"}\' AND \'{"a":1}\'::jsonb <@ data;'],
@@ -546,7 +550,6 @@ export const PG_BATTERY: BatteryRow[] = [
     ["txn", "both", "LOCK TABLE accounts IN ACCESS EXCLUSIVE MODE;"],
     ["txn", "both", "LOCK accounts, ledger IN SHARE ROW EXCLUSIVE MODE NOWAIT;"],
     ["txn", "both", "LOCK TABLE ONLY t IN ROW EXCLUSIVE MODE;"],
-    ["txn", "both", "SELECT pg_advisory_xact_lock(hashtext('job'));"],
     ["session", "sql-lite", "SET search_path TO myschema, public;"],
     ["session", "sql-lite", "SET search_path = '$user', public;"],
     ["session", "both", "SET LOCAL statement_timeout = '5s';"],
@@ -573,7 +576,6 @@ export const PG_BATTERY: BatteryRow[] = [
     ["session", "neither", "UNLISTEN *;"],
     ["session", "neither", "UNLISTEN channel_a;"],
     ["session", "neither", "LOAD 'auto_explain';"],
-    ["session", "both", "SELECT set_config('app.user_id', '42', true);"],
     ["cursor", "sql-lite", "DECLARE c CURSOR FOR SELECT * FROM big_table;"],
     ["cursor", "sql-lite", "DECLARE c BINARY INSENSITIVE NO SCROLL CURSOR WITH HOLD FOR SELECT 1;"],
     ["cursor", "sql-lite", "DECLARE c SCROLL CURSOR WITHOUT HOLD FOR SELECT * FROM t FOR UPDATE;"],
