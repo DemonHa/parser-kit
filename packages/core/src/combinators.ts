@@ -369,6 +369,7 @@ export function delimited<T, TT extends string>(
     parse: (ctx) => {
       const items: T[] = [];
       let firstItem = true;
+      let closed = false;
 
       // Non-interleaved bodies are separator-terminated lines: a run of
       // separators and trivia counts as one, so blank lines and comment lines
@@ -394,6 +395,7 @@ export function delimited<T, TT extends string>(
       while (!ctx.eof()) {
         if (matchesToken(ctx.peek(), close)) {
           ctx.next();
+          closed = true;
           break;
         }
 
@@ -429,6 +431,8 @@ export function delimited<T, TT extends string>(
 
         firstItem = false;
       }
+      // The loop also ends at end of input; a strict grammar wants the close.
+      if (!closed && ctx.strictDelimited) croakExpected(ctx, quoteList(matchLabel(close)));
 
       return items;
     },

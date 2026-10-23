@@ -108,6 +108,8 @@ export interface ParseContext<TT extends string = string> {
   farthestError(): ParseError | null;
   /** Number of tokens consumed so far — used for progress guarantees. */
   consumed(): number;
+  /** The grammar's strictDelimited option: delimited() croaks at end of input instead of closing there. */
+  readonly strictDelimited?: boolean;
 }
 
 export interface ContextConfig<TT extends string = string> {
@@ -119,13 +121,23 @@ export interface ContextConfig<TT extends string = string> {
   preferFarthest?: boolean;
   /** Tag errors thrown by the token stream (fromLexer) and let them escape tryParse. */
   propagateLexerErrors?: boolean;
+  /** Make delimited() require its close token at end of input. */
+  strictDelimited?: boolean;
 }
 
 export function createParseContext<TT extends string>(
   stream: TokenStream<TT>,
   config: ContextConfig<TT> = {},
 ): ParseContext<TT> {
-  const { labels, trivia = [], sync = [], errors, preferFarthest = false, propagateLexerErrors = false } = config;
+  const {
+    labels,
+    trivia = [],
+    sync = [],
+    errors,
+    preferFarthest = false,
+    propagateLexerErrors = false,
+    strictDelimited = false,
+  } = config;
 
   // Every token pull goes through these. With propagateLexerErrors a lexer
   // croak is stamped fromLexer on its way out; otherwise errors pass through
@@ -332,6 +344,7 @@ export function createParseContext<TT extends string>(
     },
     farthestError: () => farthest,
     consumed: () => count,
+    strictDelimited,
   };
 
   return ctx;
