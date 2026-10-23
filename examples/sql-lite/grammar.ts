@@ -4607,8 +4607,8 @@ function partitionStrategy(ctx: ParseContext<SqlTokenType>): PartitionSpec["stra
 // The expression forms PG's `part_elem` takes unparenthesised: a column (its
 // ColId, so one part) or a function call, the special-syntax ones (EXTRACT,
 // CURRENT_DATE, …) included, as PG's func_expr_windowless includes them. CAST
-// is one of those too, but its node is a `::` cast's as well, so partitionKey
-// tells the two apart by the lead word instead.
+// is one of those too, but its node is a `::` cast's as well, so
+// isBareFuncExpr tells the two apart by the lead word instead.
 const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "name",
   "call",
@@ -4637,9 +4637,7 @@ function isBareFuncExpr(expr: Expr, castCall: boolean): boolean {
 // goes through the full expression rule, whose COLLATE postfix takes the
 // collation; it is lifted off the node here, since in PG it belongs to the key,
 // not the expression. Anything else unparenthesised — `a + b`, `t.a`, `a::int`
-// — is PG's syntax error, and so is it here. A `CAST(…)` key is a cast node led
-// by `cast` whose operand starts after it: `CAST(a AS int)::text` is led by
-// `cast` too, but its outer cast's operand starts where it does.
+// — is PG's syntax error, and so is it here (see isBareFuncExpr).
 // ON CONFLICT's arbiter elements share this reader, under their own `what`.
 function partitionKey(ctx: ParseContext<SqlTokenType>, what = "a partition key"): PartitionKey {
   const start = ctx.position();
@@ -7618,10 +7616,12 @@ function parseStatsParam(ctx: ParseContext<SqlTokenType>): Expr {
     expectClose(ctx);
     return expr;
   }
+  const start = ctx.position();
   const castCall = ctx.is("ident", "cast");
   const expr = ctx.parse(expression);
   if (isBareFuncExpr(expr, castCall)) return expr;
-  return ctx.croak("A statistics expression other than a column or a function call must be parenthesised");
+  const message = "A statistics expression other than a column or a function call must be parenthesised";
+  return ctx.croak(message, start, ctx.lastEnd());
 }
 
 // The name is optional unless IF NOT EXISTS is written; `on` is reserved, so it

@@ -12373,7 +12373,7 @@ describe("SQL-lite long-tail objects with definition lists", () => {
     expect(fails("CREATE CAST (a AS b) WITH INOUT AS frob;")).toThrow(/Expected "assignment" or "implicit"/);
     expect(fails("CREATE CONVERSION c FOR utf8 TO 'x' FROM f;")).toThrow(/Expected a string but found "utf8"/);
     expect(fails("CREATE DEFAULT x;")).toThrow(/Expected "conversion" but found "x"/);
-    expect(fails("CREATE STATISTICS s ON a + b FROM t;")).toThrow(/must be parenthesised/);
+    expect(fails("CREATE STATISTICS s ON x, a + b FROM t;")).toThrow(/must be parenthesised \(1:26\)/);
     expect(fails("CREATE STATISTICS s ON t.a FROM t;")).toThrow(/must be parenthesised/);
     expect(fails("CREATE STATISTICS s ON a::int FROM t;")).toThrow(/must be parenthesised/);
     expect(fails("CREATE STATISTICS s ON CAST(a AS int)::text FROM t;")).toThrow(/must be parenthesised/);
