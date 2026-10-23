@@ -378,7 +378,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ],
     [
       "insert",
-      "neither",
+      "sql-lite",
       "INSERT INTO users (email, tenant_id) VALUES ('a@x', 1) ON CONFLICT (lower(email)) WHERE deleted_at IS NULL DO NOTHING;",
     ],
     [
@@ -446,7 +446,7 @@ export const PG_BATTERY: BatteryRow[] = [
       "both",
       "UPDATE docs SET data = jsonb_set(data, '{status}', '\"done\"') WHERE data->>'status' = 'pending';",
     ],
-    ["update", "node", "UPDATE t SET arr[1] = 5, info.field = 'x' WHERE id = 1;"],
+    ["update", "both", "UPDATE t SET arr[1] = 5, info.field = 'x' WHERE id = 1;"],
     [
       "update",
       "both",

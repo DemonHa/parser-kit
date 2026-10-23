@@ -1359,9 +1359,26 @@ export type Cte = {
 // top-level items may be a bare DEFAULT) or a `(SELECT …)` subquery — the only
 // sources PG accepts.
 // A single column's value may be a bare DEFAULT too (`SET a = DEFAULT`).
+// A target may assign into part of a column (`SET a[1] = …`, `SET c.f = …`):
+// `indirection` holds those steps, and is present only when written. For the
+// multi-column form it runs parallel to `columns`, an empty list standing for a
+// column assigned whole, and is present only when some column has steps.
 export type Assignment =
-  | { column: string; value: Expr | DefaultValue }
-  | { columns: string[]; value: AssignmentRow | Extract<Expr, { kind: "row" | "subquery" }> };
+  | { column: string; indirection?: Indirection; value: Expr | DefaultValue }
+  | {
+      columns: string[];
+      indirection?: Indirection[];
+      value: AssignmentRow | Extract<Expr, { kind: "row" | "subquery" }>;
+    };
+
+// The steps after an assigned or inserted column's name (PG's opt_indirection on
+// set_target / insert_column_item): `.field` or a `[i]` / `[lo:hi]` subscript,
+// whose bounds read as the `subscript` expression's do. PG's grammar also takes
+// `.*`, which its analysis then rejects; it is rejected here outright.
+export type IndirectionStep =
+  | { kind: "field"; name: string; span: Span }
+  | { kind: "subscript"; index: Expr | null; upper?: Expr | null; span: Span };
+export type Indirection = IndirectionStep[];
 
 // The row-constructor source of a multi-column assignment: RowExpr's shape, but
 // its items may be a bare DEFAULT. A `((1, 2))` source keeps the inner RowExpr
@@ -1370,11 +1387,23 @@ export type AssignmentRow = { kind: "row"; items: (Expr | DefaultValue)[]; impli
 
 // `constraint` is present only for `ON CONFLICT ON CONSTRAINT name`, which
 // names the arbiter instead of listing its columns (`target` is then null).
+// `inference` is present only for an arbiter list that plain column names
+// cannot hold — an element with an expression, COLLATE or operator class, or a
+// `WHERE` predicate after the list — and `target` is then null too.
 export type OnConflict = {
   target: string[] | null;
   constraint?: string;
+  inference?: ConflictInference;
   action: { kind: "nothing" } | { kind: "update"; set: Assignment[]; where: Expr | null };
 };
+
+// `ON CONFLICT (element, …) [WHERE predicate]`: PG's opt_conf_expr. Each element
+// is an index_elem as arbiter inference reads it — `column | func(…) | (expr)`,
+// then `[COLLATE collation] [opclass]` — which is the partition key's shape.
+// ASC / DESC and NULLS, which PG's grammar takes and its analysis rejects here,
+// are not accepted, nor are operator-class options (`ops (…)`), which its
+// grammar also takes. `where` is present only when written.
+export type ConflictInference = { elements: PartitionKey[]; where?: Expr };
 
 // A bare DEFAULT standing for a column's default: an INSERT VALUES row item, or
 // the value of a SET assignment (`SET a = DEFAULT`, `SET (a, b) = (1, DEFAULT)`).
@@ -1388,12 +1417,15 @@ export type InsertOverriding = "system" | "user";
 // The DML statements (MERGE too) each accept a leading `WITH …` prefix. `with_` /
 // `recursive` are present only when one attaches (like FromItem's optional
 // `lateral`), so WITH-less DML keeps its original AST shape. INSERT's `alias`
-// (`INSERT INTO t AS a`) and `overriding` follow the same rule.
+// (`INSERT INTO t AS a`) and `overriding` follow the same rule, as does
+// `indirection`, which runs parallel to `columns` as on a multi-column Assignment
+// (`INSERT INTO t (a[1], c.f) …`).
 export type Insert = {
   kind: "insert";
   table: string[];
   alias?: string;
   columns: string[] | null;
+  indirection?: Indirection[];
   overriding?: InsertOverriding;
   source:
     | { kind: "values"; rows: (Expr | DefaultValue)[][] }
@@ -1443,8 +1475,8 @@ export type Delete = {
 
 // What a MERGE WHEN clause does. INSERT's `source` is INSERT's own union,
 // narrowed to the two forms MERGE admits: one VALUES row (`rows` then holds
-// exactly one) or DEFAULT VALUES. `overriding` is present only when written, as
-// on Insert.
+// exactly one) or DEFAULT VALUES. `overriding` and `indirection` are present
+// only when written, as on Insert.
 export type MergeAction =
   | { kind: "update"; set: Assignment[] }
   | { kind: "delete" }
@@ -1452,6 +1484,7 @@ export type MergeAction =
   | {
       kind: "insert";
       columns: string[] | null;
+      indirection?: Indirection[];
       overriding?: InsertOverriding;
       source: Extract<Insert["source"], { kind: "values" | "defaultValues" }>;
     };
@@ -2612,20 +2645,29 @@ const castPostfix = {
 
 // `a[i]` element access and `a[lo:hi]` slice. A `:` marks a slice; either bound
 // may be omitted (`a[:hi]`, `a[lo:]`). The non-slice form omits the `upper` key.
+// subscriptBounds reads the bracketed part, `[` to `]`; `upper` is undefined for
+// the non-slice form. An assignment target's subscript step reads it too. An
+// empty `a[]` is PG's syntax error, and so is it here.
+function subscriptBounds(ctx: ParseContext<SqlTokenType>): { index: Expr | null; upper: Expr | null | undefined } {
+  ctx.next(); // "["
+  // `a[]` names no element: PG's indirection_el needs an index or a `:`.
+  if (ctx.is("punc", "]")) ctx.croak('Expected an expression or ":" but found "]"');
+  const hasIndex = !ctx.is("punc", ":");
+  const index = hasIndex ? ctx.parse(expression) : null;
+  let upper: Expr | null | undefined;
+  if (ctx.is("punc", ":")) {
+    ctx.next(); // ":"
+    upper = ctx.is("punc", "]") ? null : ctx.parse(expression);
+  }
+  if (!ctx.is("punc", "]")) ctx.croak(`Expected "]" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "]"
+  return { index, upper };
+}
 const subscriptPostfix = {
   match: punc("["),
   bp: 19,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
-    ctx.next(); // "["
-    const hasIndex = !ctx.is("punc", ":") && !ctx.is("punc", "]");
-    const index = hasIndex ? ctx.parse(expression) : null;
-    let upper: Expr | null | undefined;
-    if (ctx.is("punc", ":")) {
-      ctx.next(); // ":"
-      upper = ctx.is("punc", "]") ? null : ctx.parse(expression);
-    }
-    if (!ctx.is("punc", "]")) ctx.croak(`Expected "]" but found ${describeFound(ctx.peek())}`);
-    ctx.next(); // "]"
+    const { index, upper } = subscriptBounds(ctx);
     return upper === undefined
       ? { kind: "subscript", base: left, index, span: closeSpan(left, ctx.lastEnd()) }
       : { kind: "subscript", base: left, index, upper, span: closeSpan(left, ctx.lastEnd()) };
@@ -3631,7 +3673,8 @@ const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
 // — is PG's syntax error, and so is it here. A `CAST(…)` key is a cast node led
 // by `cast` whose operand starts after it: `CAST(a AS int)::text` is led by
 // `cast` too, but its outer cast's operand starts where it does.
-function partitionKey(ctx: ParseContext<SqlTokenType>): PartitionKey {
+// ON CONFLICT's arbiter elements share this reader, under their own `what`.
+function partitionKey(ctx: ParseContext<SqlTokenType>, what = "a partition key"): PartitionKey {
   const start = ctx.position();
   let expr: Expr;
   let collate: string[] | null = null;
@@ -3651,7 +3694,7 @@ function partitionKey(ctx: ParseContext<SqlTokenType>): PartitionKey {
           (expr.expr.span.start.row !== expr.span.start.row || expr.expr.span.start.col !== expr.span.start.col)
         : BARE_PARTITION_KEYS.has(expr.kind) && !(expr.kind === "name" && expr.parts.length > 1);
     if (!bare) {
-      return ctx.croak("a partition key expression must be parenthesised", start, ctx.lastEnd());
+      return ctx.croak(`${what} expression must be parenthesised`, start, ctx.lastEnd());
     }
   }
   // An opclass is a name, so a reserved word (a stray `DESC`, say) is left for
@@ -6501,9 +6544,56 @@ const insertValue = oneOf(
   expression,
 );
 
+// An assigned or inserted column: PG's `ColId opt_indirection` (see
+// Indirection). A field step's name is read as a qualified name's parts are, so
+// unlike PG's ColLabel a reserved word there must be quoted (`SET c."from"`).
+type SetTarget = { name: string; indirection: Indirection };
+const setTarget = custom<SetTarget, SqlTokenType>(
+  (ctx) => {
+    const name = ctx.parse(nameWord);
+    const indirection: Indirection = [];
+    for (;;) {
+      const start = ctx.position();
+      if (ctx.eat("punc", ".") !== null) {
+        if (ctx.is("op", "*")) {
+          return ctx.croak('Expected a field name but found "*"; a row cannot be expanded in an assignment target');
+        }
+        indirection.push({ kind: "field", name: ctx.parse(nameWord), span: ctx.spanFrom(start) });
+      } else if (ctx.is("punc", "[")) {
+        const { index, upper } = subscriptBounds(ctx);
+        indirection.push(
+          upper === undefined
+            ? { kind: "subscript", index, span: ctx.spanFrom(start) }
+            : { kind: "subscript", index, upper, span: ctx.spanFrom(start) },
+        );
+      } else {
+        return { name, indirection };
+      }
+    }
+  },
+  { expected: nameWord.expected(), first: nameWord.first() },
+);
+// A column list of set targets, for INSERT and MERGE's INSERT: a local rule, as
+// the shared `columnList` serves DDL too, where a name takes no steps. Unlike
+// columnList's, the list may not be empty: PG's insert_column_list.
+const insertColumnList = seq(skip(punc("(")), field("items", sepBy(setTarget, P(","))), skip(punc(")"))).map(
+  (s) => s.items,
+);
+// Split a list of targets into the `columns` / `indirection` pair (see Insert).
+function splitTargets(targets: SetTarget[]): { columns: string[]; indirection?: Indirection[] } {
+  const columns = targets.map((t) => t.name);
+  return targets.some((t) => t.indirection.length > 0)
+    ? { columns, indirection: targets.map((t) => t.indirection) }
+    : { columns };
+}
+
 const eq = token("op", { values: ["="] });
-const singleAssignment = seq(field("column", nameWord), skip(eq), field("value", insertValue)).map(
-  ({ column, value }): Assignment => ({ column, value }),
+const singleAssignment = seq(field("target", setTarget), skip(eq), field("value", insertValue)).map(
+  ({ target, value }): Assignment => ({
+    column: target.name,
+    ...(target.indirection.length > 0 && { indirection: target.indirection }),
+    value,
+  }),
 );
 // `(a, b, …) = source`. The row items are read locally (not via `expression`)
 // so they may be a bare DEFAULT, as in an INSERT VALUES row. `row` is matched
@@ -6519,11 +6609,13 @@ const assignmentSubquery = parenQuery.map((query, span): MultiAssignmentSource =
 const multiAssignment = custom<Assignment, SqlTokenType>(
   (ctx) => {
     ctx.next(); // "("
-    const columns = [ctx.parse(nameWord)];
-    while (ctx.eat("punc", ",") !== null) columns.push(ctx.parse(nameWord));
+    const targets = [ctx.parse(setTarget)];
+    while (ctx.eat("punc", ",") !== null) targets.push(ctx.parse(setTarget));
     expectClose(ctx);
     ctx.parse(eq);
-    if (isSubqueryParen(ctx)) return { columns, value: ctx.parse(assignmentSubquery) };
+    const named = splitTargets(targets);
+    const { columns } = named;
+    if (isSubqueryParen(ctx)) return { ...named, value: ctx.parse(assignmentSubquery) };
     const start = ctx.position();
     const after = ctx.peekAhead(1);
     const explicit = ctx.is("ident", "row") && after?.type === "punc" && after.value === "(";
@@ -6562,7 +6654,7 @@ const multiAssignment = custom<Assignment, SqlTokenType>(
         value.span.end,
       );
     }
-    return { columns, value };
+    return { ...named, value };
   },
   { expected: '"("', first: [{ type: "punc", value: "(" }] },
 );
@@ -7707,25 +7799,32 @@ const overridingClause = seq(
 // failure, and any other where the source should start, is reported here with
 // the insert_rest forms still open at that point (DEFAULT VALUES only up front,
 // OVERRIDING until it is read), rather than as the query's narrower message.
-const insertColumns = optional(attempt(columnList));
+const insertColumns = optional(attempt(insertColumnList));
 const insertOverriding = optional(overridingClause);
-type InsertRest = Pick<Insert, "columns" | "overriding" | "source">;
+type InsertRest = Pick<Insert, "columns" | "indirection" | "overriding" | "source">;
 // The forms still open where a source should start, as an `Expected …` prefix.
-const insertRestOpen = (columns: string[] | null, overriding: InsertOverriding | null): string =>
-  overriding !== null ? "" : columns === null ? '"default values" or "overriding" or ' : '"overriding" or ';
+const insertRestOpen = (hasColumns: boolean, overriding: InsertOverriding | null): string =>
+  overriding !== null ? "" : !hasColumns ? '"default values" or "overriding" or ' : '"overriding" or ';
 const insertRest = custom<InsertRest, SqlTokenType>(
   (ctx) => {
     if (ctx.is("ident", "default")) return { columns: null, source: ctx.parse(defaultValues) };
+    // `()` is neither an (empty) column list nor a query; reported as the list's.
+    const next = ctx.peekAhead(1);
+    if (ctx.is("punc", "(") && next?.type === "punc" && next.value === ")") {
+      ctx.next(); // "("
+      return ctx.croak(`Expected a name but found ")"`);
+    }
     // A `(` here is a column list unless it opens a parenthesised query source;
     // attempt() rolls the column-list read back when the `(` is really a SELECT.
-    const columns = ctx.parse(insertColumns) ?? null;
+    const targets = ctx.parse(insertColumns) ?? null;
     const overriding = ctx.parse(insertOverriding) ?? null;
     if (!matchesFirst(ctx.peek(), insertSourceFirst)) {
-      const open = insertRestOpen(columns, overriding);
+      const open = insertRestOpen(targets !== null, overriding);
       return ctx.croak(`Expected ${open}"values" or a query but found ${describeFound(ctx.peek())}`);
     }
     const source = ctx.parse(insertSource);
-    return { columns, ...(overriding && { overriding }), source };
+    const named = targets === null ? { columns: null } : splitTargets(targets);
+    return { ...named, ...(overriding && { overriding }), source };
   },
   {
     expected: '"default values" or "overriding" or "values" or a query',
@@ -7736,13 +7835,36 @@ const insertRest = custom<InsertRest, SqlTokenType>(
 // `ON CONSTRAINT name` names the arbiter constraint in place of a column list.
 const conflictConstraint = seq(skip(kwseq("on", "constraint")), field("name", nameWord)).map((s) => s.name);
 
+// `(element, …) [WHERE predicate]` (see ConflictInference). A list of bare
+// column names with no WHERE keeps the plain `target` shape.
+type ConflictTarget = Pick<OnConflict, "target" | "inference">;
+// The list may not be empty: PG's index_params.
+const conflictElement = custom<PartitionKey, SqlTokenType>((ctx) => partitionKey(ctx, "an ON CONFLICT index"), {
+  expected: expression.expected(),
+  first: expression.first(),
+});
+const conflictElements = seq(skip(punc("(")), field("items", sepBy(conflictElement, P(","))), skip(punc(")"))).map(
+  (s) => s.items,
+);
+const conflictInference = seq(field("elements", conflictElements), field("where", optional(whereClause))).map(
+  ({ elements, where }): ConflictTarget => {
+    const columns: string[] = [];
+    for (const e of elements) {
+      if (e.expr.kind !== "name" || e.expr.parts.length !== 1 || e.collate || e.opclass) break;
+      columns.push(e.expr.parts[0]!);
+    }
+    if (columns.length === elements.length && where === null) return { target: columns };
+    return { target: null, inference: { elements, ...(where !== null && { where }) } };
+  },
+);
+
 const onConflict = seq(
   skip(kwseq("on", "conflict")),
   field(
     "target",
     optional(
       oneOf(
-        columnList.map((columns) => ({ columns })),
+        conflictInference,
         conflictConstraint.map((name) => ({ name })),
       ),
     ),
@@ -7759,8 +7881,9 @@ const onConflict = seq(
   ),
 ).map(
   ({ target, action }): OnConflict => ({
-    target: target && "columns" in target ? target.columns : null,
+    target: target && "target" in target ? target.target : null,
     ...(target && "name" in target && { constraint: target.name }),
+    ...(target && "inference" in target && { inference: target.inference }),
     action,
   }),
 );
@@ -7783,6 +7906,7 @@ const insertStmt = seq(
     table,
     ...(typeof alias === "string" && { alias }),
     columns: rest.columns,
+    ...(rest.indirection && { indirection: rest.indirection }),
     ...(rest.overriding && { overriding: rest.overriding }),
     source: rest.source,
     onConflict: oc ?? null,
@@ -7845,7 +7969,7 @@ const deleteStmt = seq(
 const mergeUpdate = seq(skip(kw("update")), field("set", setAssignments)).map(
   ({ set }): MergeAction => ({ kind: "update", set }),
 );
-const mergeColumns = optional(columnList);
+const mergeColumns = optional(insertColumnList);
 
 // PG's merge_insert: `INSERT [(cols)] [OVERRIDING … VALUE] VALUES (row)` or
 // `INSERT DEFAULT VALUES`. Unlike INSERT's, the source is one row, never a
@@ -7854,14 +7978,15 @@ const mergeInsert = custom<MergeAction, SqlTokenType>(
   (ctx) => {
     ctx.parse(kw("insert"));
     if (ctx.is("ident", "default")) return { kind: "insert", columns: null, source: ctx.parse(defaultValues) };
-    const columns = ctx.parse(mergeColumns) ?? null;
+    const targets = ctx.parse(mergeColumns) ?? null;
     const overriding = ctx.parse(insertOverriding) ?? null;
     if (ctx.eat("ident", "values") === null) {
-      const open = insertRestOpen(columns, overriding);
+      const open = insertRestOpen(targets !== null, overriding);
       return ctx.croak(`Expected ${open}"values" but found ${describeFound(ctx.peek())}`);
     }
     const row = ctx.parse(insertValuesRow);
-    return { kind: "insert", columns, ...(overriding && { overriding }), source: { kind: "values", rows: [row] } };
+    const named = targets === null ? { columns: null } : splitTargets(targets);
+    return { kind: "insert", ...named, ...(overriding && { overriding }), source: { kind: "values", rows: [row] } };
   },
   { expected: '"insert"', first: [{ type: "ident", value: "insert" }] },
 );

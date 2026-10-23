@@ -8904,6 +8904,197 @@ describe("SQL-lite ONLY targets, WHERE CURRENT OF and SET col = DEFAULT", () => 
   });
 });
 
+// --- assignment indirection and ON CONFLICT inference ---
+
+describe("SQL-lite assignment indirection and ON CONFLICT inference", () => {
+  const sub = (index: unknown, upper?: unknown) => ({
+    kind: "subscript",
+    index,
+    ...(upper !== undefined && { upper }),
+  });
+  const fld = (n: string) => ({ kind: "field", name: n });
+  const row = (...items: unknown[]) => ({ kind: "row", items, implicit: true });
+  const values = (...items: unknown[]) => ({ kind: "values", rows: [items] });
+  const conflict = (src: string) => firstStmt(`INSERT INTO t VALUES (1) ON CONFLICT ${src};`).onConflict;
+  const key = (expr: unknown, over: Record<string, unknown> = {}) => ({ expr, ...over });
+  const lower = { kind: "call", name: "lower", args: [name("email")] };
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("reads subscript and field steps on a single UPDATE target", () => {
+    expect(firstStmt("UPDATE t SET a[1] = 1, c.f = 2, a[i + 1] = 3;").set).toEqual([
+      { column: "a", indirection: [sub(num(1))], value: num(1) },
+      { column: "c", indirection: [fld("f")], value: num(2) },
+      { column: "a", indirection: [sub(bin("+", name("i"), num(1)))], value: num(3) },
+    ]);
+  });
+
+  it("reads slices and chained steps", () => {
+    expect(firstStmt('UPDATE t SET a[1:2] = x, a[:3] = y, a[2:] = z, a[:] = w, m[1][2].f."G" = 0;').set).toEqual([
+      { column: "a", indirection: [sub(num(1), num(2))], value: name("x") },
+      { column: "a", indirection: [sub(null, num(3))], value: name("y") },
+      { column: "a", indirection: [sub(num(2), null)], value: name("z") },
+      { column: "a", indirection: [sub(null, null)], value: name("w") },
+      { column: "m", indirection: [sub(num(1)), sub(num(2)), fld("f"), fld("G")], value: num(0) },
+    ]);
+  });
+
+  it("runs multi-column steps parallel to the columns", () => {
+    expect(firstStmt("UPDATE t SET (a[1], b.f, c) = (1, 2, DEFAULT), (d, e) = (SELECT 1, 2);").set).toEqual([
+      {
+        columns: ["a", "b", "c"],
+        indirection: [[sub(num(1))], [fld("f")], []],
+        value: row(num(1), num(2), { kind: "default" }),
+      },
+      { columns: ["d", "e"], value: expect.objectContaining({ kind: "subquery" }) },
+    ]);
+  });
+
+  it("reads steps under ON CONFLICT DO UPDATE and MERGE's UPDATE SET", () => {
+    expect(conflict("(a) DO UPDATE SET a[1] = 1, (b.f) = ROW(2)").action.set).toEqual([
+      { column: "a", indirection: [sub(num(1))], value: num(1) },
+      { columns: ["b"], indirection: [[fld("f")]], value: { kind: "row", items: [num(2)] } },
+    ]);
+    expect(
+      firstStmt("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a[1] = s.a, (b.f, c) = (1, 2);")
+        .when[0].action,
+    ).toEqual({
+      kind: "update",
+      set: [
+        { column: "a", indirection: [sub(num(1))], value: name("s", "a") },
+        { columns: ["b", "c"], indirection: [[fld("f")], []], value: row(num(1), num(2)) },
+      ],
+    });
+  });
+
+  it("reads steps in INSERT's and MERGE's INSERT column lists", () => {
+    expect(firstStmt("INSERT INTO t (a[1], b, c.f) OVERRIDING USER VALUE VALUES (1, 2, 3);")).toEqual({
+      kind: "insert",
+      table: ["t"],
+      columns: ["a", "b", "c"],
+      indirection: [[sub(num(1))], [], [fld("f")]],
+      overriding: "user",
+      source: values(num(1), num(2), num(3)),
+      onConflict: null,
+      returning: null,
+    });
+    expect(firstStmt("INSERT INTO t (a[1:2]) SELECT x FROM u;")).toMatchObject({
+      columns: ["a"],
+      indirection: [[sub(num(1), num(2))]],
+      source: { kind: "select" },
+    });
+    expect(
+      firstStmt("MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (a[1], c.f) VALUES (1, 2);").when[0]
+        .action,
+    ).toEqual({
+      kind: "insert",
+      columns: ["a", "c"],
+      indirection: [[sub(num(1))], [fld("f")]],
+      source: values(num(1), num(2)),
+    });
+  });
+
+  it("omits indirection when no target has steps", () => {
+    expect(firstStmt("UPDATE t SET a = 1, (b, c) = (1, 2);").set).toEqual([
+      { column: "a", value: num(1) },
+      { columns: ["b", "c"], value: row(num(1), num(2)) },
+    ]);
+    expect(firstStmt("INSERT INTO t (a, b) VALUES (1, 2);")).not.toHaveProperty("indirection");
+    const merge = firstStmt("MERGE INTO t USING s ON true WHEN NOT MATCHED THEN INSERT (a) VALUES (1);");
+    expect(merge.when[0].action).not.toHaveProperty("indirection");
+    // A parenthesised query is still INSERT's source, not a column list.
+    expect(firstStmt("INSERT INTO t ((SELECT 1));")).toMatchObject({ columns: null, source: { kind: "select" } });
+  });
+
+  it("reads ON CONFLICT index expressions, COLLATE and operator classes", () => {
+    expect(conflict("((lower(email))) DO NOTHING")).toEqual({
+      target: null,
+      inference: { elements: [key(lower)] },
+      action: { kind: "nothing" },
+    });
+    expect(
+      conflict('(lower(email) COLLATE "C" text_pattern_ops, (a + b), c s.ops, d COLLATE "de_DE") DO NOTHING'),
+    ).toEqual({
+      target: null,
+      inference: {
+        elements: [
+          key(lower, { collate: ["C"], opclass: ["text_pattern_ops"] }),
+          key(bin("+", name("a"), name("b"))),
+          key(name("c"), { opclass: ["s", "ops"] }),
+          key(name("d"), { collate: ["de_DE"] }),
+        ],
+      },
+      action: { kind: "nothing" },
+    });
+  });
+
+  it("reads a WHERE predicate after the ON CONFLICT list", () => {
+    expect(conflict("(a, b) WHERE c > 0 DO UPDATE SET a = 1 WHERE d")).toEqual({
+      target: null,
+      inference: { elements: [key(name("a")), key(name("b"))], where: bin(">", name("c"), num(0)) },
+      action: { kind: "update", set: [{ column: "a", value: num(1) }], where: name("d") },
+    });
+    expect(conflict("((lower(email))) WHERE deleted_at IS NULL DO NOTHING").inference).toEqual({
+      elements: [key(lower)],
+      where: { kind: "is", expr: name("deleted_at"), negated: false },
+    });
+  });
+
+  it("keeps a plain ON CONFLICT column list as target", () => {
+    expect(conflict('(a, "B") DO NOTHING')).toEqual({ target: ["a", "B"], action: { kind: "nothing" } });
+    // A parenthesised column is still the column, as in PG's arbiter inference.
+    expect(conflict("((a), b) DO NOTHING")).toEqual({ target: ["a", "b"], action: { kind: "nothing" } });
+    // Keyword-like column names stay plain columns through the element reader.
+    expect(conflict("(time, year, filter) DO NOTHING").target).toEqual(["time", "year", "filter"]);
+    // A WHERE predicate moves even a plain list into inference.
+    expect(conflict("(a) WHERE b DO NOTHING")).toEqual({
+      target: null,
+      inference: { elements: [key(name("a"))], where: name("b") },
+      action: { kind: "nothing" },
+    });
+    expect(conflict("DO NOTHING")).toEqual({ target: null, action: { kind: "nothing" } });
+    expect(conflict("ON CONSTRAINT c DO NOTHING")).toEqual({
+      target: null,
+      constraint: "c",
+      action: { kind: "nothing" },
+    });
+  });
+
+  it("rejects the malformed forms", () => {
+    // A target step is `.name` or a bracketed subscript; PG rejects `.*` in analysis.
+    expect(bad("UPDATE t SET c.* = 1;")).toThrow(/Expected a field name but found "\*"/);
+    expect(bad("INSERT INTO t (c.*) VALUES (1);")).toThrow(/Expected a field name but found "\*"/);
+    expect(bad("UPDATE t SET a. = 1;")).toThrow(/Expected a name but found "="/);
+    expect(bad("UPDATE t SET a[1 = 1;")).toThrow(/Expected "\]" but found ";"/);
+    expect(bad("UPDATE t SET (a[1) = (1);")).toThrow(/Expected "\]" but found "\)"/);
+    // Column lists may not be empty.
+    expect(bad("INSERT INTO t () VALUES (1);")).toThrow(/Expected a name but found "\)" \(1:15\)/);
+    expect(bad("INSERT INTO t () SELECT 1;")).toThrow(/Expected a name but found "\)" \(1:15\)/);
+    // A subscript names an index or a slice.
+    expect(bad("UPDATE t SET a[] = 1;")).toThrow(/Expected an expression or ":" but found "\]" \(1:15\)/);
+    expect(bad("SELECT a[] FROM t;")).toThrow(/Expected an expression or ":" but found "\]"/);
+    expect(bad("MERGE INTO t USING s ON true WHEN NOT MATCHED THEN INSERT () VALUES (1);")).toThrow(
+      /Expected a name but found "\)"/,
+    );
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT () DO NOTHING;")).toThrow(/but found "\)" \(1:38\)/);
+    // An element other than a column or call must be parenthesised.
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a + b) DO NOTHING;")).toThrow(
+      /an ON CONFLICT index expression must be parenthesised/,
+    );
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (t.a) DO NOTHING;")).toThrow(
+      /an ON CONFLICT index expression must be parenthesised/,
+    );
+    // Sort options, which PG's analysis rejects in an arbiter.
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a DESC) DO NOTHING;")).toThrow(/Expected "\)" but found "desc"/);
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a ASC) DO NOTHING;")).toThrow(/Expected "\)" but found "asc"/);
+    // WHERE follows a list only, and needs a predicate.
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT ON CONSTRAINT c WHERE x DO NOTHING;")).toThrow(
+      /Expected "do" but found "where"/,
+    );
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT WHERE x DO NOTHING;")).toThrow(/found "where"/);
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a) WHERE DO NOTHING;")).toThrow(/found "do"/);
+  });
+});
+
 // --- MERGE ---
 
 describe("SQL-lite MERGE", () => {
