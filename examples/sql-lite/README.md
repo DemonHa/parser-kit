@@ -64,8 +64,9 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
   - **`ALTER TABLE`:** action lists that add or drop columns and constraints, `ALTER COLUMN` type / default / not-null, renames, `SET SCHEMA`, `OWNER TO`, triggers, `ATTACH` / `DETACH PARTITION`, storage parameters, `REPLICA IDENTITY`, `CLUSTER ON`.
   - **Other `CREATE` targets:** indexes (with `CONCURRENTLY`, `USING`, opclasses, `INCLUDE`, partial `WHERE`, `WITH`), views and materialized views, sequences, enum / composite / range types, domains, schemas, databases, extensions, tablespaces, functions, procedures, aggregates, triggers, roles and users.
   - **`DROP`:** all of those except tablespaces.
-  - **`ALTER`:** schemas, domains, types, indexes, functions, aggregates, views, materialized views and sequences.
-  - Plus `COMMENT ON` and `REFRESH MATERIALIZED VIEW`.
+  - **`ALTER`:** schemas, domains, types, indexes, functions, aggregates, views, materialized views and sequences. `ALTER EXTENSION` with `ADD` / `DROP` of a member object, `SET SCHEMA` and `UPDATE [TO version]`. `RENAME TO`, `OWNER TO` and `SET SCHEMA`, as far as PostgreSQL allows each, on procedures, routines, collations, conversions, statistics, the four text search kinds, operators, operator classes and families, languages, event triggers, foreign-data wrappers, servers, publications, subscriptions, databases, tablespaces, large objects, rules and triggers.
+  - **`COMMENT ON`** every object kind PostgreSQL 17 takes, including functions, procedures and aggregates with their signatures, operators, casts, transforms, constraints, policies, rules and triggers `ON` their table, operator classes and families `USING` their access method, and large objects. **`SECURITY LABEL [FOR provider] ON`** the kinds PostgreSQL labels.
+  - Plus `REFRESH MATERIALIZED VIEW`.
 - **Access control and utility.** `GRANT` / `REVOKE` on tables, columns, sequences, schemas, databases, types and `ALL … IN SCHEMA`, and role membership. Transactions with isolation modes, `AND [NO] CHAIN` and savepoints. `SET` / `SHOW` / `RESET`. `LOCK`, `CALL`, `DO`, `PREPARE` / `EXECUTE` / `DEALLOCATE`. Cursors (`DECLARE` / `FETCH` / `MOVE` / `CLOSE`). `EXPLAIN` (option list and legacy forms), `ANALYZE`, `VACUUM`.
 
 ### Compared with node-sql-parser
@@ -79,13 +80,13 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 | Types and lexical | 34 | 18 | 12 | 2 | 2 |
 | DML | 77 | 32 | 35 | 6 | 4 |
 | Transactions and session | 70 | 17 | 33 | 0 | 20 |
-| Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
+| Utility and maintenance | 35 | 2 | 23 | 0 | 10 |
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
-| Other schema objects | 93 | 15 | 37 | 3 | 38 |
+| Other schema objects | 93 | 15 | 45 | 3 | 30 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **211** | **237** | **18** | **133** |
+| **Total** | **599** | **211** | **247** | **18** | **123** |
 
-So sql-lite accepts 448 of the 599 statements (75%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 458 of the 599 statements (76%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -102,9 +103,9 @@ PG_COVERAGE_REPORT=1 pnpm vitest run examples/sql-lite/pg-coverage.test.ts
 
 | File | Statements | Parse | Rate | COPY blocks | Meta-commands |
 |---|---:|---:|---:|---:|---:|
-| `handwritten-pg17.sql` | 110 | 63 | 57.3% | 4 | 7 |
-| `pagila-schema.sql` | 388 | 208 | 53.6% | 0 | 0 |
-| **Total** | **498** | **271** | **54.4%** | **4** | **7** |
+| `handwritten-pg17.sql` | 110 | 69 | 62.7% | 4 | 7 |
+| `pagila-schema.sql` | 388 | 209 | 53.9% | 0 | 0 |
+| **Total** | **498** | **278** | **55.8%** | **4** | **7** |
 
 To print the table, or to rewrite `pg-dump-corpus.ts` after a grammar change (review the diff: no row may move to `fail`):
 
@@ -130,11 +131,10 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - `LISTEN` / `NOTIFY` / `UNLISTEN`, `DISCARD`.
 - `SET TRANSACTION`, `SET SESSION CHARACTERISTICS`, `SET CONSTRAINTS`, `SET` / `RESET SESSION AUTHORIZATION`, `SET … FROM CURRENT`, multi-word `SHOW TRANSACTION ISOLATION LEVEL`.
 - `END` and `ABORT` (the transaction synonyms), and two-phase commit (`PREPARE TRANSACTION`, `COMMIT PREPARED`, `ROLLBACK PREPARED`).
-- `ALTER DATABASE`, `ALTER EXTENSION`, `ALTER PROCEDURE`, `ALTER TABLESPACE`, `ALTER TRIGGER`, `ALTER SYSTEM`, `DROP TABLESPACE`.
+- `ALTER DATABASE` and `ALTER TABLESPACE` beyond `RENAME TO` / `OWNER TO`; `ALTER PROCEDURE` / `ALTER ROUTINE` attributes (`SECURITY DEFINER`, `SET`, …); `ALTER FOREIGN TABLE`, `ALTER POLICY`, `ALTER SYSTEM`, `DROP TABLESPACE`.
 - Some actions on objects that are otherwise supported: `ALTER INDEX … ATTACH PARTITION`, `ALTER MATERIALIZED VIEW … SET TABLESPACE`, `ALTER TYPE … ADD / DROP ATTRIBUTE`, and the shell type `CREATE TYPE name;`.
-- `COMMENT ON` anything but a table, column, index, type or schema (views, functions, constraints, triggers, roles, extensions, …).
 - The `TABLE name` command.
-- The long tail: `RULE`, `EVENT TRIGGER`, `PUBLICATION`, `SUBSCRIPTION`, `CAST`, `COLLATION`, `CONVERSION`, `OPERATOR [CLASS | FAMILY]`, `SERVER`, `USER MAPPING`, `FOREIGN TABLE`, `IMPORT FOREIGN SCHEMA`, `STATISTICS`, `TEXT SEARCH …`, `LANGUAGE`, `ACCESS METHOD`, `TRANSFORM`, `SECURITY LABEL`.
+- `CREATE` and `DROP` for the long tail: `RULE`, `EVENT TRIGGER`, `PUBLICATION`, `SUBSCRIPTION`, `CAST`, `COLLATION`, `CONVERSION`, `OPERATOR [CLASS | FAMILY]`, `SERVER`, `USER MAPPING`, `FOREIGN TABLE`, `IMPORT FOREIGN SCHEMA`, `STATISTICS`, `TEXT SEARCH …`, `LANGUAGE`, `ACCESS METHOD`, `TRANSFORM`. `COMMENT ON`, `SECURITY LABEL`, `ALTER EXTENSION … ADD / DROP` and the generic `ALTER` forms above already name these objects.
 - `USE db` is a MySQL-ism with no PostgreSQL equivalent. It is rejected **on purpose**, and `pg-coverage.test.ts` pins that.
 
 **Clauses**
@@ -220,6 +220,7 @@ Inputs that used to parse and are now rejected, because PostgreSQL's grammar rej
 
 - A join other than `CROSS` or `NATURAL` with no `ON` / `USING` qualifier: `a JOIN b`, `a LEFT JOIN b`, and `a JOIN b JOIN c ON p` (the inner join takes the only `ON`, leaving the outer one without a qualifier).
 - `NATURAL CROSS JOIN`.
+- A qualified name where `COMMENT ON` takes a plain one: `COMMENT ON SCHEMA a.b`. Schemas, extensions, roles, databases and the other kinds PostgreSQL names by a single word now take only one.
 
 ## Benchmarks
 
