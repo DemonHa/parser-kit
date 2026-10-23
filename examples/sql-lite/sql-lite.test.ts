@@ -10060,6 +10060,13 @@ describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
     expect(bad("ALTER DATABASE d OWNER TO;")).toThrow(/Expected a name but found ";"/);
     expect(bad("ALTER DATABASE d WITH is_template;")).toThrow(/Expected an option value but found ";"/);
     expect(bad("ALTER DATABASE a.b RENAME TO c;")).toThrow(/Expected ";" but found "\."/);
+    // The other actions' words name no option, and OWNER TO only leads.
+    expect(bad("ALTER DATABASE d WITH RESET x;")).toThrow(/Expected ";" but found "reset"/);
+    expect(bad("ALTER DATABASE d IS_TEMPLATE true REFRESH COLLATION VERSION;")).toThrow(
+      /Expected ";" but found "refresh"/,
+    );
+    expect(bad("ALTER DATABASE d WITH OWNER TO r;")).toThrow(/Expected an option value but found "to"/);
+    expect(bad("CREATE DATABASE d OWNER TO;")).toThrow(/Expected an option value but found "to"/);
     expect(bad("ALTER TABLESPACE t;")).toThrow(/Expected "rename", "owner", "set" or "reset" but found ";"/);
     expect(bad("ALTER TABLESPACE t SET random_page_cost = 1;")).toThrow(/Expected "\(" but found "random_page_cost"/);
     expect(bad("ALTER TABLESPACE t RESET (x = 1);")).toThrow(/RESET must not include values for parameters/);

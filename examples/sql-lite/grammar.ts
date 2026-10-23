@@ -788,7 +788,8 @@ export type AlterConfigAction =
   | { kind: "set"; name: string; values: Expr[] | "default" | "fromCurrent" }
   | { kind: "reset"; name: string };
 // ALTER ROLE's `options` are CREATE ROLE's, bar the membership ones (IN ROLE,
-// ROLE, ADMIN, USER), which only CREATE takes; PG lets the run be empty.
+// ROLE, ADMIN, and the undocumented USER that PG keeps for ALTER GROUP), which
+// are not taken; PG lets the run be empty.
 export type AlterRoleAction = { kind: "options"; options: RoleOption[] } | AlterRenameTo | AlterConfigAction;
 // ALTER DATABASE's `options` are CREATE DATABASE's entries; RENAME TO and
 // OWNER TO build the generic `alterObject` node instead.
@@ -4692,14 +4693,22 @@ function parseRoleSpec(ctx: ParseContext<SqlTokenType>): string {
 // already makes. So is a lone `CONNECTION = n`, read as an ordinary option
 // named `connection`. The list has no delimiter, so it runs while a name leads:
 // an unreserved word or a quoted one, as PG's own option names are IDENT bar a
-// few.
+// few — and bar the words that lead ALTER DATABASE's other actions, which are
+// keywords to PG and never an option's name. OWNER is an option name, but never
+// before TO, which is reserved and so no value.
+const DATABASE_ACTION_WORDS: ReadonlySet<string> = new Set(["rename", "set", "reset", "refresh"]);
 function isDatabaseOptionStart(ctx: ParseContext<SqlTokenType>): boolean {
   const tok = ctx.peek();
-  return tok !== null && (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value)));
+  if (tok?.type === "qident") return true;
+  return tok?.type === "ident" && !RESERVED.has(tok.value) && !DATABASE_ACTION_WORDS.has(tok.value);
 }
 
 function parseDatabaseOption(ctx: ParseContext<SqlTokenType>): RelationOption {
   const next = ctx.peekAhead(1);
+  if (ctx.is("ident", "owner") && isWordAhead(ctx, 1, "to")) {
+    ctx.next(); // OWNER
+    return ctx.croak(`Expected an option value but found ${describeFound(ctx.peek())}`);
+  }
   if (!(ctx.is("ident", "connection") && next?.type === "ident" && next.value === "limit")) {
     return ctx.parse(relationOption);
   }
@@ -4858,8 +4867,8 @@ function parseSignedInt(ctx: ParseContext<SqlTokenType>, what = "an integer"): n
 // `null` and `user`, reserved already); the list has no delimiter, so it simply
 // runs until a word leads no option. PG's legacy spellings `IN GROUP` and
 // `USER` read as `IN ROLE` and `ROLE`; its SYSID is not taken. With `alter`,
-// the membership options (IN ROLE, ROLE, USER, ADMIN) lead none, as ALTER ROLE
-// takes none of them.
+// the membership options (IN ROLE, ROLE, USER, ADMIN) lead none: ALTER ROLE
+// takes none of them in PG bar an undocumented USER, which is not taken here.
 const MEMBERSHIP_OPTIONS: ReadonlySet<string> = new Set(["in", "role", "user", "admin"]);
 function parseRoleOption(ctx: ParseContext<SqlTokenType>, alter = false): RoleOption | null {
   const tok = ctx.peek();
@@ -6646,7 +6655,8 @@ function alterRenameOwner(
 // `ALTER DATABASE name …` once ALTER is consumed: RENAME TO, OWNER TO, SET
 // TABLESPACE, REFRESH COLLATION VERSION, SET / RESET, or `[WITH] option …`, a
 // run of CREATE DATABASE's entries that PG lets be empty. RENAME, SET, RESET
-// and REFRESH are keywords to PG and never an option's name, so each commits.
+// and REFRESH are keywords to PG and never an option's name, so each commits
+// where it leads, and ends the option run elsewhere (see isDatabaseOptionStart).
 function alterDatabaseRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
   ctx.next(); // DATABASE
   const name = ctx.parse(nameWord);
@@ -6781,6 +6791,8 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
   },
   default: { parse: alterDefaultPrivilegesRest },
   role: { parse: (ctx, start) => alterRoleRest(ctx, start, "role") },
+  // USER only; `ALTER USER MAPPING` is not supported and reads as a user named
+  // `mapping` followed by stray words, as on DROP.
   user: { parse: (ctx, start) => alterRoleRest(ctx, start, "user") },
   database: { parse: alterDatabaseRest },
   tablespace: { parse: alterTablespaceRest },
