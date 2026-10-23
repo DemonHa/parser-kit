@@ -672,7 +672,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ],
     [
       "create-table",
-      "neither",
+      "sql-lite",
       'CREATE TABLE order_items (order_id int, line int, sku text COLLATE "C", qty int DEFAULT 1 CONSTRAINT qty_pos CHECK (qty > 0), PRIMARY KEY (order_id, line), CONSTRAINT fk_order FOREIGN KEY (order_id) REFERENCES orders (id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED);',
     ],
     [
@@ -687,7 +687,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ],
     [
       "create-table",
-      "neither",
+      "sql-lite",
       "CREATE TABLE fk2 (tenant_id int, parent_id int, FOREIGN KEY (tenant_id, parent_id) REFERENCES parents (tenant_id, id) ON DELETE SET NULL (parent_id));",
     ],
     [
@@ -741,13 +741,13 @@ export const PG_BATTERY: BatteryRow[] = [
       "sql-lite",
       "CREATE TABLE ts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), doc tsvector, ip inet, mac macaddr, money_col money, x xml);",
     ],
-    ["create-table", "neither", "CREATE TABLE u2 (a int, b int, UNIQUE NULLS NOT DISTINCT (a, b));"],
+    ["create-table", "sql-lite", "CREATE TABLE u2 (a int, b int, UNIQUE NULLS NOT DISTINCT (a, b));"],
     [
       "create-table",
-      "neither",
+      "sql-lite",
       "CREATE TABLE u3 (a int, b int, CONSTRAINT u3_ab UNIQUE (a, b) INCLUDE (b) WITH (fillfactor = 90) USING INDEX TABLESPACE idxspace);",
     ],
-    ["create-table", "neither", "CREATE TABLE c1 (a int CHECK (a > 0) NO INHERIT, b int NULL);"],
+    ["create-table", "sql-lite", "CREATE TABLE c1 (a int CHECK (a > 0) NO INHERIT, b int NULL);"],
     [
       "create-table",
       "sql-lite",
@@ -782,7 +782,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ["alter-table", "sql-lite", "ALTER TABLE users ALTER COLUMN email SET NOT NULL, ALTER email DROP NOT NULL;"],
     [
       "alter-table",
-      "neither",
+      "sql-lite",
       "ALTER TABLE orders ADD CONSTRAINT orders_user_fk FOREIGN KEY (user_id) REFERENCES users (id) NOT VALID;",
     ],
     ["alter-table", "sql-lite", "ALTER TABLE orders VALIDATE CONSTRAINT orders_user_fk;"],
@@ -835,8 +835,8 @@ export const PG_BATTERY: BatteryRow[] = [
       "CREATE INDEX o_created ON orders (created_at DESC NULLS LAST, id) INCLUDE (total) WHERE deleted_at IS NULL;",
     ],
     ["index", "both", "CREATE INDEX name_trgm ON users USING gist (name gist_trgm_ops);"],
-    ["index", "neither", "CREATE UNIQUE INDEX uq ON t (a, b) NULLS NOT DISTINCT;"],
-    ["index", "neither", "CREATE INDEX ON ONLY measurement (logdate) TABLESPACE idxspace;"],
+    ["index", "sql-lite", "CREATE UNIQUE INDEX uq ON t (a, b) NULLS NOT DISTINCT;"],
+    ["index", "sql-lite", "CREATE INDEX ON ONLY measurement (logdate) TABLESPACE idxspace;"],
     ["index", "both", 'CREATE INDEX t_coll ON t (name COLLATE "C" text_pattern_ops ASC);'],
     ["index", "sql-lite", "ALTER INDEX idx_orders_user RENAME TO orders_user_idx;"],
     ["index", "neither", "ALTER INDEX measurement_logdate_idx ATTACH PARTITION m_y2024_logdate_idx;"],
