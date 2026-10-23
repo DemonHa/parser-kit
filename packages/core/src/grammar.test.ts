@@ -3,6 +3,7 @@ import { attempt, bindTokens, field, oneOf, optional, repeat, seq, skip } from "
 import { ParseError } from "./error";
 import { defineExpression, defineGrammar } from "./grammar";
 import { defineLexer, readers } from "./lexer";
+import { makeRule } from "./rule";
 import { stripSpans } from "./strip-spans";
 
 // A miniature dbml-style language: keyword-led top-level constructs, newlines
@@ -138,6 +139,114 @@ describe("defineGrammar() — errorReporting.preferFarthest", () => {
       errorReporting: { preferFarthest: true },
     });
     expect(() => labeled.parse("foo bar")).toThrow('Expected a count but found "bar"');
+  });
+});
+
+describe("defineGrammar() — errorReporting.propagateLexerErrors", () => {
+  // `@` doesn't lex. The lexer consumes it before croaking, so once a
+  // backtracking branch rolls back the character is gone for good.
+  const lexLexer = defineLexer({
+    punctuation: { type: "punc", tokens: [":", ",", ";"], display: "a symbol" },
+    identifier: { type: "word", start: /[a-z_]/i, part: /[a-z0-9_]/i, display: "an identifier" },
+    readers: [readers.number("num", { display: "a number" })],
+  });
+  type LexTT = "punc" | "word" | "num";
+  const t = bindTokens<LexTT>().token;
+  const p = (value: string) => t("punc", { values: [value] });
+  const punc = (value: string) => skip(p(value));
+  const num = t("num").map((node) => node.value);
+  const word = t("word").map((node) => node.value);
+
+  // `foo : 1` takes the attempted branch; on `foo : @` that branch hits the
+  // lexer error and, by default, the committed branch then misreports `:`.
+  const stmt = seq(
+    field(
+      "value",
+      oneOf(attempt(seq(skip(t("word")), punc(":"), field("n", num))), seq(skip(t("word")), field("n", word))),
+    ),
+    punc(";"),
+  );
+  const sync = [{ type: "punc", value: ";", consume: true }] as const;
+  const plain = defineGrammar({ lexer: lexLexer, root: repeat(stmt), recovery: { sync } });
+  const propagating = defineGrammar({
+    lexer: lexLexer,
+    root: repeat(stmt),
+    recovery: { sync },
+    errorReporting: { propagateLexerErrors: true },
+  });
+
+  it("off (default): backtracking swallows the lexer error and leaves it untagged", () => {
+    expect(() => plain.parse("foo : @;")).toThrow('Expected an identifier but found ":" (1:4)');
+    expect(stripSpans(plain.parse("foo @ bar;"))).toEqual([{ value: { n: "bar" } }]); // `@` silently dropped
+    // Not even as an own `undefined` key: the field is declared, never defined.
+    expect(() => plain.parse("@")).toThrow(expect.not.objectContaining({ fromLexer: undefined }));
+  });
+
+  it("on: tryParse rethrows the lexer error, tagged fromLexer", () => {
+    expect(() => propagating.parse("foo : @;")).toThrow(
+      expect.objectContaining({ message: 'Unexpected character "@" (1:6)', fromLexer: true }),
+    );
+    expect(() => propagating.parse("foo @ bar;")).toThrow('Unexpected character "@" (1:4)');
+    expect(() => propagating.parseValue(stmt, "foo : @;")).toThrow(expect.objectContaining({ fromLexer: true }));
+    expect(stripSpans(propagating.parse("foo : 1; foo bar;"))).toEqual([
+      { value: { n: "1" } },
+      { value: { n: "bar" } },
+    ]);
+  });
+
+  it("on: escapes nested attempts", () => {
+    const root = oneOf(
+      attempt(seq(skip(t("word")), field("inner", oneOf(attempt(seq(punc(":"), field("n", num))), p(","))))),
+      seq(skip(t("word")), field("other", word)),
+    );
+    const grammar = (propagateLexerErrors: boolean) =>
+      defineGrammar({ lexer: lexLexer, root, errorReporting: { propagateLexerErrors } });
+    expect(() => grammar(true).parse("foo : @")).toThrow('Unexpected character "@"');
+    expect(() => grammar(false).parse("foo : @")).toThrow('Expected an identifier but found ":"');
+    // Ordinary failures inside the nest still roll back.
+    expect(() => grammar(true).parse("foo : bar")).toThrow('Expected an identifier but found ":"');
+  });
+
+  it("on: diagnose() records each lexer error once and resumes at the next sync point", () => {
+    const { ast, errors } = propagating.diagnose("foo : @; foo : 2; foo : @ @ 3; foo bar;");
+    // The second `@` of the third statement is hit by recovery's own skip loop.
+    expect(errors.map((error) => error.message)).toEqual([
+      'Unexpected character "@" (1:6)',
+      'Unexpected character "@" (1:24)',
+      'Unexpected character "@" (1:26)',
+    ]);
+    expect(stripSpans(ast)).toEqual([{ value: { n: "2" } }, { value: { n: "bar" } }]);
+  });
+
+  it("on: describe() keeps the lexer message instead of relabelling it", () => {
+    const root = seq(skip(t("word")), field("n", t("num").describe("a count")));
+    const grammar = (propagateLexerErrors: boolean) =>
+      defineGrammar({ lexer: lexLexer, root, errorReporting: { propagateLexerErrors } });
+    expect(() => grammar(false).parse("foo @")).toThrow("Expected a count but found end of input");
+    expect(() => grammar(true).parse("foo @")).toThrow('Unexpected character "@"');
+  });
+
+  it("on: a propagated lexer error is never replaced by a farthest croak", () => {
+    // The attempt croaks on `x` four tokens in; the second branch has consumed
+    // one token when its lookahead reaches the `@`. Lexer errors carry no
+    // consumed stamp, so the shallower lexer error still wins.
+    const lookahead = makeRule<null, LexTT>({
+      parse: (ctx) => {
+        ctx.next();
+        ctx.peekAhead(4);
+        return ctx.croak("unreachable");
+      },
+      first: () => [{ type: "word" }],
+      expected: () => "a lookahead",
+    });
+    const root = oneOf(
+      attempt(seq(skip(t("word")), punc(":"), skip(t("num")), punc(","), skip(t("num")))),
+      attempt(lookahead),
+    );
+    const grammar = (propagateLexerErrors: boolean) =>
+      defineGrammar({ lexer: lexLexer, root, errorReporting: { preferFarthest: true, propagateLexerErrors } });
+    expect(() => grammar(false).parse("foo : 1 , x @")).toThrow('Expected a number but found "x"');
+    expect(() => grammar(true).parse("foo : 1 , x @")).toThrow('Unexpected character "@"');
   });
 });
 
