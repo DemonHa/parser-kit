@@ -26,6 +26,22 @@ export interface PrattHelpers<T> {
   parseRhs(minBp: number): T;
 }
 
+/**
+ * Opt-in guard on an infix or postfix group, run after the group's operator
+ * matched the current token. Return false to decline: the next matching group
+ * of the same kind is tried, and a token no postfix group accepts goes on to
+ * infix lookup as usual. If no infix group accepts either, the expression ends
+ * as if no operator matched. Infix guards run before the bp check (so a later
+ * group with another bp can take a declined token); postfix guards run only
+ * once the group's bp qualifies. The cursor is on the operator; look with
+ * `peek`/`peekAhead` and don't consume.
+ * It may be called again for the same token: at each enclosing precedence
+ * level, with that level's `left`, and for the non-associativity chain check.
+ * Keep it pure and don't assume a single call. Groups without `when` cost
+ * nothing extra.
+ */
+export type PrattGuard<T, TT extends string = string> = (ctx: ParseContext<TT>, left: T) => boolean;
+
 export type PrattInfix<T, TT extends string = string> =
   | {
       ops: readonly string[];
@@ -33,6 +49,8 @@ export type PrattInfix<T, TT extends string = string> =
       /** Restrict matching to one token type; defaults to matching by value. */
       type?: TT;
       assoc?: "left" | "right" | "nonassoc";
+      /** Decline after the operator matched; see {@link PrattGuard}. */
+      when?: PrattGuard<T, TT>;
       map?: (op: string, left: T, right: T, span: Span) => T;
       /** Custom tail parse (ternary): consumes the operator itself. */
       parse?: (ctx: ParseContext<TT>, left: T, helpers: PrattHelpers<T>) => T;
@@ -48,6 +66,8 @@ export type PrattInfix<T, TT extends string = string> =
       match: Rule<unknown, TT>;
       bp: number;
       assoc?: "left" | "right" | "nonassoc";
+      /** Decline after the operator matched; see {@link PrattGuard}. */
+      when?: PrattGuard<T, TT>;
       /** Consumes the operator (typically via the match rule) and the RHS. */
       parse: (ctx: ParseContext<TT>, left: T, helpers: PrattHelpers<T>) => T;
     };
@@ -65,6 +85,8 @@ export interface PrattDef<T, TT extends string = string> {
   postfix?: readonly {
     match: Rule<unknown, TT>;
     bp: number;
+    /** Decline after the postfix matched; see {@link PrattGuard}. */
+    when?: PrattGuard<T, TT>;
     /** Consumes the whole postfix (call args, member name, index). */
     parse: (ctx: ParseContext<TT>, left: T, helpers: PrattHelpers<T>) => T;
   }[];
@@ -75,6 +97,9 @@ const opMatches = <TT extends string>(token: Token<TT>, ops: readonly string[], 
 
 const infixMatches = <T, TT extends string>(token: Token<TT>, group: PrattInfix<T, TT>) =>
   "ops" in group ? opMatches(token, group.ops, group.type) : matchesFirst(token, group.match.first());
+
+const accepts = <T, TT extends string>(group: { when?: PrattGuard<T, TT> }, ctx: ParseContext<TT>, left: T) =>
+  group.when === undefined || group.when(ctx, left);
 
 export function pratt<T, TT extends string = string>(def: PrattDef<T, TT>): Rule<T, TT> {
   const { atom, prefix = [], infix = [], postfix = [] } = def;
@@ -103,13 +128,15 @@ export function pratt<T, TT extends string = string>(def: PrattDef<T, TT>): Rule
       const next = ctx.peek();
       if (next === null) break;
 
-      const postfixGroup = postfix.find((group) => group.bp >= minBp && matchesFirst(next, group.match.first()));
+      const postfixGroup = postfix.find(
+        (group) => group.bp >= minBp && matchesFirst(next, group.match.first()) && accepts(group, ctx, left),
+      );
       if (postfixGroup) {
         left = postfixGroup.parse(ctx, left, helpers);
         continue;
       }
 
-      const infixGroup = infix.find((group) => infixMatches(next, group));
+      const infixGroup = infix.find((group) => infixMatches(next, group) && accepts(group, ctx, left));
       if (!infixGroup || infixGroup.bp < minBp) break;
 
       if ("match" in infixGroup || infixGroup.parse) {
@@ -122,9 +149,11 @@ export function pratt<T, TT extends string = string>(def: PrattDef<T, TT>): Rule
 
       // A nonassoc RHS was parsed at bp + 1, so a same-group operator here
       // would silently left-associate at this loop — reject the chain instead.
+      // Only this group is consulted (with its guard), not whichever group
+      // the next pass would pick.
       if (infixGroup.assoc === "nonassoc") {
         const after = ctx.peek();
-        if (after !== null && infixMatches(after, infixGroup)) {
+        if (after !== null && infixMatches(after, infixGroup) && accepts(infixGroup, ctx, left)) {
           ctx.croak(`Operator "${after.value}" is non-associative`);
         }
       }
