@@ -5768,9 +5768,11 @@ function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
   if (orReplace) ctx.parse(kwseq("or", "replace"));
   // A prefixed TABLE or view, a RECURSIVE view and a CONSTRAINT TRIGGER are
   // schema elements too; of what createUnmappedTarget reads, only an UNLOGGED
-  // MATERIALIZED VIEW is not, and it is refused at MATERIALIZED, as an
-  // unprefixed one is at its lead word.
-  if (!orReplace && ctx.is("ident", "unlogged") && isWordAhead(ctx, 1, "materialized")) {
+  // MATERIALIZED VIEW is not. So after UNLOGGED only TABLE (or a view, which
+  // createWithPrefix refuses for its own reason) is named, and MATERIALIZED is
+  // refused at the word itself, as an unprefixed one is.
+  const unloggedTarget = () => ["table", "view", "recursive"].some((word) => isWordAhead(ctx, 1, word));
+  if (!orReplace && ctx.is("ident", "unlogged") && !unloggedTarget()) {
     ctx.next(); // UNLOGGED
     return ctx.croak(`Expected "table" but found ${describeFound(ctx.peek())}`);
   }

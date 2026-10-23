@@ -13884,19 +13884,6 @@ describe("SQL-lite CREATE CONSTRAINT TRIGGER", () => {
     expect(
       parseFails("CREATE OR REPLACE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
     ).toThrow(/CREATE OR REPLACE CONSTRAINT TRIGGER is not supported/);
-    expect(
-      parseFails("CREATE CONSTRAINT TRIGGER c AFTER INSERT OR INSERT ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
-    ).toThrow(/duplicate trigger events specified \(1:44\)/);
-    expect(parseFails("CREATE TRIGGER tr AFTER UPDATE OF a OR DELETE OR UPDATE ON t EXECUTE FUNCTION f();")).toThrow(
-      /duplicate trigger events specified/,
-    );
-    // The lead words neither CREATE map holds are named where they may stand.
-    expect(parseFails("CREATE OR REPLACE frobnicate v;")).toThrow(
-      expectsKeys(["view", "trigger", "recursive", "temp", "temporary", "local", "global"], '"frobnicate"'),
-    );
-    expect(parseFails("CREATE SCHEMA s CREATE frobnicate t;")).toThrow(
-      expectsKeys(["table", "trigger", "recursive", "constraint", "temp", "unlogged"], '"frobnicate"'),
-    );
     // FROM and the deferral attributes belong to constraint triggers only.
     expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t FROM x FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
       /Expected "execute" but found "from"/,
@@ -13904,6 +13891,41 @@ describe("SQL-lite CREATE CONSTRAINT TRIGGER", () => {
     expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t DEFERRABLE FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
       /Expected "execute" but found "deferrable"/,
     );
+  });
+});
+
+describe("SQL-lite duplicate trigger events", () => {
+  it("rejects an event written twice, UPDATE OF included, as PG's grammar does", () => {
+    expect(
+      parseFails("CREATE CONSTRAINT TRIGGER c AFTER INSERT OR INSERT ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
+    ).toThrow(/duplicate trigger events specified \(1:44\)/);
+    expect(parseFails("CREATE TRIGGER tr AFTER UPDATE OF a OR DELETE OR UPDATE ON t EXECUTE FUNCTION f();")).toThrow(
+      /duplicate trigger events specified/,
+    );
+  });
+});
+
+describe("SQL-lite lead words of the prefixed, recursive and constraint CREATE forms", () => {
+  it("names them where they may stand, and takes them as schema elements", () => {
+    // The lead words neither CREATE map holds are named where they may stand.
+    expect(parseFails("CREATE OR REPLACE frobnicate v;")).toThrow(
+      expectsKeys(["view", "trigger", "recursive", "temp", "temporary", "local", "global"], '"frobnicate"'),
+    );
+    expect(parseFails("CREATE SCHEMA s CREATE frobnicate t;")).toThrow(
+      expectsKeys(["table", "trigger", "recursive", "constraint", "temp", "unlogged"], '"frobnicate"'),
+    );
+    expect(parseFails("CREATE SCHEMA s CREATE UNLOGGED foo;")).toThrow(/Expected "table" but found "foo"/);
+    expect(parseFails("CREATE SCHEMA s CREATE TEMP TABLE t AS SELECT 1;")).toThrow(/cannot be CREATE TABLE AS/);
+    expect(firstStmt("CREATE SCHEMA s CREATE UNLOGGED TABLE t (a int) CREATE TEMP TABLE u (b int);").elements).toEqual([
+      {
+        kind: "createTable",
+        ifNotExists: false,
+        name: ["t"],
+        items: [plainColumn("a", "int")],
+        modifiers: ["unlogged"],
+      },
+      { kind: "createTable", ifNotExists: false, name: ["u"], items: [plainColumn("b", "int")], modifiers: ["temp"] },
+    ]);
   });
 });
 
