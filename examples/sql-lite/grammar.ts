@@ -6641,11 +6641,12 @@ function alterRoleRest(ctx: ParseContext<SqlTokenType>, start: Position, lead: "
   return node({ kind: "options", options });
 }
 
-// PG reserves the role names PUBLIC and NONE, unquoted, wherever a role is
-// named rather than specified: RENAME's two names here.
+// PG reserves the role names `public` and `none`, quoted or not, wherever a
+// role is named rather than specified: RENAME's two names here.
 function checkRoleName(ctx: ParseContext<SqlTokenType>, tok: Token<SqlTokenType> | null, at: Position): void {
-  if (tok?.type === "ident" && (tok.value === "public" || tok.value === "none")) {
-    ctx.croak(`Role name "${tok.value}" is reserved`, at);
+  const word = tok?.type === "ident" || tok?.type === "qident" ? tok.value : null;
+  if (word === "public" || word === "none") {
+    ctx.croak(`Role name "${word}" is reserved`, at);
   }
 }
 

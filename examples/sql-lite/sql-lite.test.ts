@@ -10060,6 +10060,9 @@ describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
     expect(bad("ALTER ROLE r RENAME x;")).toThrow(/Expected "to" but found "x"/);
     expect(bad("ALTER ROLE public RENAME TO x;")).toThrow(/Role name "public" is reserved \(1:11\)/);
     expect(bad("ALTER USER r RENAME TO none;")).toThrow(/Role name "none" is reserved \(1:23\)/);
+    expect(bad('ALTER ROLE "public" RENAME TO x;')).toThrow(/Role name "public" is reserved/);
+    expect(bad('ALTER ROLE r RENAME TO "none";')).toThrow(/Role name "none" is reserved/);
+    expect(firstStmt('ALTER ROLE "PUBLIC" RENAME TO x;')).toMatchObject({ name: "PUBLIC" });
     // SET takes a parameter value, never an expression.
     expect(bad("ALTER ROLE r SET x = 1 + 2;")).toThrow(/Expected ";" but found "\+"/);
     expect(bad("ALTER ROLE r SET x;")).toThrow(/Expected "to" or "=" but found ";"/);
