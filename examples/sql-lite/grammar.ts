@@ -3992,9 +3992,9 @@ function parseIndirection(ctx: ParseContext<SqlTokenType>, base: Expr, start: Po
 // sit below the unary sign, so `-x COLLATE "C"` is `(-x) COLLATE "C"`, and above
 // `^`. The zone is read at bp 17: it takes a COLLATE but not another AT, so a
 // chain of AT TIME ZONE nests to the left as PG's `%left AT` does. `at` is a
-// bare label in PG, so the postfix declines unless TIME or LOCAL follows
-// it, and `SELECT x at FROM t` keeps `at` as the alias. AT TIME commits to
-// the zone, as in PG, where no alias is followed by TIME.
+// bare label in PG, so the postfix declines unless TIME or LOCAL follows it,
+// and `SELECT x at FROM t` keeps `at` as the alias. AT TIME commits to the
+// zone, as in PG, where no alias is followed by TIME.
 const collatePostfix = {
   match: kw("collate"),
   bp: 17,
@@ -11697,8 +11697,8 @@ const dmlStatement = custom<Stmt, SqlTokenType>(
 // --- PREPARE / EXECUTE ---
 //
 // Both lead words stay UNRESERVED, matched by value like the Phase 9 utility
-// words. In PG a written list here must hold at least one item; the list
-// rules are local because EXECUTE's `( list )` is optional.
+// words. In PG a written list here must hold at least one item: PREPARE's
+// holds types, and EXECUTE's is optional, so each reads its own list.
 const prepareTypes = sepBy(typeRef, P(","));
 const executeArgs = sepBy(expression, P(","));
 // An optional `( list )`: null when no `(` follows; the list itself is non-empty.
