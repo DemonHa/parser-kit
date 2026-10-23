@@ -3438,6 +3438,8 @@ describe("SQL-lite quoted literals", () => {
     expect(lex("E'\\303\\251'")).toEqual([strTok("é")]);
     expect(lex("E'\\xe2\\x82\\xac \\xC3\\xA9'")).toEqual([strTok("€ é")]);
     expect(lex("E'\\xF0\\x9F\\x98\\x80'")).toEqual([strTok("😀")]);
+    // U+FEFF is an ordinary character here, never a byte-order mark to drop.
+    expect(lex("E'\\xEF\\xBB\\xBF' E'a\\357\\273\\277b'")).toEqual([strTok("\uFEFF"), strTok("a\uFEFFb")]);
     // A byte run that isn't UTF-8 is rejected, as PG's encoding check does:
     // a lone lead byte, a lone continuation byte, a run cut short by a
     // character, and `\777` (whose low byte is 0xFF).
@@ -3505,6 +3507,8 @@ describe("SQL-lite quoted literals", () => {
     expect(colExpr("U&\"d!0061t\" UESCAPE '!'")).toEqual(name("dat"));
     expect(fails('SELECT U&"\\00" FROM t;')).toThrow(/Invalid Unicode escape value/);
     expect(fails("SELECT U&\"x\" UESCAPE '+' FROM t;")).toThrow(/Invalid Unicode escape character/);
+    // One character, but not one byte.
+    expect(fails("SELECT U&'x' UESCAPE 'é' FROM t;")).toThrow(/Invalid Unicode escape character/);
   });
 
   it("reads a UESCAPE clause across comments", () => {

@@ -205,9 +205,9 @@ const readEscapeBody = (stream: InputStream, tokenStart: Position) => {
     const end = stream.position();
     stream.next();
     if (stream.peek() === "'") {
-      // Doubled, it is a quote character. Kept raw as a lone `'`, which the
-      // decoder passes through: no escape it reads can end in a quote, so the
-      // two never run together.
+      // Doubled, it is a quote character, kept raw as a lone `'`. The decoder
+      // passes that through: a backslash in `raw` always has its partner
+      // beside it, and no escape's digits can include a quote.
       stream.next();
       raw += "'";
       continue;
@@ -239,7 +239,8 @@ const decodeEscapes = (stream: InputStream, segments: readonly string[], start: 
   const flushBytes = () => {
     if (bytes.length === 0) return;
     if (bytes.includes(0)) fail('Invalid byte sequence for encoding "UTF8": 0x00');
-    utf8 ??= new TextDecoder("utf-8", { fatal: true });
+    // `ignoreBOM`: a U+FEFF spelled in escapes is content, not a marker to strip.
+    utf8 ??= new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
     try {
       value += utf8.decode(new Uint8Array(bytes));
     } catch {
@@ -365,9 +366,15 @@ const readUescapeTail = (stream: InputStream): string | null => {
   // *past* it. Croaking with the closing quote unconsumed would leave it to
   // open a runaway string and swallow the rest of the file.
   const { value: escapeChar } = readQuotedBody(stream, UESCAPE_CHAR, start);
-  // PG's check_uescapechar: exactly one character, and not one that could be
+  // PG's check_uescapechar: exactly one ASCII character (one byte), and not one that could be
   // part of an escape it introduces (a hex digit or `+`), a quote, or space.
-  if (escapeChar.length !== 1 || isHexDigit(escapeChar) || "+'\"".includes(escapeChar) || isSpace(escapeChar)) {
+  if (
+    escapeChar.length !== 1 ||
+    escapeChar > "\x7f" ||
+    isHexDigit(escapeChar) ||
+    "+'\"".includes(escapeChar) ||
+    isSpace(escapeChar)
+  ) {
     stream.croak("Invalid Unicode escape character", start, stream.position());
   }
   return escapeChar;
