@@ -717,6 +717,76 @@ export type CreateRole = {
   span: Span;
 };
 
+// A row-security policy's clauses, as CREATE POLICY and ALTER POLICY share
+// them: `TO role, …`, `USING (expr)` and `WITH CHECK (expr)`, each omitted when
+// absent. Absent roles are PUBLIC on CREATE POLICY, and left as they were on
+// ALTER POLICY.
+export type PolicyClauses = { roles?: string[]; using?: Expr; withCheck?: Expr };
+
+// `CREATE POLICY name ON table [AS {PERMISSIVE | RESTRICTIVE}] [FOR command]
+// [TO role, …] [USING (expr)] [WITH CHECK (expr)]`. `as` and `command` are
+// omitted when absent, which PG reads as PERMISSIVE and ALL.
+export type CreatePolicy = {
+  kind: "createPolicy";
+  name: string;
+  table: string[];
+  as?: "permissive" | "restrictive";
+  command?: "all" | "select" | "insert" | "update" | "delete";
+  span: Span;
+} & PolicyClauses;
+
+// One entry of a publication's object list: `TABLE [ONLY] t [*] [(cols)]
+// [WHERE (expr)]`, or `TABLES IN SCHEMA s`, whose `schema` is null for
+// CURRENT_SCHEMA. An entry that leaves its lead words off takes the previous
+// entry's, as in PG. `only`, `columns` and `where` are omitted when absent; a
+// trailing `*` spells the default and is not recorded.
+export type PublicationObject =
+  | { kind: "table"; name: string[]; only?: true; columns?: string[]; where?: Expr }
+  | { kind: "tablesInSchema"; schema: string | null };
+
+// `CREATE PUBLICATION name [FOR ALL TABLES | FOR object, …] [WITH (option, …)]`.
+// `allTables`, `objects` and `options` are omitted when absent.
+export type CreatePublication = {
+  kind: "createPublication";
+  name: string;
+  allTables?: true;
+  objects?: PublicationObject[];
+  options?: RelationOption[];
+  span: Span;
+};
+
+// `CREATE SUBSCRIPTION name CONNECTION 'conninfo' PUBLICATION p, … [WITH
+// (option, …)]`; `options` is omitted when absent.
+export type CreateSubscription = {
+  kind: "createSubscription";
+  name: string;
+  connection: string;
+  publications: string[];
+  options?: RelationOption[];
+  span: Span;
+};
+
+// ALTER PUBLICATION's actions bar RENAME TO and OWNER TO, which build the
+// alterObject node, as on the kinds the generic ALTER takes: ADD / SET / DROP
+// of an object list, and `SET (option, …)`.
+export type AlterPublicationAction =
+  | { kind: "add" | "set" | "drop"; objects: PublicationObject[] }
+  | { kind: "setOptions"; options: RelationOption[] };
+
+// ALTER SUBSCRIPTION's actions bar RENAME TO and OWNER TO (as above).
+// `options` is the trailing `WITH (…)`, omitted when absent; `SET (…)` and
+// SKIP take a list of their own, which is not optional.
+export type AlterSubscriptionAction =
+  | { kind: "connection"; connection: string }
+  | {
+      kind: "setPublication" | "addPublication" | "dropPublication";
+      publications: string[];
+      options?: RelationOption[];
+    }
+  | { kind: "refreshPublication"; options?: RelationOption[] }
+  | { kind: "enable" | "disable" }
+  | { kind: "setOptions" | "skip"; options: RelationOption[] };
+
 // `CREATE TABLE [IF NOT EXISTS] name [(cols)] AS query [WITH [NO] DATA]` — the
 // query-backed table. Distinct kind from `createTable` so its `query` payload is
 // unmistakable. `columns` is the optional output-column-name list.
@@ -1235,6 +1305,9 @@ export type Stmt =
   | CreateExtension
   | CreateTablespace
   | CreateRole
+  | CreatePolicy
+  | CreatePublication
+  | CreateSubscription
   | CreateTableAs
   | CreateFunction
   | CreateProcedure
@@ -1274,10 +1347,25 @@ export type Stmt =
     }
   | { kind: "alterSequence"; ifExists: boolean; name: string[]; action: AlterSequenceAction; span: Span }
   | { kind: "alterExtension"; name: string; action: AlterExtensionAction; span: Span }
+  // `ALTER POLICY name ON table [TO role, …] [USING (expr)] [WITH CHECK (expr)]`;
+  // PG's grammar takes all three clauses as optional, so none may be written.
+  // `ALTER POLICY … RENAME TO` is an alterObject node, as TRIGGER's is.
+  | ({ kind: "alterPolicy"; name: string; table: string[]; span: Span } & PolicyClauses)
+  | { kind: "alterPublication"; name: string; action: AlterPublicationAction; span: Span }
+  | { kind: "alterSubscription"; name: string; action: AlterSubscriptionAction; span: Span }
   // `ALTER kind object {RENAME TO | OWNER TO | SET SCHEMA} …` for the object
   // kinds with no ALTER target of their own; which of the three a kind takes
-  // follows PG (OBJECT_KINDS).
-  | { kind: "alterObject"; object: ObjectRef; action: AlterRenameTo | AlterOwnerTo | AlterSetSchema; span: Span }
+  // follows PG (OBJECT_KINDS). The ALTER targets of POLICY, PUBLICATION and
+  // SUBSCRIPTION build it for RENAME TO, and PUBLICATION's and SUBSCRIPTION's
+  // for OWNER TO too. `ifExists` is
+  // ALTER POLICY IF EXISTS … RENAME's, and omitted elsewhere.
+  | {
+      kind: "alterObject";
+      ifExists?: true;
+      object: ObjectRef;
+      action: AlterRenameTo | AlterOwnerTo | AlterSetSchema;
+      span: Span;
+    }
   // Generalized DROP: `DROP <object> [CONCURRENTLY] [IF EXISTS] name[, …]
   // [CASCADE|RESTRICT]`. `objectType` is the folded keyword (`"materialized
   // view"` for the two-word one); `behavior` is the trailing CASCADE/RESTRICT
@@ -1286,7 +1374,7 @@ export type Stmt =
   // The remaining keys belong to one object kind each and are omitted elsewhere:
   // - `signatures` (FUNCTION / PROCEDURE / AGGREGATE): one entry per name, null
   //   where a function or procedure name carries no argument list;
-  // - `table` (TRIGGER): the `ON table` the trigger belongs to;
+  // - `table` (TRIGGER, POLICY): the `ON table` the object belongs to;
   // - `force` (DATABASE): present, as true, only when `(FORCE)` is written.
   | {
       kind: "drop";
@@ -5874,6 +5962,9 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   role: { parse: (ctx) => createRoleRest(ctx, "role") },
   user: { parse: (ctx) => createRoleRest(ctx, "user") },
   group: { parse: (ctx) => createRoleRest(ctx, "group") },
+  policy: { parse: createPolicyRest },
+  publication: { parse: createPublicationRest },
+  subscription: { parse: createSubscriptionRest },
 };
 
 // REPLACEABLE_CREATE dispatch CONSUMES the lead word: these bodies are entered
@@ -5924,9 +6015,10 @@ for (const target of SCHEMA_REPLACEABLE_TARGETS) {
 // (VIEW / MATERIALIZED VIEW / FUNCTION / PROCEDURE / AGGREGATE / TRIGGER) — or,
 // with no such prefix, one of the remaining keyword-led targets (TABLE /
 // [UNIQUE] INDEX / TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION /
-// TABLESPACE / ROLE / USER), TABLE alone taking the TEMP / UNLOGGED prefix. `OR
-// REPLACE` before a non-replaceable object croaks, as does a prefix before
-// anything but TABLE — PG's TEMP VIEW and TEMP SEQUENCE are not parsed.
+// TABLESPACE / ROLE / USER / POLICY / PUBLICATION / SUBSCRIPTION), TABLE alone
+// taking the TEMP / UNLOGGED prefix. `OR REPLACE` before a non-replaceable
+// object croaks, as does a prefix before anything but TABLE — PG's TEMP VIEW
+// and TEMP SEQUENCE are not parsed.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -6581,8 +6673,8 @@ type ObjectKind = {
   // ALTER EXTENSION ADD / DROP takes the kind.
   member?: true;
   // The generic ALTER's actions on the kind, for a kind with no ALTER target of
-  // its own; absent where PG has none, a dedicated target owns the ALTER, or
-  // one is to (ROLE, POLICY, FOREIGN TABLE).
+  // its own; absent where PG has none, a dedicated target owns the ALTER (as
+  // for TABLE, POLICY or PUBLICATION), or one is to (ROLE, FOREIGN TABLE).
   alter?: readonly AlterObjectVerb[];
 };
 
@@ -6591,8 +6683,9 @@ const RENAME_OWNER: readonly AlterObjectVerb[] = ["rename", "owner"];
 const RENAME_SCHEMA: readonly AlterObjectVerb[] = ["rename", "set"];
 
 // Grouped as gram.y groups them; the order is the order an "Expected …" croak
-// lists the lead words in. ROLE, POLICY and FOREIGN TABLE take no generic
-// ALTER: each is left for a dedicated target that will own its whole ALTER.
+// lists the lead words in. ROLE and FOREIGN TABLE take no generic ALTER: each
+// is left for a dedicated target that will own its whole ALTER, as POLICY,
+// PUBLICATION and SUBSCRIPTION already have.
 const OBJECT_KINDS: readonly ObjectKind[] = [
   // object_type_any_name
   { objectType: "table", shape: "qualName", label: true, member: true },
@@ -6624,12 +6717,12 @@ const OBJECT_KINDS: readonly ObjectKind[] = [
     member: true,
     alter: RENAME_OWNER,
   },
-  { objectType: "publication", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "publication", shape: "name", label: true, member: true },
   { objectType: "schema", shape: "name", label: true, member: true },
   { objectType: "server", shape: "name", label: true, member: true, alter: RENAME_OWNER },
   { objectType: "database", shape: "name", label: true, member: true, alter: RENAME_OWNER },
   { objectType: "role", shape: "name", label: true, member: true },
-  { objectType: "subscription", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "subscription", shape: "name", label: true, member: true },
   { objectType: "tablespace", shape: "name", label: true, member: true, alter: RENAME_OWNER },
   // The kinds with a reference shape of their own.
   { objectType: "type", shape: "qualName", label: true, member: true },
@@ -6843,6 +6936,306 @@ const EXTENSION_ACTIONS: DispatchMap<AlterExtensionAction> = {
 };
 const EXTENSION_ACTION_EXPECTED = keyList(EXTENSION_ACTIONS);
 
+// --- policies, publications and subscriptions ---
+//
+// CREATE / ALTER POLICY, PUBLICATION and SUBSCRIPTION. Every lead and clause
+// word is matched by value, so none of them stops being usable as a name; `on`,
+// `as`, `for`, `all`, `select`, `to`, `using`, `with`, `check`, `table`, `only`,
+// `in` and `where` are reserved and match here all the same. RENAME TO and
+// OWNER TO build the alterObject node, as they do on the kinds the generic
+// ALTER takes.
+
+const POLICY_COMMANDS = ["all", "select", "insert", "update", "delete"] as const;
+
+// A policy's `name ON table`.
+function parsePolicyHead(ctx: ParseContext<SqlTokenType>): { name: string; table: string[] } {
+  const name = ctx.parse(nameWord);
+  ctx.parse(kw("on"));
+  return { name, table: ctx.parse(qualName) };
+}
+
+// `[TO role, …] [USING (expr)] [WITH CHECK (expr)]`, in the order PG's grammar
+// fixes. The roles are role specs, PUBLIC among them as a plain name.
+function parsePolicyClauses(ctx: ParseContext<SqlTokenType>): PolicyClauses {
+  const clauses: PolicyClauses = {};
+  if (ctx.eat("ident", "to") !== null) {
+    const roles: string[] = [];
+    do {
+      roles.push(parseRoleSpec(ctx));
+    } while (ctx.eat("punc", ",") !== null);
+    clauses.roles = roles;
+  }
+  if (ctx.eat("ident", "using") !== null) clauses.using = ctx.parse(parenExpr);
+  if (ctx.eat("ident", "with") !== null) {
+    ctx.parse(kw("check"));
+    clauses.withCheck = ctx.parse(parenExpr);
+  }
+  return clauses;
+}
+
+// `AS {PERMISSIVE | RESTRICTIVE}` once AS is consumed. PG reads an identifier
+// there and compares its text, so a quoted "permissive" counts too.
+function parsePolicyAs(ctx: ParseContext<SqlTokenType>): NonNullable<CreatePolicy["as"]> {
+  const tok = ctx.peek();
+  if (
+    (tok?.type === "ident" || tok?.type === "qident") &&
+    (tok.value === "permissive" || tok.value === "restrictive")
+  ) {
+    ctx.next();
+    return tok.value;
+  }
+  return ctx.croak(`Expected "permissive" or "restrictive" but found ${describeFound(tok)}`);
+}
+
+// `FOR command` once FOR is consumed; the commands are keywords, so a quoted
+// one is no command.
+function parsePolicyCommand(ctx: ParseContext<SqlTokenType>): NonNullable<CreatePolicy["command"]> {
+  const tok = ctx.peek();
+  const command = POLICY_COMMANDS.find((c) => tok?.type === "ident" && tok.value === c);
+  if (command === undefined) {
+    return ctx.croak(`Expected ${quoteList(POLICY_COMMANDS)} but found ${describeFound(tok)}`);
+  }
+  ctx.next();
+  return command;
+}
+
+function createPolicyRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("policy"));
+  const { name, table } = parsePolicyHead(ctx);
+  const as = ctx.eat("ident", "as") !== null ? parsePolicyAs(ctx) : null;
+  const command = ctx.eat("ident", "for") !== null ? parsePolicyCommand(ctx) : null;
+  return {
+    kind: "createPolicy",
+    name,
+    table,
+    ...(as !== null && { as }),
+    ...(command !== null && { command }),
+    ...parsePolicyClauses(ctx),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// `POLICY [IF EXISTS] name ON table {RENAME TO new | clauses}`, ALTER consumed
+// by the caller. IF EXISTS is PG's on the RENAME form only.
+function alterPolicyRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // POLICY
+  const ifExists = parseIfExists(ctx);
+  const { name, table } = parsePolicyHead(ctx);
+  if (ifExists || ctx.is("ident", "rename")) {
+    if (!ctx.is("ident", "rename")) ctx.croak(`Expected "rename" but found ${describeFound(ctx.peek())}`);
+    const action = parseRenameTo(ctx);
+    const object = { objectType: "policy", name: [name], table };
+    return { kind: "alterObject", ...(ifExists && { ifExists: true }), object, action, span: ctx.spanFrom(start) };
+  }
+  return { kind: "alterPolicy", name, table, ...parsePolicyClauses(ctx), span: ctx.spanFrom(start) };
+}
+
+// An optional `WITH (option, …)`, PG's opt_definition. It is read as a
+// relation's options are, so what PG's definition lacks (the `ns.name` form, an
+// entry with a value but no `=`, a list value) passes here too: the
+// one-shape-for-every-list trade relationOption already makes.
+function parseOptDefinition(ctx: ParseContext<SqlTokenType>): { options?: RelationOption[] } {
+  return ctx.eat("ident", "with") !== null ? { options: ctx.parse(relationOptions) } : {};
+}
+
+// A publication's `object, …`. The first entry must say TABLE or TABLES IN
+// SCHEMA; a later one that leaves its lead words off takes the previous
+// entry's. `tables` is TABLES IN SCHEMA only before `in`, which is reserved and
+// so can never follow a table called `tables`. `others` are the words the
+// caller also takes where the first entry belongs, named in its croak.
+function parsePublicationObjects(ctx: ParseContext<SqlTokenType>, others: readonly string[]): PublicationObject[] {
+  const objects: PublicationObject[] = [];
+  let lead: "table" | "schema" | null = null;
+  do {
+    const after = ctx.peekAhead(1);
+    if (ctx.eat("ident", "table") !== null) {
+      lead = "table";
+    } else if (ctx.is("ident", "tables") && (lead === null || (after?.type === "ident" && after.value === "in"))) {
+      ctx.parse(kwseq("tables", "in", "schema"));
+      lead = "schema";
+    } else if (lead === null) {
+      return ctx.croak(`Expected ${quoteList([...others, "table", "tables"])} but found ${describeFound(ctx.peek())}`);
+    }
+    objects.push(lead === "table" ? parsePublicationTable(ctx) : parsePublicationSchema(ctx));
+  } while (ctx.eat("punc", ",") !== null);
+  return objects;
+}
+
+// `[ONLY] t [*] [(cols)] [WHERE (expr)]`. PG takes CURRENT_SCHEMA for no table
+// name, so an unquoted one is refused here, after ONLY or `ONLY (` too, though
+// it is a name elsewhere. The column list may not be empty, as in PG; the
+// shared columnList takes `()`, so that is checked here.
+function parsePublicationTable(ctx: ParseContext<SqlTokenType>): PublicationObject {
+  let at = 0;
+  if (ctx.is("ident", "only")) at = isPuncToken(ctx.peekAhead(1), "(") ? 2 : 1;
+  const head = ctx.peekAhead(at);
+  if (head?.type === "ident" && head.value === "current_schema") {
+    ctx.croak(`Expected a name but found ${describeFound(head)}`, head.position.start, head.position.end);
+  }
+  const { name, only } = ctx.parse(relationExpr);
+  const table: PublicationObject = { kind: "table", name, ...(only && { only: true }) };
+  if (ctx.is("punc", "(")) {
+    const close = ctx.peekAhead(1);
+    if (close !== null && isPuncToken(close, ")")) {
+      ctx.croak(`Expected a name but found ${describeFound(close)}`, close.position.start, close.position.end);
+    }
+    table.columns = ctx.parse(columnList);
+  }
+  if (ctx.eat("ident", "where") !== null) table.where = ctx.parse(parenExpr);
+  return table;
+}
+
+function parsePublicationSchema(ctx: ParseContext<SqlTokenType>): PublicationObject {
+  const schema = ctx.eat("ident", "current_schema") !== null ? null : ctx.parse(nameWord);
+  return { kind: "tablesInSchema", schema };
+}
+
+function createPublicationRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("publication"));
+  const name = ctx.parse(nameWord);
+  let target: Pick<CreatePublication, "allTables" | "objects"> = {};
+  if (ctx.eat("ident", "for") !== null) {
+    if (ctx.eat("ident", "all") !== null) {
+      ctx.parse(kw("tables"));
+      target = { allTables: true };
+    } else {
+      target = { objects: parsePublicationObjects(ctx, ["all"]) };
+    }
+  }
+  return { kind: "createPublication", name, ...target, ...parseOptDefinition(ctx), span: ctx.spanFrom(start) };
+}
+
+// ALTER PUBLICATION's actions. SET leads both an object list and `(option, …)`;
+// an object list never opens on `(`, so one token tells them apart.
+const PUBLICATION_ACTIONS: DispatchMap<AlterPublicationAction | AlterRenameTo | AlterOwnerTo> = {
+  add: {
+    parse: (ctx) => {
+      ctx.next(); // ADD
+      return { kind: "add", objects: parsePublicationObjects(ctx, []) };
+    },
+  },
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
+      return { kind: "set", objects: parsePublicationObjects(ctx, ["("]) };
+    },
+  },
+  drop: {
+    parse: (ctx) => {
+      ctx.next(); // DROP
+      return { kind: "drop", objects: parsePublicationObjects(ctx, []) };
+    },
+  },
+  rename: { parse: parseRenameTo },
+  owner: { parse: parseOwnerTo },
+};
+const PUBLICATION_ACTION_EXPECTED = keyList(PUBLICATION_ACTIONS);
+
+function alterPublicationRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // PUBLICATION
+  const name = ctx.parse(nameWord);
+  const action = dispatch(PUBLICATION_ACTIONS, PUBLICATION_ACTION_EXPECTED, ctx);
+  if (action.kind === "rename" || action.kind === "ownerTo") {
+    const object = { objectType: "publication", name: [name] };
+    return { kind: "alterObject", object, action, span: ctx.spanFrom(start) };
+  }
+  return { kind: "alterPublication", name, action, span: ctx.spanFrom(start) };
+}
+
+const publicationNames = sepBy(nameWord, P(","));
+
+function createSubscriptionRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("subscription"));
+  const name = ctx.parse(nameWord);
+  ctx.parse(kw("connection"));
+  const connection = sconstString(ctx);
+  ctx.parse(kw("publication"));
+  const publications = ctx.parse(publicationNames);
+  const options = parseOptDefinition(ctx);
+  return { kind: "createSubscription", name, connection, publications, ...options, span: ctx.spanFrom(start) };
+}
+
+// `p, … [WITH (…)]`, the tail of SET / ADD / DROP PUBLICATION.
+const publicationList = (
+  ctx: ParseContext<SqlTokenType>,
+  kind: "setPublication" | "addPublication" | "dropPublication",
+): AlterSubscriptionAction => ({ kind, publications: ctx.parse(publicationNames), ...parseOptDefinition(ctx) });
+
+// ALTER SUBSCRIPTION's actions. SET leads both `(option, …)` and SET
+// PUBLICATION, told apart by the token after it.
+const SUBSCRIPTION_ACTIONS: DispatchMap<AlterSubscriptionAction | AlterRenameTo | AlterOwnerTo> = {
+  connection: {
+    parse: (ctx) => {
+      ctx.next(); // CONNECTION
+      return { kind: "connection", connection: sconstString(ctx) };
+    },
+  },
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
+      if (ctx.eat("ident", "publication") === null) {
+        ctx.croak(`Expected "(" or "publication" but found ${describeFound(ctx.peek())}`);
+      }
+      return publicationList(ctx, "setPublication");
+    },
+  },
+  add: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("add", "publication"));
+      return publicationList(ctx, "addPublication");
+    },
+  },
+  drop: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("drop", "publication"));
+      return publicationList(ctx, "dropPublication");
+    },
+  },
+  refresh: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("refresh", "publication"));
+      return { kind: "refreshPublication", ...parseOptDefinition(ctx) };
+    },
+  },
+  enable: {
+    parse: (ctx) => {
+      ctx.next(); // ENABLE
+      return { kind: "enable" };
+    },
+  },
+  disable: {
+    parse: (ctx) => {
+      ctx.next(); // DISABLE
+      return { kind: "disable" };
+    },
+  },
+  skip: {
+    parse: (ctx) => {
+      ctx.next(); // SKIP
+      return { kind: "skip", options: ctx.parse(relationOptions) };
+    },
+  },
+  rename: { parse: parseRenameTo },
+  owner: { parse: parseOwnerTo },
+};
+const SUBSCRIPTION_ACTION_EXPECTED = keyList(SUBSCRIPTION_ACTIONS);
+
+function alterSubscriptionRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // SUBSCRIPTION
+  const name = ctx.parse(nameWord);
+  const action = dispatch(SUBSCRIPTION_ACTIONS, SUBSCRIPTION_ACTION_EXPECTED, ctx);
+  if (action.kind === "rename" || action.kind === "ownerTo") {
+    const object = { objectType: "subscription", name: [name] };
+    return { kind: "alterObject", object, action, span: ctx.spanFrom(start) };
+  }
+  return { kind: "alterSubscription", name, action, span: ctx.spanFrom(start) };
+}
+
 // The ALTER targets. Dispatch peeks, as PLAIN_CREATE's does: each handler
 // consumes its own lead word, and is handed the position before ALTER so its
 // node spans the whole statement. The croak is hand-written and replaces no
@@ -6930,6 +7323,9 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
     },
   },
   default: { parse: alterDefaultPrivilegesRest },
+  policy: { parse: alterPolicyRest },
+  publication: { parse: alterPublicationRest },
+  subscription: { parse: alterSubscriptionRest },
 };
 // Every other kind the generic ALTER takes leads it here. A dedicated target
 // that takes one of these lead words must hand that word's generic kinds to
@@ -7011,6 +7407,19 @@ const routineDrop = (objectType: string, ref: Rule<RoutineRef, SqlTokenType>): D
   },
 });
 
+// `DROP kind [IF EXISTS] name ON table [CASCADE|RESTRICT]` — one object.
+const onTableDrop = (objectType: string): DropEntry => ({
+  parse: (ctx, start) => {
+    ctx.next(); // the object keyword
+    const ifExists = parseIfExists(ctx);
+    const name = ctx.parse(nameWord);
+    ctx.parse(kw("on"));
+    const table = ctx.parse(qualName);
+    const behavior = ctx.parse(dropBehavior);
+    return dropNode(ctx, start, objectType, { concurrently: false, ifExists, names: [[name]], behavior }, { table });
+  },
+});
+
 const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
   table: listDrop("table", qualName, { concurrently: true }),
   view: listDrop("view", qualName, { concurrently: true }),
@@ -7022,18 +7431,7 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
   function: routineDrop("function", routineRef),
   procedure: routineDrop("procedure", routineRef),
   aggregate: routineDrop("aggregate", aggregateRef),
-  // `DROP TRIGGER [IF EXISTS] name ON table [CASCADE|RESTRICT]` — one trigger.
-  trigger: {
-    parse: (ctx, start) => {
-      ctx.next(); // TRIGGER
-      const ifExists = parseIfExists(ctx);
-      const name = ctx.parse(nameWord);
-      ctx.parse(kw("on"));
-      const table = ctx.parse(qualName);
-      const behavior = ctx.parse(dropBehavior);
-      return dropNode(ctx, start, "trigger", { concurrently: false, ifExists, names: [[name]], behavior }, { table });
-    },
-  },
+  trigger: onTableDrop("trigger"),
   domain: listDrop("domain", qualName),
   extension: listDrop("extension", unqualName),
   // `DROP DATABASE [IF EXISTS] name [[WITH] (FORCE[, …])]` — one database, and
@@ -7065,6 +7463,19 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
   // USER only; `DROP USER MAPPING` is not supported and reads as a user named
   // `mapping` followed by stray words.
   user: listDrop("user", unqualName, { behavior: false }),
+  policy: onTableDrop("policy"),
+  publication: listDrop("publication", unqualName),
+  // `DROP SUBSCRIPTION [IF EXISTS] name [CASCADE|RESTRICT]` — one subscription.
+  subscription: {
+    parse: (ctx, start) => {
+      ctx.next(); // SUBSCRIPTION
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(nameWord);
+      const behavior = ctx.parse(dropBehavior);
+      const fields = { concurrently: false, ifExists, names: [[name]], behavior };
+      return dropNode(ctx, start, "subscription", fields);
+    },
+  },
 };
 const DROP_TARGET_EXPECTED = keyList(DROP_TARGETS);
 
@@ -7078,7 +7489,8 @@ const dropStmt = custom<Stmt, SqlTokenType>(
 );
 
 // PG's relation_expr, a LOCK, MERGE, UPDATE, DELETE, TRUNCATE, ALTER TABLE or
-// CREATE INDEX target — `[ONLY] name [*]` or `ONLY (name)`.
+// CREATE INDEX target, or a publication's TABLE entry — `[ONLY] name [*]` or
+// `ONLY (name)`.
 // `only` and `table` are reserved, so neither can begin a name.
 const relationExpr = custom<LockTarget, SqlTokenType>(
   (ctx) => {
@@ -7573,8 +7985,9 @@ function parseAndChain(ctx: ParseContext<SqlTokenType>): boolean {
   return !no;
 }
 
-// The string identifier of a two-phase transaction (PG's Sconst).
-function gidString(ctx: ParseContext<SqlTokenType>): string {
+// A string, PG's Sconst: a two-phase transaction's identifier, a subscription's
+// conninfo.
+function sconstString(ctx: ParseContext<SqlTokenType>): string {
   if (!ctx.is("string")) return ctx.croak(`Expected a string but found ${describeFound(ctx.peek())}`);
   return ctx.parse(strValue);
 }
@@ -7600,7 +8013,7 @@ const transactionStmt = custom<Stmt, SqlTokenType>(
     if (head.value === "commit" || head.value === "end") {
       ctx.next();
       if (head.value === "commit" && ctx.eat("ident", "prepared") !== null) {
-        return { kind: "commitPrepared", gid: gidString(ctx), span: ctx.spanFrom(start) };
+        return { kind: "commitPrepared", gid: sconstString(ctx), span: ctx.spanFrom(start) };
       }
       ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
       return { kind: "commit", chain: parseAndChain(ctx), span: ctx.spanFrom(start) };
@@ -7615,7 +8028,7 @@ const transactionStmt = custom<Stmt, SqlTokenType>(
     if (head.value === "rollback") {
       ctx.next();
       if (ctx.eat("ident", "prepared") !== null) {
-        return { kind: "rollbackPrepared", gid: gidString(ctx), span: ctx.spanFrom(start) };
+        return { kind: "rollbackPrepared", gid: sconstString(ctx), span: ctx.spanFrom(start) };
       }
       ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
       // `ROLLBACK TO [SAVEPOINT] name` and `ROLLBACK AND CHAIN` are exclusive.
@@ -9536,7 +9949,7 @@ const prepareStmt = custom<Stmt, SqlTokenType>(
     ctx.parse(kw("prepare"));
     if (ctx.is("ident", "transaction") && peekOrReport(ctx, 1)?.type === "string") {
       ctx.next(); // TRANSACTION
-      return { kind: "prepareTransaction", gid: gidString(ctx), span: ctx.spanFrom(start) };
+      return { kind: "prepareTransaction", gid: sconstString(ctx), span: ctx.spanFrom(start) };
     }
     const name = ctx.parse(nameWord);
     const types = optParenList(ctx, prepareTypes);
