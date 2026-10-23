@@ -1148,7 +1148,8 @@ export type CopyLocation =
   | { kind: "stdin" }
   | { kind: "stdout" };
 // `COPY table [(col, …)] FROM location [[WITH] (option, …)] [WHERE cond]` or
-// `COPY {table [(col, …)] | (query)} TO location [[WITH] (option, …)]`.
+// `COPY {table [(col, …)] | (query)} TO location [[WITH] (option, …)]`, or
+// either in PG's pre-9.0 spelling (below).
 // Exactly one of `table` and `query` is set; `columns` is null without a list
 // (and always with a query), `options` when no option is written, and `where`
 // unless a FROM writes one. The query is any statement PREPARE takes; PG
@@ -9834,6 +9835,14 @@ const copyStmt = custom<Stmt, SqlTokenType>(
     const hasWith = ctx.eat("ident", "with") !== null;
     if (ctx.is("punc", "(")) options.push(...ctx.parse(relationOptions));
     else if (hasWith || isLegacyCopyWord(ctx.peek())) {
+      // A modern option without its parentheses lands here: point at them.
+      const tok = ctx.peek();
+      if (
+        hasWith &&
+        (tok?.type === "qident" || (tok?.type === "ident" && tok.value !== "where" && !isLegacyCopyWord(tok)))
+      ) {
+        return ctx.croak(`Expected "(" or a COPY option but found ${describeFound(tok)}`);
+      }
       legacy = true;
       while (isLegacyCopyWord(ctx.peek())) options.push(legacyCopyOption(ctx));
     }

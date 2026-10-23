@@ -10517,6 +10517,11 @@ describe("SQL-lite COPY legacy options", () => {
     });
     // An empty bare-word list: the options are absent, the spelling is not.
     expect(firstStmt("COPY t TO STDOUT WITH;")).toMatchObject({ options: null, legacy: true });
+    expect(firstStmt("COPY t FROM STDIN WITH WHERE a;")).toMatchObject({
+      options: null,
+      where: name("a"),
+      legacy: true,
+    });
     // The options come before WHERE, and a query may take them too.
     expect(firstStmt("COPY t FROM STDIN WITH CSV WHERE a;")).toMatchObject({
       options: [opt("format", word("csv"))],
@@ -10602,6 +10607,14 @@ describe("SQL-lite COPY legacy options", () => {
     expect(bad("COPY t FROM STDIN (HEADER) CSV;")).toThrow(/Expected ";" but found "csv"/);
     expect(bad("COPY t FROM STDIN FORCE;")).toThrow(/Expected "quote", "not" or "null" but found ";"/);
     expect(bad("COPY t FROM STDIN FORCE NOT a;")).toThrow(/Expected "null" but found "a"/);
+    expect(bad("COPY t FROM STDIN CSV FORCE NOT NULL *;")).toThrow(/Expected a name but found "\*"/);
+    expect(bad("COPY t FROM STDIN CSV FORCE NULL *;")).toThrow(/Expected a name but found "\*"/);
+    expect(bad("COPY t TO STDOUT WITH WHERE a;")).toThrow(/Expected ";" but found "where"/);
+    expect(bad("COPY t FROM STDIN WITH FORMAT csv;")).toThrow(
+      /Expected "\(" or a COPY option but found "format" \(1:23\)/,
+    );
+    // The BINARY lookahead reports what does not lex rather than dropping it.
+    expect(sqlLite.diagnose("COPY binary 'x").errors[0]?.message).toMatch(/Unterminated/);
     expect(bad("COPY t TO STDOUT FORCE QUOTE (a);")).toThrow(/Expected a name but found "\("/);
     expect(bad("COPY t FROM STDIN DELIMITER ,;")).toThrow(/Expected a string but found ","/);
     expect(bad("COPY t FROM STDIN ENCODING AS 'UTF8';")).toThrow(/Expected a string but found "as"/);
