@@ -401,10 +401,12 @@ export type ColConstraintElem = (
 
 export type ColConstraint = ColConstraintElem | { kind: "collate"; collation: string[]; span: Span };
 
+// `options` is the column's `OPTIONS (…)`, present only when written.
 export type ColumnDef = {
   kind: "column";
   name: string;
   dataType: ColType;
+  options?: GenericOption[];
   constraints: ColConstraint[];
   span: Span;
 };
@@ -556,6 +558,8 @@ export type AlterAction =
   | { kind: "setCompression"; column: string; method: string | null }
   | { kind: "setColumnOptions"; column: string; options: RelationOption[] }
   | { kind: "resetColumnOptions"; column: string; options: RelationOption[] }
+  | { kind: "columnGenericOptions"; column: string; options: AlterGenericOption[] }
+  | { kind: "genericOptions"; options: AlterGenericOption[] }
   | { kind: "alterConstraint"; name: string; attrs: ConstraintAttrs }
   | { kind: "renameColumn"; from: string; to: string }
   | { kind: "renameConstraint"; from: string; to: string }
@@ -899,6 +903,111 @@ export type AlterSubscriptionAction =
   | { kind: "refreshPublication"; options?: RelationOption[] }
   | { kind: "enable" | "disable" }
   | { kind: "setOptions" | "skip"; options: RelationOption[] };
+
+// --- foreign data ---
+//
+// A generic option, PG's `name 'value'`: what OPTIONS (…) holds on a
+// foreign-data wrapper, server, user mapping, foreign table or column. The
+// ALTER forms take `[ADD | SET] name 'value'` or `DROP name`; `action` is
+// present only when ADD, SET or DROP is written, and `value` is absent on DROP.
+export type GenericOption = { name: string; value: string };
+export type AlterGenericOption =
+  | { action?: "add" | "set"; name: string; value: string }
+  | { action: "drop"; name: string };
+
+// A wrapper's `HANDLER name` / `VALIDATOR name`, or with NO, a null `name`.
+// PG takes them in any order, so they are kept as written.
+export type FdwFunction = { kind: "handler" | "validator"; name: string[] | null };
+
+// `CREATE FOREIGN DATA WRAPPER name [HANDLER h | NO HANDLER] [VALIDATOR v | NO
+// VALIDATOR] [OPTIONS (…)]`; ALTER takes the same clauses, generic ones with
+// ADD / SET / DROP, and needs at least one. Each key is omitted when absent.
+export type CreateForeignDataWrapper = {
+  kind: "createForeignDataWrapper";
+  name: string;
+  functions?: FdwFunction[];
+  options?: GenericOption[];
+  span: Span;
+};
+export type AlterForeignDataWrapper = {
+  kind: "alterForeignDataWrapper";
+  name: string;
+  functions?: FdwFunction[];
+  options?: AlterGenericOption[];
+  span: Span;
+};
+
+// `CREATE SERVER [IF NOT EXISTS] name [TYPE 'type'] [VERSION {'version' |
+// NULL}] FOREIGN DATA WRAPPER fdw [OPTIONS (…)]`; ALTER SERVER takes VERSION
+// and OPTIONS, one at least. A null `version` is VERSION NULL; every optional
+// key is omitted when absent.
+export type CreateServer = {
+  kind: "createServer";
+  ifNotExists?: true;
+  name: string;
+  type?: string;
+  version?: string | null;
+  wrapper: string;
+  options?: GenericOption[];
+  span: Span;
+};
+export type AlterServer = {
+  kind: "alterServer";
+  name: string;
+  version?: string | null;
+  options?: AlterGenericOption[];
+  span: Span;
+};
+
+// `{CREATE | ALTER | DROP} USER MAPPING … FOR role SERVER name`. `user` is the
+// role: a name, or one of the CURRENT_ / SESSION_ pseudo-roles, the USER
+// keyword reading as `current_user`, as in PG; `options` is omitted when
+// absent (ALTER's is required).
+export type CreateUserMapping = {
+  kind: "createUserMapping";
+  ifNotExists?: true;
+  user: string;
+  server: string;
+  options?: GenericOption[];
+  span: Span;
+};
+export type AlterUserMapping = {
+  kind: "alterUserMapping";
+  user: string;
+  server: string;
+  options: AlterGenericOption[];
+  span: Span;
+};
+export type DropUserMapping = { kind: "dropUserMapping"; ifExists: boolean; user: string; server: string; span: Span };
+
+// `CREATE FOREIGN TABLE [IF NOT EXISTS] name ({column | constraint}, …)
+// [INHERITS (parent, …)] SERVER server [OPTIONS (…)]`, or with `PARTITION OF
+// parent [(items)] bound` in place of the element list and INHERITS, whose
+// `items` are then as on createTable's. Optional keys are omitted when absent.
+export type CreateForeignTable = {
+  kind: "createForeignTable";
+  ifNotExists?: true;
+  name: string[];
+  items: TableItem[];
+  partitionOf?: PartitionOf;
+  inherits?: string[][];
+  server: string;
+  options?: GenericOption[];
+  span: Span;
+};
+
+// `IMPORT FOREIGN SCHEMA remote [{LIMIT TO | EXCEPT} (table, …)] FROM SERVER
+// server INTO local [OPTIONS (…)]`; `qualification` and `options` are omitted
+// when absent.
+export type ImportForeignSchema = {
+  kind: "importForeignSchema";
+  remoteSchema: string;
+  qualification?: { kind: "limitTo" | "except"; tables: string[][] };
+  server: string;
+  into: string;
+  options?: GenericOption[];
+  span: Span;
+};
 
 // `CREATE TABLE [IF NOT EXISTS] name [(cols)] AS query [WITH [NO] DATA]` — the
 // query-backed table. Distinct kind from `createTable` so its `query` payload is
@@ -1603,6 +1712,11 @@ export type Stmt =
   | CreatePolicy
   | CreatePublication
   | CreateSubscription
+  | CreateForeignDataWrapper
+  | CreateServer
+  | CreateUserMapping
+  | CreateForeignTable
+  | ImportForeignSchema
   | CreateTableAs
   | CreateFunction
   | CreateProcedure
@@ -1624,8 +1738,22 @@ export type Stmt =
   | { kind: "refreshMaterializedView"; concurrently: boolean; name: string[]; withData: boolean | null; span: Span }
   // `ALTER TABLE [IF EXISTS] [ONLY] name [*] action[, …]`. `actions` is never
   // empty, and a RENAME is always its only element — PG keeps those out of the
-  // action list. `only` is present only when ONLY is written.
-  | { kind: "alterTable"; ifExists: boolean; name: string[]; only?: true; actions: AlterAction[]; span: Span }
+  // action list. `only` is present only when ONLY is written, and `foreign`
+  // only on ALTER FOREIGN TABLE, which takes the same actions bar ATTACH /
+  // DETACH PARTITION and RENAME CONSTRAINT.
+  | {
+      kind: "alterTable";
+      foreign?: true;
+      ifExists: boolean;
+      name: string[];
+      only?: true;
+      actions: AlterAction[];
+      span: Span;
+    }
+  | AlterForeignDataWrapper
+  | AlterServer
+  | AlterUserMapping
+  | DropUserMapping
   | { kind: "alterSchema"; name: string; action: AlterSchemaAction; span: Span }
   | { kind: "alterDomain"; name: string[]; action: AlterDomainAction; span: Span }
   | { kind: "alterType"; name: string[]; action: AlterTypeAction; span: Span }
@@ -4977,11 +5105,28 @@ const namedConstraint = seq(skip(kw("constraint")), field("name", nameWord), fie
 
 const tableConstraint = oneOf(namedConstraint, tableConstraintBody);
 
+// A column's `OPTIONS (…)`, between its type and its constraints as in PG's
+// columnDef. No constraint leads with `options`, so the word commits.
+const columnGenericOptions = custom<GenericOption[], SqlTokenType>(parseGenericOptions, {
+  expected: '"options"',
+  first: [{ type: "ident", value: "options" }],
+});
+
 const columnDef = seq(
   field("name", nameWord),
   field("dataType", typeRef),
+  field("options", optional(columnGenericOptions)),
   field("constraints", many(columnConstraint)),
-).map(({ name, dataType, constraints }, span): ColumnDef => ({ kind: "column", name, dataType, constraints, span }));
+).map(
+  ({ name, dataType, options, constraints }, span): ColumnDef => ({
+    kind: "column",
+    name,
+    dataType,
+    ...(options !== null && { options }),
+    constraints,
+    span,
+  }),
+);
 
 // An element led by `exclude`: an EXCLUDE constraint when the lookahead says
 // so, else `column` — the column definition of a table body, or the column
@@ -5423,18 +5568,20 @@ const partitionItem = oneOf(tableConstraint, excludeOr(columnOptions), columnOpt
 // this grammar takes after a table's element list. PG also allows `USING
 // method` between PARTITION BY and WITH; that is not parsed yet.
 function parseTableClauses(ctx: ParseContext<SqlTokenType>): TableClauses {
-  const clauses: TableClauses = {};
-  if (ctx.eat("ident", "inherits") !== null) {
-    if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
-    ctx.next(); // "("
-    const parents: string[][] = [];
-    do {
-      parents.push(ctx.parse(qualName));
-    } while (ctx.eat("punc", ",") !== null);
-    expectClose(ctx);
-    clauses.inherits = parents;
-  }
-  return { ...clauses, ...parsePartitionBy(ctx), ...parseStorageClauses(ctx) };
+  return { ...parseInherits(ctx), ...parsePartitionBy(ctx), ...parseStorageClauses(ctx) };
+}
+
+// `[INHERITS (parent, …)]`, which CREATE FOREIGN TABLE takes too.
+function parseInherits(ctx: ParseContext<SqlTokenType>): Pick<TableClauses, "inherits"> {
+  if (ctx.eat("ident", "inherits") === null) return {};
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const parents: string[][] = [];
+  do {
+    parents.push(ctx.parse(qualName));
+  } while (ctx.eat("punc", ",") !== null);
+  expectClose(ctx);
+  return { inherits: parents };
 }
 
 // A CTAS column-name list `(a, b) [storage clauses] AS` — bare names, ending in
@@ -5486,21 +5633,7 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
   // [storage clauses]`. The element list is optional, and INHERITS is not
   // allowed, as in PG.
   if (ctx.is("ident", "partition")) {
-    ctx.parse(kwseq("partition", "of"));
-    const parent = ctx.parse(qualName);
-    // Unlike the classic form's, this list may not be empty: `()` croaks as the
-    // missing first item.
-    // The peek goes through peekOrReport, and only on a `(`: lexing is lazy, and
-    // a bad first item must reach delimited()'s recovery rather than escape it.
-    const close = ctx.is("punc", "(") ? peekOrReport(ctx, 1) : null;
-    if (close?.type === "punc" && close.value === ")") {
-      ctx.next(); // "("
-      ctx.parse(partitionItem);
-    }
-    const items = ctx.is("punc", "(")
-      ? ctx.parse(delimited(P("("), P(")"), P(","), partitionItem, { interleaved: true, recover: true }))
-      : [];
-    const partitionOf = { parent, bound: parsePartitionBound(ctx) };
+    const { items, partitionOf } = parsePartitionOf(ctx);
     return {
       kind: "createTable",
       ifNotExists,
@@ -5541,6 +5674,26 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
     ...(modifiers.length > 0 && { modifiers }),
     span: ctx.spanFrom(start),
   };
+}
+
+// `PARTITION OF parent [(items)] bound`, the form CREATE [FOREIGN] TABLE
+// takes in place of its element list.
+function parsePartitionOf(ctx: ParseContext<SqlTokenType>): { items: TableItem[]; partitionOf: PartitionOf } {
+  ctx.parse(kwseq("partition", "of"));
+  const parent = ctx.parse(qualName);
+  // Unlike the classic form's, this list may not be empty: `()` croaks as the
+  // missing first item.
+  // The peek goes through peekOrReport, and only on a `(`: lexing is lazy, and
+  // a bad first item must reach delimited()'s recovery rather than escape it.
+  const close = ctx.is("punc", "(") ? peekOrReport(ctx, 1) : null;
+  if (close?.type === "punc" && close.value === ")") {
+    ctx.next(); // "("
+    ctx.parse(partitionItem);
+  }
+  const items = ctx.is("punc", "(")
+    ? ctx.parse(delimited(P("("), P(")"), P(","), partitionItem, { interleaved: true, recover: true }))
+    : [];
+  return { items, partitionOf: { parent, bound: parsePartitionBound(ctx) } };
 }
 
 // `NULLS FIRST | NULLS LAST`. Only a `nulls` with one of the two after it starts
@@ -6793,7 +6946,11 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   extension: { parse: createExtensionRest },
   tablespace: { parse: createTablespaceRest },
   role: { parse: (ctx) => createRoleRest(ctx, "role") },
-  user: { parse: (ctx) => createRoleRest(ctx, "user") },
+  // USER MAPPING when MAPPING is followed by FOR or IF; otherwise a user, who
+  // may be called `mapping`.
+  user: {
+    parse: (ctx) => (isUserMappingAhead(ctx, ["for", "if"]) ? createUserMappingRest(ctx) : createRoleRest(ctx, "user")),
+  },
   group: { parse: (ctx) => createRoleRest(ctx, "group") },
   policy: { parse: createPolicyRest },
   publication: { parse: createPublicationRest },
@@ -6807,6 +6964,11 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   access: { parse: createAccessMethodRest },
   text: { parse: createTextSearchRest },
   operator: { parse: createOperatorRest },
+  foreign: {
+    parse: (ctx) =>
+      foreignKindAhead(ctx) === "table" ? createForeignTableRest(ctx) : createForeignDataWrapperRest(ctx),
+  },
+  server: { parse: createServerRest },
 };
 
 // REPLACEABLE_CREATE dispatch CONSUMES the lead word: these bodies are entered
@@ -7109,6 +7271,9 @@ const ALTER_COLUMN_ACTIONS: DispatchMap<AlterAction, [string]> = {
     },
   },
   restart: { parse: parseAlterIdentity },
+  options: {
+    parse: (ctx, column) => ({ kind: "columnGenericOptions", column, options: parseAlterGenericOptions(ctx) }),
+  },
 };
 const ALTER_COLUMN_ACTION_EXPECTED = keyList(ALTER_COLUMN_ACTIONS);
 
@@ -7337,6 +7502,9 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       return { kind: "detachPartition", partition, mode: (mode?.value ?? null) as "concurrently" | "finalize" | null };
     },
   },
+  // `OPTIONS (…)`, a foreign table's generic options; PG's grammar takes it on
+  // any ALTER TABLE.
+  options: { parse: (ctx) => ({ kind: "genericOptions", options: parseAlterGenericOptions(ctx) }) },
 };
 
 // Hand-written croak, so the comma form over the KEYS — `owner`, `cluster` and
@@ -7414,9 +7582,9 @@ function alterAllInTablespaceRest(
   };
 }
 
-// The `action[, …]` list of ALTER TABLE, INDEX and [MATERIALIZED] VIEW, whose
-// lead words are `map`'s keys. A `solo` kind is fine alone and rejected beside
-// any other.
+// The `action[, …]` list of ALTER [FOREIGN] TABLE, INDEX and [MATERIALIZED]
+// VIEW, whose lead words are `map`'s keys. A `solo` kind is fine alone and
+// rejected beside any other.
 function parseActionList<A extends { kind: string }>(
   ctx: ParseContext<SqlTokenType>,
   target: string,
@@ -7812,7 +7980,7 @@ type ObjectKind = {
   member?: true;
   // The generic ALTER's actions on the kind, for a kind with no ALTER target of
   // its own; absent where PG has none, a dedicated target owns the ALTER (as
-  // for TABLE, POLICY or PUBLICATION), or one is to (FOREIGN TABLE).
+  // for TABLE, FOREIGN TABLE, POLICY or PUBLICATION).
   alter?: readonly AlterObjectVerb[];
 };
 
@@ -7821,9 +7989,9 @@ const RENAME_OWNER: readonly AlterObjectVerb[] = ["rename", "owner"];
 const RENAME_SCHEMA: readonly AlterObjectVerb[] = ["rename", "set"];
 
 // Grouped as gram.y groups them; the order is the order an "Expected …" croak
-// lists the lead words in. FOREIGN TABLE takes no generic ALTER: it is left
-// for a dedicated target that will own its whole ALTER, as ROLE, DATABASE,
-// TABLESPACE, POLICY, PUBLICATION and SUBSCRIPTION already have.
+// lists the lead words in. The kinds with an ALTER target of their own (ROLE,
+// DATABASE, TABLESPACE, POLICY, PUBLICATION, SUBSCRIPTION, FOREIGN TABLE, …)
+// take no generic ALTER.
 const OBJECT_KINDS: readonly ObjectKind[] = [
   // object_type_any_name
   { objectType: "table", shape: "qualName", label: true, member: true },
@@ -7845,7 +8013,9 @@ const OBJECT_KINDS: readonly ObjectKind[] = [
   { objectType: "event trigger", shape: "name", label: true, member: true, alter: RENAME_OWNER },
   // ALTER EXTENSION is a target of its own.
   { objectType: "extension", shape: "name", label: true, member: true },
-  { objectType: "foreign data wrapper", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  // FOREIGN DATA WRAPPER and SERVER have ALTER targets of their own, which
+  // hand RENAME TO and OWNER TO back to the generic node, as DATABASE's does.
+  { objectType: "foreign data wrapper", shape: "name", label: true, member: true },
   { objectType: "language", shape: "name", label: true, member: true, alter: RENAME_OWNER },
   {
     objectType: "language",
@@ -7857,7 +8027,7 @@ const OBJECT_KINDS: readonly ObjectKind[] = [
   },
   { objectType: "publication", shape: "name", label: true, member: true },
   { objectType: "schema", shape: "name", label: true, member: true },
-  { objectType: "server", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "server", shape: "name", label: true, member: true },
   // DATABASE and TABLESPACE have ALTER targets of their own, which hand RENAME
   // TO and OWNER TO back to the generic node (see alterRenameOwner).
   { objectType: "database", shape: "name", label: true, member: true },
@@ -8163,10 +8333,11 @@ function checkRoleName(ctx: ParseContext<SqlTokenType>, tok: Token<SqlTokenType>
   }
 }
 
-// RENAME TO and OWNER TO on ALTER DATABASE and ALTER TABLESPACE, which build
-// the generic `alterObject` node these two kinds have always had, or null when
-// neither leads. With `ownerOption`, OWNER leads OWNER TO only before TO, as it
-// is a database option name too (`OWNER = role`).
+// RENAME TO and OWNER TO on ALTER DATABASE, TABLESPACE, FOREIGN DATA WRAPPER
+// and SERVER, which build the generic `alterObject` node these kinds have
+// always had, or null when neither leads. With `ownerOption`, OWNER leads
+// OWNER TO only before TO, as it is a database option name too (`OWNER =
+// role`).
 function alterRenameOwner(
   ctx: ParseContext<SqlTokenType>,
   start: Position,
@@ -8926,6 +9097,324 @@ function createOperatorRest(ctx: ParseContext<SqlTokenType>): Stmt {
   return { kind: "createOperator", name, definition: parseDefinition(ctx), span: ctx.spanFrom(start) };
 }
 
+// --- foreign data ---
+//
+// Foreign-data wrappers, servers, user mappings, foreign tables and IMPORT
+// FOREIGN SCHEMA. Every lead and clause word is matched by value, so none of
+// them stops being usable as a name; `foreign`, `table` and `user` are
+// reserved and match here all the same.
+
+// `OPTIONS (name 'value', …)`, entered on OPTIONS: the generic options a
+// CREATE takes. The names are ColLabels (see optionName), so a reserved word
+// such as `user` is one, and every value is a string, as PG's Sconst.
+function parseGenericOptions(ctx: ParseContext<SqlTokenType>): GenericOption[] {
+  ctx.parse(kw("options"));
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const options = commaList(ctx, (c) => ({ name: optionName(c), value: stringConst(c) }));
+  expectClose(ctx);
+  return options;
+}
+
+// An ALTER's `OPTIONS ([ADD | SET] name 'value' | DROP name, …)`, entered on
+// OPTIONS. ADD, SET and DROP are option names too, and are one exactly when a
+// string follows them, as in PG: `OPTIONS (set 'x')` sets nothing, it names an
+// option called `set`.
+const GENERIC_OPTION_ACTIONS: ReadonlySet<string> = new Set(["add", "set", "drop"]);
+function parseAlterGenericOptions(ctx: ParseContext<SqlTokenType>): AlterGenericOption[] {
+  ctx.parse(kw("options"));
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const options = commaList(ctx, (c): AlterGenericOption => {
+    const tok = c.peek();
+    if (tok?.type === "ident" && GENERIC_OPTION_ACTIONS.has(tok.value) && c.peekAhead(1)?.type !== "string") {
+      c.next(); // ADD / SET / DROP
+      const name = optionName(c);
+      if (tok.value === "drop") return { action: "drop", name };
+      return { action: tok.value as "add" | "set", name, value: stringConst(c) };
+    }
+    return { name: optionName(c), value: stringConst(c) };
+  });
+  expectClose(ctx);
+  return options;
+}
+
+// A trailing `OPTIONS (…)`, spread into a node: `{}` when it is not written.
+function optionalGenericOptions(ctx: ParseContext<SqlTokenType>): { options?: GenericOption[] } {
+  return ctx.is("ident", "options") ? { options: parseGenericOptions(ctx) } : {};
+}
+
+// Which object FOREIGN leads, told by the word after it: `"table"` for FOREIGN
+// TABLE, `"data"` for FOREIGN DATA WRAPPER. Nothing is consumed unless the
+// word is neither, which croaks there.
+function foreignKindAhead(ctx: ParseContext<SqlTokenType>): "table" | "data" {
+  if (isWordAhead(ctx, 1, "table")) return "table";
+  if (isWordAhead(ctx, 1, "data")) return "data";
+  ctx.next(); // FOREIGN
+  return ctx.croak(`Expected "data" or "table" but found ${describeFound(ctx.peek())}`);
+}
+
+// Whether `USER MAPPING` leads, rather than a user called `mapping`: MAPPING
+// is followed by one of `follow`, which no role statement puts after a name.
+function isUserMappingAhead(ctx: ParseContext<SqlTokenType>, follow: readonly string[]): boolean {
+  if (!isWordAhead(ctx, 1, "mapping")) return false;
+  const tok = ctx.peekAhead(2);
+  return tok?.type === "ident" && follow.includes(tok.value);
+}
+
+// A wrapper's run of `HANDLER name`, `NO HANDLER`, `VALIDATOR name` and `NO
+// VALIDATOR`, in any order, possibly empty. NO is told apart from a name by
+// its place: no clause after the wrapper's name starts with one.
+const FDW_FUNCTION_WORDS = ["handler", "validator"] as const;
+function parseFdwFunctions(ctx: ParseContext<SqlTokenType>): FdwFunction[] {
+  const functions: FdwFunction[] = [];
+  for (;;) {
+    const no = ctx.eat("ident", "no") !== null;
+    const tok = ctx.peek();
+    const kind = FDW_FUNCTION_WORDS.find((w) => tok?.type === "ident" && tok.value === w);
+    if (kind === undefined) {
+      if (no) ctx.croak(`Expected ${quoteList([...FDW_FUNCTION_WORDS])} but found ${describeFound(tok)}`);
+      return functions;
+    }
+    ctx.next(); // HANDLER / VALIDATOR
+    functions.push({ kind, name: no ? null : ctx.parse(qualName) });
+  }
+}
+
+// `FOREIGN DATA WRAPPER name [function …] [OPTIONS (…)]` after CREATE.
+function createForeignDataWrapperRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kwseq("foreign", "data", "wrapper"));
+  const name = ctx.parse(nameWord);
+  const functions = parseFdwFunctions(ctx);
+  return {
+    kind: "createForeignDataWrapper",
+    name,
+    ...(functions.length > 0 && { functions }),
+    ...optionalGenericOptions(ctx),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// `FOREIGN DATA WRAPPER name …` after ALTER: RENAME TO, OWNER TO, or a run of
+// handler and validator clauses and an OPTIONS list, at least one of them.
+function alterForeignDataWrapperRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.parse(kwseq("foreign", "data", "wrapper"));
+  const name = ctx.parse(nameWord);
+  const renameOwner = alterRenameOwner(ctx, start, "foreign data wrapper", name);
+  if (renameOwner !== null) return renameOwner;
+  const functions = parseFdwFunctions(ctx);
+  const options = ctx.is("ident", "options") ? parseAlterGenericOptions(ctx) : null;
+  if (functions.length === 0 && options === null) {
+    const expected = ["handler", "validator", "no", "options", "rename", "owner"];
+    ctx.croak(`Expected ${quoteList(expected)} but found ${describeFound(ctx.peek())}`);
+  }
+  return {
+    kind: "alterForeignDataWrapper",
+    name,
+    ...(functions.length > 0 && { functions }),
+    ...(options !== null && { options }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// A server's `VERSION {'version' | NULL}`, VERSION consumed.
+function parseServerVersion(ctx: ParseContext<SqlTokenType>): string | null {
+  if (ctx.eat("ident", "null") !== null) return null;
+  if (!ctx.is("string")) ctx.croak(`Expected a string or "null" but found ${describeFound(ctx.peek())}`);
+  return ctx.next()!.value;
+}
+
+// `SERVER [IF NOT EXISTS] name [TYPE 'type'] [VERSION …] FOREIGN DATA WRAPPER
+// fdw [OPTIONS (…)]` after CREATE.
+function createServerRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("server"));
+  const ifNotExists = parseIfNotExists(ctx);
+  const name = ctx.parse(nameWord);
+  const type = ctx.eat("ident", "type") !== null ? stringConst(ctx) : undefined;
+  const version = ctx.eat("ident", "version") !== null ? parseServerVersion(ctx) : undefined;
+  ctx.parse(kwseq("foreign", "data", "wrapper"));
+  const wrapper = ctx.parse(nameWord);
+  return {
+    kind: "createServer",
+    ...(ifNotExists && { ifNotExists: true }),
+    name,
+    ...(type !== undefined && { type }),
+    ...(version !== undefined && { version }),
+    wrapper,
+    ...optionalGenericOptions(ctx),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// `SERVER name …` after ALTER: RENAME TO, OWNER TO, or `[VERSION …] [OPTIONS
+// (…)]`, at least one of the two.
+function alterServerRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // SERVER
+  const name = ctx.parse(nameWord);
+  const renameOwner = alterRenameOwner(ctx, start, "server", name);
+  if (renameOwner !== null) return renameOwner;
+  const version = ctx.eat("ident", "version") !== null ? parseServerVersion(ctx) : undefined;
+  const options = ctx.is("ident", "options") ? parseAlterGenericOptions(ctx) : null;
+  if (version === undefined && options === null) {
+    ctx.croak(
+      `Expected ${quoteList(["version", "options", "rename", "owner"])} but found ${describeFound(ctx.peek())}`,
+    );
+  }
+  return {
+    kind: "alterServer",
+    name,
+    ...(version !== undefined && { version }),
+    ...(options !== null && { options }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// The `FOR role SERVER name` every USER MAPPING statement names its mapping
+// by. The role is PG's auth_ident: a role spec, or USER, which is reserved and
+// so matched by value, and which PG reads as CURRENT_USER.
+function parseUserMappingTarget(ctx: ParseContext<SqlTokenType>): { user: string; server: string } {
+  ctx.parse(kw("for"));
+  const user = ctx.eat("ident", "user") !== null ? "current_user" : parseRoleSpec(ctx);
+  ctx.parse(kw("server"));
+  return { user, server: ctx.parse(nameWord) };
+}
+
+// `USER MAPPING [IF NOT EXISTS] FOR role SERVER name [OPTIONS (…)]` after CREATE.
+function createUserMappingRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kwseq("user", "mapping"));
+  // FOR is reserved, so an IF here can only open IF NOT EXISTS.
+  const ifNotExists = ctx.is("ident", "if");
+  if (ifNotExists) ctx.parse(kwseq("if", "not", "exists"));
+  return {
+    kind: "createUserMapping",
+    ...(ifNotExists && { ifNotExists: true }),
+    ...parseUserMappingTarget(ctx),
+    ...optionalGenericOptions(ctx),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// `USER MAPPING FOR role SERVER name OPTIONS (…)` after ALTER.
+function alterUserMappingRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.parse(kwseq("user", "mapping"));
+  const target = parseUserMappingTarget(ctx);
+  return { kind: "alterUserMapping", ...target, options: parseAlterGenericOptions(ctx), span: ctx.spanFrom(start) };
+}
+
+// `USER MAPPING [IF EXISTS] FOR role SERVER name` after DROP.
+function dropUserMappingRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.parse(kwseq("user", "mapping"));
+  // As on CREATE, an IF here can only open IF EXISTS.
+  const ifExists = ctx.is("ident", "if");
+  if (ifExists) ctx.parse(kwseq("if", "exists"));
+  return { kind: "dropUserMapping", ifExists, ...parseUserMappingTarget(ctx), span: ctx.spanFrom(start) };
+}
+
+// `FOREIGN TABLE [IF NOT EXISTS] name …` after CREATE: an element list, as
+// CREATE TABLE's (which may be empty) and INHERITS, or PARTITION OF with an
+// optional list and a bound; then `SERVER name [OPTIONS (…)]`.
+function createForeignTableRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kwseq("foreign", "table"));
+  const ifNotExists = parseIfNotExists(ctx);
+  const name = ctx.parse(qualName);
+  let body: Pick<CreateForeignTable, "items" | "partitionOf" | "inherits">;
+  if (ctx.is("ident", "partition")) {
+    body = parsePartitionOf(ctx);
+  } else {
+    const items = ctx.parse(delimited(P("("), P(")"), P(","), tableItem, { interleaved: true, recover: true }));
+    body = { items, ...parseInherits(ctx) };
+  }
+  ctx.parse(kw("server"));
+  const server = ctx.parse(nameWord);
+  return {
+    kind: "createForeignTable",
+    ...(ifNotExists && { ifNotExists: true }),
+    name,
+    ...body,
+    server,
+    ...optionalGenericOptions(ctx),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// ALTER FOREIGN TABLE's actions: ALTER TABLE's, its table-level OPTIONS
+// among them, bar ATTACH / DETACH PARTITION and RENAME CONSTRAINT, which PG's
+// grammar gives ALTER TABLE alone.
+const FOREIGN_TABLE_ACTIONS: DispatchMap<AlterAction> = {
+  ...Object.fromEntries(Object.entries(ALTER_ACTIONS).filter(([key]) => key !== "attach" && key !== "detach")),
+  rename: {
+    parse: (ctx) => {
+      if (isWordAhead(ctx, 1, "constraint")) {
+        ctx.next(); // RENAME
+        ctx.croak(`Expected "to", "column" or a name but found ${describeFound(ctx.peek())}`);
+      }
+      return ALTER_ACTIONS.rename!.parse(ctx);
+    },
+  },
+};
+const FOREIGN_TABLE_ACTION_EXPECTED = keyList(FOREIGN_TABLE_ACTIONS);
+
+// `FOREIGN TABLE [IF EXISTS] relation action[, …]` after ALTER.
+function alterForeignTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.parse(kwseq("foreign", "table"));
+  const ifExists = parseIfExists(ctx);
+  const { name, only } = ctx.parse(relationExpr);
+  const parseAction = (c: ParseContext<SqlTokenType>) =>
+    dispatch(FOREIGN_TABLE_ACTIONS, FOREIGN_TABLE_ACTION_EXPECTED, c);
+  const actions = parseActionList(ctx, "FOREIGN TABLE", parseAction, FOREIGN_TABLE_ACTIONS, SOLO_ALTER_ACTIONS);
+  return {
+    kind: "alterTable",
+    foreign: true,
+    ifExists,
+    name,
+    ...(only && { only: true }),
+    actions,
+    span: ctx.spanFrom(start),
+  };
+}
+
+// `IMPORT FOREIGN SCHEMA remote [{LIMIT TO | EXCEPT} (table, …)] FROM SERVER
+// server INTO local [OPTIONS (…)]`. `limit` and `except` are reserved, so
+// neither can be read as anything else after the schema's name. The tables
+// are PG's relation_expr, whose ONLY and `*` PG takes and then ignores: only
+// each name is kept.
+const importForeignSchemaStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kwseq("import", "foreign", "schema"));
+    const remoteSchema = ctx.parse(nameWord);
+    let qualification: ImportForeignSchema["qualification"];
+    if (ctx.is("ident", "limit") || ctx.is("ident", "except")) {
+      const kind = ctx.is("ident", "limit") ? "limitTo" : "except";
+      if (kind === "limitTo") ctx.parse(kwseq("limit", "to"));
+      else ctx.next(); // EXCEPT
+      if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+      ctx.next(); // "("
+      const tables = commaList(ctx, (c) => c.parse(relationExpr).name);
+      expectClose(ctx);
+      qualification = { kind, tables };
+    }
+    ctx.parse(kwseq("from", "server"));
+    const server = ctx.parse(nameWord);
+    ctx.parse(kw("into"));
+    const into = ctx.parse(nameWord);
+    return {
+      kind: "importForeignSchema",
+      remoteSchema,
+      ...(qualification !== undefined && { qualification }),
+      server,
+      into,
+      ...optionalGenericOptions(ctx),
+      span: ctx.spanFrom(start),
+    };
+  },
+  { expected: '"import"', first: [{ type: "ident", value: "import" }] },
+);
+
 // The ALTER targets. Dispatch peeks, as PLAIN_CREATE's does: each handler
 // consumes its own lead word, and is handed the position before ALTER so its
 // node spans the whole statement. The croak is hand-written and replaces no
@@ -9022,19 +9511,28 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
   },
   default: { parse: alterDefaultPrivilegesRest },
   role: { parse: (ctx, start) => alterRoleRest(ctx, start, "role") },
-  // USER only; `ALTER USER MAPPING` is not supported and reads as a user named
-  // `mapping` followed by stray words, as on DROP.
-  user: { parse: (ctx, start) => alterRoleRest(ctx, start, "user") },
+  // USER MAPPING when `mapping for` follows; otherwise a user, who may be
+  // called `mapping`.
+  user: {
+    parse: (ctx, start) =>
+      isUserMappingAhead(ctx, ["for"]) ? alterUserMappingRest(ctx, start) : alterRoleRest(ctx, start, "user"),
+  },
   database: { parse: alterDatabaseRest },
   tablespace: { parse: alterTablespaceRest },
   policy: { parse: alterPolicyRest },
   publication: { parse: alterPublicationRest },
   subscription: { parse: alterSubscriptionRest },
+  foreign: {
+    parse: (ctx, start) =>
+      foreignKindAhead(ctx) === "table" ? alterForeignTableRest(ctx, start) : alterForeignDataWrapperRest(ctx, start),
+  },
+  server: { parse: alterServerRest },
 };
 // Every other kind the generic ALTER takes leads it here. A dedicated target
-// that takes one of these lead words must hand that word's generic kinds to
-// alterObjectRest itself (`FOREIGN DATA WRAPPER` beside `FOREIGN TABLE`), and
-// then drop the word from this loop, which refuses to shadow it silently.
+// that takes one of these lead words must take that word's generic kinds over
+// itself (as DATABASE and FOREIGN DATA WRAPPER do through alterRenameOwner)
+// and drop them from OBJECT_KINDS' `alter`; this loop refuses to shadow a
+// word silently.
 for (const word of ALTER_OBJECTS.next.keys()) {
   if (Object.hasOwn(ALTER_TARGETS, word)) throw new Error(`ALTER ${word} has a dedicated target`);
   ALTER_TARGETS[word] = { parse: alterObjectRest };
@@ -9057,7 +9555,7 @@ const dropBehavior = optional(oneOf(kw("cascade"), kw("restrict"))).map(
 
 // `DROP <object> …`, dispatched on the object keyword like ALTER. Every lead
 // word is matched by value, so none of them stops being usable as a name;
-// `table` and `user` are reserved but match here all the same.
+// `foreign`, `table` and `user` are reserved but match here all the same.
 type DropStmt = Extract<Stmt, { kind: "drop" }>;
 type DropEntry = DispatchEntry<Stmt, [Position]>;
 
@@ -9130,6 +9628,12 @@ const onTableDrop = (objectType: string): DropEntry => ({
   },
 });
 
+const USER_DROP = listDrop("user", unqualName, { behavior: false });
+const FOREIGN_TABLE_DROP = listDrop("foreign table", qualName, { lead: kwseq("foreign", "table") });
+const FOREIGN_DATA_WRAPPER_DROP = listDrop("foreign data wrapper", unqualName, {
+  lead: kwseq("foreign", "data", "wrapper"),
+});
+
 const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
   table: listDrop("table", qualName, { concurrently: true }),
   view: listDrop("view", qualName, { concurrently: true }),
@@ -9170,9 +9674,12 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
     },
   },
   role: listDrop("role", unqualName, { behavior: false }),
-  // USER only; `DROP USER MAPPING` is not supported and reads as a user named
-  // `mapping` followed by stray words.
-  user: listDrop("user", unqualName, { behavior: false }),
+  // USER MAPPING when MAPPING is followed by FOR or IF; otherwise users, the
+  // first of whom may be called `mapping`.
+  user: {
+    parse: (ctx, start) =>
+      isUserMappingAhead(ctx, ["for", "if"]) ? dropUserMappingRest(ctx, start) : USER_DROP.parse(ctx, start),
+  },
   // `DROP TABLESPACE [IF EXISTS] name` — one tablespace, and no CASCADE / RESTRICT.
   tablespace: {
     parse: (ctx, start) => {
@@ -9244,6 +9751,11 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
       return dropNode(ctx, start, "operator", fields, { operands: items.map((i) => i.operands) });
     },
   },
+  foreign: {
+    parse: (ctx, start) =>
+      (foreignKindAhead(ctx) === "table" ? FOREIGN_TABLE_DROP : FOREIGN_DATA_WRAPPER_DROP).parse(ctx, start),
+  },
+  server: listDrop("server", unqualName),
 };
 const DROP_TARGET_EXPECTED = keyList(DROP_TARGETS);
 
@@ -12333,7 +12845,16 @@ const copyStmt = custom<Stmt, SqlTokenType>(
 // to grow. Nesting is dispatch- and validation-equivalent to the flat form —
 // oneOf's first() is a flatMap, and the inner groups catch collisions within a
 // family — and the composed `expected` is overridden by describe() anyway.
-const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt, securityLabelStmt, refreshStmt);
+const ddlStmt = oneOf(
+  createStmt,
+  alterStmt,
+  dropStmt,
+  truncateStmt,
+  commentStmt,
+  securityLabelStmt,
+  refreshStmt,
+  importForeignSchemaStmt,
+);
 const utilityStmt = oneOf(
   grantStmt,
   transactionStmt,
