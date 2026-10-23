@@ -6623,7 +6623,14 @@ function alterRoleRest(ctx: ParseContext<SqlTokenType>, start: Position, lead: "
     if (tok?.type === "ident" && ROLE_KEYWORDS.has(tok.value)) {
       ctx.croak(`${tok.value.toUpperCase()} cannot be used as a role name here`, roleStart);
     }
-    return node(parseRenameTo(ctx));
+    checkRoleName(ctx, tok, roleStart);
+    ctx.next(); // RENAME
+    if (ctx.eat("ident", "to") === null) ctx.croak(`Expected "to" but found ${describeFound(ctx.peek())}`);
+    const toStart = ctx.position();
+    const toTok = ctx.peek();
+    const to = ctx.parse(nameWord);
+    checkRoleName(ctx, toTok, toStart);
+    return node({ kind: "rename", to });
   }
   // `with` is reserved, so it can only open the list.
   ctx.eat("ident", "with");
@@ -6632,6 +6639,14 @@ function alterRoleRest(ctx: ParseContext<SqlTokenType>, start: Position, lead: "
     options.push(option);
   }
   return node({ kind: "options", options });
+}
+
+// PG reserves the role names PUBLIC and NONE, unquoted, wherever a role is
+// named rather than specified: RENAME's two names here.
+function checkRoleName(ctx: ParseContext<SqlTokenType>, tok: Token<SqlTokenType> | null, at: Position): void {
+  if (tok?.type === "ident" && (tok.value === "public" || tok.value === "none")) {
+    ctx.croak(`Role name "${tok.value}" is reserved`, at);
+  }
 }
 
 // RENAME TO and OWNER TO on ALTER DATABASE and ALTER TABLESPACE, which build

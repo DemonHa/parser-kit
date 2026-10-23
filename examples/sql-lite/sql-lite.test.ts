@@ -9897,6 +9897,14 @@ describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
     expect(firstStmt("ALTER DATABASE d SET tablespace TO x;")).toEqual(
       db({ kind: "set", name: "tablespace", values: [name("x")] }),
     );
+    // …as is one called `tablespace` written with `=`, and so is a quoted SET.
+    expect(firstStmt("ALTER DATABASE d SET TABLESPACE = x;")).toEqual(
+      db({ kind: "set", name: "tablespace", values: [name("x")] }),
+    );
+    expect(firstStmt("ALTER DATABASE d WITH TABLESPACE x;")).toEqual(
+      db({ kind: "options", options: [{ name: "tablespace", value: name("x") }] }),
+    );
+    expect(firstStmt('CREATE DATABASE d "set" = 1;').options).toEqual([{ name: "set", value: num(1) }]);
     // OWNER is a database option too; it leads OWNER TO only before TO.
     expect(firstStmt("ALTER DATABASE d OWNER = bob;")).toEqual(
       db({ kind: "options", options: [{ name: "owner", value: name("bob") }] }),
@@ -10050,6 +10058,8 @@ describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
     );
     expect(bad("ALTER ROLE r RENAME TO session_user;")).toThrow(/Expected a name but found "session_user"/);
     expect(bad("ALTER ROLE r RENAME x;")).toThrow(/Expected "to" but found "x"/);
+    expect(bad("ALTER ROLE public RENAME TO x;")).toThrow(/Role name "public" is reserved \(1:11\)/);
+    expect(bad("ALTER USER r RENAME TO none;")).toThrow(/Role name "none" is reserved \(1:23\)/);
     // SET takes a parameter value, never an expression.
     expect(bad("ALTER ROLE r SET x = 1 + 2;")).toThrow(/Expected ";" but found "\+"/);
     expect(bad("ALTER ROLE r SET x;")).toThrow(/Expected "to" or "=" but found ";"/);
@@ -10067,6 +10077,8 @@ describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
     );
     expect(bad("ALTER DATABASE d WITH OWNER TO r;")).toThrow(/Expected an option value but found "to"/);
     expect(bad("CREATE DATABASE d OWNER TO;")).toThrow(/Expected an option value but found "to"/);
+    expect(bad("CREATE DATABASE d SET = 1;")).toThrow(/Expected ";" but found "set"/);
+    expect(bad("ALTER DATABASE d SET TABLESPACE x.y;")).toThrow(/Expected ";" but found "\."/);
     expect(bad("ALTER TABLESPACE t;")).toThrow(/Expected "rename", "owner", "set" or "reset" but found ";"/);
     expect(bad("ALTER TABLESPACE t SET random_page_cost = 1;")).toThrow(/Expected "\(" but found "random_page_cost"/);
     expect(bad("ALTER TABLESPACE t RESET (x = 1);")).toThrow(/RESET must not include values for parameters/);
