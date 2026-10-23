@@ -14197,3 +14197,500 @@ describe("SQL-lite psql scripts", () => {
     expect(errors.map((error) => error.message)).toEqual(["Unexpected text after COPY … FROM STDIN (1:19)"]);
   });
 });
+
+// --- foreign data: wrappers, servers, user mappings, foreign tables ---
+
+describe("SQL-lite foreign data", () => {
+  const fails = (text: string) => () => sqlLite.parse(text);
+  const ty = (typeName: string, args: number[] = []) => ({
+    name: typeName,
+    args,
+    array: false,
+  });
+  const opt = (optionName: string, value: string) => ({
+    name: optionName,
+    value,
+  });
+
+  it("parses CREATE and ALTER FOREIGN DATA WRAPPER", () => {
+    expect(firstStmt("CREATE FOREIGN DATA WRAPPER w;")).toEqual({
+      kind: "createForeignDataWrapper",
+      name: "w",
+    });
+    expect(
+      firstStmt("CREATE FOREIGN DATA WRAPPER w HANDLER s.h NO VALIDATOR OPTIONS (debug 'true', user 'u');"),
+    ).toEqual({
+      kind: "createForeignDataWrapper",
+      name: "w",
+      functions: [
+        { kind: "handler", name: ["s", "h"] },
+        { kind: "validator", name: null },
+      ],
+      options: [opt("debug", "true"), opt("user", "u")],
+    });
+    // PG takes the clauses in any order.
+    expect(firstStmt("CREATE FOREIGN DATA WRAPPER w VALIDATOR v NO HANDLER;").functions).toEqual([
+      { kind: "validator", name: ["v"] },
+      { kind: "handler", name: null },
+    ]);
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w NO HANDLER OPTIONS (ADD a '1', SET b '2', DROP c, d '4');")).toEqual(
+      {
+        kind: "alterForeignDataWrapper",
+        name: "w",
+        functions: [{ kind: "handler", name: null }],
+        options: [
+          { action: "add", name: "a", value: "1" },
+          { action: "set", name: "b", value: "2" },
+          { action: "drop", name: "c" },
+          opt("d", "4"),
+        ],
+      },
+    );
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w VALIDATOR v;")).toEqual({
+      kind: "alterForeignDataWrapper",
+      name: "w",
+      functions: [{ kind: "validator", name: ["v"] }],
+    });
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w OPTIONS (DROP a);")).toEqual({
+      kind: "alterForeignDataWrapper",
+      name: "w",
+      options: [{ action: "drop", name: "a" }],
+    });
+    // ADD, SET and DROP name an option when a string follows them.
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w OPTIONS (set 'x', drop 'y', SET add 'z');").options).toEqual([
+      opt("set", "x"),
+      opt("drop", "y"),
+      { action: "set", name: "add", value: "z" },
+    ]);
+  });
+
+  it("keeps RENAME TO and OWNER TO on wrappers and servers as alterObject", () => {
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w RENAME TO x;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "foreign data wrapper", name: ["w"] },
+      action: { kind: "rename", to: "x" },
+    });
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w OWNER TO CURRENT_USER;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "foreign data wrapper", name: ["w"] },
+      action: { kind: "ownerTo", owner: "current_user" },
+    });
+    expect(firstStmt("ALTER SERVER s RENAME TO t;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "server", name: ["s"] },
+      action: { kind: "rename", to: "t" },
+    });
+    expect(firstStmt("ALTER SERVER s OWNER TO r;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "server", name: ["s"] },
+      action: { kind: "ownerTo", owner: "r" },
+    });
+  });
+
+  it("parses CREATE and ALTER SERVER", () => {
+    expect(firstStmt("CREATE SERVER s FOREIGN DATA WRAPPER postgres_fdw;")).toEqual({
+      kind: "createServer",
+      name: "s",
+      wrapper: "postgres_fdw",
+    });
+    expect(
+      firstStmt(
+        "CREATE SERVER IF NOT EXISTS s TYPE 'pg' VERSION '17' FOREIGN DATA WRAPPER w OPTIONS (host 'foo', dbname 'films');",
+      ),
+    ).toEqual({
+      kind: "createServer",
+      ifNotExists: true,
+      name: "s",
+      type: "pg",
+      version: "17",
+      wrapper: "w",
+      options: [opt("host", "foo"), opt("dbname", "films")],
+    });
+    expect(firstStmt("CREATE SERVER s VERSION NULL FOREIGN DATA WRAPPER w;")).toMatchObject({ version: null });
+    // A server called `if` is no IF NOT EXISTS.
+    expect(firstStmt("CREATE SERVER if FOREIGN DATA WRAPPER w;")).toMatchObject({ name: "if" });
+    expect(firstStmt("ALTER SERVER s VERSION '2' OPTIONS (SET host 'x');")).toEqual({
+      kind: "alterServer",
+      name: "s",
+      version: "2",
+      options: [{ action: "set", name: "host", value: "x" }],
+    });
+    expect(firstStmt("ALTER SERVER s VERSION NULL;")).toEqual({
+      kind: "alterServer",
+      name: "s",
+      version: null,
+    });
+    expect(firstStmt("ALTER SERVER s OPTIONS (port '5432');")).toEqual({
+      kind: "alterServer",
+      name: "s",
+      options: [opt("port", "5432")],
+    });
+  });
+
+  it("parses CREATE, ALTER and DROP USER MAPPING", () => {
+    expect(firstStmt("CREATE USER MAPPING FOR app_user SERVER films OPTIONS (user 'bob', password 'x');")).toEqual({
+      kind: "createUserMapping",
+      user: "app_user",
+      server: "films",
+      options: [opt("user", "bob"), opt("password", "x")],
+    });
+    // PG reads the USER keyword as CURRENT_USER.
+    expect(firstStmt("CREATE USER MAPPING IF NOT EXISTS FOR USER SERVER s;")).toEqual({
+      kind: "createUserMapping",
+      ifNotExists: true,
+      user: "current_user",
+      server: "s",
+    });
+    // A quoted "user" is a role of that name.
+    expect(firstStmt('CREATE USER MAPPING FOR "user" SERVER s;')).toMatchObject({ user: "user" });
+    for (const role of ["current_role", "current_user", "session_user", "public"]) {
+      expect(firstStmt(`CREATE USER MAPPING FOR ${role.toUpperCase()} SERVER s;`)).toMatchObject({ user: role });
+    }
+    expect(firstStmt("ALTER USER MAPPING FOR CURRENT_ROLE SERVER s OPTIONS (DROP password, SET user 'u');")).toEqual({
+      kind: "alterUserMapping",
+      user: "current_role",
+      server: "s",
+      options: [
+        { action: "drop", name: "password" },
+        { action: "set", name: "user", value: "u" },
+      ],
+    });
+    expect(firstStmt("DROP USER MAPPING IF EXISTS FOR u SERVER s;")).toEqual({
+      kind: "dropUserMapping",
+      ifExists: true,
+      user: "u",
+      server: "s",
+    });
+    expect(firstStmt("DROP USER MAPPING FOR USER SERVER s;")).toEqual({
+      kind: "dropUserMapping",
+      ifExists: false,
+      user: "current_user",
+      server: "s",
+    });
+  });
+
+  it("still reads a user called mapping as a user", () => {
+    expect(firstStmt("CREATE USER mapping;")).toEqual({
+      kind: "createRole",
+      user: true,
+      name: "mapping",
+      options: [],
+    });
+    expect(firstStmt("CREATE USER mapping WITH LOGIN;")).toMatchObject({
+      kind: "createRole",
+      name: "mapping",
+    });
+    expect(firstStmt("ALTER USER mapping WITH LOGIN;")).toMatchObject({
+      kind: "alterRole",
+      name: "mapping",
+    });
+    expect(firstStmt("ALTER USER mapping RENAME TO m;")).toMatchObject({
+      kind: "alterRole",
+      name: "mapping",
+    });
+    expect(firstStmt("DROP USER mapping, other;")).toMatchObject({
+      kind: "drop",
+      objectType: "user",
+      names: [["mapping"], ["other"]],
+    });
+    expect(firstStmt("DROP USER IF EXISTS mapping;")).toMatchObject({
+      objectType: "user",
+      ifExists: true,
+    });
+  });
+
+  it("parses CREATE FOREIGN TABLE with column and table options", () => {
+    expect(
+      firstStmt(
+        "CREATE FOREIGN TABLE films (code char(5) OPTIONS (column_name 'c') NOT NULL, title varchar(40)) " +
+          "SERVER films_srv OPTIONS (schema_name 'public');",
+      ),
+    ).toEqual({
+      kind: "createForeignTable",
+      name: ["films"],
+      items: [
+        {
+          kind: "column",
+          name: "code",
+          dataType: ty("char", [5]),
+          options: [opt("column_name", "c")],
+          constraints: [{ kind: "notNull" }],
+        },
+        {
+          kind: "column",
+          name: "title",
+          dataType: ty("varchar", [40]),
+          constraints: [],
+        },
+      ],
+      server: "films_srv",
+      options: [opt("schema_name", "public")],
+    });
+    expect(firstStmt("CREATE FOREIGN TABLE IF NOT EXISTS s.f () INHERITS (p, q) SERVER s;")).toEqual({
+      kind: "createForeignTable",
+      ifNotExists: true,
+      name: ["s", "f"],
+      items: [],
+      inherits: [["p"], ["q"]],
+      server: "s",
+    });
+    expect(firstStmt("CREATE FOREIGN TABLE f (a int, CHECK (a > 0)) SERVER s;").items[1]).toMatchObject({
+      kind: "check",
+    });
+    // PG's columnDef takes OPTIONS on any table.
+    expect(firstStmt("CREATE TABLE t (a int OPTIONS (x 'y') DEFAULT 1);").items[0]).toEqual({
+      kind: "column",
+      name: "a",
+      dataType: ty("int"),
+      options: [opt("x", "y")],
+      constraints: [{ kind: "default", expr: num(1) }],
+    });
+  });
+
+  it("parses CREATE FOREIGN TABLE … PARTITION OF", () => {
+    expect(firstStmt("CREATE FOREIGN TABLE f PARTITION OF p FOR VALUES IN (1) SERVER s;")).toEqual({
+      kind: "createForeignTable",
+      name: ["f"],
+      items: [],
+      partitionOf: { parent: ["p"], bound: { kind: "list", values: [num(1)] } },
+      server: "s",
+    });
+    expect(
+      firstStmt("CREATE FOREIGN TABLE f PARTITION OF p (a NOT NULL) DEFAULT SERVER s OPTIONS (t 'x');"),
+    ).toMatchObject({
+      items: [{ kind: "columnOptions", name: "a" }],
+      partitionOf: { parent: ["p"], bound: { kind: "default" } },
+      options: [opt("t", "x")],
+    });
+    expect(firstStmt("CREATE FOREIGN TABLE IF NOT EXISTS f PARTITION OF p DEFAULT SERVER s;")).toEqual({
+      kind: "createForeignTable",
+      ifNotExists: true,
+      name: ["f"],
+      items: [],
+      partitionOf: { parent: ["p"], bound: { kind: "default" } },
+      server: "s",
+    });
+  });
+
+  it("parses ALTER FOREIGN TABLE with ALTER TABLE's actions and OPTIONS", () => {
+    expect(
+      firstStmt(
+        "ALTER FOREIGN TABLE IF EXISTS ONLY f ADD COLUMN c int OPTIONS (n 'v'), ALTER c OPTIONS (ADD x 'y'), OPTIONS (DROP z);",
+      ),
+    ).toEqual({
+      kind: "alterTable",
+      foreign: true,
+      ifExists: true,
+      name: ["f"],
+      only: true,
+      actions: [
+        {
+          kind: "addColumn",
+          ifNotExists: false,
+          column: {
+            kind: "column",
+            name: "c",
+            dataType: ty("int"),
+            options: [opt("n", "v")],
+            constraints: [],
+          },
+        },
+        {
+          kind: "columnGenericOptions",
+          column: "c",
+          options: [{ action: "add", name: "x", value: "y" }],
+        },
+        { kind: "genericOptions", options: [{ action: "drop", name: "z" }] },
+      ],
+    });
+    expect(firstStmt("ALTER FOREIGN TABLE f RENAME TO g;")).toEqual({
+      kind: "alterTable",
+      foreign: true,
+      ifExists: false,
+      name: ["f"],
+      actions: [{ kind: "renameTable", to: "g" }],
+    });
+    expect(firstStmt("ALTER FOREIGN TABLE f OWNER TO r;").actions).toEqual([{ kind: "ownerTo", owner: "r" }]);
+    expect(firstStmt("ALTER FOREIGN TABLE f SET SCHEMA s;").actions).toEqual([{ kind: "setSchema", schema: "s" }]);
+    expect(firstStmt("ALTER TABLE t ALTER COLUMN c OPTIONS (SET a 'b');").actions).toEqual([
+      { kind: "columnGenericOptions", column: "c", options: [{ action: "set", name: "a", value: "b" }] },
+    ]);
+    expect(firstStmt("ALTER TABLE t ADD COLUMN a int OPTIONS (x 'y');").actions).toEqual([
+      {
+        kind: "addColumn",
+        ifNotExists: false,
+        column: { kind: "column", name: "a", dataType: ty("int"), options: [opt("x", "y")], constraints: [] },
+      },
+    ]);
+    expect(firstStmt("ALTER TABLE t OPTIONS (a 'b');")).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["t"],
+      actions: [{ kind: "genericOptions", options: [opt("a", "b")] }],
+    });
+  });
+
+  it("parses IMPORT FOREIGN SCHEMA", () => {
+    expect(firstStmt("IMPORT FOREIGN SCHEMA remote FROM SERVER srv INTO local;")).toEqual({
+      kind: "importForeignSchema",
+      remoteSchema: "remote",
+      server: "srv",
+      into: "local",
+    });
+    expect(firstStmt("IMPORT FOREIGN SCHEMA r LIMIT TO (t1, s.t2) FROM SERVER srv INTO l;")).toMatchObject({
+      qualification: { kind: "limitTo", tables: [["t1"], ["s", "t2"]] },
+    });
+    // ONLY and `*` are PG's relation_expr, accepted and ignored.
+    expect(firstStmt("IMPORT FOREIGN SCHEMA r LIMIT TO (ONLY a, b *) FROM SERVER srv INTO l;")).toMatchObject({
+      qualification: { kind: "limitTo", tables: [["a"], ["b"]] },
+    });
+    expect(
+      firstStmt("IMPORT FOREIGN SCHEMA r EXCEPT (t3) FROM SERVER srv INTO l OPTIONS (import_default 'true');"),
+    ).toEqual({
+      kind: "importForeignSchema",
+      remoteSchema: "r",
+      qualification: { kind: "except", tables: [["t3"]] },
+      server: "srv",
+      into: "l",
+      options: [opt("import_default", "true")],
+    });
+  });
+
+  it("parses DROP FOREIGN TABLE, FOREIGN DATA WRAPPER and SERVER", () => {
+    const drop = (objectType: string, names: string[][], ifExists: boolean, behavior: string | null) => ({
+      kind: "drop",
+      objectType,
+      concurrently: false,
+      ifExists,
+      names,
+      behavior,
+    });
+    expect(firstStmt("DROP FOREIGN TABLE IF EXISTS a, b.c CASCADE;")).toEqual(
+      drop("foreign table", [["a"], ["b", "c"]], true, "cascade"),
+    );
+    expect(firstStmt("DROP FOREIGN DATA WRAPPER w;")).toEqual(drop("foreign data wrapper", [["w"]], false, null));
+    expect(firstStmt("DROP SERVER IF EXISTS s, t RESTRICT;")).toEqual(drop("server", [["s"], ["t"]], true, "restrict"));
+  });
+
+  it("still comments on servers, wrappers and foreign tables", () => {
+    expect(firstStmt("COMMENT ON SERVER s IS 'x';")).toEqual({
+      kind: "comment",
+      objectType: "server",
+      name: ["s"],
+      comment: "x",
+    });
+    expect(firstStmt("COMMENT ON FOREIGN DATA WRAPPER w IS 'x';")).toMatchObject({
+      objectType: "foreign data wrapper",
+      name: ["w"],
+    });
+    expect(firstStmt("COMMENT ON FOREIGN TABLE s.t IS NULL;")).toMatchObject({
+      objectType: "foreign table",
+      name: ["s", "t"],
+      comment: null,
+    });
+  });
+
+  it("rejects malformed foreign-data statements", () => {
+    expect(fails("CREATE FOREIGN frob x;")).toThrow(/Expected "data" or "table" but found "frob"/);
+    expect(fails("ALTER FOREIGN frob x;")).toThrow(/Expected "data" or "table" but found "frob"/);
+    expect(fails("DROP FOREIGN frob x;")).toThrow(/Expected "data" or "table" but found "frob"/);
+    expect(fails("CREATE FOREIGN DATA WRAPPER w NO frob;")).toThrow(
+      /Expected "handler" or "validator" but found "frob"/,
+    );
+    expect(fails("CREATE FOREIGN DATA WRAPPER w HANDLER;")).toThrow(/Expected a name but found ";"/);
+    expect(fails("ALTER FOREIGN DATA WRAPPER w;")).toThrow(
+      /Expected "handler", "validator", "no", "options", "rename" or "owner" but found ";"/,
+    );
+    expect(fails("ALTER SERVER s;")).toThrow(/Expected "version", "options", "rename" or "owner" but found ";"/);
+    expect(fails("CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (host 1);")).toThrow(
+      /Expected a string but found "1"/,
+    );
+    expect(fails("CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS ();")).toThrow(
+      /Expected an option name but found "\)"/,
+    );
+    expect(fails("CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (ADD a 'b');")).toThrow(
+      /Expected a string but found "a"/,
+    );
+    expect(fails("CREATE SERVER s VERSION 1 FOREIGN DATA WRAPPER w;")).toThrow(
+      /Expected a string or "null" but found "1"/,
+    );
+    expect(fails("CREATE SERVER s TYPE pg FOREIGN DATA WRAPPER w;")).toThrow(/Expected a string but found "pg"/);
+    expect(fails("CREATE SERVER s;")).toThrow(/Expected "foreign data wrapper" but found ";"/);
+    expect(fails("ALTER SERVER s OPTIONS (DROP a 'b');")).toThrow(/Expected "\)" but found "b"/);
+    expect(fails("CREATE USER MAPPING FOR u;")).toThrow(/Expected "server" but found ";"/);
+    expect(fails("ALTER USER MAPPING FOR u SERVER s;")).toThrow(/Expected "options" but found ";"/);
+    expect(fails("CREATE FOREIGN TABLE f (a int);")).toThrow(/Expected "server" but found ";"/);
+    expect(fails("CREATE FOREIGN TABLE f (a int) SERVER s WITH (fillfactor = 70);")).toThrow(/but found "with"/);
+    expect(fails("CREATE FOREIGN TABLE f PARTITION OF p () FOR VALUES IN (1) SERVER s;")).toThrow(/but found "\)"/);
+    expect(fails("CREATE FOREIGN TABLE f PARTITION OF p FOR VALUES IN (1) INHERITS (q) SERVER s;")).toThrow(
+      /Expected "server" but found "inherits"/,
+    );
+    expect(fails("ALTER FOREIGN TABLE f RENAME TO g, OWNER TO r;")).toThrow(
+      /RENAME cannot be combined with other ALTER FOREIGN TABLE actions/,
+    );
+    // PG gives the partition commands and RENAME CONSTRAINT to ALTER TABLE alone.
+    expect(fails("ALTER FOREIGN TABLE f ATTACH PARTITION p DEFAULT;")).toThrow(/but found "attach"/);
+    expect(fails("ALTER FOREIGN TABLE f DETACH PARTITION p;")).toThrow(/but found "detach"/);
+    expect(fails("ALTER FOREIGN TABLE f RENAME CONSTRAINT a TO b;")).toThrow(
+      /Expected "to", "column" or a name but found "constraint"/,
+    );
+    expect(firstStmt("ALTER FOREIGN TABLE f RENAME COLUMN a TO b;").actions).toEqual([
+      { kind: "renameColumn", from: "a", to: "b" },
+    ]);
+    expect(fails("CREATE USER mapping IF;")).toThrow(/Expected "not" but found ";"/);
+    expect(fails("DROP USER MAPPING IF frob FOR u SERVER s;")).toThrow(/Expected "exists" but found "frob"/);
+    expect(fails("ALTER USER MAPPING IF EXISTS FOR u SERVER s OPTIONS (a 'b');")).toThrow(
+      /Expected ";" but found "if"/,
+    );
+    expect(fails("ALTER SERVER s OPTIONS (drop);")).toThrow(/Expected an option name but found "\)"/);
+    expect(fails("ALTER SERVER s OPTIONS (ADD a);")).toThrow(/Expected a string but found "\)"/);
+    // A column's OPTIONS precedes its constraints, and a PARTITION OF column takes none.
+    expect(fails("CREATE FOREIGN TABLE f (a int NOT NULL OPTIONS (x 'y')) SERVER s;")).toThrow(/but found "options"/);
+    expect(fails("CREATE FOREIGN TABLE f PARTITION OF p (a OPTIONS (x 'y')) DEFAULT SERVER s;")).toThrow(
+      /but found "options"/,
+    );
+    expect(fails("ALTER TABLE t ALTER c OPTIONS a;")).toThrow(/Expected "\(" but found "a"/);
+    expect(fails("IMPORT FOREIGN SCHEMA r LIMIT (t) FROM SERVER s INTO l;")).toThrow(/Expected "to" but found "\("/);
+    expect(fails("IMPORT FOREIGN SCHEMA r FROM s INTO l;")).toThrow(/Expected "server" but found "s"/);
+    expect(fails("IMPORT FOREIGN SCHEMA r EXCEPT () FROM SERVER s INTO l;")).toThrow(/but found "\)"/);
+  });
+
+  it("keeps the foreign-data words unreserved as names and aliases", () => {
+    const words = "options wrapper server mapping handler validator import version data".split(" ");
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS options, 2 server FROM mapping AS wrapper;")).toMatchObject({
+      columns: [{ alias: "options" }, { alias: "server" }],
+      from: [{ name: ["mapping"], alias: "wrapper" }],
+    });
+    expect(firstStmt("CREATE TABLE import (options int, server text, handler int, version int);")).toMatchObject({
+      name: ["import"],
+      items: [{ name: "options" }, { name: "server" }, { name: "handler" }, { name: "version" }],
+    });
+    // …and as the names of the objects being created.
+    expect(
+      firstStmt("CREATE FOREIGN DATA WRAPPER wrapper HANDLER handler VALIDATOR validator OPTIONS (options 'o');"),
+    ).toMatchObject({
+      name: "wrapper",
+      functions: [{ name: ["handler"] }, { name: ["validator"] }],
+    });
+    expect(firstStmt("CREATE SERVER server FOREIGN DATA WRAPPER wrapper;")).toMatchObject({
+      name: "server",
+      wrapper: "wrapper",
+    });
+    expect(firstStmt("CREATE USER MAPPING FOR mapping SERVER server;")).toMatchObject({
+      user: "mapping",
+      server: "server",
+    });
+    expect(firstStmt("CREATE FOREIGN TABLE options (options int OPTIONS (options 'x')) SERVER server;")).toMatchObject({
+      name: ["options"],
+      items: [{ name: "options", options: [opt("options", "x")] }],
+    });
+    expect(firstStmt("IMPORT FOREIGN SCHEMA import FROM SERVER server INTO version;")).toMatchObject({
+      remoteSchema: "import",
+      into: "version",
+    });
+    expect(firstStmt("ALTER TABLE t ALTER options TYPE int;").actions[0]).toMatchObject({ column: "options" });
+  });
+});
