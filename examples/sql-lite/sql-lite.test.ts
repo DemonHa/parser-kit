@@ -14924,3 +14924,424 @@ describe("SQL-lite foreign data", () => {
     expect(firstStmt("ALTER TABLE t ALTER options TYPE int;").actions[0]).toMatchObject({ column: "options" });
   });
 });
+
+// --- SQL/JSON clause syntax ---
+
+describe("SQL-lite SQL/JSON functions", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const x = name("x");
+  const v = (expr: unknown, over: Record<string, unknown> = {}) => ({ expr, ...over });
+  const call = (fnName: string, args: unknown[], over: Record<string, unknown> = {}) => ({
+    kind: "call",
+    name: fnName,
+    args,
+    ...over,
+  });
+  const jsonb = { returning: { type: ct("jsonb") } };
+
+  it("parses JSON_OBJECT with VALUE and colon entries and every clause", () => {
+    expect(colExpr("JSON_OBJECT('a' VALUE 1, 'b' : x)")).toEqual({
+      kind: "jsonObject",
+      entries: [
+        { key: str("a"), value: v(num(1)) },
+        { key: str("b"), value: v(x) },
+      ],
+    });
+    expect(
+      colExpr(
+        "json_object(k || 'x' VALUE y FORMAT JSON ENCODING UTF8 ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb FORMAT JSON)",
+      ),
+    ).toEqual({
+      kind: "jsonObject",
+      entries: [{ key: bin("||", name("k"), str("x")), value: v(name("y"), { format: { encoding: "utf8" } }) }],
+      onNull: "absent",
+      uniqueKeys: true,
+      returning: { type: ct("jsonb"), format: {} },
+    });
+    expect(colExpr("JSON_OBJECT('a': 1 NULL ON NULL WITHOUT UNIQUE)")).toEqual({
+      kind: "jsonObject",
+      entries: [{ key: str("a"), value: v(num(1)) }],
+      onNull: "null",
+      uniqueKeys: false,
+    });
+    expect(colExpr("JSON_OBJECT(RETURNING jsonb)")).toEqual({ kind: "jsonObject", entries: [], ...jsonb });
+  });
+
+  it("parses JSON_ARRAY's value and query forms", () => {
+    expect(colExpr("JSON_ARRAY(1, x FORMAT JSON, 'a' ABSENT ON NULL RETURNING jsonb)")).toEqual({
+      kind: "jsonArray",
+      elements: [v(num(1)), v(x, { format: {} }), v(str("a"))],
+      onNull: "absent",
+      ...jsonb,
+    });
+    expect(colExpr("JSON_ARRAY(1 NULL ON NULL)")).toEqual({ kind: "jsonArray", elements: [v(num(1))], onNull: "null" });
+    expect(colExpr("JSON_ARRAY(RETURNING jsonb)")).toEqual({ kind: "jsonArray", elements: [], ...jsonb });
+    expect(colExpr("JSON_ARRAY(SELECT a FROM u ORDER BY a RETURNING jsonb)")).toEqual({
+      kind: "jsonArrayQuery",
+      query: sel({
+        columns: [col(name("a"))],
+        from: [tableFrom(["u"])],
+        orderBy: [{ expr: name("a"), dir: null, nulls: null }],
+      }),
+      ...jsonb,
+    });
+    expect(colExpr("JSON_ARRAY(VALUES (1) FORMAT JSON)")).toMatchObject({
+      kind: "jsonArrayQuery",
+      query: { kind: "values" },
+      format: {},
+    });
+    // A parenthesised query is a scalar-subquery element, as in PG.
+    expect(colExpr("JSON_ARRAY((SELECT 1) RETURNING jsonb)")).toMatchObject({
+      kind: "jsonArray",
+      elements: [{ expr: { kind: "subquery" } }],
+    });
+  });
+
+  it("parses JSON_OBJECTAGG and JSON_ARRAYAGG with FILTER and OVER", () => {
+    expect(colExpr("JSON_OBJECTAGG(k VALUE x ABSENT ON NULL WITH UNIQUE RETURNING jsonb)")).toEqual({
+      kind: "jsonObjectAgg",
+      key: name("k"),
+      value: v(x),
+      onNull: "absent",
+      uniqueKeys: true,
+      ...jsonb,
+    });
+    expect(colExpr("JSON_ARRAYAGG(x FORMAT JSON ORDER BY y DESC NULL ON NULL)")).toEqual({
+      kind: "jsonArrayAgg",
+      value: v(x, { format: {} }),
+      orderBy: [{ expr: name("y"), dir: "desc", nulls: null }],
+      onNull: "null",
+    });
+    expect(colExpr("JSON_ARRAYAGG(x ORDER BY y RETURNING jsonb)")).toEqual({
+      kind: "jsonArrayAgg",
+      value: v(x),
+      orderBy: [{ expr: name("y"), dir: null, nulls: null }],
+      ...jsonb,
+    });
+    expect(colExpr("JSON_OBJECTAGG(k : x RETURNING jsonb) FILTER (WHERE x > 1) OVER (PARTITION BY g)")).toEqual({
+      kind: "window",
+      fn: {
+        kind: "aggFilter",
+        fn: { kind: "jsonObjectAgg", key: name("k"), value: v(x), ...jsonb },
+        where: bin(">", x, num(1)),
+      },
+      name: null,
+      partitionBy: [name("g")],
+      orderBy: null,
+      frame: null,
+    });
+    // Only FILTER and OVER: the SQL/JSON aggregates take no WITHIN GROUP.
+    expect(bad("SELECT JSON_ARRAYAGG(x ABSENT ON NULL) WITHIN GROUP (ORDER BY y) FROM t;")).toThrow(
+      /Expected "by" but found "\("/,
+    );
+  });
+
+  it("parses JSON_VALUE, JSON_QUERY and JSON_EXISTS with their clauses", () => {
+    const ctxPath = { context: v(name("doc")), path: str("$.a") };
+    expect(colExpr("JSON_VALUE(doc, '$.a' RETURNING int)")).toEqual({
+      kind: "jsonValue",
+      ...ctxPath,
+      returning: { type: ct("int") },
+    });
+    expect(
+      colExpr(
+        "JSON_VALUE(doc FORMAT JSON, '$.a ? (@ > $min)' PASSING 5 AS min, x AS \"Max\" DEFAULT 0 ON EMPTY ERROR ON ERROR)",
+      ),
+    ).toEqual({
+      kind: "jsonValue",
+      context: v(name("doc"), { format: {} }),
+      path: str("$.a ? (@ > $min)"),
+      passing: [
+        { value: v(num(5)), name: "min" },
+        { value: v(x), name: "Max" },
+      ],
+      onEmpty: { kind: "default", expr: num(0) },
+      onError: { kind: "error" },
+    });
+    expect(
+      colExpr(
+        "JSON_QUERY(doc, '$.a' RETURNING jsonb WITH CONDITIONAL ARRAY WRAPPER KEEP QUOTES ON SCALAR STRING EMPTY OBJECT ON EMPTY EMPTY ON ERROR)",
+      ),
+    ).toEqual({
+      kind: "jsonQuery",
+      ...ctxPath,
+      ...jsonb,
+      wrapper: "conditional",
+      quotes: "keep",
+      onEmpty: { kind: "emptyObject" },
+      onError: { kind: "emptyArray" },
+    });
+    expect(colExpr("JSON_QUERY(doc, '$.a' WITH WRAPPER)")).toEqual({
+      kind: "jsonQuery",
+      ...ctxPath,
+      wrapper: "unconditional",
+    });
+    expect(colExpr("JSON_QUERY(doc, '$.a' WITHOUT ARRAY WRAPPER OMIT QUOTES NULL ON EMPTY)")).toEqual({
+      kind: "jsonQuery",
+      ...ctxPath,
+      wrapper: "without",
+      quotes: "omit",
+      onEmpty: { kind: "null" },
+    });
+    expect(colExpr("JSON_EXISTS(doc, '$.a' PASSING 1 AS one UNKNOWN ON ERROR)")).toEqual({
+      kind: "jsonExists",
+      ...ctxPath,
+      passing: [{ value: v(num(1)), name: "one" }],
+      onError: { kind: "unknown" },
+    });
+    for (const behavior of ["true", "false", "error"]) {
+      expect(colExpr(`JSON_EXISTS(doc, '$.a' ${behavior} ON ERROR)`)).toEqual({
+        kind: "jsonExists",
+        ...ctxPath,
+        onError: { kind: behavior },
+      });
+    }
+    // PG's analysis, not its grammar, restricts which behaviour each takes.
+    expect(colExpr("JSON_VALUE(doc, '$.a' EMPTY ARRAY ON ERROR)")).toMatchObject({ onError: { kind: "emptyArray" } });
+  });
+
+  it("parses JSON(), JSON_SCALAR and JSON_SERIALIZE", () => {
+    expect(colExpr("JSON(x FORMAT JSON WITH UNIQUE KEYS)")).toEqual({
+      kind: "jsonParse",
+      value: v(x, { format: {} }),
+      uniqueKeys: true,
+    });
+    expect(colExpr("json(x WITHOUT UNIQUE)")).toEqual({ kind: "jsonParse", value: v(x), uniqueKeys: false });
+    expect(colExpr("JSON_SERIALIZE(x FORMAT JSON RETURNING bytea)")).toEqual({
+      kind: "jsonSerialize",
+      value: v(x, { format: {} }),
+      returning: { type: ct("bytea") },
+    });
+    expect(colExpr("JSON_SERIALIZE(x RETURNING text)")).toEqual({
+      kind: "jsonSerialize",
+      value: v(x),
+      returning: { type: ct("text") },
+    });
+    // No clause at all: JSON_SCALAR is always an ordinary call node.
+    expect(colExpr("JSON_SCALAR(x + 1)")).toEqual(call("json_scalar", [bin("+", x, num(1))]));
+  });
+
+  it("keeps a call with no SQL/JSON clause an ordinary call", () => {
+    // The legacy json_object(text[]) and json_object(keys, values).
+    expect(colExpr("json_object('{a,1,b,2}')")).toEqual(call("json_object", [str("{a,1,b,2}")]));
+    expect(colExpr("json_object(k, v)")).toEqual(call("json_object", [name("k"), name("v")]));
+    expect(colExpr("JSON_ARRAY(1, 2, 'x')")).toEqual(call("json_array", [num(1), num(2), str("x")]));
+    expect(colExpr("JSON_ARRAYAGG(x ORDER BY x)")).toEqual(
+      call("json_arrayagg", [x], { orderBy: [{ expr: x, dir: null, nulls: null }] }),
+    );
+    expect(colExpr("json_exists(doc, '$.a')")).toEqual(call("json_exists", [name("doc"), str("$.a")]));
+    expect(colExpr("json(x)")).toEqual(call("json", [x]));
+    expect(colExpr("json_object()")).toEqual(call("json_object", []));
+    // Other json functions are untouched.
+    expect(colExpr("json_array_length(x)")).toEqual(call("json_array_length", [x]));
+    expect(colExpr("json_build_object('a', 1)")).toEqual(call("json_build_object", [str("a"), num(1)]));
+    // A quoted or qualified name is an ordinary function, clause or not.
+    expect(bad("SELECT \"json_object\"('a' VALUE 1);")).toThrow(/Expected "\)" but found "value"/);
+    expect(bad("SELECT pg_catalog.json_value(doc, '$' RETURNING int);")).toThrow(/Expected "\)" but found "returning"/);
+    // So is a FROM call to json_table without COLUMNS.
+    expect(firstStmt("SELECT * FROM json_table(x, y) j;").from).toEqual([
+      { kind: "function", call: call("json_table", [x, name("y")]), alias: "j" },
+    ]);
+  });
+
+  it("parses JSON_TABLE in FROM with an alias, a join and LATERAL", () => {
+    const from = (src: string) => (firstStmt(src) as any).from;
+    expect(
+      from(
+        "SELECT * FROM JSON_TABLE(doc, '$[*]' AS root PASSING 1 AS n COLUMNS (" +
+          "id FOR ORDINALITY, " +
+          "a int PATH '$.a' NULL ON EMPTY ERROR ON ERROR, " +
+          "b jsonb FORMAT JSON PATH '$.b' WITH WRAPPER OMIT QUOTES, " +
+          "c text, " +
+          "d bool EXISTS PATH '$.d' FALSE ON ERROR, " +
+          "NESTED PATH '$.items[*]' AS items COLUMNS (e int PATH '$.e'), " +
+          "NESTED '$.tags' COLUMNS (tag text PATH '$')" +
+          ") ERROR ON ERROR) AS jt (x1, x2);",
+      ),
+    ).toEqual([
+      {
+        kind: "jsonTable",
+        table: {
+          context: v(name("doc")),
+          path: str("$[*]"),
+          pathName: "root",
+          passing: [{ value: v(num(1)), name: "n" }],
+          columns: [
+            { kind: "ordinality", name: "id" },
+            {
+              kind: "value",
+              name: "a",
+              type: ct("int"),
+              path: "$.a",
+              onEmpty: { kind: "null" },
+              onError: { kind: "error" },
+            },
+            {
+              kind: "value",
+              name: "b",
+              type: ct("jsonb"),
+              format: {},
+              path: "$.b",
+              wrapper: "unconditional",
+              quotes: "omit",
+            },
+            { kind: "value", name: "c", type: ct("text") },
+            { kind: "exists", name: "d", type: ct("bool"), path: "$.d", onError: { kind: "false" } },
+            {
+              kind: "nested",
+              path: "$.items[*]",
+              pathName: "items",
+              columns: [{ kind: "value", name: "e", type: ct("int"), path: "$.e" }],
+            },
+            { kind: "nested", path: "$.tags", columns: [{ kind: "value", name: "tag", type: ct("text"), path: "$" }] },
+          ],
+          onError: { kind: "error" },
+        },
+        alias: "jt",
+        columns: ["x1", "x2"],
+      },
+    ]);
+    const jt = (alias: string | null, over: Record<string, unknown> = {}) => ({
+      kind: "jsonTable",
+      table: {
+        context: v(name("t", "doc")),
+        path: str("$[*]"),
+        columns: [{ kind: "value", name: "a", type: ct("int") }],
+      },
+      alias,
+      ...over,
+    });
+    expect(from("SELECT * FROM t JOIN JSON_TABLE(t.doc, '$[*]' COLUMNS (a int)) j ON true;")).toEqual([
+      {
+        kind: "join",
+        joinType: "inner",
+        left: tableFrom(["t"]),
+        right: jt("j"),
+        on: { kind: "bool", value: true },
+        using: null,
+      },
+    ]);
+    expect(from("SELECT * FROM t, LATERAL JSON_TABLE(t.doc, '$[*]' COLUMNS (a int));")).toEqual([
+      tableFrom(["t"]),
+      jt(null, { lateral: true }),
+    ]);
+    expect(from("SELECT * FROM t CROSS JOIN json_table(t.doc FORMAT JSON, '$[*]' COLUMNS (a int)) AS j;")).toEqual([
+      {
+        kind: "join",
+        joinType: "cross",
+        left: tableFrom(["t"]),
+        right: {
+          ...jt("j"),
+          table: { ...jt("j").table, context: v(name("t", "doc"), { format: {} }) },
+        },
+        on: null,
+        using: null,
+      },
+    ]);
+    // A column named `nested`, and one whose type is named `path`.
+    expect(
+      from("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (nested int, p path PATH '$.p'));")[0].table.columns,
+    ).toEqual([
+      { kind: "value", name: "nested", type: ct("int") },
+      { kind: "value", name: "p", type: ct("path"), path: "$.p" },
+    ]);
+  });
+
+  it("rejects malformed SQL/JSON clauses", () => {
+    expect(bad("SELECT JSON_OBJECT('a' VALUE 1, 'b') FROM t;")).toThrow(/Expected "value" or ":" but found "\)"/);
+    expect(bad("SELECT JSON_OBJECT('a' VALUE 1 ABSENT) FROM t;")).toThrow(/Expected "on null" but found "\)"/);
+    expect(bad("SELECT JSON_OBJECT('a' VALUE 1 WITH UNIQUE NULL ON NULL) FROM t;")).toThrow(
+      /Expected "\)" but found "null"/,
+    );
+    expect(bad("SELECT JSON_ARRAY(1 FORMAT) FROM t;")).toThrow(/Expected "json" but found "\)"/);
+    expect(bad("SELECT JSON_ARRAY(1 WITH UNIQUE) FROM t;")).toThrow(/Expected "\)" but found "with"/);
+    expect(bad("SELECT JSON_ARRAYAGG(x ORDER BY y FORMAT JSON) FROM t;")).toThrow(/Expected "\)" but found "format"/);
+    expect(bad("SELECT JSON_VALUE(doc, '$' ERROR ON) FROM t;")).toThrow(/Expected "empty" or "error" but found "\)"/);
+    expect(bad("SELECT JSON_VALUE(doc, '$' ERROR ON ERROR NULL ON EMPTY) FROM t;")).toThrow(
+      /Expected "\)" but found "null"/,
+    );
+    expect(bad("SELECT JSON_VALUE(doc, '$' WITH WRAPPER) FROM t;")).toThrow(/Expected "\)" but found "with"/);
+    expect(bad("SELECT JSON_EXISTS(doc, '$' TRUE ON EMPTY) FROM t;")).toThrow(/Expected "error" but found "empty"/);
+    expect(bad("SELECT JSON_EXISTS(doc, '$' RETURNING int) FROM t;")).toThrow(/Expected "\)" but found "returning"/);
+    expect(bad("SELECT JSON_QUERY(doc, '$' WITH CONDITIONAL) FROM t;")).toThrow(/Expected "wrapper" but found "\)"/);
+    expect(bad("SELECT JSON_QUERY(doc, '$' KEEP QUOTES ON SCALAR) FROM t;")).toThrow(
+      /Expected "string" but found "\)"/,
+    );
+    expect(bad("SELECT JSON_VALUE(doc, '$' PASSING 1) FROM t;")).toThrow(/Expected "as" but found "\)"/);
+    expect(bad("SELECT JSON_VALUE(doc FORMAT JSON) FROM t;")).toThrow(/Expected "," but found "\)"/);
+    expect(bad("SELECT JSON(x WITH KEYS) FROM t;")).toThrow(/Expected "unique" but found "keys"/);
+    expect(bad("SELECT JSON_SERIALIZE(x RETURNING) FROM t;")).toThrow(/but found "\)"/);
+    // A clause after a named, VARIADIC or `*` argument is no SQL/JSON form.
+    expect(bad("SELECT JSON_ARRAY(a => 1 RETURNING jsonb) FROM t;")).toThrow(/Expected "\)" but found "returning"/);
+    expect(bad("SELECT JSON_ARRAYAGG(DISTINCT x RETURNING jsonb) FROM t;")).toThrow(
+      /Expected "\)" but found "returning"/,
+    );
+    // JSON_TABLE needs its COLUMNS, holding at least one column, and is a FROM item only.
+    expect(bad("SELECT * FROM JSON_TABLE(doc, '$' AS p);")).toThrow(/Expected "columns" but found "\)"/);
+    expect(bad("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS ());")).toThrow(/but found "\)"/);
+    expect(bad("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a int PATH x));")).toThrow(
+      /Expected a string but found "x"/,
+    );
+    expect(bad("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a int) TRUE ON EMPTY);")).toThrow(
+      /Expected "error" but found "empty"/,
+    );
+    expect(bad("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a int)) WITH ORDINALITY;")).toThrow(/but found "with"/);
+    expect(bad("SELECT JSON_TABLE(doc, '$' COLUMNS (a int)) FROM t;")).toThrow(/Expected "\)" but found "columns"/);
+  });
+
+  it("keeps the SQL/JSON clause words unreserved as names and aliases", () => {
+    for (const word of [
+      "format",
+      "encoding",
+      "absent",
+      "keys",
+      "wrapper",
+      "conditional",
+      "unconditional",
+      "quotes",
+      "omit",
+      "keep",
+      "scalar",
+      "columns",
+      "nested",
+      "path",
+      "ordinality",
+      "passing",
+      "empty",
+      "error",
+      "json_object",
+      "json_table",
+    ]) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [col(name(word))],
+        from: [{ kind: "table", name: [word], alias: null }],
+      });
+      expect(firstStmt(`SELECT a AS ${word}, b ${word} FROM t ${word};`)).toMatchObject({
+        columns: [col(name("a"), word), col(name("b"), word)],
+        from: [{ kind: "table", name: ["t"], alias: word }],
+      });
+      expect(firstStmt(`CREATE TABLE t (${word} int);`)).toMatchObject({ items: [{ name: word }] });
+    }
+    // As operands inside the clause forms themselves.
+    expect(colExpr("JSON_OBJECT(value VALUE format)")).toEqual({
+      kind: "jsonObject",
+      entries: [{ key: name("value"), value: v(name("format")) }],
+    });
+    expect(colExpr("JSON_VALUE(error, path PASSING empty AS error ERROR ON ERROR)")).toEqual({
+      kind: "jsonValue",
+      context: v(name("error")),
+      path: name("path"),
+      passing: [{ value: v(name("empty")), name: "error" }],
+      onError: { kind: "error" },
+    });
+    expect(
+      firstStmt("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (columns int, ordinality text, path int PATH '$'));").from[0]
+        .table.columns,
+    ).toEqual([
+      { kind: "value", name: "columns", type: ct("int") },
+      { kind: "value", name: "ordinality", type: ct("text") },
+      { kind: "value", name: "path", type: ct("int"), path: "$" },
+    ]);
+  });
+});
