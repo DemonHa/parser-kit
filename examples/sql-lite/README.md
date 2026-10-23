@@ -100,6 +100,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - **Comments inside a statement.** Comments are only trivia *between* statements: `SELECT id, -- primary key` followed by a line break fails, as does `SELECT /* note */ 1;`. This is the most common real-world failure. (The only exceptions are lexical: a `--` comment between two continued string constants, and a comment before or inside a `UESCAPE` clause.)
 - Numbers with a trailing dot (`5.`, `1.e3`).
 - National character strings (`N'…'`).
+- Non-ASCII characters in unquoted identifiers (`SELECT café FROM t`). Quoted, they work.
 
 **Statements**
 
