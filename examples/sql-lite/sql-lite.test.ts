@@ -13752,6 +13752,7 @@ describe("SQL-lite CREATE TABLE AS TABLE and AS EXECUTE", () => {
 
   it("rejects an empty argument list and clauses out of order", () => {
     expect(parseFails("CREATE TABLE x AS EXECUTE p();")).toThrow(/but found "\)"/);
+    expect(parseFails("CREATE TABLE x AS frob;")).toThrow(/Expected a query or "execute" but found "frob"/);
     expect(parseFails("CREATE TABLE x (a, b) WITH (x = 1) WITHOUT OIDS AS SELECT 1;")).toThrow(
       /Expected "as" but found "without"/,
     );

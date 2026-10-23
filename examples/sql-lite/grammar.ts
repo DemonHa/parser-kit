@@ -5282,11 +5282,11 @@ const ctasColumns = attempt(
   ),
 );
 
-// What follows CREATE TABLE … AS: `EXECUTE name [(args)]`, or a query.
-// `execute` leads no query, so it can only be the prepared-statement form.
-function parseCtasQuery(ctx: ParseContext<SqlTokenType>): CreateTableAs["query"] {
-  return ctx.is("ident", "execute") ? (ctx.parse(executeStmt) as Execute) : ctx.parse(query);
-}
+// What follows CREATE TABLE … AS: a query, or `EXECUTE name [(args)]`.
+// `execute` leads no query, so the two first sets are disjoint and the "Expected
+// …" message names both. lazy() because executeStmt is defined further down.
+const ctasQuery = lazy(() => oneOf(query, executeStmt as Rule<Execute, SqlTokenType>));
+const parseCtasQuery = (ctx: ParseContext<SqlTokenType>): CreateTableAs["query"] => ctx.parse(ctasQuery);
 
 // CREATE TABLE — the ordinary `(items)` form or the query-backed `AS query`
 // (CREATE TABLE AS). A handler rather than a rule so the CTAS branches (`name
