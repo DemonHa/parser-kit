@@ -207,7 +207,7 @@ describe("SQL-lite comments inside statements", () => {
   it("points errors at the token after a comment", () => {
     expect(() => sqlLite.parse("SELECT /* c */ ;")).toThrow(/but found ";" \(1:15\)/);
     expect(() => sqlLite.parse("SELECT 1 /* c */ 2;")).toThrow(/Expected ";" but found "2"/);
-    expect(() => sqlLite.parse("SELECT 1 -- tail")).toThrow(/Expected ";" but found end of input \(1:16\)/);
+    expect(() => sqlLite.parse("SELECT 1 -- tail\n2")).toThrow(/Expected ";" but found "2" \(2:0\)/);
     // An unclosed block comment is a lexer error, as in PG.
     expect(() => sqlLite.parse("SELECT /* unclosed 1;")).toThrow(/Unterminated \/\* comment \(1:7\)/);
   });
@@ -231,6 +231,124 @@ describe("SQL-lite comments inside statements", () => {
     const { ast, errors } = sqlLite.diagnose("SELECT /* c */ FROM; -- next\nSELECT /* ok */ 1;");
     expect(errors).toHaveLength(1);
     expect(stripSpans(ast)).toEqual([sel({ columns: [col(num(1))] })]);
+  });
+});
+
+// --- statement separators ---
+
+describe("SQL-lite statement separators", () => {
+  const one = sel({ columns: [col(num(1))] });
+  const two = sel({ columns: [col(num(2))] });
+
+  it("parses a single statement without a trailing ;", () => {
+    expect(parse("SELECT 1")).toEqual([one]);
+    expect(parse("SELECT 1")).toEqual(parse("SELECT 1;"));
+    expect(firstStmt("CREATE TABLE t (id int)")).toMatchObject({ kind: "createTable", name: ["t"] });
+    expect(firstStmt("DROP TABLE t")).toMatchObject({ kind: "drop", names: [["t"]] });
+  });
+
+  it("lets only the last of several statements omit its ;", () => {
+    expect(parse("SELECT 1; SELECT 2")).toEqual([one, two]);
+    expect(parse("SELECT 1;\nSELECT 2;\n")).toEqual([one, two]);
+  });
+
+  it("allows a comment after the last statement without a ;", () => {
+    expect(parse("SELECT 1 -- tail")).toEqual([one]);
+    expect(parse("SELECT 1; SELECT 2 /* tail */\n")).toEqual([one, two]);
+  });
+
+  it("produces no node for empty statements", () => {
+    expect(parse("SELECT 1;; SELECT 2;")).toEqual([one, two]);
+    expect(parse("; SELECT 1")).toEqual([one]);
+    expect(parse("SELECT 1;;")).toEqual([one]);
+    expect(parse(";")).toEqual([]);
+    expect(parse(" ; ;\n; -- c\n/* c */ ;")).toEqual([]);
+    expect(parse("-- only a comment")).toEqual([]);
+    expect(parse("")).toEqual([]);
+    expect(parse("  \n\t")).toEqual([]);
+  });
+
+  it("still requires ; between statements", () => {
+    expect(() => sqlLite.parse("SELECT 1 SELECT 2")).toThrow(/Expected ";" but found "select" \(1:9\)/);
+    expect(() => sqlLite.parse("SELECT 1 SELECT 2;")).toThrow(/Expected ";" but found "select" \(1:9\)/);
+    expect(() => sqlLite.parse("SELECT 1; SELECT 2 SELECT 3")).toThrow(/Expected ";" but found "select" \(1:19\)/);
+    // An incomplete last statement still fails on its own terms at end of input.
+    expect(() => sqlLite.parse("SELECT 1 +")).toThrow(/but found end of input/);
+    expect(() => sqlLite.parse("SELECT 1; SELECT 'abc FROM t")).toThrow(/Unterminated/);
+  });
+
+  it("rejects a list still open at the end of the input", () => {
+    const open = /Expected "\)" but found end of input/;
+    expect(() => sqlLite.parse("INSERT INTO t (a, b) VALUES (1")).toThrow(
+      /Expected "\)" but found end of input \(1:30\)/,
+    );
+    expect(() => sqlLite.parse("CREATE TABLE t (id int")).toThrow(open);
+    expect(() => sqlLite.parse("CREATE TABLE t (")).toThrow(open);
+    expect(() => sqlLite.parse("CREATE INDEX i ON t (a")).toThrow(open);
+    expect(() => sqlLite.parse("SELECT * FROM t WHERE a IN (1, 2")).toThrow(open);
+    expect(() => sqlLite.parse("DROP FUNCTION f(")).toThrow(open);
+    expect(() => sqlLite.parse("SELECT x::numeric(10")).toThrow(open);
+    expect(() => sqlLite.parse("SELECT ARRAY[1, 2")).toThrow(/Expected "]" but found end of input/);
+    expect(() => sqlLite.parse("SELECT f(1")).toThrow(open);
+    // Closed, the same statements need no `;`.
+    expect(firstStmt("CREATE TABLE t (id int)")).toMatchObject({ kind: "createTable" });
+    expect(firstStmt("SELECT * FROM t WHERE a IN (1, 2)")).toMatchObject({ kind: "select" });
+  });
+
+  it("parses statements whose lookahead stops at the ; when it is missing", () => {
+    expect(firstStmt("FETCH next")).toEqual({ kind: "fetch", direction: null, cursor: "next" });
+    expect(firstStmt("VACUUM")).toEqual({ kind: "vacuum", options: [], tables: [] });
+    expect(firstStmt("ANALYZE")).toEqual({ kind: "analyze", options: [], tables: [] });
+  });
+
+  it("keeps spans unchanged whether or not the ; is there", () => {
+    const span = (row: number, col: number, endRow: number, endCol: number) => ({
+      start: { row, col },
+      end: { row: endRow, col: endCol },
+    });
+    const [bare] = sqlLite.parse("SELECT 1") as any[];
+    const [ended] = sqlLite.parse("SELECT 1;") as any[];
+    expect(bare.span).toEqual(span(1, 0, 1, 8));
+    expect(ended.span).toEqual(bare.span);
+    const stmts = sqlLite.parse(";;\n  SELECT a FROM t;;\nSELECT 2 -- tail") as any[];
+    expect(stmts.map((s) => s.span)).toEqual([span(2, 2, 2, 17), span(3, 0, 3, 8)]);
+  });
+
+  it("diagnose() resyncs on ; and keeps the statements around a bad one", () => {
+    const { ast, errors } = sqlLite.diagnose("SELECT 1;; SELECT FROM; SELECT 2");
+    expect(errors.map((e) => e.message)).toEqual([expect.stringMatching(/but found "from" \(1:18\)/)]);
+    expect(stripSpans(ast)).toEqual([one, two]);
+  });
+
+  it("diagnose() reports a bad last statement without a ;", () => {
+    const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT 2 +");
+    expect(errors.map((e) => e.message)).toEqual([expect.stringMatching(/but found end of input/)]);
+    expect(stripSpans(ast)).toEqual([one]);
+  });
+
+  it("diagnose() records a lexer error on the first token instead of throwing", () => {
+    const bare = sqlLite.diagnose("'abc");
+    expect(bare.errors.map((e) => e.message)).toEqual(["Unterminated quoted string (1:0)"]);
+    expect(bare.ast).toEqual([]);
+    const { ast, errors } = sqlLite.diagnose("X'G1'; SELECT 1");
+    expect(errors.map((e) => e.message)).toEqual(['Invalid hexadecimal digit "G" (1:0)']);
+    expect(stripSpans(ast)).toEqual([one]);
+  });
+
+  it("diagnose() reports the unclosed list when a bad table element's recovery runs past the ;", () => {
+    // The element's skip stops only at `,` or `)`, so it consumes the `;`.
+    const { ast, errors } = sqlLite.diagnose("CREATE TABLE t (id;");
+    expect(errors.map((e) => e.message)).toEqual([
+      expect.stringMatching(/but found ";" \(1:18\)/),
+      'Expected ")" but found end of input (1:19)',
+    ]);
+    expect(ast).toEqual([]);
+  });
+
+  it("diagnose() reports a missing ; between statements and resumes after the next ;", () => {
+    const { ast, errors } = sqlLite.diagnose("SELECT 1 SELECT 2; SELECT 3");
+    expect(errors.map((e) => e.message)).toEqual(['Expected ";" but found "select" (1:9)']);
+    expect(stripSpans(ast)).toEqual([sel({ columns: [col(num(3))] })]);
   });
 });
 

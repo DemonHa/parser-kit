@@ -9134,14 +9134,34 @@ const utilityStmt = oneOf(
   copyStmt,
 );
 const statementBody = oneOf(ddlStmt, utilityStmt, dmlStatement).describe("a statement");
-// Each statement owns its trailing `;`; `;` is also the recovery sync point.
-const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
+// PG's stmtmulti: `;` separates statements rather than ending them, so the
+// last statement may omit it (`SELECT 1`), and an empty statement (`;;`, a
+// leading `;`) yields no node — `null` here, dropped by the root. Anything
+// else after a statement is an error at that token (`SELECT 1 SELECT 2`).
+// `;` is also the recovery sync point.
+const SEMICOLON = punc(";");
+const statement = custom<Stmt | null, SqlTokenType>(
+  (ctx) => {
+    if (ctx.eat("punc", ";") !== null) return null;
+    const stmt = ctx.parse(statementBody);
+    if (!ctx.eof()) ctx.parse(SEMICOLON);
+    return stmt;
+  },
+  { expected: statementBody.expected(), first: [...statementBody.first(), { type: "punc", value: ";" }] },
+);
+// Not `.map()`: it reads the start position before repeat() runs, so a lexer
+// error on the first token would escape diagnose()'s recovery.
+const statements = repeat(statement);
+const script = custom<Stmt[], SqlTokenType>((ctx) => ctx.parse(statements).filter((stmt) => stmt !== null), {
+  expected: statements.expected(),
+  first: statements.first(),
+});
 
 // --- grammar ---
 
 export const sqlLite = defineGrammar({
   lexer: sqlParseLexer,
-  root: repeat(statement),
+  root: script,
   recovery: { sync: [{ type: "punc", value: ";", consume: true }] },
   // Opt into PG-style farthest-failure reporting: when a discarded backtracking
   // branch (a mistyped IF NOT EXISTS) got deeper than the error that surfaced,
@@ -9149,4 +9169,7 @@ export const sqlLite = defineGrammar({
   // backtracking branch (`INSERT INTO t (a, X'G1')`) reports itself rather
   // than whatever the rolled-back parse trips over next.
   errorReporting: { preferFarthest: true, propagateLexerErrors: true },
+  // The last statement needs no `;`, so a list still open at end of input
+  // (`INSERT INTO t VALUES (1`) must fail rather than close there.
+  strictDelimited: true,
 });
