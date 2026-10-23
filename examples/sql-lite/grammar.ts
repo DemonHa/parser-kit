@@ -112,11 +112,24 @@ export type Expr =
   | { kind: "bool"; value: boolean; span: Span }
   | { kind: "null"; span: Span }
   | { kind: "name"; parts: string[]; span: Span }
-  // `distinct` and `orderBy` are the aggregate modifiers that live inside the
-  // argument list (`count(DISTINCT x)`, `array_agg(a ORDER BY b)`); both keys are
-  // omitted entirely on a call that has neither.
-  | { kind: "call"; name: string; args: Expr[]; distinct?: true; orderBy?: OrderItem[]; span: Span }
-  // `name => value` in argument position — PG's named function-call notation.
+  // `distinct`, `all` and `orderBy` are the aggregate modifiers that live inside
+  // the argument list (`count(DISTINCT x)`, `count(ALL x)`, `array_agg(a ORDER
+  // BY b)`); ALL is the default, so `all` only records that it was written.
+  // `variadic` marks a last argument written after VARIADIC (`f(a, VARIADIC
+  // arr)`), which passes an array to a variadic parameter as a whole. Each key
+  // is omitted entirely on a call that has none of these.
+  | {
+      kind: "call";
+      name: string;
+      args: Expr[];
+      distinct?: true;
+      all?: true;
+      variadic?: true;
+      orderBy?: OrderItem[];
+      span: Span;
+    }
+  // `name => value` or `name := value` in argument position — PG's named
+  // function-call notation, whose two spellings mean the same.
   | { kind: "namedArg"; name: string; value: Expr; span: Span }
   // `opSchema` is present only on the `OPERATOR(schema.op)` spelling: the
   // qualifying names, empty for an unqualified `OPERATOR(op)`.
@@ -178,8 +191,13 @@ export type Expr =
   // A positional / named bind parameter (`$1`, `$name`); `name` is the text after
   // the `$` ("1", "name"). Lexed as a dedicated `param` token.
   | { kind: "param"; name: string; span: Span }
-  // `ARRAY[…]` constructor. `elements` may be empty (`ARRAY[]`).
-  | { kind: "array"; elements: Expr[]; span: Span }
+  // `ARRAY[…]` constructor. `elements` may be empty (`ARRAY[]`). A
+  // multidimensional one may spell its inner rows as bare brackets,
+  // `ARRAY[[1, 2], [3, 4]]`: each row is an `array` node too, marked `implicit`
+  // (present only on that spelling) as it has no ARRAY keyword of its own.
+  | { kind: "array"; elements: Expr[]; implicit?: true; span: Span }
+  // `ARRAY(SELECT …)` — an array built from a subquery's single column.
+  | { kind: "arraySubquery"; query: Query; span: Span }
   // `ROW(…)` and the implicit `(a, b, …)` — see RowExpr.
   | RowExpr
   // `(start, end) OVERLAPS (start, end)` — two periods, each a two-item row
@@ -189,6 +207,13 @@ export type Expr =
   // Array subscript / slice postfix: `a[i]` (no `upper` key) or `a[lo:hi]`
   // (`upper` present, either bound possibly null for `a[:hi]` / `a[lo:]`).
   | { kind: "subscript"; base: Expr; index: Expr | null; upper?: Expr | null; span: Span }
+  // `(row).field` and `(row).*` — a composite value's field, or all of them
+  // (`field` null). PG takes these after a parenthesised expression or
+  // subquery, and after a column reference's subscript (`a[1].f`); a plain
+  // `t.c` stays a dotted `name`, as which of its parts is the column is only
+  // known once the tables are. (PG also takes them after a parameter, `$1.f`,
+  // which this grammar does not yet.)
+  | { kind: "fieldSelect"; expr: Expr; field: string | null; span: Span }
   // `INTERVAL 'literal' [field]` — `fields` is the trailing unit spec (e.g.
   // "day", "hour to minute"), absent when only the literal is given.
   // `precision` is the fractional-seconds precision, written either before the
@@ -1372,7 +1397,9 @@ export type Lock = {
 };
 // CALL name ( [arg, …] ) — the argument list is always written, possibly empty.
 // Not kind "call", which is the expression node (whose `name` is joined).
-export type CallProcedure = { kind: "callProcedure"; name: string[]; args: Expr[]; span: Span };
+// `variadic` is as on that node: present only when the last argument follows
+// VARIADIC.
+export type CallProcedure = { kind: "callProcedure"; name: string[]; args: Expr[]; variadic?: true; span: Span };
 
 // DECLARE name [option …] CURSOR [{WITH | WITHOUT} HOLD] FOR query. The options
 // come in any order, as in PG: `binary` is false when BINARY is absent;
@@ -2367,41 +2394,97 @@ const boolLit = token("ident", { values: ["true", "false"] }).map(
 const nullLit = kw("null").map((_node, span): Expr => ({ kind: "null", span }));
 const parenExpr = seq(skip(punc("(")), field("e", expression), skip(punc(")"))).map((s) => s.e);
 
-// A function argument: `*` (for `count(*)`), a named argument (`a => 1`), or an
-// ordinary expression. The named form is picked out by a two-token peek rather
-// than a backtracking branch: `=>` appears in no operator table, so an argument
-// that is *not* named can never have consumed one. Widening this rule widens
-// every position that reaches it — a plain call, a FROM table function, and
-// SUBSTRING's comma form from its second argument on (`parseSubstring` reads the
-// first through `expression`, to tell the FROM/FOR form from the comma one, so
-// `substring(str => 'abc', from => 2)` is still rejected). That is deliberate as
-// far as it goes: PG accepts named arguments in all of those positions.
+// A function argument: `*` (for `count(*)`), a named argument (`a => 1` or `a
+// := 1`), or an ordinary expression. The named form is picked out by a
+// two-token peek rather than a backtracking branch: `=>` appears in no operator
+// table and `:=` lexes as a token of its own (so a spaced `a : = 1` is no named
+// argument, as in PG), so an argument that is *not* named can never have
+// consumed either. Widening this rule widens every position that reaches it — a
+// plain call, a FROM table function, and SUBSTRING's comma form from its second
+// argument on (`parseSubstring` reads the first through `expression`, to tell
+// the FROM/FOR form from the comma one, so `substring(str => 'abc', from => 2)`
+// is still rejected). That is deliberate as far as it goes: PG accepts named
+// arguments in all of those positions.
 const plainFunctionArg = oneOf(bareStar, expression);
+const isNamedArgMark = (tok: Token<SqlTokenType> | null): boolean =>
+  tok !== null && ((tok.type === "op" && tok.value === "=>") || (tok.type === "punc" && tok.value === ":="));
+// The argument itself, its value read by `value`: `plainFunctionArg`, or just
+// `expression` after VARIADIC, which takes no `*` (PG's func_arg_expr).
+function parseCallArg(ctx: ParseContext<SqlTokenType>, value: Rule<Expr, SqlTokenType>): Expr {
+  const head = ctx.peek();
+  if (head !== null && (head.type === "ident" || head.type === "qident") && isNamedArgMark(ctx.peekAhead(1))) {
+    const start = ctx.position();
+    const argName = ctx.parse(nameWord);
+    ctx.next(); // "=>" or ":="
+    return { kind: "namedArg", name: argName, value: ctx.parse(expression), span: ctx.spanFrom(start) };
+  }
+  return ctx.parse(value);
+}
 // lazy() so the first set and expected string stay verbatim the ones above;
 // custom() takes them eagerly, and evaluating them at module scope would enter
 // `expression`'s lazy() before `expressionRule` exists.
 const functionArg: Rule<Expr, SqlTokenType> = lazy(() =>
-  custom<Expr, SqlTokenType>(
-    (ctx) => {
-      const head = ctx.peek();
-      const after = ctx.peekAhead(1);
-      if (
-        head !== null &&
-        (head.type === "ident" || head.type === "qident") &&
-        after !== null &&
-        after.type === "op" &&
-        after.value === "=>"
-      ) {
-        const start = ctx.position();
-        const argName = ctx.parse(nameWord);
-        ctx.next(); // "=>"
-        return { kind: "namedArg", name: argName, value: ctx.parse(expression), span: ctx.spanFrom(start) };
-      }
-      return ctx.parse(plainFunctionArg);
-    },
-    { expected: plainFunctionArg.expected(), first: plainFunctionArg.first() },
-  ),
+  custom<Expr, SqlTokenType>((ctx) => parseCallArg(ctx, plainFunctionArg), {
+    expected: plainFunctionArg.expected(),
+    first: plainFunctionArg.first(),
+  }),
 );
+
+// The argument list of an ordinary call, PG's func_application, entered just
+// past its `(` and stopping at its `)`. Ahead of the arguments, DISTINCT or
+// ALL; then the arguments, of which the last may follow VARIADIC (but not
+// after DISTINCT or ALL, and no argument may follow it); then an aggregate's
+// `ORDER BY`. All four words are reserved, so none can be an argument and none
+// needs a guard. A FROM call or CALL passes `aggregate: false` and takes
+// VARIADIC alone: PG's grammar reads the other three there too, but its
+// analysis rejects DISTINCT and ORDER BY outside an aggregate, and this
+// grammar has never read them there (nor the no-op ALL). `afterFirst` sees
+// the first argument as soon as it is read and may take the call over from
+// there, returning its node as `taken` (OVERLAY's PLACING form, see columnRef),
+// or decline with null.
+type CallArgs = {
+  args: Expr[];
+  quantifier: "distinct" | "all" | null;
+  variadic: boolean;
+  orderBy: OrderItem[];
+  // Whether every argument opened on an integer constant: with each one a plain
+  // number node, the list could be a typmod (see columnRef). Only the token an
+  // argument starts on is checked, which it peeks anyway.
+  integerArgs: boolean;
+  taken?: Expr;
+};
+function parseCallArgs(
+  ctx: ParseContext<SqlTokenType>,
+  opts: { aggregate: boolean; afterFirst?: (first: Expr, call: CallArgs) => Expr | null },
+): CallArgs {
+  const quantifier = opts.aggregate
+    ? ((ctx.eat("ident", ["distinct", "all"])?.value ?? null) as CallArgs["quantifier"])
+    : null;
+  const call: CallArgs = { args: [], quantifier, variadic: false, orderBy: [], integerArgs: true };
+  // DISTINCT and ALL qualify an argument list, so one must follow.
+  if (ctx.is("punc", ")") && quantifier === null) return call;
+  const readArg = (): void => {
+    // No bare `*` after DISTINCT, ALL or VARIADIC: PG's `count(*)` is a form
+    // of its own, and none of them takes it.
+    if (quantifier !== null || ctx.eat("ident", "variadic") !== null) {
+      call.variadic = quantifier === null;
+      call.integerArgs = false;
+      call.args.push(parseCallArg(ctx, expression));
+      return;
+    }
+    call.integerArgs &&= isIntegerConstant(ctx.peek());
+    call.args.push(ctx.parse(functionArg));
+  };
+  readArg();
+  const taken = opts.afterFirst?.(call.args[0]!, call) ?? null;
+  if (taken !== null) return { ...call, taken };
+  while (!call.variadic && ctx.is("punc", ",")) {
+    ctx.next(); // ","
+    readArg();
+  }
+  if (opts.aggregate && ctx.is("ident", "order")) call.orderBy = ctx.parse(orderByClause);
+  return call;
+}
 
 // --- special call syntaxes ---
 // A handful of PG functions take keyword-separated arguments rather than a plain
@@ -2761,57 +2844,39 @@ const columnRef = custom<Expr, SqlTokenType>(
       const special =
         parts.length === 1 && Object.hasOwn(SPECIAL_CALLS, parts[0]!) ? SPECIAL_CALLS[parts[0]!] : undefined;
       if (special !== undefined) return special(ctx, start);
-      // The aggregate modifiers that live inside the argument list: a leading
-      // DISTINCT and a trailing `ORDER BY …` (`array_agg(a ORDER BY b)`). Both
-      // `distinct` and `order` are reserved, so neither can be an argument name
-      // and neither needs a guard. The keys are omitted when absent, so an
-      // ordinary call keeps exactly its prior shape.
-      const distinct = ctx.eat("ident", "distinct") !== null;
-      const args: Expr[] = [];
-      let orderBy: OrderItem[] = [];
-      // Whether every argument so far opened on an integer constant: with each
-      // one a plain number node, the list could be a typmod (see below). Only
-      // the token an argument starts on is checked, which it peeks anyway.
-      let integerArgs = true;
-      if (!ctx.is("punc", ")")) {
-        integerArgs &&= isIntegerConstant(ctx.peek());
-        args.push(ctx.parse(functionArg));
-        // OVERLAY's keyword form is told apart from its comma form only by a
-        // PLACING after the first argument, so unlike the SPECIAL_CALLS it
-        // cannot claim the call up front: the comma form stays on this path and
-        // so parses exactly as it did before the keyword form existed. That
-        // includes the modifiers every call here accepts (DISTINCT, ORDER BY,
-        // OVER, …), which PG would reject on OVERLAY's comma form — no narrower
-        // than this grammar is for any other call. `placing` is reserved, so
-        // no first argument can end in one — before this check, it was a
-        // syntax error here, and it still is after a bare `*` or a named
-        // argument, which PG's keyword form does not take either (a `t.*` is an
-        // ordinary operand to it, as to SUBSTRING's FROM form).
-        const value = args[0]!;
-        if (
-          bareLead &&
-          parts.length === 1 &&
-          parts[0] === "overlay" &&
-          !distinct &&
-          !(value.kind === "star" && value.table === null) &&
-          value.kind !== "namedArg" &&
-          ctx.is("ident", "placing")
-        ) {
-          return parseOverlay(ctx, value, start);
-        }
-        while (ctx.is("punc", ",")) {
-          ctx.next(); // ","
-          integerArgs &&= isIntegerConstant(ctx.peek());
-          args.push(ctx.parse(functionArg));
-        }
-        if (ctx.is("ident", "order")) orderBy = ctx.parse(orderByClause);
-      }
+      // OVERLAY's keyword form is told apart from its comma form only by a
+      // PLACING after the first argument, so unlike the SPECIAL_CALLS it cannot
+      // claim the call up front: the comma form stays on this path and so
+      // parses exactly as it did before the keyword form existed. That includes
+      // the modifiers every call here accepts (DISTINCT, ORDER BY, OVER, …),
+      // which PG would reject on OVERLAY's comma form — no narrower than this
+      // grammar is for any other call. `placing` is reserved, so no first
+      // argument can end in one — before this check, it was a syntax error
+      // here, and it still is after a bare `*`, a named or VARIADIC argument,
+      // none of which PG's keyword form takes either (a `t.*` is an ordinary
+      // operand to it, as to SUBSTRING's FROM form).
+      const overlay =
+        bareLead && parts.length === 1 && parts[0] === "overlay"
+          ? (value: Expr, call: CallArgs): Expr | null =>
+              call.quantifier === null &&
+              !call.variadic &&
+              !(value.kind === "star" && value.table === null) &&
+              value.kind !== "namedArg" &&
+              ctx.is("ident", "placing")
+                ? parseOverlay(ctx, value, start)
+                : null
+          : undefined;
+      const { args, quantifier, variadic, orderBy, integerArgs, taken } = parseCallArgs(ctx, {
+        aggregate: true,
+        afterFirst: overlay,
+      });
+      if (taken !== undefined) return taken;
       if (!ctx.is("punc", ")")) ctx.croak(`Expected ")" but found ${describeFound(ctx.peek())}`);
       ctx.next(); // ")"
       // `INTERVAL(3) '…'` and `varchar(3) 'abc'`: the call was a type's
       // precision or typmod after all.
       const typmod =
-        integerArgs && args.length > 0 && !distinct && orderBy.length === 0
+        integerArgs && args.length > 0 && quantifier === null && orderBy.length === 0
           ? args.map((arg) => (arg.kind === "number" ? arg.value : null))
           : null;
       if (typmod !== null && !typmod.includes(null) && ctx.is("string")) {
@@ -2826,14 +2891,21 @@ const columnRef = custom<Expr, SqlTokenType>(
         kind: "call",
         name: parts.join("."),
         args,
-        ...(distinct && { distinct: true }),
+        ...(quantifier === "distinct" && { distinct: true }),
+        ...(quantifier === "all" && { all: true }),
+        ...(variadic && { variadic: true }),
         ...(orderBy.length > 0 && { orderBy }),
         span: ctx.spanFrom(start),
       };
       // Trailing WITHIN GROUP / IGNORE|RESPECT NULLS / FILTER / OVER modifiers.
       return applyCallModifiers(ctx, call, start);
     }
-    return typeNameLiteral(ctx, start, lead, parts, null) ?? { kind: "name", parts, span: ctx.spanFrom(start) };
+    const literal = typeNameLiteral(ctx, start, lead, parts, null);
+    if (literal !== null) return literal;
+    const name: Expr = { kind: "name", parts, span: ctx.spanFrom(start) };
+    // A subscript may lead a field selection here (`a[1].f`), so the name's
+    // indirection is read in full rather than left to the subscript postfix.
+    return ctx.is("punc", "[") ? parseIndirection(ctx, name, start) : name;
   },
   { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
 );
@@ -2873,16 +2945,20 @@ const existsExpr = seq(skip(kw("exists")), field("query", parenQuery)).map(
 // which may lead OVERLAPS. A lone `(a)` keeps the bare inner expression — span
 // and all — exactly as before; it only becomes a row long enough to report a
 // wrong OVERLAPS arity.
+//
+// A parenthesised expression or subquery may be followed by indirection, PG's
+// `'(' a_expr ')' opt_indirection` and `select_with_parens indirection`:
+// `(row).f`, `(f()).*`, `(arr)[1].f`. A row constructor takes none, as in PG.
 const subqueryExpr = parenQuery.map((q, span): Expr => ({ kind: "subquery", query: q, span }));
 const parenOrSubquery = custom<Expr, SqlTokenType>(
   (ctx) => {
-    if (isSubqueryParen(ctx)) return ctx.parse(subqueryExpr);
     const start = ctx.position();
+    if (isSubqueryParen(ctx)) return parseIndirection(ctx, ctx.parse(subqueryExpr), start);
     ctx.next(); // "("
     const items = parseRowItems(ctx, false);
     const row: RowExpr = { kind: "row", items, implicit: true, span: ctx.spanFrom(start) };
     if (startsOverlaps(ctx)) return parseOverlaps(ctx, row);
-    return items.length === 1 ? items[0]! : row;
+    return items.length === 1 ? parseIndirection(ctx, items[0]!, start) : row;
   },
   { expected: '"("', first: [{ type: "punc", value: "(" }] },
 );
@@ -2904,12 +2980,34 @@ const castExpr = seq(
   skip(punc(")")),
 ).map(({ expr, type }, span): Expr => ({ kind: "cast", expr, type, span }));
 
-// ARRAY[…] constructor. `array` is reserved, so this atom owns the keyword; the
-// element list may be empty (`ARRAY[]`).
-const arrayExpr = seq(
-  skip(kw("array")),
-  field("elements", delimited(P("["), P("]"), P(","), expression, { interleaved: true })),
-).map(({ elements }, span): Expr => ({ kind: "array", elements, span }));
+// ARRAY[…] constructor and ARRAY(subquery). `array` is reserved, so this atom
+// owns the keyword. The element list may be empty (`ARRAY[]`), and holds either
+// expressions or, in a multidimensional array, bare `[…]` rows — PG's
+// array_expr, which takes no mix of the two (`ARRAY[[1], 2]` is a syntax error
+// there and here). A row is an array_expr too, so rows nest to any depth.
+const arrayElements = delimited(P("["), P("]"), P(","), expression, { interleaved: true });
+function parseArrayBody(ctx: ParseContext<SqlTokenType>): Expr[] {
+  if (!ctx.is("punc", "[") || !isPuncToken(ctx.peekAhead(1), "[")) return ctx.parse(arrayElements);
+  ctx.next(); // "["
+  const rows: Expr[] = [];
+  do {
+    const start = ctx.position();
+    if (!ctx.is("punc", "[")) ctx.croak(`Expected "[" but found ${describeFound(ctx.peek())}`);
+    rows.push({ kind: "array", elements: parseArrayBody(ctx), implicit: true, span: ctx.spanFrom(start) });
+  } while (ctx.eat("punc", ",") !== null);
+  if (!ctx.is("punc", "]")) ctx.croak(`Expected "]" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "]"
+  return rows;
+}
+const arrayExpr = custom<Expr, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.next(); // array
+    if (ctx.is("punc", "(")) return { kind: "arraySubquery", query: ctx.parse(parenQuery), span: ctx.spanFrom(start) };
+    return { kind: "array", elements: parseArrayBody(ctx), span: ctx.spanFrom(start) };
+  },
+  { expected: '"array"', first: [{ type: "ident", value: "array" }] },
+);
 
 // CURRENT_DATE, CURRENT_TIMESTAMP[(p)], USER, … — the niladic keyword
 // functions. Each is reserved, so it can be a value-specific atom key without
@@ -3758,16 +3856,38 @@ function subscriptBounds(ctx: ParseContext<SqlTokenType>): { index: Expr | null;
   ctx.next(); // "]"
   return { index, upper };
 }
+function subscriptNode(ctx: ParseContext<SqlTokenType>, left: Expr): Expr {
+  const { index, upper } = subscriptBounds(ctx);
+  return upper === undefined
+    ? { kind: "subscript", base: left, index, span: closeSpan(left, ctx.lastEnd()) }
+    : { kind: "subscript", base: left, index, upper, span: closeSpan(left, ctx.lastEnd()) };
+}
 const subscriptPostfix = {
   match: punc("["),
   bp: 19,
-  parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
-    const { index, upper } = subscriptBounds(ctx);
-    return upper === undefined
-      ? { kind: "subscript", base: left, index, span: closeSpan(left, ctx.lastEnd()) }
-      : { kind: "subscript", base: left, index, upper, span: closeSpan(left, ctx.lastEnd()) };
-  },
+  parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => subscriptNode(ctx, left),
 };
+
+// PG's opt_indirection: any run of `[…]` subscripts and `.field` / `.*` field
+// selections after `base`, an atom opened at `start`. Only the atoms that PG
+// gives indirection read it here — a parenthesised expression or subquery,
+// and a column reference — which is what lets a field follow a subscript
+// (`(arr)[1].f`, `a[1].f`). A subscript builds the node the postfix does, span
+// and all; a field selection spans from `start`, the `(` included. A field name
+// is read as a dotted name's parts are, so a reserved one must be quoted.
+function parseIndirection(ctx: ParseContext<SqlTokenType>, base: Expr, start: Position): Expr {
+  let expr = base;
+  for (;;) {
+    if (ctx.is("punc", "[")) {
+      expr = subscriptNode(ctx, expr);
+    } else if (ctx.eat("punc", ".") !== null) {
+      const field = ctx.eat("op", "*") !== null ? null : ctx.parse(nameWord);
+      expr = { kind: "fieldSelect", expr, field, span: ctx.spanFrom(start) };
+    } else {
+      return expr;
+    }
+  }
+}
 
 // `x COLLATE collation` (bp 17) and `x AT TIME ZONE zone` (bp 16) sit below the
 // unary sign, so `-x COLLATE "C"` is `(-x) COLLATE "C"`, and above `^`. The zone
@@ -10431,21 +10551,24 @@ function parseFromCall(ctx: ParseContext<SqlTokenType>): Expr {
 // from `start`, which tableRef passes so a plain item's span keeps covering a
 // leading LATERAL.
 function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[], start: Position): Expr {
-  const args = parseCallArgList(ctx);
-  return { kind: "call", name: nameParts.join("."), args, span: ctx.spanFrom(start) };
+  const { args, variadic } = parseCallArgList(ctx);
+  return {
+    kind: "call",
+    name: nameParts.join("."),
+    args,
+    ...(variadic && { variadic: true }),
+    span: ctx.spanFrom(start),
+  };
 }
-// `( [functionArg, …] )` — a call's argument list, possibly empty, without the
-// modifiers a SELECT-list call takes. Shared by FROM calls and CALL.
-function parseCallArgList(ctx: ParseContext<SqlTokenType>): Expr[] {
+// `( [functionArg, …] )` — a call's argument list, possibly empty and its last
+// argument possibly VARIADIC, without the aggregate modifiers a SELECT-list
+// call takes. Shared by FROM calls and CALL.
+function parseCallArgList(ctx: ParseContext<SqlTokenType>): { args: Expr[]; variadic: boolean } {
   if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
   ctx.next(); // "("
-  const args: Expr[] = [];
-  if (!ctx.is("punc", ")")) {
-    args.push(ctx.parse(functionArg));
-    while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(functionArg));
-  }
+  const { args, variadic } = parseCallArgs(ctx, { aggregate: false });
   expectClose(ctx);
-  return args;
+  return { args, variadic };
 }
 
 // `WITH ORDINALITY` after a table function. Keyed on the word pair, since a
@@ -11754,8 +11877,8 @@ const callStmt = custom<Stmt, SqlTokenType>(
     const start = ctx.position();
     ctx.parse(kw("call"));
     const name = ctx.parse(qualName);
-    const args = parseCallArgList(ctx);
-    return { kind: "callProcedure", name, args, span: ctx.spanFrom(start) };
+    const { args, variadic } = parseCallArgList(ctx);
+    return { kind: "callProcedure", name, args, ...(variadic && { variadic: true }), span: ctx.spanFrom(start) };
   },
   { expected: '"call"', first: [{ type: "ident", value: "call" }] },
 );

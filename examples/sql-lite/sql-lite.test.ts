@@ -6013,8 +6013,12 @@ describe("SQL-lite numeric literals and parameters", () => {
       { type: "op", value: "=" },
       { type: "number", value: "1" },
     ]);
-    // No rule takes `:=` yet, and the spaced spelling is no named argument.
-    expect(() => sqlLite.parse("SELECT f(a := 1);")).toThrow(/found ":="/);
+    // `:=` names an argument, and the spaced spelling is no named argument.
+    expect(colExpr("f(a := 1)")).toEqual({
+      kind: "call",
+      name: "f",
+      args: [{ kind: "namedArg", name: "a", value: num(1) }],
+    });
     expect(() => sqlLite.parse("SELECT f(a : = 1);")).toThrow(/found ":"/);
     // `:` and `::` lex as before.
     expect(colExpr("a[1:2]")).toMatchObject({ kind: "subscript" });
@@ -13103,6 +13107,184 @@ describe("SQL-lite MERGE", () => {
     expect(bad("COPY (MERGE INTO t USING s WHEN MATCHED THEN DELETE) TO STDOUT;")).toThrow(
       /Expected "on" but found "when" \(1:27\)/,
     );
+  });
+});
+
+// --- composite and array access, and call-argument forms ---
+
+describe("SQL-lite composite and array access, and call-argument forms", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const fieldOf = (expr: unknown, field: string | null) => ({ kind: "fieldSelect", expr, field });
+  const sub = (base: unknown, index: unknown) => ({ kind: "subscript", base, index });
+  const call = (fnName: string, args: unknown[] = [], mods: Record<string, unknown> = {}) => ({
+    kind: "call",
+    name: fnName,
+    args,
+    ...mods,
+  });
+  const arr = (...elements: unknown[]) => ({ kind: "array", elements });
+  const row = (...elements: unknown[]) => ({ kind: "array", elements, implicit: true });
+  const named = (argName: string, value: unknown) => ({ kind: "namedArg", name: argName, value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const select1 = sel({ columns: [col(num(1))] });
+
+  it("selects a field, or every field, of a parenthesised expression", () => {
+    expect(colExpr("(t.composite_col).field")).toEqual(fieldOf(name("t", "composite_col"), "field"));
+    expect(colExpr("(compute_row()).*")).toEqual(fieldOf(call("compute_row"), null));
+    expect(colExpr("(t.c).a.b")).toEqual(fieldOf(fieldOf(name("t", "c"), "a"), "b"));
+    expect(colExpr('(r)."Mixed"')).toEqual(fieldOf(name("r"), "Mixed"));
+    // PG's ColLabel would take a reserved word here; like a dotted name's
+    // parts, this grammar wants it quoted.
+    expect(colExpr('(r)."from"')).toEqual(fieldOf(name("r"), "from"));
+    expect(bad("SELECT (r).from FROM t;")).toThrow(/Expected a name but found "from"/);
+  });
+
+  it("selects a field of a subquery and of a call", () => {
+    expect(colExpr("(SELECT 1).f")).toEqual(fieldOf({ kind: "subquery", query: select1 }, "f"));
+    expect(colExpr("(SELECT 1).*")).toEqual(fieldOf({ kind: "subquery", query: select1 }, null));
+    expect(colExpr("(s.f(1, 2)).x")).toEqual(fieldOf(call("s.f", [num(1), num(2)]), "x"));
+  });
+
+  it("mixes subscripts and field selections in any order", () => {
+    expect(colExpr("(arr)[1]")).toEqual(sub(name("arr"), num(1)));
+    expect(colExpr("(arr)[1].f")).toEqual(fieldOf(sub(name("arr"), num(1)), "f"));
+    expect(colExpr("(r).f[2]")).toEqual(sub(fieldOf(name("r"), "f"), num(2)));
+    expect(colExpr("(r).a[1][2].b.*")).toEqual(
+      fieldOf(fieldOf(sub(sub(fieldOf(name("r"), "a"), num(1)), num(2)), "b"), null),
+    );
+    // A column reference takes the same chain once a subscript opens it.
+    expect(colExpr("a[1].f")).toEqual(fieldOf(sub(name("a"), num(1)), "f"));
+    expect(colExpr("t.a[1].f.*")).toEqual(fieldOf(fieldOf(sub(name("t", "a"), num(1)), "f"), null));
+    expect(colExpr("(SELECT a)[1:2]")).toEqual({
+      kind: "subscript",
+      base: { kind: "subquery", query: sel({ columns: [col(name("a"))] }) },
+      index: num(1),
+      upper: num(2),
+    });
+  });
+
+  it("binds the chain tighter than any operator", () => {
+    expect(colExpr("-(r).f")).toEqual({ kind: "unary", op: "-", operand: fieldOf(name("r"), "f") });
+    expect(colExpr("(r).f::int")).toEqual({ kind: "cast", expr: fieldOf(name("r"), "f"), type: ct("int") });
+    expect(colExpr("(r).f + (s).g")).toEqual(bin("+", fieldOf(name("r"), "f"), fieldOf(name("s"), "g")));
+    expect(exprOf("(r).f > 0")).toEqual(bin(">", fieldOf(name("r"), "f"), num(0)));
+    expect(firstStmt("SELECT (r).f AS x FROM t;").columns).toEqual([col(fieldOf(name("r"), "f"), "x")]);
+  });
+
+  it("spans a field selection from its opening parenthesis", () => {
+    const [stmt] = sqlLite.parse("SELECT (r).f[1].g FROM t;") as any[];
+    const g = stmt.columns[0].expr;
+    expect(g.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 17 } });
+    // The subscript keeps the span the postfix gives it, from its base.
+    expect(g.expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 15 } });
+    expect(g.expr.base.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 12 } });
+    const [chained] = sqlLite.parse("SELECT a[1].f FROM t;") as any[];
+    expect(chained.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 13 } });
+  });
+
+  it("takes no indirection where PG takes none", () => {
+    // A row constructor, and a field after a bare `.` of nothing.
+    expect(bad("SELECT (a, b).f FROM t;")).toThrow(/Expected ";" but found "\."/);
+    expect(bad("SELECT (r). FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(bad("SELECT (r).1 FROM t;")).toThrow(/Expected ";" but found "\.1"/);
+  });
+
+  it("builds an array from a subquery", () => {
+    expect(colExpr("ARRAY(SELECT 1)")).toEqual({ kind: "arraySubquery", query: select1 });
+    expect(colExpr("ARRAY(SELECT id FROM users ORDER BY id)").query).toMatchObject({ kind: "select" });
+    expect(bad("SELECT ARRAY() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT ARRAY(1) FROM t;")).toThrow(/but found "1"/);
+    expect(bad("SELECT ARRAY x FROM t;")).toThrow(/Expected "\[" but found "x"/);
+  });
+
+  it("reads bare inner rows of a multidimensional array", () => {
+    expect(colExpr("ARRAY[[1, 2], [3, 4]]")).toEqual(arr(row(num(1), num(2)), row(num(3), num(4))));
+    expect(colExpr("ARRAY[[[1]], [[]]]")).toEqual(arr(row(row(num(1))), row(row())));
+    expect(colExpr("ARRAY[[]]")).toEqual(arr(row()));
+    // Only the inner rows carry `implicit`.
+    expect(Object.keys(colExpr("ARRAY[[1]]"))).toEqual(["kind", "elements"]);
+    // An ARRAY-spelled inner array stays an ordinary element.
+    expect(colExpr("ARRAY[ARRAY[1], ARRAY[2]]")).toEqual(arr(arr(num(1)), arr(num(2))));
+    // Rows and expressions don't mix.
+    expect(bad("SELECT ARRAY[[1], 2] FROM t;")).toThrow(/Expected "\[" but found "2"/);
+    expect(bad("SELECT ARRAY[1, [2]] FROM t;")).toThrow(/but found "\["/);
+    expect(bad("SELECT ARRAY[[1],] FROM t;")).toThrow(/Expected "\[" but found "\]"/);
+    expect(bad("SELECT ARRAY[[1] FROM t;")).toThrow(/Expected "\]" but found "from"/);
+  });
+
+  it("spans an inner row over its brackets", () => {
+    const [stmt] = sqlLite.parse("SELECT ARRAY[[1], [2, 3]];") as any[];
+    const outer = stmt.columns[0].expr;
+    expect(outer.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 25 } });
+    expect(outer.elements[1].span).toEqual({ start: { row: 1, col: 18 }, end: { row: 1, col: 24 } });
+  });
+
+  it("names an argument with := as with =>", () => {
+    expect(colExpr("make_interval(days := 10)")).toEqual(call("make_interval", [named("days", num(10))]));
+    expect(colExpr('f(1, "B" := 2, c => 3)')).toEqual(call("f", [num(1), named("B", num(2)), named("c", num(3))]));
+    expect(firstStmt("CALL p(a := 1);")).toEqual({ kind: "callProcedure", name: ["p"], args: [named("a", num(1))] });
+    expect(bad("SELECT f(a : = 1) FROM t;")).toThrow(/Expected "\)" but found ":"/);
+    expect(bad("SELECT f(a :=) FROM t;")).toThrow(/but found "\)"/);
+  });
+
+  it("passes a last argument as VARIADIC", () => {
+    expect(colExpr("concat_ws(',', VARIADIC ARRAY['a', 'b'])")).toEqual(
+      call("concat_ws", [str(","), arr(str("a"), str("b"))], { variadic: true }),
+    );
+    expect(colExpr("f(VARIADIC arr)")).toEqual(call("f", [name("arr")], { variadic: true }));
+    expect(colExpr("f(VARIADIC a := arr)")).toEqual(call("f", [named("a", name("arr"))], { variadic: true }));
+    expect(colExpr("array_agg(VARIADIC a ORDER BY b)")).toEqual(
+      call("array_agg", [name("a")], { variadic: true, orderBy: [{ expr: name("b"), dir: null, nulls: null }] }),
+    );
+    expect(firstStmt("SELECT * FROM f(1, VARIADIC a);").from[0].call).toEqual(
+      call("f", [num(1), name("a")], { variadic: true }),
+    );
+    expect(firstStmt("CALL p(VARIADIC a);")).toEqual({
+      kind: "callProcedure",
+      name: ["p"],
+      args: [name("a")],
+      variadic: true,
+    });
+    // Omitted when absent, on all three.
+    expect(Object.keys(colExpr("f(a)"))).toEqual(["kind", "name", "args"]);
+    expect(Object.keys(firstStmt("SELECT * FROM f(a);").from[0].call)).toEqual(["kind", "name", "args"]);
+    expect(Object.keys(firstStmt("CALL p(a);"))).toEqual(["kind", "name", "args"]);
+  });
+
+  it("rejects a VARIADIC argument that is not last, or not an expression", () => {
+    expect(bad("SELECT f(VARIADIC a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT * FROM f(VARIADIC a, b);")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("CALL p(VARIADIC a, b);")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT f(VARIADIC *) FROM t;")).toThrow(/but found "\*"/);
+    expect(bad("SELECT f(VARIADIC) FROM t;")).toThrow(/but found "\)"/);
+    // PG's grammar takes VARIADIC after neither DISTINCT nor ALL.
+    expect(bad("SELECT f(DISTINCT VARIADIC a) FROM t;")).toThrow(/Expected a name but found "variadic"/);
+    expect(bad("SELECT f(ALL a, VARIADIC b) FROM t;")).toThrow(/Expected a name but found "variadic"/);
+    // Nor is a VARIADIC typmod a typed literal's.
+    expect(bad("SELECT varchar(VARIADIC 3) 'x' FROM t;")).toThrow(/Expected ";" but found "x"/);
+  });
+
+  it("records ALL ahead of an aggregate's arguments", () => {
+    expect(colExpr("count(ALL x)")).toEqual(call("count", [name("x")], { all: true }));
+    expect(colExpr("string_agg(ALL a, ',' ORDER BY a)")).toEqual(
+      call("string_agg", [name("a"), str(",")], { all: true, orderBy: [{ expr: name("a"), dir: null, nulls: null }] }),
+    );
+    // DISTINCT and ALL each want an argument after them.
+    expect(bad("SELECT count(ALL) FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT count(DISTINCT) FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT count(ALL DISTINCT x) FROM t;")).toThrow(/but found "distinct"/);
+    // Nor does either take a bare `*`, which stands only on its own.
+    expect(bad("SELECT count(ALL *) FROM t;")).toThrow(/but found "\*"/);
+    expect(bad("SELECT count(DISTINCT *) FROM t;")).toThrow(/but found "\*"/);
+    // A FROM call and CALL read neither (see parseCallArgs).
+    expect(bad("SELECT * FROM f(ALL x);")).toThrow(/but found "all"/);
+    expect(bad("CALL p(DISTINCT x);")).toThrow(/but found "distinct"/);
+  });
+
+  it("keeps the OVERLAY keyword form to plain first arguments", () => {
+    expect(bad("SELECT overlay(VARIADIC a PLACING b FROM 1) FROM t;")).toThrow(/Expected "\)" but found "placing"/);
+    expect(bad("SELECT overlay(ALL a PLACING b FROM 1) FROM t;")).toThrow(/Expected "\)" but found "placing"/);
+    expect(colExpr("overlay(a PLACING b FROM 1)")).toMatchObject({ kind: "overlay" });
   });
 });
 
