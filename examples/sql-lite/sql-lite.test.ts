@@ -13587,18 +13587,18 @@ describe("SQL-lite long-tail objects with definition lists", () => {
 // --- typed tables, storage clauses, CTAS forms, column storage, constraint
 // triggers, transition tables and temp / recursive views ---
 
-describe("SQL-lite table, view and trigger leftovers", () => {
-  const ty = (typeName: string) => ({ name: typeName, args: [], array: false });
-  const column = (colName: string, typeName: string, extra: Record<string, unknown> = {}) => ({
-    kind: "column",
-    name: colName,
-    dataType: ty(typeName),
-    ...extra,
-    constraints: [],
-  });
-  const one = sel({ columns: [col(num(1))] });
-  const fails = (src: string) => () => sqlLite.parse(src);
+const plainType = (typeName: string) => ({ name: typeName, args: [], array: false });
+const plainColumn = (colName: string, typeName: string, extra: Record<string, unknown> = {}) => ({
+  kind: "column",
+  name: colName,
+  dataType: plainType(typeName),
+  ...extra,
+  constraints: [],
+});
+const selectOne = sel({ columns: [col(num(1))] });
+const parseFails = (src: string) => () => sqlLite.parse(src);
 
+describe("SQL-lite typed tables (OF type)", () => {
   it("parses a typed table, its column options and its trailing clauses", () => {
     expect(firstStmt("CREATE TABLE t OF typ;")).toEqual({
       kind: "createTable",
@@ -13637,14 +13637,34 @@ describe("SQL-lite table, view and trigger leftovers", () => {
     });
   });
 
-  it("parses USING method and WITHOUT OIDS among a table's storage clauses", () => {
+  it("rejects an empty list, typed columns, LIKE and INHERITS", () => {
+    expect(parseFails("CREATE TABLE t OF typ ();")).toThrow(/Expected .* but found "\)"/);
+    expect(parseFails("CREATE TABLE t OF typ (a int);")).toThrow(/but found "int"/);
+    expect(parseFails("CREATE TABLE t OF typ (LIKE x);")).toThrow(/but found "like"/);
+    expect(parseFails("CREATE TABLE t OF typ INHERITS (p);")).toThrow(/Expected ";" but found "inherits"/);
+  });
+
+  it("keeps of unreserved as names", () => {
+    expect(firstStmt("CREATE TABLE of OF of;")).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["of"],
+      items: [],
+      ofType: ["of"],
+    });
+    expect(firstStmt("CREATE TABLE of (of int);").items).toEqual([plainColumn("of", "int")]);
+  });
+});
+
+describe("SQL-lite USING method and WITHOUT OIDS table clauses", () => {
+  it("parses them among a table's storage clauses, in PG's order", () => {
     expect(
       firstStmt("CREATE TABLE t (a int) INHERITS (p) USING heap WITHOUT OIDS ON COMMIT PRESERVE ROWS TABLESPACE ts;"),
     ).toEqual({
       kind: "createTable",
       ifNotExists: false,
       name: ["t"],
-      items: [column("a", "int")],
+      items: [plainColumn("a", "int")],
       inherits: [["p"]],
       accessMethod: "heap",
       withoutOids: true,
@@ -13661,7 +13681,31 @@ describe("SQL-lite table, view and trigger leftovers", () => {
     });
   });
 
-  it("parses CREATE TABLE AS TABLE and AS EXECUTE, with their storage clauses", () => {
+  it("rejects them out of order, together with WITH, or incomplete", () => {
+    expect(parseFails("CREATE TABLE t (a int) WITH (x = 1) WITHOUT OIDS;")).toThrow(/Expected ";" but found "without"/);
+    expect(parseFails("CREATE TABLE t (a int) TABLESPACE ts USING heap;")).toThrow(/Expected ";" but found "using"/);
+    expect(parseFails("CREATE TABLE t (a int) WITHOUT;")).toThrow(/Expected "oids" but found ";"/);
+  });
+
+  it("keeps without, oids and heap unreserved", () => {
+    expect(firstStmt("CREATE TABLE heap (without int, oids int) USING heap;")).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["heap"],
+      items: [plainColumn("without", "int"), plainColumn("oids", "int")],
+      accessMethod: "heap",
+    });
+    expect(firstStmt("SELECT without, oids, heap AS oids FROM heap AS without;")).toEqual(
+      sel({
+        columns: [col(name("without")), col(name("oids")), col(name("heap"), "oids")],
+        from: [tableFrom(["heap"], "without")],
+      }),
+    );
+  });
+});
+
+describe("SQL-lite CREATE TABLE AS TABLE and AS EXECUTE", () => {
+  it("parses both, with their storage clauses and WITH [NO] DATA", () => {
     expect(firstStmt("CREATE TABLE x (a, b) USING heap WITHOUT OIDS TABLESPACE ts AS TABLE t WITH NO DATA;")).toEqual({
       kind: "createTableAs",
       ifNotExists: false,
@@ -13698,20 +13742,38 @@ describe("SQL-lite table, view and trigger leftovers", () => {
     });
   });
 
-  it("parses a column's STORAGE and COMPRESSION ahead of its constraints", () => {
+  it("rejects an empty argument list and clauses out of order", () => {
+    expect(parseFails("CREATE TABLE x AS EXECUTE p();")).toThrow(/but found "\)"/);
+    expect(parseFails("CREATE TABLE x (a, b) WITH (x = 1) WITHOUT OIDS AS SELECT 1;")).toThrow(
+      /Expected "as" but found "without"/,
+    );
+    expect(parseFails("CREATE SCHEMA s CREATE TABLE x AS EXECUTE p;")).toThrow(/cannot be CREATE TABLE AS/);
+  });
+
+  it("keeps execute unreserved as a table name", () => {
+    expect(firstStmt("CREATE TABLE execute AS EXECUTE execute;")).toMatchObject({
+      name: ["execute"],
+      query: { kind: "execute", name: "execute" },
+    });
+  });
+});
+
+describe("SQL-lite column STORAGE and COMPRESSION", () => {
+  it("parses both ahead of a column's constraints", () => {
     expect(
       firstStmt(
         'CREATE TABLE t (a text STORAGE external COMPRESSION lz4 NOT NULL, b text STORAGE DEFAULT, c text COMPRESSION default, d text STORAGE "MAIN", e text COMPRESSION "DEFAULT");',
       ).items,
     ).toEqual([
-      { ...column("a", "text", { storage: "external", compression: "lz4" }), constraints: [{ kind: "notNull" }] },
-      column("b", "text", { storage: "default" }),
-      column("c", "text", { compression: "default" }),
-      column("d", "text", { storage: "main" }),
-      column("e", "text", { compression: "DEFAULT" }),
+      { ...plainColumn("a", "text", { storage: "external", compression: "lz4" }), constraints: [{ kind: "notNull" }] },
+      plainColumn("b", "text", { storage: "default" }),
+      plainColumn("c", "text", { compression: "default" }),
+      plainColumn("d", "text", { storage: "main" }),
+      plainColumn("e", "text", { compression: "DEFAULT" }),
     ]);
-    expect(firstStmt("ALTER TABLE t ADD COLUMN a text STORAGE plain;").actions).toEqual([
-      { kind: "addColumn", ifNotExists: false, column: column("a", "text", { storage: "plain" }) },
+    expect(firstStmt("ALTER TABLE t ADD COLUMN a text STORAGE plain, ADD b int COMPRESSION lz4;").actions).toEqual([
+      { kind: "addColumn", ifNotExists: false, column: plainColumn("a", "text", { storage: "plain" }) },
+      { kind: "addColumn", ifNotExists: false, column: plainColumn("b", "int", { compression: "lz4" }) },
     ]);
     // SET STORAGE and SET COMPRESSION share the readers, and keep their nulls.
     expect(firstStmt('ALTER TABLE t ALTER a SET STORAGE "DEFAULT", ALTER b SET COMPRESSION default;').actions).toEqual([
@@ -13720,7 +13782,37 @@ describe("SQL-lite table, view and trigger leftovers", () => {
     ]);
   });
 
-  it("parses CONSTRAINT TRIGGER with FROM and deferral attributes", () => {
+  it("rejects them out of order or with an unknown storage mode", () => {
+    expect(parseFails("CREATE TABLE t (a text COMPRESSION lz4 STORAGE main);")).toThrow(
+      /Expected "," but found "storage"/,
+    );
+    expect(parseFails('CREATE TABLE t (a text COLLATE "C" STORAGE main);')).toThrow(/Expected "," but found "storage"/);
+    expect(parseFails("CREATE TABLE t (a text STORAGE bogus);")).toThrow(/invalid storage type "bogus"/);
+  });
+
+  it("keeps storage and compression unreserved", () => {
+    expect(
+      firstStmt("CREATE TABLE storage (storage text STORAGE main COMPRESSION compression, compression int);"),
+    ).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["storage"],
+      items: [
+        plainColumn("storage", "text", { storage: "main", compression: "compression" }),
+        plainColumn("compression", "int"),
+      ],
+    });
+    expect(firstStmt("SELECT storage, compression AS storage FROM compression storage;")).toEqual(
+      sel({
+        columns: [col(name("storage")), col(name("compression"), "storage")],
+        from: [tableFrom(["compression"], "storage")],
+      }),
+    );
+  });
+});
+
+describe("SQL-lite CREATE CONSTRAINT TRIGGER", () => {
+  it("parses FROM and the deferral attributes", () => {
     expect(
       firstStmt(
         "CREATE CONSTRAINT TRIGGER c AFTER INSERT OR UPDATE ON t FROM s.r DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.a > 0) EXECUTE FUNCTION f(1);",
@@ -13743,7 +13835,7 @@ describe("SQL-lite table, view and trigger leftovers", () => {
       when: bin(">", name("new", "a"), num(0)),
       execute: { routine: "function", name: ["f"], args: [num(1)] },
     });
-    expect(firstStmt("CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();")).toEqual({
+    const bare = {
       kind: "createTrigger",
       orReplace: false,
       name: "c",
@@ -13754,10 +13846,52 @@ describe("SQL-lite table, view and trigger leftovers", () => {
       forEach: "row",
       when: null,
       execute: { routine: "procedure", name: ["f"], args: [] },
-    });
+    };
+    expect(firstStmt("CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();")).toEqual(
+      bare,
+    );
+    expect(
+      firstStmt(
+        "CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE PROCEDURE f();",
+      ),
+    ).toEqual({ ...bare, deferrable: false, initially: "immediate" });
+    // A schema element may be one, as in PG's schema_stmt.
+    expect(
+      firstStmt("CREATE SCHEMA s CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();")
+        .elements,
+    ).toEqual([bare]);
   });
 
-  it("parses REFERENCING transition tables, AS optional, in either order", () => {
+  it("rejects other timings, row-less and statement forms, REFERENCING and refused attributes", () => {
+    const trig = (middle: string) => `CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t ${middle} EXECUTE PROCEDURE f();`;
+    expect(parseFails("CREATE CONSTRAINT TRIGGER c BEFORE DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();")).toThrow(
+      /Expected "after" but found "before"/,
+    );
+    expect(parseFails(trig("FOR ROW"))).toThrow(/Expected "each" but found "row"/);
+    expect(parseFails(trig("FOR EACH STATEMENT"))).toThrow(/Expected "row" but found "statement"/);
+    expect(parseFails(trig("NOT VALID FOR EACH ROW"))).toThrow(/TRIGGER constraints cannot be marked NOT VALID/);
+    expect(parseFails(trig("NO INHERIT FOR EACH ROW"))).toThrow(/TRIGGER constraints cannot be marked NO INHERIT/);
+    expect(parseFails(trig("NOT DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"))).toThrow(
+      /constraint declared INITIALLY DEFERRED must be DEFERRABLE/,
+    );
+    expect(parseFails(trig("REFERENCING NEW TABLE n FOR EACH ROW"))).toThrow(
+      /Expected "for each row" but found "referencing"/,
+    );
+    expect(
+      parseFails("CREATE OR REPLACE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
+    ).toThrow(/CREATE OR REPLACE CONSTRAINT TRIGGER is not supported/);
+    // FROM and the deferral attributes belong to constraint triggers only.
+    expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t FROM x FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
+      /Expected "execute" but found "from"/,
+    );
+    expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t DEFERRABLE FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
+      /Expected "execute" but found "deferrable"/,
+    );
+  });
+});
+
+describe("SQL-lite trigger REFERENCING transition tables", () => {
+  it("parses OLD and NEW TABLE, AS optional, in either order", () => {
     expect(
       firstStmt(
         "CREATE TRIGGER tr AFTER UPDATE ON t REFERENCING NEW TABLE AS n OLD TABLE o FOR EACH STATEMENT EXECUTE FUNCTION f();",
@@ -13779,19 +13913,59 @@ describe("SQL-lite table, view and trigger leftovers", () => {
     });
   });
 
-  it("parses TEMP and RECURSIVE views, with or without OR REPLACE", () => {
-    const view = (over: Record<string, unknown>) => ({
-      kind: "createView",
-      materialized: false,
+  it("rejects ROW transitions and an empty clause", () => {
+    expect(
+      parseFails("CREATE TRIGGER tr AFTER INSERT ON t REFERENCING NEW ROW AS n FOR EACH ROW EXECUTE FUNCTION f();"),
+    ).toThrow(/ROW variable naming in the REFERENCING clause is not supported/);
+    expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t REFERENCING FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
+      /Expected "old" or "new" but found "for"/,
+    );
+  });
+
+  it("keeps referencing, old and new unreserved", () => {
+    expect(
+      firstStmt(
+        "CREATE TRIGGER referencing AFTER INSERT ON new REFERENCING OLD TABLE old NEW TABLE new EXECUTE FUNCTION referencing();",
+      ),
+    ).toEqual({
+      kind: "createTrigger",
       orReplace: false,
-      ifNotExists: false,
-      name: ["v"],
-      columns: null,
-      query: one,
-      withData: null,
-      ...over,
+      name: "referencing",
+      timing: "after",
+      events: [{ event: "insert", columns: null }],
+      table: ["new"],
+      referencing: [
+        { kind: "old", name: "old" },
+        { kind: "new", name: "new" },
+      ],
+      forEach: null,
+      when: null,
+      execute: { routine: "function", name: ["referencing"], args: [] },
     });
+    expect(firstStmt("SELECT referencing, old AS new FROM new old;")).toEqual(
+      sel({ columns: [col(name("referencing")), col(name("old"), "new")], from: [tableFrom(["new"], "old")] }),
+    );
+  });
+});
+
+describe("SQL-lite TEMP and RECURSIVE views", () => {
+  const view = (over: Record<string, unknown>) => ({
+    kind: "createView",
+    materialized: false,
+    orReplace: false,
+    ifNotExists: false,
+    name: ["v"],
+    columns: null,
+    query: selectOne,
+    withData: null,
+    ...over,
+  });
+
+  it("parses both, with or without OR REPLACE", () => {
     expect(firstStmt("CREATE TEMP VIEW v AS SELECT 1;")).toEqual(view({ modifiers: ["temp"] }));
+    expect(firstStmt("CREATE GLOBAL TEMPORARY VIEW v AS SELECT 1;")).toEqual(
+      view({ modifiers: ["global", "temporary"] }),
+    );
     expect(firstStmt("CREATE OR REPLACE TEMPORARY VIEW v (a) AS SELECT 1;")).toEqual(
       view({ orReplace: true, columns: ["a"], modifiers: ["temporary"] }),
     );
@@ -13806,9 +13980,44 @@ describe("SQL-lite table, view and trigger leftovers", () => {
       row: 1,
       col: 0,
     });
+    // Schema elements take both, as in PG's schema_stmt.
+    expect(
+      firstStmt("CREATE SCHEMA s CREATE TEMP VIEW v AS SELECT 1 CREATE RECURSIVE VIEW v (n) AS SELECT 1;").elements,
+    ).toEqual([view({ modifiers: ["temp"] }), view({ columns: ["n"], recursive: true })]);
   });
 
-  it("parses UNLOGGED and the storage clauses of a materialized view, and AS TABLE", () => {
+  it("rejects a RECURSIVE view without columns or with a check option, and an unlogged view", () => {
+    expect(parseFails("CREATE RECURSIVE VIEW v AS SELECT 1;")).toThrow(/Expected "\(" but found "as" \(1:24\)/);
+    expect(parseFails("CREATE RECURSIVE VIEW v () AS SELECT 1;")).toThrow(/Expected a name but found "\)"/);
+    expect(parseFails("CREATE RECURSIVE VIEW v (n) AS SELECT 1 WITH CHECK OPTION;")).toThrow(
+      /WITH CHECK OPTION not supported on recursive views/,
+    );
+    for (const src of ["CREATE UNLOGGED VIEW v AS SELECT 1;", "CREATE OR REPLACE UNLOGGED VIEW v AS SELECT 1;"]) {
+      expect(parseFails(src)).toThrow(/views cannot be unlogged because they do not have storage/);
+    }
+    expect(parseFails("CREATE TEMP MATERIALIZED VIEW mv AS SELECT 1;")).toThrow(
+      /Expected "table", "recursive" or "view" but found "materialized"/,
+    );
+    expect(parseFails("EXPLAIN CREATE TEMP VIEW v AS SELECT 1;")).toThrow(
+      /EXPLAIN takes CREATE TABLE AS or CREATE MATERIALIZED VIEW/,
+    );
+  });
+
+  it("keeps recursive unreserved", () => {
+    expect(firstStmt("CREATE RECURSIVE VIEW recursive (recursive) AS SELECT 1;")).toEqual(
+      view({ name: ["recursive"], columns: ["recursive"], recursive: true }),
+    );
+    expect(firstStmt("CREATE VIEW recursive AS SELECT recursive FROM recursive;")).toEqual(
+      view({
+        name: ["recursive"],
+        query: sel({ columns: [col(name("recursive"))], from: [tableFrom(["recursive"])] }),
+      }),
+    );
+  });
+});
+
+describe("SQL-lite UNLOGGED materialized views and their storage clauses", () => {
+  it("parses UNLOGGED, USING, WITH and TABLESPACE, and AS TABLE", () => {
     expect(
       firstStmt(
         "CREATE UNLOGGED MATERIALIZED VIEW IF NOT EXISTS mv (a) USING heap WITH (fillfactor = 50) TABLESPACE ts AS TABLE t WITH NO DATA;",
@@ -13834,105 +14043,28 @@ describe("SQL-lite table, view and trigger leftovers", () => {
       ifNotExists: false,
       name: ["mv"],
       columns: null,
-      query: one,
+      query: selectOne,
       withData: null,
       tablespace: "ts",
     });
   });
 
-  it("rejects what PG's grammar rejects in these forms", () => {
-    expect(fails("CREATE RECURSIVE VIEW v AS SELECT 1;")).toThrow(/Expected "\(" but found "as" \(1:24\)/);
-    expect(fails("CREATE RECURSIVE VIEW v () AS SELECT 1;")).toThrow(/Expected a name but found "\)"/);
-    expect(fails("CREATE RECURSIVE VIEW v (n) AS SELECT 1 WITH CHECK OPTION;")).toThrow(
-      /WITH CHECK OPTION not supported on recursive views/,
+  it("rejects the clauses out of order, on a plain view, and AS EXECUTE", () => {
+    expect(parseFails("CREATE MATERIALIZED VIEW mv USING heap TABLESPACE ts WITH (x = 1) AS SELECT 1;")).toThrow(
+      /Expected "as" but found "with"/,
     );
-    expect(fails("CREATE UNLOGGED VIEW v AS SELECT 1;")).toThrow(
-      /views cannot be unlogged because they do not have storage/,
-    );
-    expect(fails("CREATE TEMP MATERIALIZED VIEW mv AS SELECT 1;")).toThrow(
-      /Expected "table", "recursive" or "view" but found "materialized"/,
-    );
-    expect(fails("CREATE VIEW v TABLESPACE ts AS SELECT 1;")).toThrow(/Expected "as" but found "tablespace"/);
-    expect(fails("CREATE VIEW v USING heap AS SELECT 1;")).toThrow(/Expected "as" but found "using"/);
-    expect(fails("CREATE MATERIALIZED VIEW mv AS EXECUTE p;")).toThrow(/but found "execute"/);
-    expect(fails("CREATE TABLE t OF typ ();")).toThrow(/Expected .* but found "\)"/);
-    expect(fails("CREATE TABLE t OF typ INHERITS (p);")).toThrow(/Expected ";" but found "inherits"/);
-    expect(fails("CREATE TABLE t (a int) WITH (x = 1) WITHOUT OIDS;")).toThrow(/Expected ";" but found "without"/);
-    expect(fails("CREATE TABLE t (a int) TABLESPACE ts USING heap;")).toThrow(/Expected ";" but found "using"/);
-    expect(fails("CREATE TABLE t (a int) WITHOUT;")).toThrow(/Expected "oids" but found ";"/);
-    expect(fails("CREATE TABLE t (a text COMPRESSION lz4 STORAGE main);")).toThrow(/Expected "," but found "storage"/);
-    expect(fails("CREATE TABLE t (a text STORAGE bogus);")).toThrow(/invalid storage type "bogus"/);
-    expect(fails("CREATE CONSTRAINT TRIGGER c BEFORE DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();")).toThrow(
-      /Expected "after" but found "before"/,
-    );
-    expect(fails("CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR ROW EXECUTE PROCEDURE f();")).toThrow(
-      /Expected "each" but found "row"/,
-    );
-    expect(fails("CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH STATEMENT EXECUTE PROCEDURE f();")).toThrow(
-      /Expected "row" but found "statement"/,
-    );
-    expect(
-      fails("CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t NOT VALID FOR EACH ROW EXECUTE PROCEDURE f();"),
-    ).toThrow(/TRIGGER constraints cannot be marked NOT VALID/);
-    expect(
-      fails(
-        "CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t REFERENCING NEW TABLE n FOR EACH ROW EXECUTE PROCEDURE f();",
-      ),
-    ).toThrow(/Expected "for each row" but found "referencing"/);
-    expect(
-      fails("CREATE OR REPLACE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
-    ).toThrow(/CREATE OR REPLACE CONSTRAINT TRIGGER is not supported/);
-    expect(
-      fails("CREATE TRIGGER tr AFTER INSERT ON t REFERENCING NEW ROW AS n FOR EACH ROW EXECUTE FUNCTION f();"),
-    ).toThrow(/ROW variable naming in the REFERENCING clause is not supported/);
-    expect(fails("CREATE TRIGGER tr AFTER INSERT ON t REFERENCING FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
-      /Expected "old" or "new" but found "for"/,
-    );
-    expect(fails("CREATE TRIGGER tr AFTER INSERT ON t FROM x FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
-      /Expected "execute" but found "from"/,
+    expect(parseFails("CREATE VIEW v TABLESPACE ts AS SELECT 1;")).toThrow(/Expected "as" but found "tablespace"/);
+    expect(parseFails("CREATE VIEW v USING heap AS SELECT 1;")).toThrow(/Expected "as" but found "using"/);
+    expect(parseFails("CREATE MATERIALIZED VIEW mv AS EXECUTE p;")).toThrow(/but found "execute"/);
+    expect(parseFails("CREATE SCHEMA s CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;")).toThrow(
+      /A schema element cannot be CREATE MATERIALIZED VIEW/,
     );
   });
 
-  it("keeps the new words unreserved as names and aliases", () => {
-    const words = ["storage", "compression", "without", "oids", "heap", "referencing", "recursive", "old", "new"];
-    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
-      words.map((word) => name(word)),
-    );
-    expect(firstStmt("SELECT 1 AS storage, 2 compression, 3 oids FROM recursive AS referencing;")).toMatchObject({
-      columns: [{ alias: "storage" }, { alias: "compression" }, { alias: "oids" }],
-      from: [{ name: ["recursive"], alias: "referencing" }],
-    });
-    expect(firstStmt(`CREATE TABLE heap (${words.map((w) => `${w} text`).join(", ")});`)).toEqual({
-      kind: "createTable",
-      ifNotExists: false,
-      name: ["heap"],
-      items: words.map((w) => column(w, "text")),
-    });
-    // …and where the new clauses look for them.
-    expect(firstStmt("CREATE TABLE t (storage text STORAGE main COMPRESSION compression);").items).toEqual([
-      column("storage", "text", { storage: "main", compression: "compression" }),
-    ]);
-    expect(firstStmt("CREATE TABLE oids OF recursive USING heap;")).toMatchObject({
-      name: ["oids"],
-      ofType: ["recursive"],
-      accessMethod: "heap",
-    });
-    expect(
-      firstStmt(
-        "CREATE TRIGGER referencing AFTER INSERT ON new REFERENCING OLD TABLE old NEW TABLE new EXECUTE FUNCTION recursive();",
-      ),
-    ).toMatchObject({
-      name: "referencing",
-      table: ["new"],
-      referencing: [
-        { kind: "old", name: "old" },
-        { kind: "new", name: "new" },
-      ],
-    });
-    expect(firstStmt("CREATE RECURSIVE VIEW recursive (recursive) AS SELECT 1;")).toMatchObject({
-      name: ["recursive"],
-      columns: ["recursive"],
-      recursive: true,
+  it("keeps tablespace unreserved", () => {
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv (tablespace) TABLESPACE tablespace AS SELECT 1;")).toMatchObject({
+      columns: ["tablespace"],
+      tablespace: "tablespace",
     });
   });
 });

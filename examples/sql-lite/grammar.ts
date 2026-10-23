@@ -695,9 +695,10 @@ export type DomainConstraint =
 // `ifNotExists` is materialized-only in PG but stored uniformly. `options` (a
 // view's `security_barrier`, a materialized view's storage parameters) and the
 // plain-view-only `checkOption` are present only when written; a bare WITH CHECK
-// OPTION is CASCADED, as in PG. So are `recursive`, whose view always has a
-// column list, the materialized-only `accessMethod` and `tablespace`, and
-// `modifiers`, the prefix words as on `createTable`.
+// OPTION is CASCADED, as in PG. `recursive` (whose view always has a column
+// list), the materialized-only `accessMethod` and `tablespace`, and
+// `modifiers` (the prefix words, as on `createTable`) are likewise present only
+// when written.
 export type CreateView = {
   kind: "createView";
   materialized: boolean;
@@ -1504,8 +1505,8 @@ export type Copy = {
 
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
-  // UNLOGGED family, see parseTempPrefix), in source order. Omitted, not null,
-  // when there are none.
+  // UNLOGGED family, see parseTempPrefix), in source order — as on a view.
+  // Omitted, not null, when there are none.
   // The clauses after the element list follow the same rule: each key is
   // present only when its clause is written (see parseTableClauses).
   // `partitionOf` marks a `PARTITION OF parent … FOR VALUES …` table and
@@ -4288,7 +4289,8 @@ function atNot(ctx: ParseContext<SqlTokenType>, word: string): boolean {
 // The constraint a table-level attribute list belongs to, spelled as PG's
 // "%s constraints cannot be marked …" messages name it.
 // ALTER TABLE's ALTER CONSTRAINT reads the same list, and PG names it "ALTER
-// CONSTRAINT statement" there, refusing NOT VALID and NO INHERIT.
+// CONSTRAINT statement" there, refusing NOT VALID and NO INHERIT; CREATE
+// CONSTRAINT TRIGGER reads it as "TRIGGER", refusing the same two.
 type ConstraintType =
   | "PRIMARY KEY"
   | "UNIQUE"
@@ -4974,9 +4976,10 @@ const relationOptions = custom<RelationOption[], SqlTokenType>(
 
 // The storage clauses, in the fixed order PG's CreateStmt gives them: `[USING
 // method] [WITH (option, …) | WITHOUT OIDS] [ON COMMIT {PRESERVE ROWS | DELETE
-// ROWS | DROP}] [TABLESPACE name]`. CREATE TABLE takes them last — after its element list, INHERITS and
-// PARTITION BY (below), or after a partition's bound and PARTITION BY — and
-// CREATE TABLE AS ahead of its AS. Written out of order they are an error, as
+// ROWS | DROP}] [TABLESPACE name]`. CREATE TABLE takes them last — after its
+// element list, INHERITS and PARTITION BY (below), after a partition's bound
+// and PARTITION BY, or after a typed table's items — and CREATE TABLE AS ahead
+// of its AS. Written out of order they are an error, as
 // in PG. Every key is set only when its clause is written, so a table with none
 // of them keeps exactly the node it had before they existed.
 //
@@ -5287,8 +5290,8 @@ function parseCtasQuery(ctx: ParseContext<SqlTokenType>): CreateTableAs["query"]
 // CREATE TABLE — the ordinary `(items)` form or the query-backed `AS query`
 // (CREATE TABLE AS). A handler rather than a rule so the CTAS branches (`name
 // AS …` and `name (cols) AS …`) share the leading IF-NOT-EXISTS / name with the
-// classic form, and so PLAIN_CREATE can hand it the span start and the prefix
-// modifiers it collected between CREATE and here.
+// classic form, and so its callers can hand it the span start and the prefix
+// modifiers createWithPrefix collected between CREATE and here.
 function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modifiers: string[]): Stmt {
   ctx.parse(kw("table"));
   // attempt() so a typo'd `IF NOT EXIST` backtracks to try a table name rather
@@ -5738,8 +5741,9 @@ function createDatabaseRest(ctx: ParseContext<SqlTokenType>): Stmt {
 }
 
 // One schema element: a GRANT of privileges ON an object, or a CREATE of one of
-// the kinds PG's schema_stmt list has — TABLE / [UNIQUE] INDEX / SEQUENCE / VIEW
-// / TRIGGER, only the last two after OR REPLACE. CREATE and OR REPLACE are
+// the kinds PG's schema_stmt list has — [TEMP] TABLE / [UNIQUE] INDEX / SEQUENCE
+// / [TEMP] [RECURSIVE] VIEW / [CONSTRAINT] TRIGGER, only views and plain
+// triggers after OR REPLACE. CREATE and OR REPLACE are
 // consumed here so that a wrong target croaks at the target word itself, and
 // the entry is then entered straight from createStmt's two maps, with the same
 // two starts createStmt gives it. A nested CREATE SCHEMA can therefore never
@@ -5761,6 +5765,17 @@ function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
   const tailStart = ctx.position();
   const orReplace = ctx.is("ident", "or");
   if (orReplace) ctx.parse(kwseq("or", "replace"));
+  // A prefixed TABLE or view, a RECURSIVE view and a CONSTRAINT TRIGGER are
+  // schema elements too; of what createUnmappedTarget reads, only an UNLOGGED
+  // MATERIALIZED VIEW is not.
+  const special = createUnmappedTarget(ctx, start, orReplace);
+  if (special?.kind === "createView" && special.materialized) {
+    return ctx.croak("A schema element cannot be CREATE MATERIALIZED VIEW", special.span.start, special.span.end);
+  }
+  if (special?.kind === "createTableAs") {
+    return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", special.span.start, special.span.end);
+  }
+  if (special !== null) return special;
   const allowed = orReplace ? SCHEMA_REPLACEABLE_TARGETS : SCHEMA_ELEMENT_TARGETS;
   const tok = ctx.peek();
   if (tok === null || tok.type !== "ident" || !allowed.includes(tok.value)) {
@@ -5770,7 +5785,7 @@ function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
     ctx.next(); // the target's lead word, as createStmt consumes it
     return REPLACEABLE_CREATE[tok.value]!.parse(ctx, start, orReplace);
   }
-  const element = PLAIN_CREATE[tok.value]!.parse(ctx, tailStart, []);
+  const element = PLAIN_CREATE[tok.value]!.parse(ctx, tailStart);
   if (element.kind === "createTableAs") {
     return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", element.span.start, element.span.end);
   }
@@ -6553,8 +6568,8 @@ function parseTriggerEvent(ctx: ParseContext<SqlTokenType>): TriggerEvent {
 }
 
 // `{OLD | NEW} TABLE [AS] name …` once REFERENCING is consumed: at least one.
-// PG's grammar also reads `OLD ROW` / `NEW ROW` and then rejects them, as this
-// does. `new`, `old` and `referencing` are matched by value only here.
+// PG's grammar also reads `OLD ROW` / `NEW ROW`, which CreateTrigger then
+// refuses; the check is local, so it is made here. `new`, `old` and `referencing` are matched by value only here.
 function parseTriggerReferencing(ctx: ParseContext<SqlTokenType>): TriggerTransition[] {
   const transitions: TriggerTransition[] = [];
   do {
@@ -6660,7 +6675,7 @@ function parseTriggerTail(
   };
 }
 
-// The words PG's `OptTemp` puts between CREATE and TABLE, and its
+// The words PG's `OptTemp` puts between CREATE and TABLE or VIEW, and its
 // `OptTempTableName` between SELECT's INTO and the target. Both allow at most one
 // of `temp`/`temporary`/`unlogged`, with the scope words `global`/`local` legal
 // only ahead of a `temp`/`temporary`, never on their own and never repeated.
@@ -6671,8 +6686,8 @@ const TABLE_STORAGE_WORDS: ReadonlySet<string> = new Set(["temp", "temporary", "
 // `[{GLOBAL | LOCAL} {TEMP | TEMPORARY} | TEMP | TEMPORARY | UNLOGGED]` after
 // CREATE, returned in source order. No CREATE target leads with one of these
 // words, so they are claimed without looking past them; a scope word must be
-// followed by a temp word, and a second storage word is left for the caller's
-// `"table"` check to reject.
+// followed by a temp word, and a second storage word is left for
+// createWithPrefix's target check to reject.
 function parseTempPrefix(ctx: ParseContext<SqlTokenType>): string[] {
   const head = ctx.peek();
   if (head?.type !== "ident") return [];
@@ -6697,13 +6712,11 @@ function parseTempPrefix(ctx: ParseContext<SqlTokenType>): string[] {
 //
 // PLAIN_CREATE dispatch PEEKS: each handler parses its own lead keyword, so its
 // node's span still opens on `TABLE` / `INDEX` / …. Every handler is offered the
-// position just after CREATE and the prefix-modifier bag, but only `table` reads
-// them — the others build their own span from their own keyword and drop the
-// bag, which is safe only because createStmt hands modifiers to no target but
-// TABLE (see createWithPrefix). Widen that along with any handler that learns
-// them.
-const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
-  table: { parse: createTableRest },
+// position just after CREATE, but only some read it — the others build their
+// own span from their own keyword. A prefixed TABLE never comes through here:
+// createWithPrefix enters createTableRest itself, with its modifiers.
+const PLAIN_CREATE: DispatchMap<Stmt, [Position]> = {
+  table: { parse: (ctx, start) => createTableRest(ctx, start, []) },
   // `[UNIQUE] INDEX` can lead with either word, so it takes two keys. They share
   // one label, which joinExpected's dedupe then folds back into a single part.
   unique: { parse: (ctx) => ctx.parse(createIndexRest) },
@@ -6799,18 +6812,8 @@ const createStmt = custom<Stmt, SqlTokenType>(
     const tailStart = ctx.position();
     const orReplace = ctx.is("ident", "or");
     if (orReplace) ctx.parse(kwseq("or", "replace"));
-    // No CREATE target leads with a prefix word, so reading one first takes
-    // nothing away from either map.
-    const prefixStart = ctx.position();
-    const modifiers = parseTempPrefix(ctx);
-    if (modifiers.length > 0) return createWithPrefix(ctx, start, prefixStart, orReplace, modifiers);
-    if (ctx.is("ident", "recursive")) return parseRecursiveView(ctx, start, orReplace, []);
-    if (ctx.is("ident", "constraint")) {
-      ctx.parse(kwseq("constraint", "trigger"));
-      // PG's grammar action rejects the combination outright.
-      if (orReplace) ctx.croak("CREATE OR REPLACE CONSTRAINT TRIGGER is not supported", start, ctx.lastEnd());
-      return parseTriggerBody(ctx, start, false, true);
-    }
+    const special = createUnmappedTarget(ctx, start, orReplace);
+    if (special !== null) return special;
     const replaceable = lookup(REPLACEABLE_CREATE, ctx.peek());
     if (replaceable !== undefined) {
       ctx.next(); // the target's lead word
@@ -6821,10 +6824,27 @@ const createStmt = custom<Stmt, SqlTokenType>(
     }
     // Nothing was consumed since `tailStart` — OR REPLACE and a prefix never
     // reach here — so every plain target spans exactly as it did before.
-    return dispatch(PLAIN_CREATE, PLAIN_CREATE_EXPECTED, ctx, tailStart, []);
+    return dispatch(PLAIN_CREATE, PLAIN_CREATE_EXPECTED, ctx, tailStart);
   },
   { expected: '"create"', first: [{ type: "ident", value: "create" }] },
 );
+
+// The CREATE targets led by a word neither dispatch map holds — a TEMP /
+// UNLOGGED prefix (see createWithPrefix), RECURSIVE VIEW and CONSTRAINT TRIGGER
+// — or null when none leads. No other target starts with any of these words,
+// so each commits, taking nothing away from either map. createStmt and
+// parseSchemaElement both enter it just past `CREATE [OR REPLACE]`.
+function createUnmappedTarget(ctx: ParseContext<SqlTokenType>, start: Position, orReplace: boolean): Stmt | null {
+  const prefixStart = ctx.position();
+  const modifiers = parseTempPrefix(ctx);
+  if (modifiers.length > 0) return createWithPrefix(ctx, start, prefixStart, orReplace, modifiers);
+  if (ctx.is("ident", "recursive")) return parseRecursiveView(ctx, start, orReplace, []);
+  if (!ctx.is("ident", "constraint")) return null;
+  ctx.parse(kwseq("constraint", "trigger"));
+  // PG's grammar action rejects the combination outright.
+  if (orReplace) ctx.croak("CREATE OR REPLACE CONSTRAINT TRIGGER is not supported", start, ctx.lastEnd());
+  return parseTriggerBody(ctx, start, false, true);
+}
 
 // The target after a TEMP / UNLOGGED prefix (see parseTempPrefix), as PG's
 // OptTemp and OptNoLog place them: TABLE takes any prefix but no OR REPLACE,
@@ -6841,6 +6861,8 @@ function createWithPrefix(
   const unlogged = modifiers[0] === "unlogged";
   if (!orReplace && ctx.is("ident", "table")) return createTableRest(ctx, prefixStart, modifiers);
   if (ctx.is("ident", ["view", "recursive"])) {
+    // PG's grammar takes the word and DefineView refuses it; the check is
+    // local, so it is made here.
     if (unlogged) ctx.croak("views cannot be unlogged because they do not have storage", prefixStart, ctx.lastEnd());
     if (ctx.eat("ident", "view") !== null) return parseViewBody(ctx, start, false, orReplace, modifiers);
     return parseRecursiveView(ctx, start, orReplace, modifiers);
