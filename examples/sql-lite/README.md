@@ -189,6 +189,7 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **Empty lists:** `IN ()`, `USING ()`, `VALUES ()`.
 - **Subscripting a call without parentheses:** `f(x)[1]`. PostgreSQL requires `(f(x))[1]`.
 - **Impossible type modifiers and interval ranges:** `x::int(4)`, `interval '1' DAY TO YEAR`.
+- **A whole-valued float where PostgreSQL wants an integer constant:** `MODULUS 4.0` or `MODULUS 4.` in a hash partition bound, `int[5.]`.
 - **The zero-length identifier `""`.**
 - **Named parameters** such as `$name`. PostgreSQL only has positional ones (`$1`); sql-lite keeps `$name` for templated SQL.
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.

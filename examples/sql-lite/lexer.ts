@@ -328,7 +328,8 @@ const numberReader: Reader<SqlTokenType> = readers.custom("number", {
     }
 
     if (stream.peek() === ".") {
-      // `1..5` is PG's `{numericfail}`: the integer, then the `..` left alone.
+      // `1..5` is PG's `{numericfail}`: the integer, with the dots left for the
+      // next token. sql-lite has no `..` token, so they then lex as `.` `.5`.
       stream.snapshot();
       stream.next();
       const dotDot = stream.peek() === ".";

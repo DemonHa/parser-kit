@@ -3451,6 +3451,7 @@ describe("SQL-lite numeric literals and parameters", () => {
       ["0x_g", /Trailing junk after numeric literal/],
       ["0x__ff", /Trailing junk after numeric literal/],
       ["0x1_", /Trailing junk after numeric literal/],
+      ["0x1$", /Trailing junk after numeric literal/],
       ["0x", /Invalid hexadecimal integer/],
       ["0x_", /Invalid hexadecimal integer/],
       ["0o", /Invalid octal integer/],
