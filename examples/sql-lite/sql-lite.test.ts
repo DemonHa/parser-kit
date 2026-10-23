@@ -10452,10 +10452,14 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
     expect(bad("CREATE SCHEMA s CREATE frobnicate;")).toThrow(
       expectsKeys(["table", "unique", "index", "sequence", "view", "trigger"], '"frobnicate" (1:23)'),
     );
-    expect(bad("CREATE SCHEMA s CREATE SCHEMA t CREATE TABLE u (a int);")).toThrow(/or "trigger" but found "schema"/);
-    expect(bad("CREATE SCHEMA s CREATE DATABASE d;")).toThrow(/or "trigger" but found "database"/);
+    expect(bad("CREATE SCHEMA s CREATE SCHEMA t CREATE TABLE u (a int);")).toThrow(
+      expectsKeys(["table", "trigger", "recursive"], '"schema"'),
+    );
+    expect(bad("CREATE SCHEMA s CREATE DATABASE d;")).toThrow(
+      expectsKeys(["table", "trigger", "recursive"], '"database"'),
+    );
     expect(bad("CREATE SCHEMA s CREATE OR REPLACE TABLE t (a int);")).toThrow(
-      /Expected "view" or "trigger" but found "table" \(1:34\)/,
+      /Expected "view", "trigger", "recursive", "temp", "temporary", "local" or "global" but found "table" \(1:34\)/,
     );
     expect(bad("CREATE SCHEMA s CREATE OR TABLE t (a int);")).toThrow(/Expected "replace" but found "table" \(1:26\)/);
     // These two are only told apart once parsed, so they croak over the element.
@@ -13880,6 +13884,19 @@ describe("SQL-lite CREATE CONSTRAINT TRIGGER", () => {
     expect(
       parseFails("CREATE OR REPLACE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
     ).toThrow(/CREATE OR REPLACE CONSTRAINT TRIGGER is not supported/);
+    expect(
+      parseFails("CREATE CONSTRAINT TRIGGER c AFTER INSERT OR INSERT ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
+    ).toThrow(/duplicate trigger events specified \(1:44\)/);
+    expect(parseFails("CREATE TRIGGER tr AFTER UPDATE OF a OR DELETE OR UPDATE ON t EXECUTE FUNCTION f();")).toThrow(
+      /duplicate trigger events specified/,
+    );
+    // The lead words neither CREATE map holds are named where they may stand.
+    expect(parseFails("CREATE OR REPLACE frobnicate v;")).toThrow(
+      expectsKeys(["view", "trigger", "recursive", "temp", "temporary", "local", "global"], '"frobnicate"'),
+    );
+    expect(parseFails("CREATE SCHEMA s CREATE frobnicate t;")).toThrow(
+      expectsKeys(["table", "trigger", "recursive", "constraint", "temp", "unlogged"], '"frobnicate"'),
+    );
     // FROM and the deferral attributes belong to constraint triggers only.
     expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t FROM x FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
       /Expected "execute" but found "from"/,
@@ -14056,8 +14073,9 @@ describe("SQL-lite UNLOGGED materialized views and their storage clauses", () =>
     expect(parseFails("CREATE VIEW v TABLESPACE ts AS SELECT 1;")).toThrow(/Expected "as" but found "tablespace"/);
     expect(parseFails("CREATE VIEW v USING heap AS SELECT 1;")).toThrow(/Expected "as" but found "using"/);
     expect(parseFails("CREATE MATERIALIZED VIEW mv AS EXECUTE p;")).toThrow(/but found "execute"/);
+    // In a schema element it is refused at MATERIALIZED, as an unprefixed one is.
     expect(parseFails("CREATE SCHEMA s CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;")).toThrow(
-      /A schema element cannot be CREATE MATERIALIZED VIEW/,
+      /Expected "table" but found "materialized" \(1:32\)/,
     );
   });
 

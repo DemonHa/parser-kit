@@ -1053,10 +1053,11 @@ export type TriggerTransition = { kind: "old" | "new"; name: string };
 
 // `CREATE [OR REPLACE] TRIGGER name {BEFORE|AFTER|INSTEAD OF} event [OR …] ON
 // table [REFERENCING transition …] [FOR [EACH] {ROW|STATEMENT}] [WHEN (cond)]
-// EXECUTE {FUNCTION|PROCEDURE} fn(args)`, or `CREATE [OR REPLACE] CONSTRAINT
-// TRIGGER name AFTER event [OR …] ON table [FROM table] [deferral attributes]
-// FOR EACH ROW [WHEN (cond)] EXECUTE …`. `referencing`, `constraint`,
-// `fromTable` and the deferral attributes are present only when written.
+// EXECUTE {FUNCTION|PROCEDURE} fn(args)`, or `CREATE CONSTRAINT TRIGGER name
+// AFTER event [OR …] ON table [FROM table] [deferral attributes] FOR EACH ROW
+// [WHEN (cond)] EXECUTE …` (OR REPLACE refused, as in PG). `referencing`,
+// `constraint`, `fromTable` and the deferral attributes are present only when
+// written.
 export type CreateTrigger = {
   kind: "createTrigger";
   orReplace: boolean;
@@ -4978,8 +4979,8 @@ const relationOptions = custom<RelationOption[], SqlTokenType>(
 // method] [WITH (option, …) | WITHOUT OIDS] [ON COMMIT {PRESERVE ROWS | DELETE
 // ROWS | DROP}] [TABLESPACE name]`. CREATE TABLE takes them last — after its
 // element list, INHERITS and PARTITION BY (below), after a partition's bound
-// and PARTITION BY, or after a typed table's items — and CREATE TABLE AS ahead
-// of its AS. Written out of order they are an error, as
+// and PARTITION BY, or after a typed table's items and PARTITION BY — and
+// CREATE TABLE AS ahead of its AS. Written out of order they are an error, as
 // in PG. Every key is set only when its clause is written, so a table with none
 // of them keeps exactly the node it had before they existed.
 //
@@ -5741,9 +5742,9 @@ function createDatabaseRest(ctx: ParseContext<SqlTokenType>): Stmt {
 }
 
 // One schema element: a GRANT of privileges ON an object, or a CREATE of one of
-// the kinds PG's schema_stmt list has — [TEMP] TABLE / [UNIQUE] INDEX / SEQUENCE
-// / [TEMP] [RECURSIVE] VIEW / [CONSTRAINT] TRIGGER, only views and plain
-// triggers after OR REPLACE. CREATE and OR REPLACE are
+// the kinds PG's schema_stmt list has — [TEMP | UNLOGGED] TABLE / [UNIQUE]
+// INDEX / SEQUENCE / [TEMP] [RECURSIVE] VIEW / [CONSTRAINT] TRIGGER, only
+// views and plain triggers after OR REPLACE. CREATE and OR REPLACE are
 // consumed here so that a wrong target croaks at the target word itself, and
 // the entry is then entered straight from createStmt's two maps, with the same
 // two starts createStmt gives it. A nested CREATE SCHEMA can therefore never
@@ -5767,11 +5768,13 @@ function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
   if (orReplace) ctx.parse(kwseq("or", "replace"));
   // A prefixed TABLE or view, a RECURSIVE view and a CONSTRAINT TRIGGER are
   // schema elements too; of what createUnmappedTarget reads, only an UNLOGGED
-  // MATERIALIZED VIEW is not.
-  const special = createUnmappedTarget(ctx, start, orReplace);
-  if (special?.kind === "createView" && special.materialized) {
-    return ctx.croak("A schema element cannot be CREATE MATERIALIZED VIEW", special.span.start, special.span.end);
+  // MATERIALIZED VIEW is not, and it is refused at MATERIALIZED, as an
+  // unprefixed one is at its lead word.
+  if (!orReplace && ctx.is("ident", "unlogged") && isWordAhead(ctx, 1, "materialized")) {
+    ctx.next(); // UNLOGGED
+    return ctx.croak(`Expected "table" but found ${describeFound(ctx.peek())}`);
   }
+  const special = createUnmappedTarget(ctx, start, orReplace);
   if (special?.kind === "createTableAs") {
     return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", special.span.start, special.span.end);
   }
@@ -5779,7 +5782,10 @@ function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
   const allowed = orReplace ? SCHEMA_REPLACEABLE_TARGETS : SCHEMA_ELEMENT_TARGETS;
   const tok = ctx.peek();
   if (tok === null || tok.type !== "ident" || !allowed.includes(tok.value)) {
-    return ctx.croak(`Expected ${quoteList(allowed)} but found ${describeFound(tok)}`);
+    const unmapped = orReplace
+      ? ["recursive", ...TEMP_LEAD_WORDS]
+      : ["recursive", "constraint", ...TEMP_LEAD_WORDS, "unlogged"];
+    return ctx.croak(`Expected ${quoteList([...allowed, ...unmapped])} but found ${describeFound(tok)}`);
   }
   if (SCHEMA_REPLACEABLE_TARGETS.includes(tok.value)) {
     ctx.next(); // the target's lead word, as createStmt consumes it
@@ -6568,8 +6574,11 @@ function parseTriggerEvent(ctx: ParseContext<SqlTokenType>): TriggerEvent {
 }
 
 // `{OLD | NEW} TABLE [AS] name …` once REFERENCING is consumed: at least one.
-// PG's grammar also reads `OLD ROW` / `NEW ROW`, which CreateTrigger then
-// refuses; the check is local, so it is made here. `new`, `old` and `referencing` are matched by value only here.
+// PG's grammar also reads `OLD ROW` / `NEW ROW`, only so that CreateTrigger can
+// refuse them with a better message; they have no node here, so this refuses
+// them too. CreateTrigger's other transition-table checks (AFTER only, no
+// repeats, the events each side allows) are analysis-time and stay accepted.
+// `new`, `old` and `referencing` are matched by value only here.
 function parseTriggerReferencing(ctx: ParseContext<SqlTokenType>): TriggerTransition[] {
   const transitions: TriggerTransition[] = [];
   do {
@@ -6614,7 +6623,15 @@ function parseTriggerBody(
     return ctx.croak(`Expected "before", "after" or "instead" but found ${describeFound(ctx.peek())}`);
   }
   const events = [parseTriggerEvent(ctx)];
-  while (ctx.eat("ident", "or") !== null) events.push(parseTriggerEvent(ctx));
+  while (ctx.eat("ident", "or") !== null) {
+    const eventStart = ctx.position();
+    const event = parseTriggerEvent(ctx);
+    // PG's TriggerEvents action, which also keeps UPDATE from coming twice.
+    if (events.some((e) => e.event === event.event)) {
+      ctx.croak("duplicate trigger events specified", eventStart, ctx.lastEnd());
+    }
+    events.push(event);
+  }
   ctx.parse(kw("on"));
   const table = ctx.parse(qualName);
   if (constraint) {
@@ -6682,6 +6699,8 @@ function parseTriggerTail(
 const TEMP_SCOPE_WORDS: ReadonlySet<string> = new Set(["global", "local"]);
 const TEMP_WORDS: ReadonlySet<string> = new Set(["temp", "temporary"]);
 const TABLE_STORAGE_WORDS: ReadonlySet<string> = new Set(["temp", "temporary", "unlogged"]);
+// The words that may open a temp prefix, as "Expected …" messages name them.
+const TEMP_LEAD_WORDS = ["temp", "temporary", "local", "global"];
 
 // `[{GLOBAL | LOCAL} {TEMP | TEMPORARY} | TEMP | TEMPORARY | UNLOGGED]` after
 // CREATE, returned in source order. No CREATE target leads with one of these
@@ -6768,7 +6787,8 @@ const REPLACEABLE_CREATE: DispatchMap<Stmt, [Position, boolean]> = {
 // PLAIN_CREATE is reached through an `oneOf`-shaped message, REPLACEABLE_CREATE
 // through a hand-written croak — hence the two derivations (see joinExpected).
 const PLAIN_CREATE_EXPECTED = joinExpected(PLAIN_CREATE);
-const REPLACEABLE_CREATE_EXPECTED = keyList(REPLACEABLE_CREATE);
+// The words createUnmappedTarget takes after OR REPLACE are listed too.
+const REPLACEABLE_CREATE_EXPECTED = quoteList([...Object.keys(REPLACEABLE_CREATE), "recursive", ...TEMP_LEAD_WORDS]);
 
 // PLAIN_CREATE is only consulted once the lead word has missed
 // REPLACEABLE_CREATE, so a word in both would leave the plain target
