@@ -205,7 +205,7 @@ describe("SQL-lite comments inside statements", () => {
   });
 
   it("points errors at the token after a comment", () => {
-    expect(() => sqlLite.parse("SELECT /* c */ ;")).toThrow(/but found ";" \(1:15\)/);
+    expect(() => sqlLite.parse("SELECT /* c */ ,;")).toThrow(/but found "," \(1:15\)/);
     expect(() => sqlLite.parse("SELECT 1 /* c */ 2;")).toThrow(/Expected ";" but found "2"/);
     expect(() => sqlLite.parse("SELECT 1 -- tail\n2")).toThrow(/Expected ";" but found "2" \(2:0\)/);
     // An unclosed block comment is a lexer error, as in PG.
@@ -315,8 +315,8 @@ describe("SQL-lite statement separators", () => {
   });
 
   it("diagnose() resyncs on ; and keeps the statements around a bad one", () => {
-    const { ast, errors } = sqlLite.diagnose("SELECT 1;; SELECT FROM; SELECT 2");
-    expect(errors.map((e) => e.message)).toEqual([expect.stringMatching(/but found "from" \(1:18\)/)]);
+    const { ast, errors } = sqlLite.diagnose("SELECT 1;; SELECT 1 +; SELECT 2");
+    expect(errors.map((e) => e.message)).toEqual([expect.stringMatching(/but found ";" \(1:21\)/)]);
     expect(stripSpans(ast)).toEqual([one, two]);
   });
 
@@ -3378,6 +3378,355 @@ describe("SQL-lite SELECT", () => {
   });
 });
 
+// --- TABLE name, empty select lists, WITH … VALUES and parenthesised query starts ---
+
+describe("SQL-lite TABLE name", () => {
+  const tableCmd = (name: string[], over: Record<string, unknown> = {}) => ({ kind: "tableCmd", name, ...over });
+  const one = sel({ columns: [col(num(1))] });
+
+  it("parses TABLE as a statement, with ONLY and the inheritance star", () => {
+    expect(parse("TABLE t; TABLE s.t *; TABLE ONLY t; TABLE ONLY (s.t);")).toEqual([
+      tableCmd(["t"]),
+      tableCmd(["s", "t"]),
+      tableCmd(["t"], { only: true }),
+      tableCmd(["s", "t"], { only: true }),
+    ]);
+  });
+
+  it("takes a query-level tail and a WITH prefix", () => {
+    expect(firstStmt("TABLE t ORDER BY 1 LIMIT 2 OFFSET 3 FOR UPDATE;")).toEqual(
+      tableCmd(["t"], {
+        orderBy: [{ expr: num(1), dir: null, nulls: null }],
+        limit: num(2),
+        offset: num(3),
+        locking: [{ strength: "update", of: [], wait: null }],
+      }),
+    );
+    expect(firstStmt("WITH c AS (SELECT 1) TABLE c;")).toEqual(
+      tableCmd(["c"], { with_: [{ name: "c", columns: null, query: one }], recursive: false }),
+    );
+    // A parenthesised TABLE keeps its WITH when a tail follows the `)`.
+    expect(firstStmt("(WITH RECURSIVE c AS (SELECT 1) TABLE c) LIMIT 1;")).toEqual(
+      tableCmd(["c"], { limit: num(1), with_: [{ name: "c", columns: null, query: one }], recursive: true }),
+    );
+  });
+
+  it("is a set-operation arm, a subquery, a CTE body and an INSERT source", () => {
+    expect(firstStmt("TABLE t UNION ALL (TABLE u) EXCEPT SELECT 1;")).toEqual({
+      kind: "setOp",
+      op: "except",
+      left: { kind: "setOp", op: "unionAll", left: tableCmd(["t"]), right: tableCmd(["u"]) },
+      right: one,
+    });
+    expect(firstStmt("SELECT * FROM (TABLE t) x;")).toEqual(
+      sel({ columns: [col(star())], from: [{ kind: "subquery", query: tableCmd(["t"]), alias: "x" }] }),
+    );
+    expect(firstStmt("SELECT 1 WHERE a IN (TABLE t) AND EXISTS (TABLE u);").where).toEqual({
+      kind: "binary",
+      op: "and",
+      left: { kind: "inSubquery", expr: name("a"), query: tableCmd(["t"]), negated: false },
+      right: { kind: "exists", query: tableCmd(["u"]), negated: false },
+    });
+    expect(firstStmt("SELECT (TABLE t);").columns).toEqual([col({ kind: "subquery", query: tableCmd(["t"]) })]);
+    expect(firstStmt("WITH c AS (TABLE t) SELECT 1;").with_).toEqual([
+      { name: "c", columns: null, query: tableCmd(["t"]) },
+    ]);
+    expect(firstStmt("INSERT INTO t TABLE u;").source).toEqual({ kind: "select", query: tableCmd(["u"]) });
+  });
+
+  it("is the body of every statement that takes a query", () => {
+    expect(firstStmt("CREATE TABLE x AS TABLE t WITH NO DATA;")).toMatchObject({
+      kind: "createTableAs",
+      query: tableCmd(["t"]),
+      withData: false,
+    });
+    expect(firstStmt("CREATE VIEW v AS TABLE t;").query).toEqual(tableCmd(["t"]));
+    expect(firstStmt("PREPARE p AS TABLE t;").query).toEqual(tableCmd(["t"]));
+    expect(firstStmt("EXPLAIN TABLE t;").statement).toEqual(tableCmd(["t"]));
+    expect(firstStmt("EXPLAIN (TABLE t);").statement).toEqual(tableCmd(["t"]));
+    expect(firstStmt("COPY (TABLE t) TO STDOUT;").query).toEqual(tableCmd(["t"]));
+    expect(firstStmt("DECLARE c CURSOR FOR TABLE t;").query).toEqual(tableCmd(["t"]));
+  });
+
+  it("leaves the statements that read TABLE as a noise word alone", () => {
+    expect(parse("CREATE TABLE t (a int); LOCK TABLE t; TRUNCATE TABLE t;").map((s) => s.kind)).toEqual([
+      "createTable",
+      "lock",
+      "truncate",
+    ]);
+    expect(firstStmt("GRANT SELECT ON TABLE t TO r;").on).toMatchObject({ objectType: "table", names: [["t"]] });
+    expect(firstStmt("SELECT a INTO TABLE x FROM t;").into).toEqual({ name: ["x"] });
+  });
+
+  it("keeps ONLY across a parenthesised tail and takes a set operation's tail as an arm", () => {
+    expect(firstStmt("(TABLE ONLY t ORDER BY 1) LIMIT 2;")).toEqual(
+      tableCmd(["t"], { only: true, orderBy: [{ expr: num(1), dir: null, nulls: null }], limit: num(2) }),
+    );
+    expect(firstStmt("TABLE t * UNION TABLE u ORDER BY 1;")).toEqual({
+      kind: "setOp",
+      op: "union",
+      left: tableCmd(["t"]),
+      right: tableCmd(["u"]),
+      orderBy: [{ expr: num(1), dir: null, nulls: null }],
+    });
+    expect(() => sqlLite.parse("TABLE t FETCH FIRST 1 ROW WITH TIES;")).toThrow(
+      /WITH TIES cannot be specified without ORDER BY clause/,
+    );
+  });
+
+  it("spans from TABLE to the end of its tail", () => {
+    const [stmt] = sqlLite.parse("TABLE ONLY (t) LIMIT 1;");
+    expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 22 } });
+    expect(sqlLite.parse("TABLE t *;")[0]!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 9 } });
+  });
+
+  it("rejects a missing name and anything PG's relation_expr doesn't take", () => {
+    expect(() => sqlLite.parse("TABLE;")).toThrow(/Expected a name but found ";"/);
+    expect(() => sqlLite.parse("TABLE ONLY;")).toThrow(/Expected a name but found ";"/);
+    expect(() => sqlLite.parse("TABLE ONLY t *;")).toThrow(/Expected ";" but found "\*"/);
+    expect(() => sqlLite.parse("TABLE ONLY (t;")).toThrow(/Expected "\)" but found ";"/);
+    // No alias, column list or WHERE: it is `SELECT * FROM name`, not a FROM item.
+    expect(() => sqlLite.parse("TABLE t x;")).toThrow(/Expected ";" but found "x"/);
+    expect(() => sqlLite.parse("TABLE t WHERE a;")).toThrow(/Expected ";" but found "where"/);
+    expect(() => sqlLite.parse("TABLE f(1);")).toThrow(/Expected ";" but found "\("/);
+  });
+});
+
+describe("SQL-lite empty select list", () => {
+  it("parses SELECT with no target list, as a statement and before each clause", () => {
+    expect(firstStmt("SELECT;")).toEqual(sel({ columns: [] }));
+    expect(firstStmt("SELECT ALL FROM t;")).toEqual(sel({ columns: [], from: [tableFrom(["t"])] }));
+    expect(firstStmt("SELECT ALL;")).toEqual(sel({ columns: [] }));
+    expect(firstStmt("SELECT INTO x FROM t WHERE true;")).toEqual(
+      sel({ columns: [], into: { name: ["x"] }, from: [tableFrom(["t"])], where: { kind: "bool", value: true } }),
+    );
+    expect(firstStmt("SELECT GROUP BY a HAVING true WINDOW w AS ();")).toMatchObject({
+      columns: [],
+      groupBy: [name("a")],
+      window: [{ name: "w" }],
+    });
+    expect(firstStmt("SELECT ORDER BY 1;")).toMatchObject({ columns: [], orderBy: [{ expr: num(1) }] });
+    expect(firstStmt("SELECT LIMIT 1;")).toMatchObject({ columns: [], limit: num(1) });
+    expect(firstStmt("SELECT OFFSET 1;")).toMatchObject({ columns: [], offset: num(1) });
+    expect(firstStmt("SELECT FETCH FIRST 1 ROW ONLY;")).toMatchObject({ columns: [], limit: num(1) });
+    expect(firstStmt("SELECT FOR UPDATE;")).toMatchObject({ columns: [], locking: [{ strength: "update" }] });
+  });
+
+  it("is empty as a set-operation arm, a subquery, a CTE body and an INSERT source", () => {
+    expect(firstStmt("SELECT UNION (SELECT) INTERSECT SELECT;")).toEqual({
+      kind: "setOp",
+      op: "union",
+      left: sel({}),
+      right: { kind: "setOp", op: "intersect", left: sel({}), right: sel({}) },
+    });
+    expect(firstStmt("SELECT * FROM (SELECT) s;").from).toEqual([{ kind: "subquery", query: sel({}), alias: "s" }]);
+    expect(firstStmt("SELECT EXISTS (SELECT);").columns).toEqual([
+      col({ kind: "exists", query: sel({}), negated: false }),
+    ]);
+    expect(firstStmt("WITH c AS (SELECT) SELECT;")).toEqual(
+      sel({ with_: [{ name: "c", columns: null, query: sel({}) }] }),
+    );
+    expect(firstStmt("INSERT INTO t SELECT ON CONFLICT DO NOTHING RETURNING *;")).toMatchObject({
+      source: { kind: "select", query: sel({}) },
+      onConflict: { target: null, action: { kind: "nothing" } },
+      returning: [col(star())],
+    });
+    expect(firstStmt("CREATE TABLE x AS SELECT WITH NO DATA;")).toMatchObject({ query: sel({}), withData: false });
+    // The bare SELECT spans its keyword alone.
+    expect(sqlLite.parse("SELECT ;")[0]!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 6 } });
+  });
+
+  it("still requires a list after DISTINCT and an item after every comma", () => {
+    // PG's DISTINCT form takes `target_list`, not `opt_target_list`.
+    expect(() => sqlLite.parse("SELECT DISTINCT FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => sqlLite.parse("SELECT DISTINCT ON (a) FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => sqlLite.parse("SELECT , FROM t;")).toThrow(/but found "," \(1:7\)/);
+    expect(() => sqlLite.parse("SELECT a, FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => sqlLite.parse("SELECT FROM;")).toThrow(/Expected a name but found ";"/);
+  });
+});
+
+describe("SQL-lite WITH … VALUES", () => {
+  const one = sel({ columns: [col(num(1))] });
+  const values = (rows: unknown[][], over: Record<string, unknown> = {}) => ({
+    kind: "values",
+    rows,
+    orderBy: null,
+    limit: null,
+    offset: null,
+    ...over,
+  });
+
+  it("attaches the WITH prefix to the VALUES query, or to a set operation's leftmost VALUES", () => {
+    expect(firstStmt("WITH RECURSIVE c AS (SELECT 1) VALUES (1), (2);")).toEqual(
+      values([[num(1)], [num(2)]], { with_: [{ name: "c", columns: null, query: one }], recursive: true }),
+    );
+    expect(firstStmt("WITH c AS (SELECT 1) VALUES (1) UNION SELECT 1;")).toEqual({
+      kind: "setOp",
+      op: "union",
+      left: values([[num(1)]], { with_: [{ name: "c", columns: null, query: one }], recursive: false }),
+      right: one,
+    });
+  });
+
+  it("keeps the WITH prefix under a query-level tail", () => {
+    const withC = { with_: [{ name: "c", columns: null, query: one }], recursive: false };
+    expect(firstStmt("WITH c AS (SELECT 1) VALUES (1) ORDER BY 1;")).toEqual(
+      values([[num(1)]], { orderBy: [{ expr: num(1), dir: null, nulls: null }], ...withC }),
+    );
+    expect(firstStmt("(WITH c AS (SELECT 1) VALUES (1)) LIMIT 1;")).toEqual(
+      values([[num(1)]], { limit: num(1), ...withC }),
+    );
+  });
+
+  it("is a subquery, a CTE body and an INSERT source", () => {
+    const withValues = { kind: "values", with_: [{ name: "c" }] };
+    const body = "WITH c AS (SELECT 1) VALUES (1)";
+    expect(firstStmt(`SELECT (${body});`).columns[0].expr.query).toMatchObject(withValues);
+    expect(firstStmt(`WITH d AS (${body}) SELECT 1;`).with_[0].query).toMatchObject(withValues);
+    expect(firstStmt(`INSERT INTO t ${body};`).source.query).toMatchObject(withValues);
+  });
+
+  it("rejects a second WITH on a parenthesised query, as PG does, at the outer WITH", () => {
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) (WITH b AS (SELECT 2) VALUES (1));")).toThrow(
+      /multiple WITH clauses not allowed \(1:0\)/,
+    );
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) ((WITH b AS (SELECT 2) TABLE t)) LIMIT 1;")).toThrow(
+      /multiple WITH clauses not allowed/,
+    );
+    // The inner WITH heads a whole set operation, which lands on its first arm.
+    expect(() => sqlLite.parse("WITH a AS (SELECT 1) (WITH b AS (SELECT 2) SELECT 1 UNION SELECT 2);")).toThrow(
+      /multiple WITH clauses not allowed/,
+    );
+    expect(() => sqlLite.parse("SELECT (WITH a AS (SELECT 1) (WITH b AS (SELECT 2) SELECT 3) LIMIT 1);")).toThrow(
+      /multiple WITH clauses not allowed/,
+    );
+  });
+
+  it("puts a WITH over a set operation on the set-op node when its first arm has its own", () => {
+    const cteOf = (name: string, n: number) => ({ name, columns: null, query: sel({ columns: [col(num(n))] }) });
+    // One WITH over a parenthesised arm without its own goes on the arm, as before.
+    expect(firstStmt("WITH a AS (SELECT 1) (SELECT 3);")).toEqual(
+      sel({ with_: [cteOf("a", 1)], columns: [col(num(3))] }),
+    );
+    expect(firstStmt("WITH a AS (SELECT 1) (WITH b AS (SELECT 2) VALUES (3)) UNION SELECT 4 LIMIT 1;")).toEqual({
+      kind: "setOp",
+      op: "union",
+      left: {
+        kind: "values",
+        rows: [[num(3)]],
+        orderBy: null,
+        limit: null,
+        offset: null,
+        with_: [cteOf("b", 2)],
+        recursive: false,
+      },
+      right: sel({ columns: [col(num(4))] }),
+      limit: num(1),
+      with_: [cteOf("a", 1)],
+      recursive: false,
+    });
+    // The same through a nested set operation, with the WITH inside parentheses.
+    expect(
+      firstStmt("SELECT (WITH a AS (SELECT 1) (WITH b AS (SELECT 2) SELECT 1 UNION SELECT 2) EXCEPT SELECT 3);")
+        .columns[0].expr.query,
+    ).toMatchObject({
+      kind: "setOp",
+      op: "except",
+      left: { kind: "setOp", op: "union", left: { with_: [{ name: "b" }] } },
+      with_: [{ name: "a" }],
+    });
+  });
+});
+
+describe("SQL-lite parenthesised VALUES and set operations as subqueries", () => {
+  const values = (...rows: unknown[][]) => ({ kind: "values", rows, orderBy: null, limit: null, offset: null });
+  const one = sel({ columns: [col(num(1))] });
+  const two = sel({ columns: [col(num(2))] });
+
+  it("reads (VALUES …) as a subquery in every expression position", () => {
+    expect(firstStmt("SELECT (VALUES (1));").columns).toEqual([col({ kind: "subquery", query: values([num(1)]) })]);
+    expect(firstStmt("SELECT 1 WHERE (a, b) IN (VALUES (1, 2), (3, 4));").where).toEqual({
+      kind: "inSubquery",
+      expr: { kind: "row", items: [name("a"), name("b")], implicit: true },
+      query: values([num(1), num(2)], [num(3), num(4)]),
+      negated: false,
+    });
+    expect(firstStmt("SELECT 1 WHERE a = ANY (VALUES (1));").where).toEqual({
+      kind: "anyAll",
+      op: "=",
+      quantifier: "any",
+      left: name("a"),
+      right: { kind: "subquery", query: values([num(1)]) },
+    });
+    expect(firstStmt("UPDATE t SET (a, b) = (VALUES (1, 2));").set).toEqual([
+      { columns: ["a", "b"], value: { kind: "subquery", query: values([num(1), num(2)]) } },
+    ]);
+  });
+
+  it("reads a parenthesised set operation or tail as a subquery", () => {
+    const union = { kind: "setOp", op: "union", left: one, right: two };
+    expect(firstStmt("SELECT ((SELECT 1) UNION (SELECT 2));").columns).toEqual([
+      col({ kind: "subquery", query: union }),
+    ]);
+    expect(firstStmt("SELECT 1 WHERE a IN ((SELECT 1) UNION SELECT 2);").where).toEqual({
+      kind: "inSubquery",
+      expr: name("a"),
+      query: union,
+      negated: false,
+    });
+    expect(firstStmt("SELECT 1 WHERE a IN (((SELECT 1)) UNION ((SELECT 2)));").where.query).toEqual(union);
+    expect(firstStmt("SELECT EXISTS ((VALUES (1)) EXCEPT (VALUES (2)));").columns[0].expr.query).toEqual({
+      kind: "setOp",
+      op: "except",
+      left: values([num(1)]),
+      right: values([num(2)]),
+    });
+    expect(firstStmt("SELECT ((VALUES (2), (1)) ORDER BY 1 LIMIT 1);").columns[0].expr.query).toEqual({
+      ...values([num(2)], [num(1)]),
+      orderBy: [{ expr: num(1), dir: null, nulls: null }],
+      limit: num(1),
+    });
+  });
+
+  it("reads them as FROM items", () => {
+    expect(firstStmt("SELECT * FROM (VALUES (1), (2)) AS v (a);").from).toEqual([
+      { kind: "subquery", query: values([num(1)], [num(2)]), alias: "v", columns: ["a"] },
+    ]);
+    expect(firstStmt("SELECT * FROM ((VALUES (1)) UNION (TABLE t)) x;").from).toEqual([
+      {
+        kind: "subquery",
+        query: { kind: "setOp", op: "union", left: values([num(1)]), right: { kind: "tableCmd", name: ["t"] } },
+        alias: "x",
+      },
+    ]);
+  });
+
+  it("keeps a redundantly parenthesised subquery or an expression around one as before", () => {
+    const sub = { kind: "subquery", query: one };
+    expect(firstStmt("SELECT ((SELECT 1));").columns).toEqual([col(sub)]);
+    expect(firstStmt("SELECT ((SELECT 1) + 1);").columns).toEqual([col(bin("+", sub, num(1)))]);
+    expect(firstStmt("SELECT ((SELECT 1), 2);").columns).toEqual([
+      col({ kind: "row", items: [sub, num(2)], implicit: true }),
+    ]);
+    // The inner subquery's span, not the outer parentheses'.
+    const [stmt] = sqlLite.parse("SELECT ((SELECT 1));") as any[];
+    expect(stmt.columns[0].expr.span).toEqual({ start: { row: 1, col: 8 }, end: { row: 1, col: 18 } });
+  });
+
+  it("spans a parenthesised set operation from its outer parenthesis", () => {
+    const [stmt] = sqlLite.parse("SELECT ((SELECT 1) UNION (SELECT 2));") as any[];
+    expect(stmt.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 36 } });
+  });
+
+  it("rejects malformed parenthesised queries", () => {
+    expect(() => sqlLite.parse("SELECT (VALUES);")).toThrow(/Expected "\(" but found "\)"/);
+    expect(() => sqlLite.parse("SELECT ((SELECT 1) UNION SELECT 2;")).toThrow(/Expected "\)" but found ";"/);
+    expect(() => sqlLite.parse("SELECT ((SELECT 1) UNION);")).toThrow(/but found "\)"/);
+    expect(() => sqlLite.parse("SELECT 1 WHERE a IN (VALUES (1)) x;")).toThrow(/Expected ";" but found "x"/);
+  });
+});
+
 // --- joins & subqueries ---
 
 describe("SQL-lite joins & subqueries", () => {
@@ -3591,10 +3940,12 @@ describe("SQL-lite data-modifying CTEs", () => {
     });
   });
 
-  it("croaks when a WITH prefix leads a bare VALUES query", () => {
-    expect(() => sqlLite.parse("WITH c AS (SELECT 1) VALUES (1);")).toThrow(
-      /WITH must attach to a SELECT, INSERT, UPDATE, DELETE or MERGE/,
-    );
+  it("attaches a WITH prefix to a bare VALUES query", () => {
+    expect(parse("WITH c AS (SELECT 1) VALUES (1);")[0]).toMatchObject({
+      kind: "values",
+      with_: [{ name: "c" }],
+      recursive: false,
+    });
   });
 });
 
@@ -7596,10 +7947,14 @@ describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
     expect(() => sqlLite.parse("SELECT * FROM (a JOIN b ON true;")).toThrow(/Expected "\)" but found ";"/);
     expect(() => sqlLite.parse("SELECT * FROM ((SELECT 1);")).toThrow(/Expected "\)" but found ";"/);
     // A `(` ahead of a token that opens neither keeps the query reading's error.
-    expect(() => sqlLite.parse("SELECT * FROM (1);")).toThrow(/Expected "select" or "values" or "\(" but found "1"/);
-    expect(() => sqlLite.parse("SELECT * FROM (;")).toThrow(/Expected "select" or "values" or "\(" but found ";"/);
-    expect(() => sqlLite.parse("SELECT * FROM ((TABLE t)) x;")).toThrow(
-      /Expected "select" or "values" or "\(" but found "table"/,
+    expect(() => sqlLite.parse("SELECT * FROM (1);")).toThrow(
+      /Expected "select" or "values" or "table" or "\(" but found "1"/,
+    );
+    expect(() => sqlLite.parse("SELECT * FROM (;")).toThrow(
+      /Expected "select" or "values" or "table" or "\(" but found ";"/,
+    );
+    expect(() => sqlLite.parse("SELECT * FROM ((NULL)) x;")).toThrow(
+      /Expected "select" or "values" or "table" or "\(" but found "null"/,
     );
     // A trailing query clause continues a query, so the run still takes the
     // query reading — and a parenthesised query takes an ORDER BY after its `)`.
@@ -9499,8 +9854,9 @@ describe("SQL-lite cursors", () => {
     // …and as the cursor names the statements take.
     expect(firstStmt("DECLARE scroll SCROLL CURSOR FOR SELECT 1;")).toMatchObject({ name: "scroll", scroll: true });
     expect(firstStmt("CLOSE cursor;")).toEqual({ kind: "close", name: "cursor" });
-    // `fetch` was already reserved for SELECT's clause, as in PG, and stays so.
-    expect(bad("SELECT fetch FROM t;")).toThrow(/Expected a name but found "fetch"/);
+    // `fetch` was already reserved for SELECT's clause, as in PG, and stays so:
+    // after an empty select list it opens that clause.
+    expect(bad("SELECT fetch FROM t;")).toThrow(/Expected "first" or "next" but found "from"/);
   });
 
   it("rejects contradictory options, a non-query body and malformed directions", () => {
