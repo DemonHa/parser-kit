@@ -78,12 +78,12 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 | DML | 77 | 32 | 35 | 6 | 4 |
 | Transactions and session | 70 | 17 | 33 | 0 | 20 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
-| Tables and indexes | 84 | 13 | 40 | 2 | 29 |
+| Tables and indexes | 84 | 14 | 41 | 1 | 28 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **210** | **234** | **19** | **136** |
+| **Total** | **599** | **211** | **235** | **18** | **135** |
 
-So sql-lite accepts 444 of the 599 statements (74%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 446 of the 599 statements (74%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -118,7 +118,6 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 
 **Clauses**
 
-- **`DEFAULT <expr>` followed by `NOT NULL`**, as in `id integer DEFAULT nextval('s'::regclass) NOT NULL`. pg_dump emits this for nearly every table. `DEFAULT` takes a full expression, so the `NOT` is read as the start of `NOT LIKE` / `NOT IN`. (Other constraints after `DEFAULT` work.)
 - **`ONLY`** on `ALTER TABLE`, `UPDATE`, `DELETE`, `TRUNCATE` and `CREATE INDEX … ON ONLY`. pg_dump emits `ALTER TABLE ONLY`. `SELECT … FROM ONLY`, `MERGE INTO ONLY` and `LOCK ONLY` work.
 - **`ALTER TABLE`:**
   - `ADD CONSTRAINT … NOT VALID`
@@ -175,14 +174,13 @@ These statements parse without error, but the tree they produce is wrong:
 - **`SELECT a ISNULL FROM t` reads `isnull` as a column alias.** PostgreSQL reads it as the null test.
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
 - **Some `E'…'` escapes are left undecoded.** The backslash is dropped and the rest kept as text: `E'\x41'` gives `x41`, `E'\101'` gives `101`, and `E'\u0041'` gives `u0041`, where PostgreSQL gives `A` for all three. `\n`, `\t` and `\'` are decoded.
-- **`DEFAULT 'x' COLLATE "C"` folds the collation into the default expression** instead of applying it to the column.
 - **Numeric literals become JavaScript numbers,** so integers beyond 2^53 lose precision (`12345678901234567890`).
 
 ### Accepted, but PostgreSQL rejects
 
 The grammar is deliberately more permissive than PostgreSQL in places. These inputs are syntax errors in PostgreSQL but parse here:
 
-- **`DEFAULT` accepts a full expression.** PostgreSQL's restricted form doesn't allow `DEFAULT 5 IS NULL`, `DEFAULT a = 1 AND b`, and so on.
+- **`OVERLAPS` and chained `IS` tests.** `DEFAULT (a, b) OVERLAPS (c, d)` parses, though PostgreSQL's restricted `DEFAULT` operand has no `OVERLAPS`. A chain like `a IS DISTINCT FROM b IS NULL` parses left-nested, where PostgreSQL's non-associative `IS` rejects it.
 - **Joins with no condition:** `a JOIN b` without `ON` / `USING`, and `NATURAL CROSS JOIN`.
 - **Repeated or conflicting row limits:** `LIMIT 1 LIMIT 2`, `LIMIT … FETCH FIRST …`. Also `WITH TIES` with no `ORDER BY`.
 - **Window frames PostgreSQL rejects:** `ROWS BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING`, `ROWS 1 FOLLOWING`.

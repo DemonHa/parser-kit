@@ -1536,11 +1536,11 @@ function many<T>(rule: Rule<T, SqlTokenType>): Rule<T[], SqlTokenType> {
 // --- expressions ---
 
 const expression: Rule<Expr, SqlTokenType> = lazy(() => expressionRule);
-// A "b-expression": the same operator sublanguage minus the loose forms
-// (comparison / IS / IN / LIKE / BETWEEN / AND / OR). PG uses it for operands
-// whose end is marked by a keyword that also lexes as an operator — here, the
-// `IN` inside `POSITION(sub IN str)`, which would otherwise be swallowed by the
-// `in` postfix. Stops before any operator below the arithmetic/concat tier.
+// A "b-expression" (PG's `b_expr`): the same operator sublanguage minus NOT,
+// AND / OR, IN, LIKE, BETWEEN, ANY / ALL, COLLATE, AT TIME ZONE and the IS tests
+// other than DISTINCT FROM. PG uses it where a keyword that one of those forms
+// would swallow marks the operand's end: the `IN` inside `POSITION(sub IN
+// str)`, and the `NOT NULL` or `COLLATE` after a column or domain DEFAULT.
 const bExpression: Rule<Expr, SqlTokenType> = lazy(() => bExprRule);
 // The expr↔query cycle: exactly one Rule<Query> annotation, resolved lazily —
 // the same one-boundary rule js-lite's expr/statement cycle follows. Declared
@@ -1707,7 +1707,7 @@ function parseRow(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
 // the finished predicate. Two over-acceptances come with the atom: a trailing
 // `[…]` binds the same way, where PG would reject it (as `ROW(a, b)[1]` already
 // was), and the b-expression shares the atom, so OVERLAPS also reaches positions
-// PG's b_expr does not admit, such as POSITION's first operand. Everything
+// PG's b_expr does not admit, such as a column DEFAULT. Everything
 // looser composes as usual: `… OVERLAPS … AND x` is an AND, and `NOT` (a
 // prefix) wraps the predicate.
 const startsOverlaps = (ctx: ParseContext<SqlTokenType>): boolean => {
@@ -2541,6 +2541,19 @@ const atTimeZonePostfix = {
   },
 };
 
+// The comparison operators (`!=` is PG's spelling of `<>`), shared by the full
+// expression's quantifiable comparison group and the b-expression's plain one.
+const COMPARISON_OPS = ["<", ">", "<=", ">=", "=", "<>", "!="];
+
+// `DISTINCT FROM x`, entered just past `IS [NOT]`. The RHS binds like a
+// comparison operand (bp 9), so it stops before AND / OR but past tighter
+// operators.
+const isDistinctTail = (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>, negated: boolean): Expr => {
+  ctx.parse(kwseq("distinct", "from"));
+  const from = h.parseRhs(9);
+  return { kind: "isDistinct", expr: left, from, negated, span: closeSpan(left, ctx.lastEnd()) };
+};
+
 const expressionRule = pratt<Expr, SqlTokenType>({
   atom,
   prefix: [
@@ -2654,7 +2667,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
     // ANY / ALL / SOME (`x = ANY (array|subquery)`); otherwise it builds the
     // ordinary binary node with a bp-10 RHS (nonassoc = bp + 1).
     {
-      ops: ["<", ">", "<=", ">=", "=", "<>", "!="],
+      ops: COMPARISON_OPS,
       bp: 9,
       type: "op",
       assoc: "nonassoc",
@@ -2686,13 +2699,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
       parse: (ctx, left, h): Expr => {
         ctx.parse(kw("is"));
         const negated = ctx.eat("ident", "not") !== null;
-        // IS [NOT] DISTINCT FROM x — the RHS binds like a comparison operand
-        // (bp 9), so it stops before AND / OR but past tighter operators.
-        if (ctx.is("ident", "distinct")) {
-          ctx.parse(kwseq("distinct", "from"));
-          const from = h.parseRhs(9);
-          return { kind: "isDistinct", expr: left, from, negated, span: closeSpan(left, ctx.lastEnd()) };
-        }
+        if (ctx.is("ident", "distinct")) return isDistinctTail(ctx, left, h, negated);
         // IS [NOT] JSON [VALUE | SCALAR | ARRAY | OBJECT] [{WITH | WITHOUT}
         // UNIQUE [KEYS]]. Nothing else may follow IS, so `json` needs no guard.
         // The words after it are taken unconditionally, as PG's grammar takes
@@ -2738,16 +2745,40 @@ const expressionRule = pratt<Expr, SqlTokenType>({
   ],
 });
 
-// The b-expression: the tight sublanguage (arithmetic / concat / JSON / cast /
-// subscript) with none of the comparison, IS, IN, LIKE, BETWEEN or logical
-// forms — see `bExpression` above. (OVERLAPS lives in the shared atom, so it is
-// the one predicate that still reaches it.) Used for the first operand of POSITION so its
-// `IN` separator is left for the special-call parser instead of the `in` postfix.
+// The b-expression, PG's `b_expr`: the tight sublanguage (arithmetic / concat /
+// JSON / cast / subscript), the plain comparisons and `IS [NOT] DISTINCT FROM`,
+// with none of NOT, AND / OR, IN, LIKE, BETWEEN, COLLATE, AT TIME ZONE, ANY /
+// ALL or the other IS tests — see `bExpression` above. (OVERLAPS lives in the
+// shared atom, so it is the one predicate that still reaches it.) A
+// parenthesised operand is a full expression again, as in PG.
 const bExprRule = pratt<Expr, SqlTokenType>({
   atom,
   prefix: [unarySignPrefix],
-  infix: arithInfix,
-  postfix: [castPostfix, subscriptPostfix],
+  infix: [
+    ...arithInfix,
+    {
+      ops: COMPARISON_OPS,
+      bp: 9,
+      type: "op",
+      assoc: "nonassoc",
+      map: (op, left, right, span): Expr => ({ kind: "binary", op, left, right, span }),
+    },
+  ],
+  postfix: [
+    castPostfix,
+    subscriptPostfix,
+    {
+      // IS takes only DISTINCT FROM here, so `5 IS NULL` stops at NULL with an
+      // error, as PG's grammar does.
+      match: kw("is"),
+      bp: 8,
+      parse: (ctx, left, h): Expr => {
+        ctx.parse(kw("is"));
+        const negated = ctx.eat("ident", "not") !== null;
+        return isDistinctTail(ctx, left, h, negated);
+      },
+    },
+  ],
 });
 
 // --- keyword dispatch maps ---
@@ -2978,7 +3009,7 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("default"));
-      return { kind: "default", expr: ctx.parse(expression), span: ctx.spanFrom(start) };
+      return { kind: "default", expr: ctx.parse(bExpression), span: ctx.spanFrom(start) };
     },
   },
   primary: {
@@ -3060,10 +3091,10 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
     },
   },
   // Column-level `COLLATE name`. `collate` is reserved, so it cannot be a type
-  // word and, straight after the type, it can only be this. After a DEFAULT,
-  // though, the expression's COLLATE postfix takes it first: `DEFAULT 'a'
-  // COLLATE "C"` collates the default, where PG (whose DEFAULT operand has no
-  // COLLATE) would collate the column. Write the COLLATE before the DEFAULT.
+  // word and, straight after the type, it can only be this. A DEFAULT's operand
+  // is a b-expression, which has no COLLATE, so `DEFAULT 'a' COLLATE "C"`
+  // collates the column, as in PG; `DEFAULT ('a' COLLATE "C")` collates the
+  // default.
   collate: {
     parse: (ctx) => {
       const start = ctx.position();
@@ -4000,7 +4031,7 @@ function parseDomainConstraints(ctx: ParseContext<SqlTokenType>): DomainConstrai
       // A `CONSTRAINT name` must be followed by NOT NULL / NULL / CHECK.
       return ctx.croak(`Expected "not", "null" or "check" but found ${describeFound(ctx.peek())}`);
     } else if (ctx.eat("ident", "default") !== null) {
-      constraints.push({ kind: "default", expr: ctx.parse(expression) });
+      constraints.push({ kind: "default", expr: ctx.parse(bExpression) });
     } else if (ctx.eat("ident", "collate") !== null) {
       constraints.push({ kind: "collate", collation: ctx.parse(qualName) });
     } else {
