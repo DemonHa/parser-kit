@@ -897,10 +897,10 @@ export const PG_BATTERY: BatteryRow[] = [
       "sql-lite",
       "CREATE FUNCTION secure_fn(OUT n int, INOUT m text) SECURITY DEFINER SET search_path = pg_catalog, pg_temp LANGUAGE plpgsql AS $$ BEGIN n := 1; END $$;",
     ],
-    ["routine", "neither", "CREATE FUNCTION sq(x int) RETURNS int LANGUAGE sql IMMUTABLE RETURN x * x;"],
+    ["routine", "sql-lite", "CREATE FUNCTION sq(x int) RETURNS int LANGUAGE sql IMMUTABLE RETURN x * x;"],
     [
       "routine",
-      "neither",
+      "sql-lite",
       "CREATE FUNCTION atomic_ins(v text) RETURNS void LANGUAGE sql BEGIN ATOMIC INSERT INTO log (msg) VALUES (v); SELECT 1; END;",
     ],
     [
