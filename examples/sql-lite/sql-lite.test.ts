@@ -13105,3 +13105,478 @@ describe("SQL-lite MERGE", () => {
     );
   });
 });
+
+// --- long-tail objects: definition lists, casts, collations, operators, … ---
+
+describe("SQL-lite long-tail objects with definition lists", () => {
+  const ty = (typeName: string, array = false) => ({ name: typeName, args: [], array });
+  const arg = (typeName: string) => ({ mode: null, name: null, type: ty(typeName), defaultValue: null });
+  const typeArg = (typeName: string) => ({ kind: "type", type: ty(typeName) });
+  const fails = (text: string) => () => sqlLite.parse(text);
+
+  it("reads every kind of definition value", () => {
+    expect(
+      firstStmt(
+        "CREATE TYPE s.c (INPUT = c_in, LIKE = pg_catalog.int4, ELEMENT = float4[], DEFAULT = -1.5, " +
+          "INTERNALLENGTH = 99999999999999999999, DELIMITER = ',', CATEGORY = NULL, PASSEDBYVALUE, " +
+          'STORAGE = NONE, "Align" = double precision, SEND = +2);',
+      ),
+    ).toEqual({
+      kind: "createType",
+      form: "base",
+      name: ["s", "c"],
+      definition: [
+        { name: "input", value: typeArg("c_in") },
+        { name: "like", value: typeArg("pg_catalog.int4") },
+        { name: "element", value: { kind: "type", type: ty("float4", true) } },
+        { name: "default", value: { kind: "number", value: -1.5 } },
+        {
+          name: "internallength",
+          value: { kind: "number", value: 1e20, raw: "99999999999999999999" },
+        },
+        { name: "delimiter", value: { kind: "string", value: "," } },
+        { name: "category", value: { kind: "keyword", value: "null" } },
+        { name: "passedbyvalue" },
+        { name: "storage", value: { kind: "none" } },
+        { name: "Align", value: typeArg("double precision") },
+        { name: "send", value: { kind: "number", value: 2 } },
+      ],
+    });
+  });
+
+  it("parses CREATE OPERATOR with operator-valued definitions", () => {
+    expect(
+      firstStmt(
+        "CREATE OPERATOR s.=== (LEFTARG = box, RIGHTARG = box, FUNCTION = box_eq, COMMUTATOR = ===, " +
+          "NEGATOR = OPERATOR(pg_catalog.<>), HASHES);",
+      ),
+    ).toEqual({
+      kind: "createOperator",
+      name: ["s", "==="],
+      definition: [
+        { name: "leftarg", value: typeArg("box") },
+        { name: "rightarg", value: typeArg("box") },
+        { name: "function", value: typeArg("box_eq") },
+        { name: "commutator", value: { kind: "operator", name: ["==="] } },
+        { name: "negator", value: { kind: "operator", name: ["pg_catalog", "<>"] } },
+        { name: "hashes" },
+      ],
+    });
+    // A prefix operator, and an operator in a schema called `class`.
+    expect(firstStmt("CREATE OPERATOR - (RIGHTARG = int);")).toMatchObject({ kind: "createOperator", name: ["-"] });
+    expect(firstStmt("CREATE OPERATOR class.+ (LEFTARG = int, RIGHTARG = int);")).toMatchObject({
+      kind: "createOperator",
+      name: ["class", "+"],
+    });
+  });
+
+  it("parses CREATE TYPE base and shell forms beside the AS forms", () => {
+    expect(firstStmt("CREATE TYPE box3d;")).toEqual({ kind: "createType", form: "shell", name: ["box3d"] });
+    expect(firstStmt("CREATE TYPE s.box3d")).toEqual({ kind: "createType", form: "shell", name: ["s", "box3d"] });
+    expect(firstStmt("CREATE TYPE t (INPUT = t_in, OUTPUT = t_out);")).toEqual({
+      kind: "createType",
+      form: "base",
+      name: ["t"],
+      definition: [
+        { name: "input", value: typeArg("t_in") },
+        { name: "output", value: typeArg("t_out") },
+      ],
+    });
+    expect(firstStmt("CREATE TYPE mood AS ENUM ('sad');")).toEqual({
+      kind: "createType",
+      form: "enum",
+      name: ["mood"],
+      values: ["sad"],
+    });
+    expect(firstStmt("CREATE TYPE p AS (x int);")).toMatchObject({ form: "composite" });
+    expect(firstStmt("CREATE TYPE r AS RANGE (SUBTYPE = int4);")).toMatchObject({ form: "range" });
+    expect(parse("CREATE TYPE a; CREATE TYPE b AS ENUM ();").map((s) => s.form)).toEqual(["shell", "enum"]);
+  });
+
+  it("parses CREATE CAST in each of its forms", () => {
+    expect(firstStmt("CREATE CAST (bigint AS int4) WITH FUNCTION s.int4(bigint) AS ASSIGNMENT;")).toEqual({
+      kind: "createCast",
+      source: ty("bigint"),
+      target: ty("int4"),
+      method: "function",
+      function: { name: ["s", "int4"], signature: { star: false, args: [arg("bigint")] } },
+      context: "assignment",
+    });
+    expect(firstStmt("CREATE CAST (a AS b) WITH FUNCTION f;")).toEqual({
+      kind: "createCast",
+      source: ty("a"),
+      target: ty("b"),
+      method: "function",
+      function: { name: ["f"] },
+    });
+    expect(firstStmt("CREATE CAST (a AS b) WITHOUT FUNCTION AS IMPLICIT;")).toEqual({
+      kind: "createCast",
+      source: ty("a"),
+      target: ty("b"),
+      method: "withoutFunction",
+      context: "implicit",
+    });
+    expect(firstStmt("CREATE CAST (int[] AS text) WITH INOUT;")).toEqual({
+      kind: "createCast",
+      source: ty("int", true),
+      target: ty("text"),
+      method: "inout",
+    });
+  });
+
+  it("parses CREATE COLLATION, CONVERSION and ACCESS METHOD", () => {
+    expect(firstStmt("CREATE COLLATION german (provider = icu, locale = 'de-DE');")).toEqual({
+      kind: "createCollation",
+      ifNotExists: false,
+      name: ["german"],
+      definition: [
+        { name: "provider", value: typeArg("icu") },
+        { name: "locale", value: { kind: "string", value: "de-DE" } },
+      ],
+    });
+    expect(firstStmt('CREATE COLLATION IF NOT EXISTS s.c FROM "C";')).toEqual({
+      kind: "createCollation",
+      ifNotExists: true,
+      name: ["s", "c"],
+      from: ["C"],
+    });
+    expect(firstStmt("CREATE CONVERSION s.myconv FOR 'UTF8' TO 'LATIN1' FROM myfunc;")).toEqual({
+      kind: "createConversion",
+      name: ["s", "myconv"],
+      source: "UTF8",
+      target: "LATIN1",
+      function: ["myfunc"],
+    });
+    expect(firstStmt("CREATE DEFAULT CONVERSION c FOR 'UTF8' TO 'LATIN1' FROM s.f;")).toEqual({
+      kind: "createConversion",
+      default: true,
+      name: ["c"],
+      source: "UTF8",
+      target: "LATIN1",
+      function: ["s", "f"],
+    });
+    expect(firstStmt("CREATE ACCESS METHOD heap2 TYPE TABLE HANDLER heap_tableam_handler;")).toEqual({
+      kind: "createAccessMethod",
+      name: "heap2",
+      type: "table",
+      handler: ["heap_tableam_handler"],
+    });
+    expect(firstStmt("CREATE ACCESS METHOD b TYPE INDEX HANDLER s.h;")).toMatchObject({
+      type: "index",
+      handler: ["s", "h"],
+    });
+  });
+
+  it("parses CREATE STATISTICS with and without a name and kinds", () => {
+    expect(firstStmt("CREATE STATISTICS s1 (dependencies, ndistinct) ON a, b FROM t;")).toEqual({
+      kind: "createStatistics",
+      ifNotExists: false,
+      name: ["s1"],
+      kinds: ["dependencies", "ndistinct"],
+      on: [name("a"), name("b")],
+      from: [["t"]],
+    });
+    expect(firstStmt("CREATE STATISTICS ON (a + b), lower(c) FROM s.t;")).toEqual({
+      kind: "createStatistics",
+      ifNotExists: false,
+      on: [bin("+", name("a"), name("b")), { kind: "call", name: "lower", args: [name("c")] }],
+      from: [["s", "t"]],
+    });
+    // The special-syntax calls are function calls too; `::` is not.
+    expect(
+      firstStmt("CREATE STATISTICS s ON CAST(a AS int), extract(year FROM d), current_date FROM t;").on.map(
+        (e: any) => e.kind,
+      ),
+    ).toEqual(["cast", "extract", "sqlValueFunction"]);
+    expect(firstStmt("CREATE STATISTICS IF NOT EXISTS s.st ON a, b FROM t;")).toMatchObject({
+      ifNotExists: true,
+      name: ["s", "st"],
+    });
+  });
+
+  it("parses CREATE EVENT TRIGGER with and without WHEN", () => {
+    expect(
+      firstStmt(
+        "CREATE EVENT TRIGGER no_ddl ON ddl_command_start WHEN TAG IN ('DROP TABLE', 'ALTER TABLE') AND tag IN ('x') EXECUTE FUNCTION s.abort_ddl();",
+      ),
+    ).toEqual({
+      kind: "createEventTrigger",
+      name: "no_ddl",
+      event: "ddl_command_start",
+      when: [
+        { variable: "tag", values: ["DROP TABLE", "ALTER TABLE"] },
+        { variable: "tag", values: ["x"] },
+      ],
+      execute: { routine: "function", name: ["s", "abort_ddl"] },
+    });
+    expect(firstStmt("CREATE EVENT TRIGGER e ON sql_drop EXECUTE PROCEDURE p();")).toEqual({
+      kind: "createEventTrigger",
+      name: "e",
+      event: "sql_drop",
+      execute: { routine: "procedure", name: ["p"] },
+    });
+  });
+
+  it("parses CREATE LANGUAGE with its prefixes and handlers", () => {
+    expect(firstStmt("CREATE LANGUAGE plperl;")).toEqual({ kind: "createLanguage", orReplace: false, name: "plperl" });
+    expect(firstStmt("CREATE OR REPLACE TRUSTED PROCEDURAL LANGUAGE plx HANDLER s.h INLINE i VALIDATOR v;")).toEqual({
+      kind: "createLanguage",
+      orReplace: true,
+      trusted: true,
+      procedural: true,
+      name: "plx",
+      handler: ["s", "h"],
+      inline: ["i"],
+      validator: ["v"],
+    });
+    expect(firstStmt("CREATE PROCEDURAL LANGUAGE plx HANDLER h NO VALIDATOR;")).toEqual({
+      kind: "createLanguage",
+      orReplace: false,
+      procedural: true,
+      name: "plx",
+      handler: ["h"],
+      validator: null,
+    });
+    expect(firstStmt("CREATE TRUSTED LANGUAGE plx;")).toEqual({
+      kind: "createLanguage",
+      orReplace: false,
+      trusted: true,
+      name: "plx",
+    });
+  });
+
+  it("parses CREATE TEXT SEARCH for each of its four kinds", () => {
+    expect(firstStmt("CREATE TEXT SEARCH CONFIGURATION s.my_cfg (COPY = english);")).toEqual({
+      kind: "createTextSearch",
+      objectType: "configuration",
+      name: ["s", "my_cfg"],
+      definition: [{ name: "copy", value: typeArg("english") }],
+    });
+    expect(
+      firstStmt("CREATE TEXT SEARCH DICTIONARY d (TEMPLATE = simple, STOPWORDS = english, ACCEPT = false);"),
+    ).toMatchObject({
+      objectType: "dictionary",
+      definition: [
+        { name: "template" },
+        { name: "stopwords" },
+        { name: "accept", value: { kind: "keyword", value: "false" } },
+      ],
+    });
+    expect(firstStmt("CREATE TEXT SEARCH PARSER p (START = s, GETTOKEN = g, END = e, LEXTYPES = l);")).toMatchObject({
+      objectType: "parser",
+    });
+    expect(firstStmt("CREATE TEXT SEARCH TEMPLATE t (LEXIZE = l);")).toMatchObject({ objectType: "template" });
+  });
+
+  it("parses CREATE OPERATOR CLASS and FAMILY", () => {
+    expect(
+      firstStmt(
+        "CREATE OPERATOR CLASS my_ops FOR TYPE int4 USING btree AS OPERATOR 1 <, FUNCTION 1 btint4cmp(int4, int4);",
+      ),
+    ).toEqual({
+      kind: "createOperatorClass",
+      name: ["my_ops"],
+      type: ty("int4"),
+      using: "btree",
+      items: [
+        { kind: "operator", strategy: 1, operator: ["<"] },
+        {
+          kind: "function",
+          support: 1,
+          name: ["btint4cmp"],
+          signature: { star: false, args: [arg("int4"), arg("int4")] },
+        },
+      ],
+    });
+    expect(
+      firstStmt(
+        "CREATE OPERATOR CLASS s.gist_ops DEFAULT FOR TYPE point USING gist FAMILY s.f AS " +
+          "OPERATOR 15 pg_catalog.<-> (point, point) FOR ORDER BY float_ops, OPERATOR 3 && FOR SEARCH, " +
+          "FUNCTION 1 (point, point) f, STORAGE box;",
+      ),
+    ).toEqual({
+      kind: "createOperatorClass",
+      name: ["s", "gist_ops"],
+      default: true,
+      type: ty("point"),
+      using: "gist",
+      family: ["s", "f"],
+      items: [
+        {
+          kind: "operator",
+          strategy: 15,
+          operator: ["pg_catalog", "<->"],
+          operands: [ty("point"), ty("point")],
+          purpose: { kind: "orderBy", family: ["float_ops"] },
+        },
+        { kind: "operator", strategy: 3, operator: ["&&"], purpose: { kind: "search" } },
+        { kind: "function", support: 1, types: [ty("point"), ty("point")], name: ["f"] },
+        { kind: "storage", type: ty("box") },
+      ],
+    });
+    expect(firstStmt("CREATE OPERATOR FAMILY s.f USING btree;")).toEqual({
+      kind: "createOperatorFamily",
+      name: ["s", "f"],
+      using: "btree",
+    });
+  });
+
+  it("parses the matching DROP forms", () => {
+    const drop = (fields: Record<string, unknown>) => ({
+      kind: "drop",
+      concurrently: false,
+      ifExists: false,
+      behavior: null,
+      ...fields,
+    });
+    expect(firstStmt("DROP CAST IF EXISTS (a AS b) CASCADE;")).toEqual(
+      drop({ objectType: "cast", ifExists: true, names: [], behavior: "cascade", source: ty("a"), target: ty("b") }),
+    );
+    expect(firstStmt("DROP OPERATOR IF EXISTS ^ (int, int), s.~ (NONE, bit);")).toEqual(
+      drop({
+        objectType: "operator",
+        ifExists: true,
+        names: [["^"], ["s", "~"]],
+        operands: [
+          [ty("int"), ty("int")],
+          [null, ty("bit")],
+        ],
+      }),
+    );
+    expect(firstStmt("DROP OPERATOR CLASS IF EXISTS c USING btree;")).toEqual(
+      drop({ objectType: "operator class", ifExists: true, names: [["c"]], using: "btree" }),
+    );
+    expect(firstStmt("DROP OPERATOR FAMILY s.f USING gin RESTRICT;")).toEqual(
+      drop({ objectType: "operator family", names: [["s", "f"]], using: "gin", behavior: "restrict" }),
+    );
+    expect(firstStmt("DROP TEXT SEARCH DICTIONARY d1, s.d2;")).toEqual(
+      drop({ objectType: "text search dictionary", names: [["d1"], ["s", "d2"]] }),
+    );
+    expect(firstStmt("DROP PROCEDURAL LANGUAGE IF EXISTS plx;")).toEqual(
+      drop({ objectType: "language", ifExists: true, names: [["plx"]] }),
+    );
+    const kinds: [string, string, string[]][] = [
+      ["COLLATION s.c", "collation", ["s", "c"]],
+      ["CONVERSION s.c", "conversion", ["s", "c"]],
+      ["STATISTICS s.st", "statistics", ["s", "st"]],
+      ["EVENT TRIGGER e", "event trigger", ["e"]],
+      ["LANGUAGE l", "language", ["l"]],
+      ["ACCESS METHOD a", "access method", ["a"]],
+      ["TEXT SEARCH PARSER p", "text search parser", ["p"]],
+      ["TEXT SEARCH TEMPLATE p", "text search template", ["p"]],
+      ["TEXT SEARCH CONFIGURATION p", "text search configuration", ["p"]],
+      ["TYPE box3d", "type", ["box3d"]],
+    ];
+    for (const [sql, objectType, objectName] of kinds) {
+      expect(firstStmt(`DROP ${sql} CASCADE;`)).toEqual(drop({ objectType, names: [objectName], behavior: "cascade" }));
+    }
+  });
+
+  it("rejects malformed definitions and statements", () => {
+    expect(fails("CREATE COLLATION c;")).toThrow(/Expected "\(" or "from" but found ";"/);
+    expect(fails("CREATE COLLATION c ();")).toThrow(/Expected an option name but found "\)"/);
+    expect(fails("CREATE COLLATION c (locale = );")).toThrow(
+      /Expected a name, a number, a string or an operator but found "\)"/,
+    );
+    expect(fails("CREATE COLLATION c (locale 'x');")).toThrow(/Expected "\)" but found "x"/);
+    expect(fails("CREATE TYPE t foo;")).toThrow(/Expected "as" but found "foo"/);
+    expect(fails("CREATE OPERATOR => (LEFTARG = int);")).toThrow(/Expected an operator but found "=>"/);
+    expect(fails("CREATE OPERATOR + ;")).toThrow(/Expected "\(" but found ";"/);
+    expect(fails("CREATE CAST (a AS b);")).toThrow(/Expected "with" or "without" but found ";"/);
+    expect(fails("CREATE CAST (a, b) WITH INOUT;")).toThrow(/Expected "as" but found ","/);
+    expect(fails("CREATE CAST (a AS b) WITH f;")).toThrow(/Expected "function" or "inout" but found "f"/);
+    expect(fails("CREATE CAST (a AS b) WITH INOUT AS frob;")).toThrow(/Expected "assignment" or "implicit"/);
+    expect(fails("CREATE CONVERSION c FOR utf8 TO 'x' FROM f;")).toThrow(/Expected a string but found "utf8"/);
+    expect(fails("CREATE DEFAULT x;")).toThrow(/Expected "conversion" but found "x"/);
+    expect(fails("CREATE STATISTICS s ON x, a + b FROM t;")).toThrow(/must be parenthesised \(1:26\)/);
+    expect(fails("CREATE STATISTICS s ON t.a FROM t;")).toThrow(/must be parenthesised/);
+    expect(fails("CREATE STATISTICS s ON a::int FROM t;")).toThrow(/must be parenthesised/);
+    expect(fails("CREATE STATISTICS s ON CAST(a AS int)::text FROM t;")).toThrow(/must be parenthesised/);
+    expect(fails("CREATE STATISTICS IF NOT EXISTS ON a FROM t;")).toThrow(/Expected a name but found "on"/);
+    expect(fails("CREATE STATISTICS s ON a;")).toThrow(/Expected "from" but found ";"/);
+    expect(fails("CREATE EVENT TRIGGER e ON x EXECUTE FUNCTION f(1);")).toThrow(/Expected "\)" but found "1"/);
+    expect(fails("CREATE EVENT TRIGGER e ON x WHEN tag IN (1) EXECUTE FUNCTION f();")).toThrow(
+      /Expected a string but found "1"/,
+    );
+    expect(fails("CREATE EVENT TRIGGER e ON x EXECUTE f();")).toThrow(/Expected "function" or "procedure"/);
+    expect(fails("CREATE TRUSTED x;")).toThrow(/Expected "procedural" or "language" but found "x"/);
+    expect(fails("CREATE PROCEDURAL x;")).toThrow(/Expected "language" but found "x"/);
+    expect(fails("CREATE LANGUAGE l HANDLER h NO frob;")).toThrow(/Expected "validator" but found "frob"/);
+    expect(fails("CREATE OR REPLACE ACCESS METHOD a TYPE TABLE HANDLER h;")).toThrow(
+      expectsKeys(["view", "language", "trusted", "procedural"], '"access"'),
+    );
+    expect(fails("CREATE ACCESS METHOD a TYPE view HANDLER h;")).toThrow(
+      /Expected "table" or "index" but found "view"/,
+    );
+    expect(fails("CREATE TEXT SEARCH frob x (a = b);")).toThrow(
+      /Expected "parser", "dictionary", "template" or "configuration" but found "frob"/,
+    );
+    expect(fails("CREATE TEXT SEARCH PARSER p;")).toThrow(/Expected "\(" but found ";"/);
+    const opclass = (items: string) => fails(`CREATE OPERATOR CLASS c FOR TYPE int USING btree AS ${items};`);
+    expect(opclass("OPERATOR x <")).toThrow(/Expected an integer but found "x"/);
+    expect(opclass("OPERATOR 1.5 <")).toThrow(/Expected an integer but found "1.5"/);
+    expect(opclass("FROB 1")).toThrow(/Expected "operator", "function" or "storage" but found "frob"/);
+    expect(opclass("OPERATOR 1 < (int)")).toThrow(/Expected "," but found "\)"/);
+    expect(opclass("OPERATOR 1 < FOR frob")).toThrow(/Expected "search" or "order" but found "frob"/);
+    expect(fails("CREATE OPERATOR CLASS c FOR TYPE int USING btree OPERATOR 1 <;")).toThrow(
+      /Expected "as" but found "operator"/,
+    );
+    expect(fails("CREATE OPERATOR FAMILY f;")).toThrow(/Expected "using" but found ";"/);
+    expect(fails("DROP CAST (a, b);")).toThrow(/Expected "as" but found ","/);
+    expect(fails("DROP OPERATOR +;")).toThrow(/Expected "\(" but found ";"/);
+    expect(fails("DROP OPERATOR + (NONE, NONE);")).toThrow(/not NONE twice/);
+    expect(fails("DROP OPERATOR CLASS c;")).toThrow(/Expected "using" but found ";"/);
+    // CAST, OPERATOR CLASS and OPERATOR FAMILY drop one object at a time.
+    expect(fails("DROP CAST (a AS b), (c AS d);")).toThrow(/Expected ";" but found ","/);
+    expect(fails("DROP OPERATOR CLASS c USING btree, d USING btree;")).toThrow(/Expected ";" but found ","/);
+    expect(fails("DROP TEXT SEARCH x y;")).toThrow(/Expected "parser", "dictionary", "template" or "configuration"/);
+    expect(fails("DROP EVENT e;")).toThrow(/Expected "trigger" but found "e"/);
+    expect(fails("DROP frobnicate x;")).toThrow(
+      expectsKeys(["cast", "collation", "operator", "text", "event", "access", "procedural"], '"frobnicate"'),
+    );
+  });
+
+  it("keeps the new words unreserved as names and aliases", () => {
+    const words = [
+      "collation conversion statistics event trigger language trusted procedural handler inline validator",
+      "access method text search parser dictionary template configuration operator class family storage",
+      "without inout implicit assignment tag none dependencies ndistinct provider locale",
+    ]
+      .join(" ")
+      .split(" ");
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS handler, 2 storage FROM statistics AS collation;")).toMatchObject({
+      columns: [{ alias: "handler" }, { alias: "storage" }],
+      from: [{ name: ["statistics"], alias: "collation" }],
+    });
+    expect(firstStmt("CREATE TABLE operator (class int, family text, inout int, validator int);")).toMatchObject({
+      name: ["operator"],
+    });
+    // …and as the names of the objects being created.
+    expect(firstStmt('CREATE COLLATION collation FROM "C";')).toMatchObject({ name: ["collation"] });
+    expect(firstStmt("CREATE STATISTICS statistics ON storage FROM text;")).toMatchObject({
+      name: ["statistics"],
+      on: [name("storage")],
+      from: [["text"]],
+    });
+    expect(firstStmt("CREATE LANGUAGE language HANDLER handler INLINE inline VALIDATOR validator;")).toMatchObject({
+      name: "language",
+      handler: ["handler"],
+      inline: ["inline"],
+      validator: ["validator"],
+    });
+    expect(firstStmt("CREATE OPERATOR CLASS class FOR TYPE storage USING family AS STORAGE storage;")).toMatchObject({
+      name: ["class"],
+      type: ty("storage"),
+      using: "family",
+    });
+    expect(firstStmt("CREATE OPERATOR FAMILY family USING method;")).toMatchObject({ name: ["family"] });
+    expect(firstStmt("CREATE TYPE type;")).toEqual({ kind: "createType", form: "shell", name: ["type"] });
+    expect(firstStmt("DROP OPERATOR family.+ (int, int);")).toMatchObject({
+      objectType: "operator",
+      names: [["family", "+"]],
+    });
+  });
+});
