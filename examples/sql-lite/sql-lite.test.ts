@@ -5853,8 +5853,13 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
     expect(firstStmt("SELECT n, name, nulls n FROM n;")).toEqual(
       sel({ columns: [col(name("n")), col(name("name")), col(name("nulls"), "n")], from: [tableFrom(["n"])] }),
     );
-    // A space between the N and the quote leaves a name followed by a string.
-    expect(() => sqlLite.parse("SELECT N 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    // A space between the N and the quote leaves a name followed by a string:
+    // a typed literal of a type named `n`, as PG reads it too.
+    expect((firstStmt("SELECT N 'abc';") as any).columns[0].expr).toEqual({
+      kind: "typedLiteral",
+      type: ct("n"),
+      value: "abc",
+    });
   });
 
   it("accepts N'…' only where an expression goes, as PG does", () => {
@@ -6263,12 +6268,10 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
   });
 
   it("reads a typed literal only when the whole spelling is followed by a string", () => {
-    // A quoted lead is an ordinary name, as it is in typeRef. That is a
-    // deliberate narrowing: PG's general `type 'string'` form also takes a
-    // quoted or qualified type name (`"char" 'a'`), which this grammar does not
-    // implement — only the three bare datetime words lead a literal here.
-    expect(() => sqlLite.parse(`SELECT "date" 'x';`)).toThrow(/Expected ";" but found "x"/);
-    // So is a lead whose tail is not followed by a string — no word is taken.
+    // A quoted lead is a type name like any other, and leads a literal as PG's
+    // general `type 'string'` form has it.
+    expect(colExpr(`"date" 'x'`)).toEqual(typed(ct("date"), "x"));
+    // A lead whose tail is not followed by a string is a name — no word is taken.
     expect(() => sqlLite.parse("SELECT timestamp with time zone FROM t;")).toThrow(/Expected ";" but found "with"/);
     // A lex error in the lookahead past the lead word must not cost the syntax
     // error the statement already had.
@@ -6286,8 +6289,9 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     expect(() => sqlLite.parse("SELECT timestamp with time zone(3) 'x';")).toThrow(/Expected ";" but found "with"/);
     // Nor does it take anything but an integer one.
     expect(() => sqlLite.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
-    // DATE takes no precision, so `date(3)` is a call and the string a stray.
-    expect(() => sqlLite.parse("SELECT date(3) 'x';")).toThrow(/Expected ";" but found "x"/);
+    // `date` is no keyword to PG, so `date(3) 'x'` is its generic
+    // `name(typmod) 'string'` form, as `varchar(3) 'abc'` is.
+    expect(colExpr("date(3) 'x'")).toEqual(typed(ct("date", { args: [3] }), "x"));
   });
 
   it("keeps date / time / timestamp unreserved as names, calls and aliases", () => {
@@ -6369,6 +6373,270 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
       col(name("overlay")),
       col(name("a"), "overlay"),
     ]);
+  });
+});
+
+// --- typed literals for any type, ARRAY type spelling and interval precision ---
+
+describe("SQL-lite typed literals, ARRAY type spelling and interval precision", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const colType = (type: string) => (firstStmt(`CREATE TABLE t (c ${type});`) as any).items[0].dataType;
+  const castType = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr.type;
+  const typed = (type: unknown, value: string) => ({ kind: "typedLiteral", type, value });
+  const interval = (value: string, over: Record<string, unknown> = {}) => ({ kind: "interval", value, ...over });
+
+  it("reads a string after any type name as a typed literal", () => {
+    expect(colExpr("jsonb '{}'")).toEqual(typed(ct("jsonb"), "{}"));
+    expect(colExpr("timestamptz '2024-01-01'")).toEqual(typed(ct("timestamptz"), "2024-01-01"));
+    expect(colExpr("int4 '42'")).toEqual(typed(ct("int4"), "42"));
+    // Qualified and quoted names, as PG's `func_name 'string'` takes them.
+    expect(colExpr("s.t 'x'")).toEqual(typed(ct("s.t"), "x"));
+    expect(colExpr("pg_catalog.int4 '1'")).toEqual(typed(ct("pg_catalog.int4"), "1"));
+    expect(colExpr(`"MyType" 'x'`)).toEqual(typed(ct("MyType"), "x"));
+    expect(colExpr(`"char" 'a'`)).toEqual(typed(ct("char", { quoted: true }), "a"));
+    // A typmod of integer constants, on a generic or a multi-word name.
+    expect(colExpr("varchar(3) 'abc'")).toEqual(typed(ct("varchar", { args: [3] }), "abc"));
+    expect(colExpr("numeric(10, 2) '1.5'")).toEqual(typed(ct("numeric", { args: [10, 2] }), "1.5"));
+    expect(colExpr("character varying(3) 'abc'")).toEqual(typed(ct("character varying", { args: [3] }), "abc"));
+    expect(colExpr("double precision '1'")).toEqual(typed(ct("double precision"), "1"));
+    // It is an atom, so operators bind around it.
+    expect(colExpr("jsonb '{}' || x")).toEqual(bin("||", typed(ct("jsonb"), "{}"), name("x")));
+    expect((firstStmt("SELECT a FROM t WHERE ts > timestamptz '2024-01-01';") as any).where).toEqual(
+      bin(">", name("ts"), typed(ct("timestamptz"), "2024-01-01")),
+    );
+  });
+
+  it("spans a qualified typed literal from its first name to its string", () => {
+    const expr = (sqlLite.parse("SELECT s.t(3) 'x';")[0] as any).columns[0].expr;
+    expect(expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 16 } });
+    expect(expr.type.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 13 } });
+  });
+
+  it("rejects the spellings PG's typed-literal forms do not take", () => {
+    // No array type, either spelling, and no SETOF.
+    expect(() => sqlLite.parse("SELECT jsonb[] '{}';")).toThrow(/Expected an expression or ":" but found "\]"/);
+    expect(() => sqlLite.parse("SELECT int ARRAY '{}';")).toThrow(/Expected ";" but found "array"/);
+    expect(() => sqlLite.parse("SELECT setof int '1';")).toThrow(/Expected ";" but found "1"/);
+    // Nothing after a `.*`, and no call that is not a typmod.
+    expect(() => sqlLite.parse("SELECT t.* 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(() => sqlLite.parse("SELECT foo() 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(() => sqlLite.parse("SELECT foo(DISTINCT 1) 'x';")).toThrow(/Expected ";" but found "x"/);
+    // A column-name keyword that is no type on its own is no `func_name`
+    // either, though it may be part of a dotted one.
+    for (const word of [
+      "coalesce",
+      "setof",
+      "national",
+      "precision",
+      "trim",
+      "between",
+      "system_user",
+      "current_catalog",
+    ]) {
+      expect(() => sqlLite.parse(`SELECT ${word} 'x';`)).toThrow(/Expected ";" but found "x"/);
+    }
+    expect(colExpr("trim.x 'y'")).toEqual(typed(ct("trim.x"), "y"));
+    expect(() => sqlLite.parse("SELECT system_user.x 'y';")).toThrow(/Expected ";" but found "y"/);
+    expect(colExpr("national character 'x'")).toEqual(typed(ct("national character"), "x"));
+  });
+
+  it("narrows the typmod to integer constants", () => {
+    // PG's `func_name (args) 'string'` takes any expression list; this
+    // grammar's type node holds integers only, so anything else stays a call.
+    expect(() => sqlLite.parse("SELECT varchar(x) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => sqlLite.parse("SELECT varchar(1.5) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    // An integer constant as PG lexes one: no float spelling of a whole number,
+    // nothing past int4, and no expression that merely starts with one.
+    expect(() => sqlLite.parse("SELECT varchar(10.) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => sqlLite.parse("SELECT varchar(4294967296) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => sqlLite.parse("SELECT varchar(1 + 2) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => sqlLite.parse("SELECT interval(3.0) '1';")).toThrow(/Expected ";" but found "1"/);
+    expect(() => sqlLite.parse("SELECT interval(1e0) '1';")).toThrow(/Expected ";" but found "1"/);
+    // A call that is not followed by a string is still a call.
+    expect(colExpr("foo(1, 2)")).toEqual({ kind: "call", name: "foo", args: [num(1), num(2)] });
+    // The TIME / TIMESTAMP precision is read by the type spelling, which takes
+    // an integer only; a dotted name is an ordinary one.
+    expect(() => sqlLite.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(colExpr("timestamp.x(3) 'y'")).toEqual(typed(ct("timestamp.x", { args: [3] }), "y"));
+    expect(colExpr("interval.x 'y'")).toEqual(typed(ct("interval.x"), "y"));
+    // A quoted or qualified `interval` is an ordinary type name with a typmod,
+    // not the INTERVAL precision form.
+    expect(colExpr(`"interval"(3) '1'`)).toEqual(typed(ct("interval", { args: [3] }), "1"));
+    expect(colExpr("pg_catalog.interval(3) '1'")).toEqual(typed(ct("pg_catalog.interval", { args: [3] }), "1"));
+  });
+
+  it("keeps N'…' the national-character literal, not a type named n", () => {
+    // `N'abc'` is its own token and stays PG's bpchar literal; a spaced
+    // `n 'x'` is an ordinary typed literal, to PG as well. A type name before
+    // an `N'…'` is no typed literal.
+    expect(colExpr("N'abc'")).toEqual(typed(ct("bpchar"), "abc"));
+    expect(colExpr("n 'abc'")).toEqual(typed(ct("n"), "abc"));
+    expect(() => sqlLite.parse("SELECT jsonb N'{}';")).toThrow(/Expected ";" but found/);
+  });
+
+  it("decides a one-word typed literal without lookahead past the name or call", () => {
+    // A lex error inside a call's arguments is reported from where the call
+    // reads it, so recovery and the errors after it are unchanged.
+    const errors = (src: string) => sqlLite.diagnose(src).errors.map((e) => e.message);
+    expect(errors("CREATE TABLE t (c int DEFAULT foo(1, \\), d int); SELECT 2;")).toEqual([
+      'Unexpected character "\\" (1:37)',
+      'Expected ";" but found "," (1:39)',
+    ]);
+    expect(errors("CREATE TABLE t (c int DEFAULT interval(\\), d int); SELECT 2;")).toEqual([
+      'Unexpected character "\\" (1:39)',
+      'Expected ";" but found "," (1:41)',
+    ]);
+    // Nor does a multi-word lead's tail lookahead swallow a lex error straight
+    // after the lead: the statement is lost to it, as before. (One past a
+    // complete tail, `double precision \`, is reported from the lookahead, and
+    // the statement is kept without it — as for `c interval day \` in a type.)
+    for (const src of ["SELECT double \\ FROM t; SELECT 2;", "SELECT char \\; SELECT 2;"]) {
+      expect(sqlLite.diagnose(src).ast).toHaveLength(1);
+    }
+    // And a reserved word, which no type spelling starts, is croaked before
+    // anything past it is read.
+    expect(errors("SELECT like \\ FROM t; SELECT 2;")).toEqual([
+      'Expected a name but found "like" (1:7)',
+      'Unexpected character "\\" (1:12)',
+    ]);
+  });
+
+  it("parses the INTERVAL precision forms", () => {
+    expect(colExpr("interval(3) '1 s'")).toEqual(interval("1 s", { precision: 3 }));
+    expect(colExpr("INTERVAL '1' SECOND(3)")).toEqual(interval("1", { fields: "second", precision: 3 }));
+    expect(colExpr("INTERVAL '1' DAY TO SECOND(3)")).toEqual(interval("1", { fields: "day to second", precision: 3 }));
+    // Without one the key is omitted, not null.
+    expect(colExpr("INTERVAL '1' MINUTE TO SECOND")).toEqual(interval("1", { fields: "minute to second" }));
+    // PG takes a leading precision or a field spec, not both: after
+    // `INTERVAL(3) '…'` a unit word is no field. This grammar reads it as the
+    // alias, as it does after `x::interval(3)`; PG rejects both.
+    expect((firstStmt("SELECT interval(3) '1' day FROM t;") as any).columns).toEqual([
+      col(interval("1", { precision: 3 }), "day"),
+    ]);
+    // Without a string, `interval(3)` is still an ordinary call.
+    expect(colExpr("interval(3)")).toEqual({ kind: "call", name: "interval", args: [num(3)] });
+  });
+
+  it("rejects the INTERVAL field specs PG does not list", () => {
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' DAY TO YEAR;")).toThrow(
+      /Expected an interval field spec like "day to second" but found "day to year" \(1:20\)/,
+    );
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' MONTH TO DAY;")).toThrow(/but found "month to day"/);
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' TO SECOND;")).toThrow(/but found "to second"/);
+    // Two fields in a row are no spec either (they used to give `"day hour"`).
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' DAY HOUR;")).toThrow(/but found "day hour"/);
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' SECOND SECOND;")).toThrow(/but found "second second"/);
+    // Only SECOND takes a precision, and only an integer one.
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' DAY(3);")).toThrow(/Expected ";" but found "\("/);
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' SECOND(x);")).toThrow(
+      /Expected an integer precision but found "x"/,
+    );
+    // The type spelling was already limited to the same thirteen specs.
+    expect(() => sqlLite.parse("SELECT x::interval day to year;")).toThrow(/Expected ";" but found "to"/);
+  });
+
+  it("parses the SQL-standard ARRAY type spelling", () => {
+    expect(colType("int ARRAY")).toEqual(ct("int", { array: true }));
+    expect(colType("integer ARRAY[3]")).toEqual(ct("integer", { array: true }));
+    expect(colType("varchar(10) ARRAY")).toEqual(ct("varchar", { args: [10], array: true }));
+    expect(castType("'{}'::int ARRAY")).toEqual(ct("int", { array: true }));
+    expect(castType("CAST(x AS text ARRAY)")).toEqual(ct("text", { array: true }));
+    // Column constraints follow it as they follow any type.
+    expect((firstStmt("CREATE TABLE t (a int ARRAY NOT NULL, b text ARRAY[2] DEFAULT '{}');") as any).items).toEqual([
+      { kind: "column", name: "a", dataType: ct("int", { array: true }), constraints: [{ kind: "notNull" }] },
+      {
+        kind: "column",
+        name: "b",
+        dataType: ct("text", { array: true }),
+        constraints: [{ kind: "default", expr: str("{}") }],
+      },
+    ]);
+  });
+
+  it("rejects the ARRAY spellings PG does not take", () => {
+    // ARRAY's bound is required when brackets follow, and there is one at most.
+    expect(() => sqlLite.parse("CREATE TABLE t (a int ARRAY[]);")).toThrow(
+      /Expected an integer array bound but found "\]"/,
+    );
+    expect(() => sqlLite.parse("CREATE TABLE t (a int ARRAY[3][4]);")).toThrow(
+      /Expected one array bound after ARRAY but found "\["/,
+    );
+    expect(() => sqlLite.parse("SELECT x::int ARRAY[3][4];")).toThrow(/Expected one array bound after ARRAY/);
+    // The two spellings do not combine.
+    expect(() => sqlLite.parse("CREATE TABLE t (a int[] ARRAY);")).toThrow(/Expected "," but found "array"/);
+    // An ARRAY constructor is no bound.
+    expect(() => sqlLite.parse("SELECT x::int ARRAY[1, 2];")).toThrow(/Expected "\]" but found ","/);
+  });
+
+  it("records SETOF on the type instead of reading the type as an alias", () => {
+    // `x::setof int` used to cast to a type named `setof`, aliased `int`.
+    expect(firstStmt("SELECT x::setof int FROM t;")).toEqual(
+      sel({
+        columns: [col({ kind: "cast", expr: name("x"), type: ct("int", { setof: true }) })],
+        from: [tableFrom(["t"])],
+      }),
+    );
+    expect(castType("x::setof int[]")).toEqual(ct("int", { array: true, setof: true }));
+    // PG's Typename takes SETOF wherever a type is written; whether it means
+    // anything there is decided after parsing.
+    expect(colType("setof int")).toEqual(ct("int", { setof: true }));
+    // Without a type name after it, `setof` is read as the type name, as it
+    // was before SETOF was recognised — PG rejects that.
+    expect(castType("x::setof")).toEqual(ct("setof"));
+    expect((firstStmt("SELECT x::setof FROM t;") as any).columns).toEqual([
+      col({ kind: "cast", expr: name("x"), type: ct("setof") }),
+    ]);
+    // RETURNS SETOF keeps its own flag, and PG's Typename takes one SETOF only.
+    expect(() => sqlLite.parse("CREATE FUNCTION f() RETURNS SETOF SETOF int LANGUAGE sql AS $$SELECT 1$$;")).toThrow(
+      /Expected a type name but found "setof"/,
+    );
+    // A routine argument too: SETOF is no argument name to PG.
+    expect((firstStmt("CREATE FUNCTION f(setof int) RETURNS int LANGUAGE sql AS $$SELECT 1$$;") as any).args).toEqual([
+      { mode: null, name: null, type: ct("int", { setof: true }), defaultValue: null },
+    ]);
+  });
+
+  it("keeps a quoted keyword type name apart from the keyword", () => {
+    // `"char"` is PG's one-byte internal type; a bare `char` is bpchar.
+    expect(castType(`1::"char"`)).toEqual(ct("char", { quoted: true }));
+    expect(castType("1::char")).toEqual(ct("char"));
+    expect(castType(`1::"int"`)).toEqual(ct("int", { quoted: true }));
+    // Quoting that changes nothing carries no flag: an ordinary name, or a
+    // qualified one, which PG never reads as a keyword spelling.
+    expect(castType(`1::"MyType"`)).toEqual(ct("MyType"));
+    expect(castType(`1::"double"`)).toEqual(ct("double"));
+    expect(castType(`1::"numeric"`)).toEqual(ct("numeric"));
+    expect(castType(`1::"timestamp"`)).toEqual(ct("timestamp"));
+    expect(castType(`1::pg_catalog."char"`)).toEqual(ct("pg_catalog.char"));
+  });
+
+  it("keeps type names and setof unreserved as names, calls and aliases", () => {
+    expect((firstStmt("SELECT jsonb, int4, timestamptz, setof, s.t FROM s;") as any).columns).toEqual([
+      col(name("jsonb")),
+      col(name("int4")),
+      col(name("timestamptz")),
+      col(name("setof")),
+      col(name("s", "t")),
+    ]);
+    expect((firstStmt("SELECT int4(x), jsonb(y), a jsonb, b AS setof FROM t;") as any).columns).toEqual([
+      col({ kind: "call", name: "int4", args: [name("x")] }),
+      col({ kind: "call", name: "jsonb", args: [name("y")] }),
+      col(name("a"), "jsonb"),
+      col(name("b"), "setof"),
+    ]);
+    expect((firstStmt("CREATE TABLE jsonb (int4 int, setof setof);") as any).items).toEqual([
+      { kind: "column", name: "int4", dataType: ct("int"), constraints: [] },
+      { kind: "column", name: "setof", dataType: ct("setof"), constraints: [] },
+    ]);
+    // A string after a name that does not start an operand is not a literal's.
+    expect((firstStmt("SELECT a FROM t WHERE a LIKE b ESCAPE '!';") as any).where).toEqual({
+      kind: "like",
+      expr: name("a"),
+      pattern: name("b"),
+      negated: false,
+      ci: false,
+      escape: str("!"),
+    });
   });
 });
 
@@ -8766,6 +9034,411 @@ describe("SQL-lite object references", () => {
       object: { name: ["transform"] },
       action: { to: "security" },
     });
+  });
+});
+
+// --- policies, publications and subscriptions ---
+
+describe("SQL-lite policies, publications and subscriptions", () => {
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const opt = (optionName: string, value: unknown) => ({ name: optionName, value });
+
+  it("parses CREATE POLICY with every clause, and with none", () => {
+    expect(
+      firstStmt(
+        "CREATE POLICY own_rows ON app.docs AS RESTRICTIVE FOR UPDATE TO app_user, CURRENT_USER, public " +
+          "USING (owner = current_user) WITH CHECK (owner = current_user);",
+      ),
+    ).toEqual({
+      kind: "createPolicy",
+      name: "own_rows",
+      table: ["app", "docs"],
+      as: "restrictive",
+      command: "update",
+      roles: ["app_user", "current_user", "public"],
+      using: exprOf("owner = current_user"),
+      withCheck: exprOf("owner = current_user"),
+    });
+    expect(firstStmt("CREATE POLICY p ON t;")).toEqual({ kind: "createPolicy", name: "p", table: ["t"] });
+    expect(firstStmt("CREATE POLICY p ON t AS PERMISSIVE FOR ALL;")).toEqual({
+      kind: "createPolicy",
+      name: "p",
+      table: ["t"],
+      as: "permissive",
+      command: "all",
+    });
+    // PG compares AS's identifier by its text, so a quoted one counts.
+    expect(firstStmt('CREATE POLICY p ON t AS "permissive";')).toMatchObject({ as: "permissive" });
+    for (const command of ["select", "insert", "delete"]) {
+      expect(firstStmt(`CREATE POLICY p ON t FOR ${command.toUpperCase()} USING (true);`)).toMatchObject({ command });
+    }
+    expect(firstStmt("CREATE POLICY p ON t WITH CHECK (a > 0);")).toEqual({
+      kind: "createPolicy",
+      name: "p",
+      table: ["t"],
+      withCheck: exprOf("a > 0"),
+    });
+  });
+
+  it("parses ALTER POLICY's clauses and RENAME TO, and DROP POLICY", () => {
+    expect(firstStmt("ALTER POLICY p ON s.t TO a, b USING (x) WITH CHECK (y);")).toEqual({
+      kind: "alterPolicy",
+      name: "p",
+      table: ["s", "t"],
+      roles: ["a", "b"],
+      using: name("x"),
+      withCheck: name("y"),
+    });
+    expect(firstStmt("ALTER POLICY p ON t WITH CHECK (y);")).toEqual({
+      kind: "alterPolicy",
+      name: "p",
+      table: ["t"],
+      withCheck: name("y"),
+    });
+    // PG's grammar takes every clause as optional.
+    expect(firstStmt("ALTER POLICY p ON t;")).toEqual({ kind: "alterPolicy", name: "p", table: ["t"] });
+    expect(firstStmt("ALTER POLICY p ON t RENAME TO q;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "policy", name: ["p"], table: ["t"] },
+      action: { kind: "rename", to: "q" },
+    });
+    expect(firstStmt("ALTER POLICY IF EXISTS p ON t RENAME TO q;")).toEqual({
+      kind: "alterObject",
+      ifExists: true,
+      object: { objectType: "policy", name: ["p"], table: ["t"] },
+      action: { kind: "rename", to: "q" },
+    });
+    expect(firstStmt("DROP POLICY IF EXISTS p ON s.t CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "policy",
+      concurrently: false,
+      ifExists: true,
+      names: [["p"]],
+      behavior: "cascade",
+      table: ["s", "t"],
+    });
+    expect(firstStmt("DROP POLICY p ON t;")).toMatchObject({ ifExists: false, behavior: null, table: ["t"] });
+  });
+
+  it("parses CREATE PUBLICATION's object lists and options", () => {
+    expect(firstStmt("CREATE PUBLICATION p;")).toEqual({ kind: "createPublication", name: "p" });
+    expect(
+      firstStmt("CREATE PUBLICATION p FOR ALL TABLES WITH (publish = 'insert', publish_via_partition_root);"),
+    ).toEqual({
+      kind: "createPublication",
+      name: "p",
+      allTables: true,
+      options: [opt("publish", str("insert")), opt("publish_via_partition_root", null)],
+    });
+    expect(
+      firstStmt(
+        "CREATE PUBLICATION p FOR TABLE ONLY s.a (id, email) WHERE (id > 0), b *, TABLES IN SCHEMA s, CURRENT_SCHEMA, TABLE c;",
+      ),
+    ).toEqual({
+      kind: "createPublication",
+      name: "p",
+      objects: [
+        { kind: "table", name: ["s", "a"], only: true, columns: ["id", "email"], where: exprOf("id > 0") },
+        { kind: "table", name: ["b"] },
+        { kind: "tablesInSchema", schema: "s" },
+        { kind: "tablesInSchema", schema: null },
+        { kind: "table", name: ["c"] },
+      ],
+    });
+    // `tables` is a table's name unless IN follows it.
+    expect(firstStmt("CREATE PUBLICATION p FOR TABLE a, tables;").objects).toEqual([
+      { kind: "table", name: ["a"] },
+      { kind: "table", name: ["tables"] },
+    ]);
+    expect(firstStmt("CREATE PUBLICATION p FOR TABLE ONLY (a);").objects).toEqual([
+      { kind: "table", name: ["a"], only: true },
+    ]);
+    // An entry with no lead words may still say ONLY; `tables` is a schema's
+    // name when it continues a schema list.
+    expect(firstStmt("CREATE PUBLICATION p FOR TABLE a, ONLY b, ONLY (c);").objects).toEqual([
+      { kind: "table", name: ["a"] },
+      { kind: "table", name: ["b"], only: true },
+      { kind: "table", name: ["c"], only: true },
+    ]);
+    expect(firstStmt("CREATE PUBLICATION p FOR TABLES IN SCHEMA s, tables;").objects).toEqual([
+      { kind: "tablesInSchema", schema: "s" },
+      { kind: "tablesInSchema", schema: "tables" },
+    ]);
+    // Quoted lead words are names.
+    expect(firstStmt('CREATE PUBLICATION p FOR TABLE a, "table", "tables";').objects).toEqual([
+      { kind: "table", name: ["a"] },
+      { kind: "table", name: ["table"] },
+      { kind: "table", name: ["tables"] },
+    ]);
+    expect(firstStmt('CREATE PUBLICATION p FOR TABLES IN SCHEMA "current_schema";').objects).toEqual([
+      { kind: "tablesInSchema", schema: "current_schema" },
+    ]);
+  });
+
+  it("parses ALTER PUBLICATION's actions, RENAME TO and OWNER TO", () => {
+    const alter = (action: unknown) => ({ kind: "alterPublication", name: "p", action });
+    expect(firstStmt("ALTER PUBLICATION p ADD TABLE ONLY app.customers (id, email) WHERE ((id > 0));")).toEqual(
+      alter({
+        kind: "add",
+        objects: [
+          {
+            kind: "table",
+            name: ["app", "customers"],
+            only: true,
+            columns: ["id", "email"],
+            where: exprOf("(id > 0)"),
+          },
+        ],
+      }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p SET TABLES IN SCHEMA a, b;")).toEqual(
+      alter({
+        kind: "set",
+        objects: [
+          { kind: "tablesInSchema", schema: "a" },
+          { kind: "tablesInSchema", schema: "b" },
+        ],
+      }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p DROP TABLE t, u;")).toEqual(
+      alter({
+        kind: "drop",
+        objects: [
+          { kind: "table", name: ["t"] },
+          { kind: "table", name: ["u"] },
+        ],
+      }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p SET TABLE t (a);")).toEqual(
+      alter({ kind: "set", objects: [{ kind: "table", name: ["t"], columns: ["a"] }] }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p DROP TABLES IN SCHEMA CURRENT_SCHEMA;")).toEqual(
+      alter({ kind: "drop", objects: [{ kind: "tablesInSchema", schema: null }] }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p SET (publish = 'insert, update');")).toEqual(
+      alter({ kind: "setOptions", options: [opt("publish", str("insert, update"))] }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p RENAME TO q;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "publication", name: ["p"] },
+      action: { kind: "rename", to: "q" },
+    });
+    expect(firstStmt("ALTER PUBLICATION p OWNER TO app_owner;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "publication", name: ["p"] },
+      action: { kind: "ownerTo", owner: "app_owner" },
+    });
+  });
+
+  it("parses CREATE and ALTER SUBSCRIPTION", () => {
+    expect(
+      firstStmt("CREATE SUBSCRIPTION s CONNECTION 'host=primary dbname=app' PUBLICATION a, b WITH (enabled = false);"),
+    ).toEqual({
+      kind: "createSubscription",
+      name: "s",
+      connection: "host=primary dbname=app",
+      publications: ["a", "b"],
+      options: [opt("enabled", { kind: "bool", value: false })],
+    });
+    expect(firstStmt("CREATE SUBSCRIPTION s CONNECTION $$host=a$$ PUBLICATION a;")).toMatchObject({
+      connection: "host=a",
+    });
+    expect(firstStmt("CREATE SUBSCRIPTION s CONNECTION E'host=\\x61' PUBLICATION a;")).toMatchObject({
+      connection: "host=a",
+    });
+    expect(firstStmt("CREATE SUBSCRIPTION s CONNECTION '' PUBLICATION a;")).toEqual({
+      kind: "createSubscription",
+      name: "s",
+      connection: "",
+      publications: ["a"],
+    });
+    const alter = (sql: string) => (firstStmt(`ALTER SUBSCRIPTION s ${sql};`) as any).action;
+    expect(firstStmt("ALTER SUBSCRIPTION s ENABLE;")).toEqual({
+      kind: "alterSubscription",
+      name: "s",
+      action: { kind: "enable" },
+    });
+    expect(alter("DISABLE")).toEqual({ kind: "disable" });
+    expect(alter("CONNECTION 'host=b'")).toEqual({ kind: "connection", connection: "host=b" });
+    expect(alter("SET PUBLICATION a, b WITH (refresh = false)")).toEqual({
+      kind: "setPublication",
+      publications: ["a", "b"],
+      options: [opt("refresh", { kind: "bool", value: false })],
+    });
+    expect(alter("ADD PUBLICATION a")).toEqual({ kind: "addPublication", publications: ["a"] });
+    expect(alter("ADD PUBLICATION a WITH (refresh = true)")).toEqual({
+      kind: "addPublication",
+      publications: ["a"],
+      options: [opt("refresh", { kind: "bool", value: true })],
+    });
+    expect(alter("SET PUBLICATION a")).toEqual({ kind: "setPublication", publications: ["a"] });
+    expect(alter("DROP PUBLICATION a, b")).toEqual({ kind: "dropPublication", publications: ["a", "b"] });
+    expect(alter("REFRESH PUBLICATION")).toEqual({ kind: "refreshPublication" });
+    expect(alter("REFRESH PUBLICATION WITH (copy_data = false)")).toEqual({
+      kind: "refreshPublication",
+      options: [opt("copy_data", { kind: "bool", value: false })],
+    });
+    expect(alter("SET (slot_name = NONE, synchronous_commit = off)")).toEqual({
+      kind: "setOptions",
+      options: [
+        opt("slot_name", { kind: "name", parts: ["none"] }),
+        opt("synchronous_commit", { kind: "name", parts: ["off"] }),
+      ],
+    });
+    expect(alter("SKIP (lsn = '0/14C0378')")).toEqual({ kind: "skip", options: [opt("lsn", str("0/14C0378"))] });
+    expect(firstStmt("ALTER SUBSCRIPTION s RENAME TO t;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "subscription", name: ["s"] },
+      action: { kind: "rename", to: "t" },
+    });
+    expect(firstStmt("ALTER SUBSCRIPTION s OWNER TO SESSION_USER;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "subscription", name: ["s"] },
+      action: { kind: "ownerTo", owner: "session_user" },
+    });
+  });
+
+  it("parses DROP PUBLICATION and DROP SUBSCRIPTION", () => {
+    expect(firstStmt("DROP SUBSCRIPTION s;")).toMatchObject({ ifExists: false, names: [["s"]], behavior: null });
+    expect(firstStmt("DROP PUBLICATION IF EXISTS a, b RESTRICT;")).toEqual({
+      kind: "drop",
+      objectType: "publication",
+      concurrently: false,
+      ifExists: true,
+      names: [["a"], ["b"]],
+      behavior: "restrict",
+    });
+    expect(firstStmt("DROP SUBSCRIPTION IF EXISTS s CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "subscription",
+      concurrently: false,
+      ifExists: true,
+      names: [["s"]],
+      behavior: "cascade",
+    });
+  });
+
+  it("still parses COMMENT ON, SECURITY LABEL and ALTER EXTENSION members for the three kinds", () => {
+    expect(firstStmt("ALTER EXTENSION e ADD PUBLICATION p;")).toEqual({
+      kind: "alterExtension",
+      name: "e",
+      action: { kind: "add", object: { objectType: "publication", name: ["p"] } },
+    });
+    expect(firstStmt("ALTER EXTENSION e DROP SUBSCRIPTION s;")).toEqual({
+      kind: "alterExtension",
+      name: "e",
+      action: { kind: "drop", object: { objectType: "subscription", name: ["s"] } },
+    });
+    expect(firstStmt("COMMENT ON POLICY p ON s.t IS 'c';")).toEqual({
+      kind: "comment",
+      objectType: "policy",
+      name: ["p"],
+      table: ["s", "t"],
+      comment: "c",
+    });
+    for (const kind of ["publication", "subscription"]) {
+      expect(firstStmt(`COMMENT ON ${kind.toUpperCase()} x IS 'c';`)).toEqual({
+        kind: "comment",
+        objectType: kind,
+        name: ["x"],
+        comment: "c",
+      });
+      expect(firstStmt(`SECURITY LABEL ON ${kind.toUpperCase()} x IS 'l';`)).toMatchObject({ objectType: kind });
+    }
+  });
+
+  it("rejects what PostgreSQL's grammar rejects", () => {
+    expect(bad("CREATE POLICY p ON t AS OTHER;")).toThrow(/Expected "permissive" or "restrictive" but found "other"/);
+    expect(bad("CREATE POLICY p ON t FOR TRUNCATE;")).toThrow(
+      /Expected "all", "select", "insert", "update" or "delete" but found "truncate"/,
+    );
+    expect(bad("CREATE POLICY p ON t USING x;")).toThrow(/Expected "\(" but found "x"/);
+    expect(bad("CREATE POLICY p ON t WITH (x);")).toThrow(/Expected "check" but found "\("/);
+    // The clauses come in PG's fixed order.
+    expect(bad("CREATE POLICY p ON t USING (x) TO r;")).toThrow(/Expected ";" but found "to"/);
+    expect(bad("CREATE POLICY p ON t FOR ALL AS PERMISSIVE;")).toThrow(/Expected ";" but found "as"/);
+    expect(bad("CREATE POLICY p;")).toThrow(/Expected "on" but found ";"/);
+    expect(bad("ALTER POLICY p ON t AS RESTRICTIVE;")).toThrow(/Expected ";" but found "as"/);
+    expect(bad("ALTER POLICY p ON t RENAME q;")).toThrow(/Expected "to" but found "q"/);
+    expect(bad("ALTER POLICY IF EXISTS p ON t TO r;")).toThrow(/Expected "rename" but found "to"/);
+    expect(bad("ALTER POLICY p ON t OWNER TO r;")).toThrow(/Expected ";" but found "owner"/);
+    expect(bad("ALTER POLICY p ON t SET SCHEMA s;")).toThrow(/Expected ";" but found "set"/);
+    expect(bad('CREATE POLICY p ON t AS "PERMISSIVE";')).toThrow(/Expected "permissive" or "restrictive"/);
+    expect(bad('CREATE POLICY p ON t FOR "select";')).toThrow(/Expected "all", "select"/);
+    expect(bad("DROP POLICY p;")).toThrow(/Expected "on" but found ";"/);
+    // The first object must say TABLE or TABLES IN SCHEMA.
+    expect(bad("CREATE PUBLICATION p FOR t;")).toThrow(/Expected "all", "table" or "tables" but found "t"/);
+    expect(bad("CREATE PUBLICATION p FOR ALL t;")).toThrow(/Expected "tables" but found "t"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLES s;")).toThrow(/Expected "in" but found "s"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE t WHERE id > 0;")).toThrow(/Expected "\(" but found "id"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE CURRENT_SCHEMA;")).toThrow(/Expected a name but found "current_schema"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE t ();")).toThrow(/Expected a name but found "\)" \(1:34\)/);
+    expect(bad("ALTER PUBLICATION p ADD TABLE t ();")).toThrow(/Expected a name but found "\)"/);
+    expect(bad("CREATE PUBLICATION p FOR ALL TABLES, TABLE t;")).toThrow(/Expected ";" but found ","/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE ONLY current_schema;")).toThrow(/found "current_schema" \(1:36\)/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE a, ONLY (current_schema);")).toThrow(/found "current_schema"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLES IN SCHEMA s WHERE (x);")).toThrow(/Expected ";" but found "where"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE a, CURRENT_SCHEMA;")).toThrow(
+      /Expected a name but found "current_schema"/,
+    );
+    // A schema takes no column list, no WHERE and no qualifier.
+    expect(bad("CREATE PUBLICATION p FOR TABLES IN SCHEMA s (a);")).toThrow(/Expected ";" but found "\("/);
+    expect(bad("CREATE PUBLICATION p FOR TABLES IN SCHEMA s, x.y;")).toThrow(/Expected ";" but found "\."/);
+    expect(bad("ALTER PUBLICATION p ADD t;")).toThrow(/Expected "table" or "tables" but found "t"/);
+    expect(bad("ALTER PUBLICATION p SET t;")).toThrow(/Expected "\(", "table" or "tables" but found "t"/);
+    expect(bad("ALTER PUBLICATION p ENABLE;")).toThrow(
+      /Expected "add", "set", "drop", "rename" or "owner" but found "enable"/,
+    );
+    expect(bad("ALTER PUBLICATION p SET SCHEMA s;")).toThrow(/Expected "\(", "table" or "tables" but found "schema"/);
+    expect(bad("CREATE SUBSCRIPTION s PUBLICATION a;")).toThrow(/Expected "connection" but found "publication"/);
+    expect(bad("CREATE SUBSCRIPTION s CONNECTION conn PUBLICATION a;")).toThrow(/Expected a string but found "conn"/);
+    expect(bad("CREATE SUBSCRIPTION s CONNECTION 'c';")).toThrow(/Expected "publication" but found ";"/);
+    expect(bad("ALTER SUBSCRIPTION s SET a;")).toThrow(/Expected "\(" or "publication" but found "a"/);
+    expect(bad("ALTER SUBSCRIPTION s ADD a;")).toThrow(/Expected "publication" but found "a"/);
+    expect(bad("ALTER SUBSCRIPTION s REFRESH;")).toThrow(/Expected "publication" but found ";"/);
+    expect(bad("ALTER SUBSCRIPTION s SKIP lsn;")).toThrow(/Expected "\(" but found "lsn"/);
+    expect(bad("ALTER SUBSCRIPTION s SET SCHEMA x;")).toThrow(/Expected "\(" or "publication" but found "schema"/);
+    expect(bad("ALTER SUBSCRIPTION s;")).toThrow(/Expected "connection", "set", [^\n]*"owner" but found ";"/);
+    expect(bad("DROP SUBSCRIPTION a, b;")).toThrow(/Expected ";" but found ","/);
+  });
+
+  it("keeps the policy, publication and subscription words unreserved as names and aliases", () => {
+    const words = [
+      "policy permissive restrictive publication subscription connection refresh skip enable disable tables",
+      "current_schema",
+    ]
+      .join(" ")
+      .split(" ");
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS policy, 2 publication FROM subscription AS refresh;")).toMatchObject({
+      columns: [{ alias: "policy" }, { alias: "publication" }],
+      from: [{ name: ["subscription"], alias: "refresh" }],
+    });
+    expect(firstStmt("CREATE TABLE policy (permissive int, restrictive int, skip int, tables int);")).toMatchObject({
+      name: ["policy"],
+    });
+    // …and as the names of the objects themselves.
+    expect(firstStmt("CREATE POLICY policy ON restrictive TO permissive;")).toMatchObject({
+      name: "policy",
+      table: ["restrictive"],
+      roles: ["permissive"],
+    });
+    expect(firstStmt("CREATE PUBLICATION publication FOR TABLE subscription, tables;")).toMatchObject({
+      name: "publication",
+      objects: [{ name: ["subscription"] }, { name: ["tables"] }],
+    });
+    expect(firstStmt("CREATE SUBSCRIPTION connection CONNECTION 'c' PUBLICATION publication, refresh;")).toMatchObject({
+      name: "connection",
+      publications: ["publication", "refresh"],
+    });
+    expect(firstStmt("ALTER SUBSCRIPTION enable DISABLE;")).toMatchObject({ name: "enable" });
+    // A policy called `if` is no IF EXISTS.
+    expect(firstStmt("ALTER POLICY if ON t RENAME TO x;")).toMatchObject({ object: { name: ["if"] } });
+    expect(firstStmt("ALTER POLICY if ON t TO r;")).toMatchObject({ name: "if", roles: ["r"] });
+    expect(firstStmt("DROP POLICY if ON t;")).toMatchObject({ ifExists: false, names: [["if"]] });
+    expect(firstStmt("DROP PUBLICATION skip;")).toMatchObject({ names: [["skip"]] });
   });
 });
 
