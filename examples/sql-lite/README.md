@@ -17,7 +17,7 @@ const ast = sqlLite.parse("SELECT id, count(DISTINCT tag) FROM posts WHERE creat
 // → Stmt[]: one node per statement, every node carrying a { start, end } span
 ```
 
-The root is a list of statements, and **every statement needs its terminating `;`**. Unquoted identifiers fold to lower case, quoted ones keep their case, and keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is; they are not kept in the AST. The node types are exported from `grammar.ts` (`Stmt`, `Query`, `Expr`, …).
+The root is a list of statements, and **every statement needs its terminating `;`**. Unquoted identifiers fold to lower case, quoted ones keep their case, and keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is (except around a `U&'…'` literal's `UESCAPE` clause; see [Not yet supported](#not-yet-supported)); they are not kept in the AST. The node types are exported from `grammar.ts` (`Stmt`, `Query`, `Expr`, …).
 
 `parse` throws a `ParseError` at the first problem:
 
@@ -38,15 +38,17 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 | File | What it is |
 |---|---|
-| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, `U&"…"` identifiers, PostgreSQL numbers (`1e5`, `.5`, `0xff`, `1_000`), `$1` parameters, comments, and the operator reader. `sqlLexer` emits `comment` tokens; `sqlParseLexer`, which the grammar uses, drops them |
+| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, PostgreSQL numbers (`1e5`, `.5`, `5.`, `0xff`, `0o17`, `0b101`, `1_000`, with PostgreSQL 15+'s rejection of `123abc`), `$1` parameters, comments, and the operator reader. `sqlLexer` emits `comment` tokens; `sqlParseLexer`, which the grammar uses, drops them |
 | `grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, and one rule per statement |
 | `index.ts` | Re-exports both |
 | `sql-lite.test.ts` | Unit tests, one `describe` per feature |
 | `corpus.ts` | The statements the benchmark measures and the parity golden pins |
 | `parity.test.ts` + `parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus a supplemental list |
 | `pg-coverage.ts` + `pg-coverage.test.ts` | The PostgreSQL coverage battery: 599 statements with the bucket each one lands in |
+| `pg-dump-corpus.ts` + `pg-dump-corpus.test.ts` | The pg_dump corpus: whether each statement of the dumps in `fixtures/pg-dump/` parses |
+| `psql-split.ts` | A test helper that splits a dump file into statements the way psql does |
 | `sql-lite.bench.ts` | Throughput over the corpus, per category |
-| `sql-lite.large.bench.ts` | Throughput on 64 KB / 256 KB / 1 MB multi-statement files |
+| `sql-lite.large.bench.ts` | Throughput on 64 KB / 256 KB / 1 MB multi-statement files, and on the pagila schema dump |
 | `sql-lite.workloads.bench.ts` | Throughput on real-world workloads |
 
 ## PostgreSQL coverage
@@ -55,8 +57,8 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 - **Queries.** `SELECT` with `DISTINCT [ON]`, every join type (`NATURAL`, `USING [AS alias]`, `LATERAL`, parenthesised and right-nested joins), subqueries and derived tables, `ONLY` and the inheritance `*`, alias column lists, column definition lists for record-returning functions, `TABLESAMPLE … REPEATABLE`, `ROWS FROM (…)` and `WITH ORDINALITY`. Also: `GROUP BY [DISTINCT | ALL]` with `ROLLUP` / `CUBE` / `GROUPING SETS`, `HAVING`, `WINDOW`, `ORDER BY … USING` and `NULLS FIRST/LAST`, `LIMIT` / `OFFSET` / `FETCH FIRST … ROWS ONLY | WITH TIES`, every locking clause (`FOR [NO KEY] UPDATE`, `FOR [KEY] SHARE`, `OF`, `NOWAIT`, `SKIP LOCKED`), `UNION` / `INTERSECT` / `EXCEPT [ALL]`, standalone `VALUES`, `SELECT INTO`. CTEs can be `RECURSIVE`, `[NOT] MATERIALIZED`, use `SEARCH` and `CYCLE`, and be data-modifying.
 - **Expressions.** The full operator precedence table: arithmetic, bitwise, `||`, comparison, `LIKE` / `ILIKE` / `SIMILAR TO` with `ESCAPE`, regex `~` operators, `IS [NOT] DISTINCT FROM`, `IS [NOT] NULL / TRUE / UNKNOWN`, `IS JSON [OBJECT | ARRAY | SCALAR] [WITH UNIQUE KEYS]`, `BETWEEN [SYMMETRIC]`, `IN`, `ANY` / `SOME` / `ALL`, `EXISTS`, `OVERLAPS`, `AT TIME ZONE`, `COLLATE`. JSON and jsonpath operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`, `?&`, `@?`, `@@`, `#-`), `::` casts and `CAST`, `CASE`, `ROW(…)`, `ARRAY[…]`, subscripts and slices. Special-syntax functions: `EXTRACT`, `POSITION`, `SUBSTRING … FROM … FOR`, `TRIM`, `OVERLAY`, the niladic `CURRENT_DATE` / `CURRENT_TIMESTAMP(p)` / `LOCALTIME` / `CURRENT_USER` family. Aggregate modifiers: `DISTINCT`, `ORDER BY` inside the call, `FILTER (WHERE …)`, `WITHIN GROUP`, `=>` named arguments, `OVER` with `ROWS` / `RANGE` / `GROUPS` frames and `EXCLUDE`.
-- **Types and literals.** Multi-word types (`double precision`, `character varying(n)`, `timestamp(p) with time zone`, `bit varying`, `interval day to second`), array types, schema-qualified types, typed literals (`DATE '…'`, `TIMESTAMP '…'`, `INTERVAL '…' HOUR TO MINUTE`), dollar-quoted strings, `E'…'` strings with every escape PostgreSQL decodes, string constants continued across a line break, bit / hex / Unicode-escape strings and `U&"…"` identifiers with `UESCAPE`.
-- **DML.** `INSERT` with `DEFAULT VALUES`, `DEFAULT` row items, `OVERRIDING`, `ON CONFLICT (cols) | ON CONSTRAINT … DO NOTHING | DO UPDATE … WHERE`, a target alias, and `RETURNING`. `UPDATE … FROM` with multi-column `(a, b) = (…)` / `= (SELECT …)` assignments. `DELETE … USING`. `MERGE` with every `WHEN [NOT] MATCHED [BY SOURCE | TARGET]` form, plus `RETURNING`. `COPY` to and from a file, `STDIN` / `STDOUT` or a `PROGRAM`, with a parenthesised option list and `WHERE`. `TRUNCATE`.
+- **Types and literals.** Multi-word types (`double precision`, `character varying(n)`, `timestamp(p) with time zone`, `bit varying`, `interval day to second`), array types, schema-qualified types, typed literals (`DATE '…'`, `TIMESTAMP '…'`, `INTERVAL '…' HOUR TO MINUTE`), dollar-quoted strings, bit / hex / Unicode-escape strings with `UESCAPE`.
+- **DML.** `INSERT` with `DEFAULT VALUES`, `DEFAULT` row items, `OVERRIDING`, `ON CONFLICT (cols) | ON CONSTRAINT … DO NOTHING | DO UPDATE … WHERE`, a target alias, and `RETURNING`. `UPDATE … FROM` with multi-column `(a, b) = (…)` / `= (SELECT …)` assignments. `SET col = DEFAULT` (also in `ON CONFLICT DO UPDATE` and `MERGE … UPDATE SET`). `DELETE … USING`. `UPDATE` / `DELETE` with `WHERE CURRENT OF cursor`. `MERGE` with every `WHEN [NOT] MATCHED [BY SOURCE | TARGET]` form, plus `RETURNING`. `COPY` to and from a file, `STDIN` / `STDOUT` or a `PROGRAM`, with a parenthesised option list and `WHERE`. `TRUNCATE` with `RESTART | CONTINUE IDENTITY` and `CASCADE | RESTRICT`. `UPDATE`, `DELETE` and `TRUNCATE` take `ONLY` / `name *` targets.
 - **DDL.**
   - **`CREATE TABLE`:** column and table constraints, identity and stored generated columns, `COLLATE`, foreign-key actions / `MATCH` / `DEFERRABLE`, `EXCLUDE`, `LIKE … INCLUDING`, `INHERITS`, range / list / hash partitioning and `PARTITION OF … FOR VALUES`, `WITH (…)`, `TABLESPACE`, `ON COMMIT`, `TEMP` / `UNLOGGED`, `AS SELECT … WITH [NO] DATA`.
   - **`ALTER TABLE`:** action lists that add or drop columns and constraints, `ALTER COLUMN` type / default / not-null, renames, `SET SCHEMA`, `OWNER TO`, triggers, `ATTACH` / `DETACH PARTITION`, storage parameters, `REPLICA IDENTITY`, `CLUSTER ON`.
@@ -74,21 +76,41 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 |---|---:|---:|---:|---:|---:|
 | Queries | 93 | 59 | 32 | 1 | 1 |
 | Expressions | 87 | 47 | 21 | 4 | 15 |
-| Types and lexical | 34 | 19 | 11 | 1 | 3 |
-| DML | 77 | 32 | 35 | 6 | 4 |
+| Types and lexical | 34 | 18 | 12 | 2 | 2 |
+| DML | 77 | 37 | 37 | 1 | 2 |
 | Transactions and session | 70 | 17 | 33 | 0 | 20 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **212** | **236** | **17** | **134** |
+| **Total** | **599** | **216** | **239** | **13** | **131** |
 
-So sql-lite accepts 448 of the 599 statements (75%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 455 of the 599 statements (76%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
 ```sh
 PG_COVERAGE_REPORT=1 pnpm vitest run examples/sql-lite/pg-coverage.test.ts
+```
+
+### pg_dump corpus
+
+`pg-dump-corpus.test.ts` runs real pg_dump output through `sqlLite.parse`, one statement at a time. `psql-split.ts` splits each file the way psql does: it respects strings, dollar quotes and `BEGIN ATOMIC` bodies, and it sets aside `COPY … FROM stdin` data blocks and `\` meta-command lines (`\connect`, `\restrict`, …), which are counted rather than parsed. Every statement's outcome is pinned in `pg-dump-corpus.ts`, so a statement that starts or stops parsing fails the test. The dumps live in `fixtures/pg-dump/`:
+
+- `pagila-schema.sql` is the [pagila](https://github.com/devrimgunduz/pagila) sample database's schema (pg_dump 15beta2 of a 12.11 server), vendored unmodified under the PostgreSQL License (`pagila-LICENSE.txt`).
+- `handwritten-pg17.sql` is written by hand in the shape pg_dumpall/pg_dump 17.6 produce. It covers what the sample dump lacks: `\restrict`, roles, row-level security and policies, default privileges, publications, identity columns, `ALTER INDEX … ATTACH PARTITION`, `BEGIN ATOMIC` bodies and COPY blocks.
+
+| File | Statements | Parse | Rate | COPY blocks | Meta-commands |
+|---|---:|---:|---:|---:|---:|
+| `handwritten-pg17.sql` | 110 | 63 | 57.3% | 4 | 7 |
+| `pagila-schema.sql` | 388 | 208 | 53.6% | 0 | 0 |
+| **Total** | **498** | **271** | **54.4%** | **4** | **7** |
+
+To print the table, or to rewrite `pg-dump-corpus.ts` after a grammar change (review the diff: no row may move to `fail`):
+
+```sh
+PG_DUMP_CORPUS_REPORT=1 pnpm vitest run examples/sql-lite/pg-dump-corpus.test.ts
+PG_DUMP_CORPUS_WRITE=1 pnpm vitest run examples/sql-lite/pg-dump-corpus.test.ts
 ```
 
 ### Not yet supported
@@ -97,9 +119,9 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 
 **Lexical**
 
-- Numbers with a trailing dot (`5.`, `1.e3`).
-- National character strings (`N'…'`).
-- Non-ASCII characters in unquoted identifiers (`SELECT café FROM t`). Quoted, they work.
+- String constants continued across a line break (`'foo'` newline `'bar'`).
+- A comment between a `U&'…'` literal and its `UESCAPE` clause, or inside that clause (`U&'…' /* c */ UESCAPE '!'`, `U&'…' UESCAPE /* c */ '!'`).
+- `U&"…"` Unicode-escaped identifiers. These parse, but into the wrong tree (see below).
 
 **Statements**
 
@@ -118,7 +140,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 **Clauses**
 
 - **`DEFAULT <expr>` followed by `NOT NULL`**, as in `id integer DEFAULT nextval('s'::regclass) NOT NULL`. pg_dump emits this for nearly every table. `DEFAULT` takes a full expression, so the `NOT` is read as the start of `NOT LIKE` / `NOT IN`. (Other constraints after `DEFAULT` work.)
-- **`ONLY`** on `ALTER TABLE`, `UPDATE`, `DELETE`, `TRUNCATE` and `CREATE INDEX … ON ONLY`. pg_dump emits `ALTER TABLE ONLY`. `SELECT … FROM ONLY`, `MERGE INTO ONLY` and `LOCK ONLY` work.
+- **`ONLY`** on `ALTER TABLE` and `CREATE INDEX … ON ONLY`. pg_dump emits `ALTER TABLE ONLY`. `SELECT … FROM ONLY`, `UPDATE ONLY`, `DELETE FROM ONLY`, `TRUNCATE ONLY`, `MERGE INTO ONLY` and `LOCK ONLY` work.
 - **`ALTER TABLE`:**
   - `ADD CONSTRAINT … NOT VALID`
   - `[ENABLE | DISABLE | FORCE | NO FORCE] ROW LEVEL SECURITY`
@@ -138,8 +160,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - **Other `CREATE TABLE` options:** `COMPRESSION` / `STORAGE` on a column, typed tables (`OF type`), `USING heap`, `WITHOUT OIDS`, `CREATE TABLE … AS TABLE` / `AS EXECUTE`.
 - `TABLESPACE` on `CREATE INDEX` and `CREATE MATERIALIZED VIEW` (`CREATE TABLE … TABLESPACE` works).
 - **`ON CONFLICT` targets that aren't plain columns:** expressions, a partial-index `WHERE`, or `COLLATE`.
-- **`UPDATE` targets:** `SET col = DEFAULT` (the multi-column form accepts `DEFAULT`), and subscript or field targets (`SET arr[1] = …`).
-- `WHERE CURRENT OF cursor` on `UPDATE` and `DELETE`.
+- **`UPDATE` targets:** subscript or field targets (`SET arr[1] = …`), and a parenthesised `SET col = (DEFAULT)`.
 - Legacy `COPY` options without parentheses (`COPY t FROM STDIN CSV HEADER`).
 - `GRANT` / `REVOKE … ON FUNCTION f(argtypes)`. It works without the argument list. Also missing: `GRANTED BY`, and the PostgreSQL 16 `WITH INHERIT / SET` role options.
 - **Routine bodies and triggers:** SQL-standard function bodies (`RETURN expr`, `BEGIN ATOMIC … END`), trigger `REFERENCING OLD / NEW TABLE`, `CREATE CONSTRAINT TRIGGER`.
@@ -170,8 +191,10 @@ These statements parse without error, but the tree they produce is wrong:
 
 - **`WITH TIES` is dropped.** `FETCH FIRST 3 ROWS WITH TIES` yields the same `limit` as `FETCH FIRST 3 ROWS ONLY`.
 - **`SELECT a ISNULL FROM t` reads `isnull` as a column alias.** PostgreSQL reads it as the null test.
+- **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
+- **Some `E'…'` escapes are left undecoded.** The backslash is dropped and the rest kept as text: `E'\x41'` gives `x41`, `E'\101'` gives `101`, and `E'\u0041'` gives `u0041`, where PostgreSQL gives `A` for all three. `\n`, `\t` and `\'` are decoded.
 - **`DEFAULT 'x' COLLATE "C"` folds the collation into the default expression** instead of applying it to the column.
-- **Numeric literals become JavaScript numbers,** so integers beyond 2^53 lose precision (`12345678901234567890`).
+- **Numbers below 2^53 in magnitude keep only double precision.** `0.1000000000000000055511151231257827` rounds, and an underflow such as `1e-400` reads as `0`. A number whose magnitude reaches 2^53 (every such double is a whole number), or that overflows to infinity, keeps its exact text in the node's `raw` field.
 
 ### Accepted, but PostgreSQL rejects
 
@@ -183,8 +206,9 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **Empty lists:** `IN ()`, `USING ()`, `VALUES ()`.
 - **Subscripting a call without parentheses:** `f(x)[1]`. PostgreSQL requires `(f(x))[1]`.
 - **Impossible type modifiers and interval ranges:** `x::int(4)`, `interval '1' DAY TO YEAR`.
-- **Junk after a number:** `SELECT 123abc` reads as `123 AS abc`. PostgreSQL 15+ rejects it.
-- **`UESCAPE` with no string after it:** `SELECT U&'x' uescape FROM t` reads `uescape` as an alias. PostgreSQL requires a string literal after `UESCAPE`.
+- **A whole-valued float where PostgreSQL wants an integer constant:** `MODULUS 4.0` or `MODULUS 4.` in a hash partition bound, `int[5.]`.
+- **The zero-length identifier `""`.**
+- **Named parameters** such as `$name`. PostgreSQL only has positional ones (`$1`); sql-lite keeps `$name` for templated SQL.
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.
@@ -228,7 +252,7 @@ The bulk `INSERT` is the one workload where node-sql-parser wins. Nearly all of 
 | 256 KB file (6,889 statements) | 3.01 | 0.97 | 3.09× |
 | 1 MB file (27,557 statements) | 0.73 | 0.25 | 2.98× |
 
-"Relative" is sql-lite's speed-up over node-sql-parser.
+"Relative" is sql-lite's speed-up over node-sql-parser. `sql-lite.large.bench.ts` also has a sql-lite-only group that parses the pagila schema dump statement by statement, unsupported statements included. node-sql-parser rejects most pg_dump DDL, so there is no comparison.
 
 ### Methodology
 
@@ -256,3 +280,4 @@ The repo-wide workflow is in [CONTRIBUTING.md](../../CONTRIBUTING.md). Specific 
 - **Prove new keywords stay unreserved.** PostgreSQL leaves most keywords usable as names, and so does this grammar: only the words in `RESERVED` are refused as bare names. Every feature that matches a new word by value comes with a "keeps … unreserved as names and aliases" test showing the word still works as a column, table and alias (for example `SELECT rows, ordinality FROM t AS rows;`). Don't add to `RESERVED` to make a parse work.
 - **Pin observable output in the parity golden.** `parity.test.ts` serialises the full AST, spans included, for every `corpus.ts` row and its own `SUPPLEMENTAL` / `MULTI_LINE` / `LEXER_EDGE_CASES` lists, plus `diagnose()` output for `MALFORMED`. New node shapes go in `SUPPLEMENTAL`, not `corpus.ts`: the benchmark's group names count the corpus's shared rows, `bench-baseline.json` keys on those names, and a new `pg: true` corpus row renames them, which silently disconnects `pnpm bench:compare`. When output is *meant* to move, regenerate with `pnpm test -- -u` (the `--` matters) and call the diff out in review. Never regenerate to make a refactor pass.
 - **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README. Update the "Not yet supported", "Known wrong ASTs" and "Accepted, but PostgreSQL rejects" lists too, and add any input that stops parsing to "Behaviour changes": they aren't pinned by any test.
+- **Update the pg_dump corpus.** If a change makes a dump statement parse (or stop parsing), `pg-dump-corpus.test.ts` fails the same way. Regenerate `pg-dump-corpus.ts` with `PG_DUMP_CORPUS_WRITE=1`, check that no row moved to `fail`, and update the [pg_dump corpus](#pg_dump-corpus) table from `PG_DUMP_CORPUS_REPORT=1`.

@@ -39,9 +39,12 @@ export type SqlTokenType =
 // `g`/`y` flag — every consumer calls `.test()`, which is stateless without one
 // and would otherwise desync through `lastIndex`.
 const WHITESPACE = /[ \t\r\n\f\v]/;
+// The decimal and octal tests run once per character of every number, so they
+// compare characters rather than run a RegExp.
+const isDecDigit = (char: string) => char >= "0" && char <= "9";
 const isHexDigit = (char: string) => /[0-9A-Fa-f]/.test(char);
-const isBinaryDigit = (char: string) => /[01]/.test(char);
 const isOctalDigit = (char: string) => char >= "0" && char <= "7";
+const isBinaryDigit = (char: string) => /[01]/.test(char);
 const isSpace = (char: string) => WHITESPACE.test(char);
 const isNewline = (char: string) => char === "\n" || char === "\r";
 
@@ -546,6 +549,161 @@ const blockCommentReader: Reader<SqlTokenType> = readers.custom("comment", {
   },
 });
 
+// --- numbers and parameters, as PG 17's scan.l reads them ---
+// PG's identifier classes: what may start an identifier, and what may continue
+// one. Every byte from 0x80 up is an identifier character there, which is why
+// the junk check below fires on any non-ASCII character too.
+// Both run after every number, so they compare characters too.
+const isIdentStart = (char: string) =>
+  (char >= "a" && char <= "z") || (char >= "A" && char <= "Z") || char === "_" || char >= "\u0080";
+const isIdentCont = (char: string) => isIdentStart(char) || isDecDigit(char) || char === "$";
+const RADIX_DIGITS: Readonly<Record<string, { isDigit: (char: string) => boolean; invalid: string }>> = {
+  x: { isDigit: isHexDigit, invalid: "Invalid hexadecimal integer" },
+  o: { isDigit: isOctalDigit, invalid: "Invalid octal integer" },
+  b: { isDigit: isBinaryDigit, invalid: "Invalid binary integer" },
+};
+
+// PG's `{decinteger}`-shaped runs: a digit, then digits each optionally preceded
+// by one `_` (PG 16+). With `leadingUnderscore`, the first digit may carry one
+// too — the `0x_ff` shape of the radix forms. The `_`s are dropped from the
+// returned text so `Number(value)` decodes it; the raw spelling stays in the
+// span. A `_` with no digit after it is left unread, for the caller's junk
+// check to reject (`1_`, `1__2`). Each `_` lookahead is a self-contained
+// snapshot/reload, so callers must not hold a snapshot across this call.
+const readDigits = (stream: InputStream, isDigit: (char: string) => boolean, leadingUnderscore = false): string => {
+  let out = "";
+  while (!stream.eof()) {
+    const char = stream.peek();
+    if (isDigit(char)) {
+      out += stream.next();
+    } else if (char === "_" && (out !== "" || leadingUnderscore)) {
+      stream.snapshot();
+      stream.next();
+      if (isDigit(stream.peek())) continue;
+      stream.reload();
+      break;
+    } else {
+      break;
+    }
+    leadingUnderscore = false;
+  }
+  return out;
+};
+
+// `{decinteger}{identifier}` and its numeric/real/param siblings: PG 15+ rejects
+// an identifier character glued to a number instead of reading `123abc` as
+// `123 AS abc`. `croakJunk` consumes the rest of the word first, so the error
+// spans it and the lexer resumes after it; `rejectJunk` does so only when an
+// identifier actually starts at the cursor.
+const croakJunk = (stream: InputStream, tokenStart: Position, message: string): never => {
+  while (isIdentCont(stream.peek())) stream.next();
+  return stream.croak(message, tokenStart, stream.position());
+};
+const rejectJunk = (stream: InputStream, tokenStart: Position, message: string): void => {
+  if (isIdentStart(stream.peek())) croakJunk(stream, tokenStart, message);
+};
+
+// Integers (decimal, `0x`/`0o`/`0b`), `1.5`, `5.`, `.5`, `1e3`, `1.e3`. The
+// core number reader leaves `5.` as `5` `.` and `123abc` as two tokens, both
+// unlike PG, so sql-lite reads its own. It declines (null, stream restored)
+// only for a `.` with no digit after it; past that it produces a number or
+// croaks. Its lookaheads each take and release the single snapshot slot in
+// turn, never nested.
+const numberReader: Reader<SqlTokenType> = readers.custom("number", {
+  startsWith: "0123456789.",
+  display: "a number",
+  read: (stream) => {
+    const tokenStart = stream.position();
+    if (stream.peek() === ".") {
+      // `.` begins a number only when a digit follows (`.5`, not `a.b`).
+      stream.snapshot();
+      stream.next();
+      const digit = isDecDigit(stream.peek());
+      stream.reload();
+      if (!digit) return null;
+    }
+    const junk = "Trailing junk after numeric literal";
+    let value = readDigits(stream, isDecDigit);
+
+    // `0x…`/`0o…`/`0b…`. Only a lone leading `0` takes a radix marker: `00x1`
+    // is `00` followed by junk, as it is in PG.
+    const radix = value === "0" ? RADIX_DIGITS[stream.peek().toLowerCase()] : undefined;
+    if (radix !== undefined) {
+      const marker = stream.next();
+      const digits = readDigits(stream, radix.isDigit, true);
+      if (digits === "") {
+        // PG's `{hexfail}` (`0x`, `0x_`) wins a tie with `{integer_junk}`, but
+        // a longer word after the marker is junk.
+        if (stream.peek() === "_") stream.next();
+        if (isIdentCont(stream.peek())) croakJunk(stream, tokenStart, junk);
+        stream.croak(radix.invalid, tokenStart, stream.position());
+      }
+      // Any identifier character continues `{integer_junk}` (`0x1g`, `0b12`,
+      // `0x1$`), since that pattern's identifier starts at the marker.
+      if (isIdentCont(stream.peek())) croakJunk(stream, tokenStart, junk);
+      return value + marker + digits;
+    }
+
+    if (stream.peek() === ".") {
+      // `1..5` is PG's `{numericfail}`: the integer, with the dots left for the
+      // next token. sql-lite has no `..` token, so they then lex as `.` `.5`.
+      stream.snapshot();
+      stream.next();
+      const dotDot = stream.peek() === ".";
+      stream.reload();
+      if (!dotDot) {
+        stream.next();
+        // The fraction is optional — `5.` is a number — but it cannot open with
+        // a separator: `1._5` is `1.` followed by junk.
+        value += `.${readDigits(stream, isDecDigit)}`;
+      }
+    }
+
+    if (stream.peek() === "e" || stream.peek() === "E") {
+      // Anything after a mantissa that starts with `e` is either an exponent or
+      // an error: `1e` and `1ex` are junk, `1e+` is PG's `{realfail}`.
+      const e = stream.next();
+      const sign = stream.peek() === "+" || stream.peek() === "-" ? stream.next() : "";
+      if (!isDecDigit(stream.peek())) croakJunk(stream, tokenStart, junk);
+      value += e + sign + readDigits(stream, isDecDigit);
+    }
+
+    rejectJunk(stream, tokenStart, junk);
+    return value;
+  },
+});
+
+// Positional (`$1`) and named (`$name`) parameters. Must follow the dollar-
+// string reader: `$tag$…$tag$` is claimed there first, and only a `$` that is
+// *not* a dollar-string opener (no `$` closes the tag) falls through to here.
+// `$` is neither an operator char nor an identifier start, so nothing else
+// competes. A positional one takes plain digits — PG allows no `_` separators
+// in it — and, as PG 15+ does, rejects an identifier glued to it (`$1abc`).
+// `$name` is not PG syntax at all; it is kept for callers that template SQL.
+const paramReader: Reader<SqlTokenType> = readers.custom("param", {
+  startsWith: "$",
+  display: "a parameter",
+  read: (stream) => {
+    const tokenStart = stream.position();
+    stream.snapshot();
+    stream.next(); // opening `$`
+    let name = "";
+    if (isDecDigit(stream.peek())) {
+      while (isDecDigit(stream.peek())) name += stream.next();
+      rejectJunk(stream, tokenStart, "Trailing junk after parameter");
+    } else if (/[A-Za-z_]/.test(stream.peek())) {
+      while (/[A-Za-z0-9_]/.test(stream.peek())) name += stream.next();
+    }
+    // A bare `$` (no digits/name) isn't a parameter — restore and fall through
+    // so the lexer reports it as an unexpected character, matching PG.
+    if (name === "") {
+      stream.reload();
+      return null;
+    }
+    return name;
+  },
+});
+
 export const sqlLexer = defineLexer({
   identifier: {
     type: "ident",
@@ -560,17 +718,11 @@ export const sqlLexer = defineLexer({
     // one cast token right next to a `||` or `@>` operator with no precedence
     // machinery — the partition alone keeps them apart.
     type: "punc",
-    tokens: ["(", ")", "[", "]", ",", ";", ".", "::", ":"],
+    tokens: ["(", ")", "[", "]", ",", ";", ".", "::", ":", ":="],
     display: "punctuation",
   },
   readers: [
-    readers.number("number", {
-      exponent: true,
-      leadingDot: true,
-      radix: { hex: true },
-      separators: true,
-      display: "a number",
-    }),
+    numberReader,
     // Standard strings double their quote; E-strings decode backslash escapes.
     // Both are type "string"; the E reader falls through when the quote doesn't
     // follow, so `end` and `explain` still lex as identifiers.
@@ -598,31 +750,7 @@ export const sqlLexer = defineLexer({
     unicodeStringReader,
     quotedIdentifierReader,
     readers.dollarString("string"),
-    // Positional / named parameters (`$1`, `$name`). Must follow the dollar-string
-    // reader: `$tag$…$tag$` is claimed there first, and only a `$` that is *not* a
-    // dollar-string opener (no `$` closes the tag) falls through to here. `$` is
-    // neither an operator char nor an identifier start, so nothing else competes.
-    readers.custom("param", {
-      startsWith: "$",
-      display: "a parameter",
-      read: (stream) => {
-        stream.snapshot();
-        stream.next(); // opening `$`
-        let name = "";
-        if (/[0-9]/.test(stream.peek())) {
-          while (/[0-9]/.test(stream.peek())) name += stream.next();
-        } else if (/[A-Za-z_]/.test(stream.peek())) {
-          while (/[A-Za-z0-9_]/.test(stream.peek())) name += stream.next();
-        }
-        // A bare `$` (no digits/name) isn't a parameter — restore and fall through
-        // so the lexer reports it as an unexpected character, matching PG.
-        if (name === "") {
-          stream.reload();
-          return null;
-        }
-        return name;
-      },
-    }),
+    paramReader,
     // Comment readers must precede the operator reader: `stopAt` then guarantees
     // an operator scan never swallows a comment start (`@--x` → `@`, then `--x`).
     readers.lineComment("comment", "--", { display: "a comment" }),
@@ -636,10 +764,9 @@ export const sqlLexer = defineLexer({
 
 // What the grammar parses: `sqlLexer`'s tokens with every `comment` dropped, so
 // a comment is legal anywhere whitespace is (`SELECT /* x */ 1`, `count -- n
-// ⏎ (*)`), as in PG's scanner — except around `UESCAPE` (see
-// `readUescapeTail`). Core skips trivia only in the list-shaped combinators and
-// at the grammar's root boundaries, and `peek`/`peekAhead` lookahead never
-// skips, so the comments are removed before the parse context sees them.
+// ⏎ (*)`), as in PG's scanner. Core skips trivia only in the list-shaped
+// combinators and at the grammar's root boundaries, and `peek`/`peekAhead`
+// lookahead never skips, so the comments are removed before the parse context sees them.
 // Comments are not kept in the AST, and spans end at the last real token rather
 // than at a trailing comment. `sqlLexer` itself still emits `comment` tokens
 // for anyone tokenizing SQL directly (highlighters, formatters).

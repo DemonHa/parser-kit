@@ -4,3 +4,7 @@
 
 # Collapse them in review by default; they are still diffable on demand.
 *.golden.json linguist-generated=true
+
+# The pg_dump corpus fixtures (pagila is vendored as-is) are kept
+# byte-for-byte too: their recorded expectations name line numbers.
+examples/sql-lite/fixtures/** text eol=lf
