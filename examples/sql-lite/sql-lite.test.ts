@@ -3267,11 +3267,10 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
   it("rejects a digit outside the literal's base", () => {
     expect(() => sqlLite.parse("SELECT B'12' FROM t;")).toThrow(/Invalid binary digit "2"/);
     expect(() => sqlLite.parse("SELECT X'gg' FROM t;")).toThrow(/Invalid hexadecimal digit "g"/);
-    // A literal that never closed swallowed the rest of the input, so the base
-    // check would blame its first stray character for a missing quote. It is
-    // left to fail where an unterminated `'…'` fails: at the `;` never reached.
-    expect(() => sqlLite.parse("SELECT B'101 FROM t;")).toThrow(/Expected ";"/);
-    expect(() => sqlLite.parse("SELECT 'abc FROM t;")).toThrow(/Expected ";"/);
+    // A literal that never closed is reported as unterminated, not blamed on
+    // its first stray character.
+    expect(() => sqlLite.parse("SELECT B'101 FROM t;")).toThrow(/Unterminated bit string literal/);
+    expect(() => sqlLite.parse("SELECT 'abc FROM t;")).toThrow(/Unterminated quoted string/);
     // Closed by a later quote, though, it is a terminated literal and is checked.
     expect(() => sqlLite.parse("SELECT B'101 FROM t; SELECT 'x';")).toThrow(/Invalid binary digit " "/);
   });
@@ -3287,12 +3286,8 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
     // Only `u&'` with nothing between the characters opens a unicode literal;
     // spaced out it is still an operator between a name and a string.
     expect(lex("u & 'x'")).toEqual([ident("u"), { type: "op", value: "&" }, { type: "string", value: "x" }]);
-    // `U&"…"` — a unicode-escaped *identifier* — is out of scope and unclaimed.
-    expect(lex('U&"MixedCase"')).toEqual([
-      ident("u"),
-      { type: "op", value: "&" },
-      { type: "qident", value: "MixedCase" },
-    ]);
+    // `u&` with no quote after it is `u` and `&`, as in PG.
+    expect(lex("u&x")).toEqual([ident("u"), { type: "op", value: "&" }, ident("x")]);
   });
 
   it("decodes U&'…' into an ordinary string token", () => {
@@ -3375,6 +3370,186 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
     // without the quote that closes it, or it would silently re-point the
     // escape character of the literal in front of it.
     expect(() => sqlLite.parse("SELECT U&'\\0041' UESCAPE '!")).toThrow(/Invalid Unicode escape character/);
+  });
+});
+
+// --- quoted literals ---
+// Every quoted form croaks when the input ends inside it, `E'…'` decodes the
+// full escape set, constants separated by a newline continue one another, and
+// `U&"…"` is a quoted identifier.
+
+describe("SQL-lite quoted literals", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const strTok = (value: string) => ({ type: "string", value });
+  const fails = (src: string) => () => sqlLite.parse(src);
+
+  it("croaks on every quoted form the input ends inside", () => {
+    expect(fails("SELECT 'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
+    expect(fails("SELECT E'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
+    // An escaped quote doesn't close the literal, and a final backslash
+    // escapes nothing.
+    expect(fails("SELECT E'abc\\'")).toThrow(/Unterminated quoted string/);
+    expect(fails("SELECT E'abc\\")).toThrow(/Unterminated quoted string/);
+    expect(fails('SELECT "abc')).toThrow(/Unterminated quoted identifier \(1:7\)/);
+    expect(fails("SELECT B'101")).toThrow(/Unterminated bit string literal \(1:7\)/);
+    expect(fails("SELECT X'ff")).toThrow(/Unterminated hexadecimal string literal \(1:7\)/);
+    expect(fails("SELECT U&'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
+    expect(fails('SELECT U&"abc')).toThrow(/Unterminated quoted identifier \(1:7\)/);
+    expect(fails("SELECT 1; /* note")).toThrow(/Unterminated \/\* comment \(1:10\)/);
+    // Nesting counts: one close for two opens is still open.
+    expect(fails("SELECT 1; /* a /* b */")).toThrow(/Unterminated \/\* comment/);
+  });
+
+  it("still reads the closed forms and the nested comment", () => {
+    expect(lex("'' E'' B'' X'' U&''")).toEqual([
+      strTok(""),
+      strTok(""),
+      { type: "bitstring", value: "" },
+      { type: "hexstring", value: "" },
+      strTok(""),
+    ]);
+    expect(lex("/* a /* b */ c */ x")).toEqual([
+      { type: "comment", value: " a /* b */ c " },
+      { type: "ident", value: "x" },
+    ]);
+  });
+
+  it("rejects the zero-length quoted identifier", () => {
+    expect(fails('SELECT "" FROM t;')).toThrow(/Zero-length delimited identifier \(1:7\)/);
+    expect(fails('SELECT U&"" FROM t;')).toThrow(/Zero-length delimited identifier/);
+    // A doubled quote is a one-character name, not an empty one.
+    expect(lex('""""')).toEqual([{ type: "qident", value: '"' }]);
+  });
+
+  it("decodes every E'…' escape", () => {
+    expect(lex("E'\\b\\f\\n\\r\\t\\v'")).toEqual([strTok("\b\f\n\r\t\v")]);
+    // Any other escaped character stands for itself, quotes and backslash too.
+    expect(lex("E'\\q\\\\\\''''")).toEqual([strTok("q\\''")]);
+    // Hex, octal and both unicode widths.
+    expect(colExpr("E'\\x41\\101\\u0041\\U00000041'")).toEqual(str("AAAA"));
+    // One or two hex digits, one to three octal digits; `\x` with no hex digit
+    // is just `x`.
+    expect(lex("E'\\x4g\\1011\\xg'")).toEqual([strTok("\x04gA1xg")]);
+    // In a standard string a backslash is an ordinary character.
+    expect(lex("'a\\nb'")).toEqual([strTok("a\\nb")]);
+  });
+
+  it("assembles octal and hex escapes into UTF-8", () => {
+    expect(lex("E'\\303\\251'")).toEqual([strTok("é")]);
+    expect(lex("E'\\xe2\\x82\\xac \\xC3\\xA9'")).toEqual([strTok("€ é")]);
+    expect(lex("E'\\xF0\\x9F\\x98\\x80'")).toEqual([strTok("😀")]);
+    // A byte run that isn't UTF-8 is rejected, as PG's encoding check does:
+    // a lone lead byte, a lone continuation byte, a run cut short by a
+    // character, and `\777` (whose low byte is 0xFF).
+    expect(fails("SELECT E'\\xC3';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
+    expect(fails("SELECT E'\\251';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
+    expect(fails("SELECT E'\\xC3A';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
+    expect(fails("SELECT E'\\777';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
+  });
+
+  it("rejects NUL however it is spelled", () => {
+    expect(fails("SELECT E'a\\0b';")).toThrow(/Invalid byte sequence for encoding "UTF8": 0x00/);
+    expect(fails("SELECT E'\\x00';")).toThrow(/Invalid byte sequence for encoding "UTF8": 0x00/);
+    expect(fails("SELECT E'\\u0000';")).toThrow(/Invalid Unicode escape value/);
+  });
+
+  it("pairs UTF-16 surrogates in \\u escapes and rejects the unpaired ones", () => {
+    expect(colExpr("E'\\uD83D\\uDE00'")).toEqual(str("😀"));
+    expect(colExpr("E'\\U0001F600'")).toEqual(str("😀"));
+    expect(fails("SELECT E'\\uD83D';")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(fails("SELECT E'\\uDE00';")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(fails("SELECT E'\\uD83Dx';")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(fails("SELECT E'\\uD83D\\x41';")).toThrow(/Invalid Unicode surrogate pair/);
+    // A pair never spans two continued constants.
+    expect(fails("SELECT E'\\uD83D'\n'\\uDE00';")).toThrow(/Invalid Unicode surrogate pair/);
+    // A short escape is an error, not a pass-through, and so is one past the
+    // last code point.
+    expect(fails("SELECT E'\\u12';")).toThrow(/Invalid Unicode escape: use \\uXXXX or \\UXXXXXXXX/);
+    expect(fails("SELECT E'\\U0041';")).toThrow(/Invalid Unicode escape: use/);
+    expect(fails("SELECT E'\\U00110000';")).toThrow(/Invalid Unicode escape value/);
+  });
+
+  it("joins string constants separated by a newline", () => {
+    expect(colExpr("'foo'\n'bar'")).toEqual(str("foobar"));
+    expect(colExpr("'foo'  \r\n\t 'bar'\n\n'baz'")).toEqual(str("foobarbaz"));
+    // A `--` comment counts as whitespace on either side of the newline.
+    expect(colExpr("'foo' -- one\n-- two\n'bar'")).toEqual(str("foobar"));
+    // Every quoted string form continues, each under its own escape rules.
+    expect(colExpr("E'a\\t'\n'\\x41'")).toEqual(str("a\tA"));
+    expect(colExpr("B'10'\n'01'")).toEqual({ kind: "bitString", value: "1001", hex: false });
+    expect(colExpr("U&'\\0041'\n'\\0042'")).toEqual(str("AB"));
+    // The span runs from the first body to the end of the last.
+    const token = sqlLexer.tokenize(createInputStream("'ab'\n'cd'")).next()!;
+    expect(token.position).toEqual({ start: { row: 1, col: 1 }, end: { row: 2, col: 3 } });
+  });
+
+  it("keeps constants apart without a newline, or across a block comment or operator", () => {
+    expect(lex("'foo' 'bar'")).toEqual([strTok("foo"), strTok("bar")]);
+    expect(fails("SELECT 'foo' 'bar';")).toThrow(/found "bar"/);
+    expect(lex("'a'\n/* c */'b'")).toEqual([strTok("a"), { type: "comment", value: " c " }, strTok("b")]);
+    expect(lex("'a'\n-'b'")).toEqual([strTok("a"), { type: "op", value: "-" }, strTok("b")]);
+    // Identifiers never continue.
+    expect(lex('"a"\n"b"')).toEqual([
+      { type: "qident", value: "a" },
+      { type: "qident", value: "b" },
+    ]);
+  });
+
+  it('reads U&"…" as a quoted identifier', () => {
+    expect(lex('U&"d\\0061t\\+000061" u&"x"')).toEqual([
+      { type: "qident", value: "data" },
+      { type: "qident", value: "x" },
+    ]);
+    expect(colExpr('U&"d\\0061t"')).toEqual(name("dat"));
+    expect((firstStmt('CREATE TABLE U&"T\\0061b" (U&"\\0063ol" int);') as any).name).toEqual(["Tab"]);
+    expect(colExpr("U&\"d!0061t\" UESCAPE '!'")).toEqual(name("dat"));
+    expect(fails('SELECT U&"\\00" FROM t;')).toThrow(/Invalid Unicode escape value/);
+    expect(fails("SELECT U&\"x\" UESCAPE '+' FROM t;")).toThrow(/Invalid Unicode escape character/);
+  });
+
+  it("reads a UESCAPE clause across comments", () => {
+    expect(colExpr("U&'d!0061t' /* why */ UESCAPE '!'")).toEqual(str("dat"));
+    expect(colExpr("U&'d!0061t' -- why\n UESCAPE -- and\n '!'")).toEqual(str("dat"));
+    expect(colExpr("U&\"d!0061t\" /* a /* b */ */ UESCAPE /**/ '!'")).toEqual(name("dat"));
+    // A comment that never closes declines the tail, and then croaks itself.
+    expect(fails("SELECT U&'x' /* open")).toThrow(/Unterminated \/\* comment/);
+    // A lone `-` or `/` is an operator, so the clause isn't there.
+    expect(lex("U&'x' / uescape")).toEqual([
+      strTok("x"),
+      { type: "op", value: "/" },
+      { type: "ident", value: "uescape" },
+    ]);
+  });
+
+  it("treats form feed and vertical tab as whitespace", () => {
+    expect(lex("a\fb\vc")).toEqual([
+      { type: "ident", value: "a" },
+      { type: "ident", value: "b" },
+      { type: "ident", value: "c" },
+    ]);
+    expect(firstStmt("SELECT\f1\v;")).toMatchObject({ kind: "select", columns: [col(num(1))] });
+  });
+
+  it("keeps e usable as a name and alias — the prefix only claims a quote right after it", () => {
+    expect(lex("e E e.x")).toEqual([
+      { type: "ident", value: "e" },
+      { type: "ident", value: "e" },
+      { type: "ident", value: "e" },
+      { type: "punc", value: "." },
+      { type: "ident", value: "x" },
+    ]);
+    expect((firstStmt("SELECT e FROM e;") as any).columns).toEqual([col(name("e"))]);
+    expect((firstStmt("SELECT 1 e FROM t e;") as any).columns).toEqual([col(num(1), "e")]);
+  });
+
+  it("surfaces the lexer's own error from inside a backtracking position", () => {
+    // The INSERT target's column list and alias are parsed speculatively; a
+    // literal error inside them must not turn into a parser error about
+    // whatever comes next.
+    expect(fails('INSERT INTO t (a, "") VALUES (1);')).toThrow(/Zero-length delimited identifier/);
+    expect(fails('INSERT INTO t (a, "b) VALUES (1);')).toThrow(/Unterminated quoted identifier/);
+    expect(fails('INSERT INTO t AS "" VALUES (1);')).toThrow(/Zero-length delimited identifier/);
+    expect(fails('INSERT INTO t AS U&"\\00" VALUES (1);')).toThrow(/Invalid Unicode escape value/);
   });
 });
 
@@ -5536,8 +5711,8 @@ describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDIN
     expect(() => sqlLite.parse("UPDATE t SET a = DEFAULT;")).toThrow(/Expected a name but found "default"/);
     // The alias needs its AS, and AS needs a name.
     expect(parse("t x VALUES (1)")).toThrow(/found "x" \(1:14\)/);
-    // (An empty quoted alias is still an alias, not a missing one.)
-    expect(insert('t AS "" VALUES (1)')).toHaveProperty("alias", "");
+    // An empty quoted alias is no name at all: PG's scanner rejects `""`.
+    expect(parse('t AS "" VALUES (1)')).toThrow(/Zero-length delimited identifier/);
     expect(parse("t AS VALUES (1)")).toThrow(/Expected a name but found "values"/);
     expect(parse("t OVERRIDING frob VALUE VALUES (1)")).toThrow(/Expected "system" or "user" but found "frob"/);
     expect(parse("t OVERRIDING USER VALUES (1)")).toThrow(/Expected "value" but found "values"/);
