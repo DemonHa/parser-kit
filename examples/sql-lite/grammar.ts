@@ -84,7 +84,13 @@ export type ColType = { name: string; args: number[]; array: boolean; span: Span
 export type RowExpr = { kind: "row"; items: Expr[]; implicit?: true; span: Span };
 
 export type Expr =
-  | { kind: "number"; value: number; span: Span }
+  // `raw` is the literal's text (its `_` separators dropped, its sign included
+  // where the grammar folds one in), present only when `value` can't stand for
+  // it: a whole number beyond `Number.isSafeInteger` (which every double from
+  // 2^53 up is, so `1.5e300` has one too), or a value that overflowed to
+  // ±Infinity (which JSON would write as `null`). PG keeps every digit of
+  // both (as `bigint` or `numeric`); `raw` lets a caller do the same.
+  | { kind: "number"; value: number; raw?: string; span: Span }
   | { kind: "string"; value: string; span: Span }
   | { kind: "bool"; value: boolean; span: Span }
   | { kind: "null"; span: Span }
@@ -896,7 +902,8 @@ export type LockMode =
 // LOCK [TABLE] [ONLY] name [*] [, …] [IN mode MODE] [NOWAIT]. ONLY is per table;
 // a trailing `*` spells the default (descendants included) and is not recorded.
 // `mode` is null when IN … MODE is omitted (PG then takes ACCESS EXCLUSIVE).
-// A MERGE target is read by the same rule (relationExpr).
+// MERGE, UPDATE, DELETE and TRUNCATE targets are read by the same rule
+// (relationExpr).
 export type LockTarget = { name: string[]; only: boolean };
 export type Lock = {
   kind: "lock";
@@ -1090,10 +1097,14 @@ export type Stmt =
       force?: true;
       span: Span;
     }
-  // `TRUNCATE [TABLE] name[, …] [RESTART|CONTINUE IDENTITY] [CASCADE|RESTRICT]`.
+  // `TRUNCATE [TABLE] {[ONLY] name [*] | ONLY (name)}[, …]
+  // [RESTART|CONTINUE IDENTITY] [CASCADE|RESTRICT]`. `only` runs parallel to
+  // `names` (true where that table is ONLY) and is present only when some table
+  // is; a trailing `*` spells the default and is not recorded.
   | {
       kind: "truncate";
       names: string[][];
+      only?: boolean[];
       identity: "restart" | "continue" | null;
       behavior: "cascade" | "restrict" | null;
       span: Span;
@@ -1214,6 +1225,12 @@ export type FromItemJoinType = "inner" | "left" | "right" | "full" | "cross";
 // `TABLESAMPLE method (arg, …) [REPEATABLE (seed)]` on a table FROM item.
 export type TableSample = { method: string; args: Expr[]; repeatable: Expr | null };
 
+// One `name type [COLLATE collation]` entry of a column definition list — PG's
+// `TableFuncElement`, which spells out the result columns of a function
+// returning `record` (`f() AS x (a int, b text)`). `collate` is present only
+// when written.
+export type ColumnDefinition = { name: string; type: ColType; collate?: string[] };
+
 // `columns` is the column-alias list that may follow an alias — `t AS x (a, b)`
 // renames t's first two columns — on any of the three leaf items. Like `only`,
 // `lateral` and `tablesample`, it is present only when written, so an item
@@ -1227,27 +1244,47 @@ export type FromItem =
   // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
   // is the underlying `call` expression node. `ordinality` is present (and
   // true) only for `WITH ORDINALITY`, as on a `rowsFrom` item.
-  | { kind: "function"; call: Expr; alias: string | null; columns?: string[]; lateral?: boolean; ordinality?: boolean }
+  // `columnDefinitions` is present only for a column definition list
+  // (`f() AS x (a int)`, `f() AS (a int)`), which takes the place of `columns`.
+  | {
+      kind: "function";
+      call: Expr;
+      alias: string | null;
+      columns?: string[];
+      columnDefinitions?: ColumnDefinition[];
+      lateral?: boolean;
+      ordinality?: boolean;
+    }
   // `ROWS FROM (f(…), g(…))` — several table functions zipped side by side,
   // optionally LATERAL. `calls` are the underlying `call` expression nodes.
+  // `callColumnDefinitions` is present only when some call carries its own
+  // `AS (col type, …)` list; it runs parallel to `calls`, with null for a call
+  // without one. `columnDefinitions` is a list after the whole item, as on a
+  // `function` item.
   | {
       kind: "rowsFrom";
       calls: Expr[];
+      callColumnDefinitions?: (ColumnDefinition[] | null)[];
       alias: string | null;
       columns?: string[];
+      columnDefinitions?: ColumnDefinition[];
       lateral?: boolean;
       ordinality?: boolean;
     }
   // `alias` and `columns` are present only on a parenthesised join that carries
   // an alias clause — `(a JOIN b ON …) AS x (c, d)`. A parenthesised join
-  // without one is the bare join node: the parentheses only group.
+  // without one is the bare join node: the parentheses only group. `natural`
+  // is present (and true) only for a NATURAL join, and `usingAlias` only for
+  // `USING (…) AS name`.
   | {
       kind: "join";
       joinType: FromItemJoinType;
+      natural?: true;
       left: FromItem;
       right: FromItem;
       on: Expr | null;
       using: string[] | null;
+      usingAlias?: string;
       alias?: string;
       columns?: string[];
     };
@@ -1287,12 +1324,14 @@ export type Cte = {
   cycle?: CteCycle;
 };
 
-// One item of a SET list, shared by UPDATE and ON CONFLICT DO UPDATE: either
-// `column = value`, or PG's multi-column `(a, b) = source`. The multi-column
-// source is a row constructor (`(1, 2)` / `ROW(1, 2)`, whose top-level items
-// may be a bare DEFAULT) or a `(SELECT …)` subquery — the only sources PG accepts.
+// One item of a SET list, shared by UPDATE, ON CONFLICT DO UPDATE and MERGE's
+// UPDATE SET: either `column = value`, or PG's multi-column `(a, b) = source`.
+// The multi-column source is a row constructor (`(1, 2)` / `ROW(1, 2)`, whose
+// top-level items may be a bare DEFAULT) or a `(SELECT …)` subquery — the only
+// sources PG accepts.
+// A single column's value may be a bare DEFAULT too (`SET a = DEFAULT`).
 export type Assignment =
-  | { column: string; value: Expr }
+  | { column: string; value: Expr | DefaultValue }
   | { columns: string[]; value: AssignmentRow | Extract<Expr, { kind: "row" | "subquery" }> };
 
 // The row-constructor source of a multi-column assignment: RowExpr's shape, but
@@ -1308,9 +1347,10 @@ export type OnConflict = {
   action: { kind: "nothing" } | { kind: "update"; set: Assignment[]; where: Expr | null };
 };
 
-// A bare DEFAULT standing for a column's default in an INSERT VALUES row. It
-// is a row item, not an expression. PG's a_expr also admits DEFAULT (e.g.
-// `UPDATE t SET a = DEFAULT`), but this grammar accepts it only here so far.
+// A bare DEFAULT standing for a column's default: an INSERT VALUES row item, or
+// the value of a SET assignment (`SET a = DEFAULT`, `SET (a, b) = (1, DEFAULT)`).
+// It is not an expression: PG's a_expr admits DEFAULT only to reject it in parse
+// analysis everywhere else, and this grammar accepts it only in those places.
 export type DefaultValue = { kind: "default"; span: Span };
 
 // Which value wins for an identity column: `OVERRIDING {SYSTEM | USER} VALUE`.
@@ -1337,25 +1377,35 @@ export type Insert = {
   span: Span;
 };
 
+// `UPDATE target …` / `DELETE FROM target …`, where a target is `[ONLY] name
+// [*]` or `ONLY (name)` (relationExpr). `only` is present only when written; a
+// trailing `*` spells the default and is not recorded. `currentOf` names the
+// cursor of `WHERE CURRENT OF cursor` and is present only for that form
+// (`where` is then null).
 export type Update = {
   kind: "update";
   table: string[];
+  only?: true;
   alias: string | null;
   set: Assignment[];
   from: FromItem[] | null;
   where: Expr | null;
+  currentOf?: string;
   returning: SelectItem[] | null;
   with_?: Cte[];
   recursive?: boolean;
   span: Span;
 };
 
+// See Update for `only` and `currentOf`.
 export type Delete = {
   kind: "delete";
   table: string[];
+  only?: true;
   alias: string | null;
   using: FromItem[] | null;
   where: Expr | null;
+  currentOf?: string;
   returning: SelectItem[] | null;
   with_?: Cte[];
   recursive?: boolean;
@@ -1590,7 +1640,16 @@ const startsQuery = (ctx: ParseContext<SqlTokenType>): boolean => {
 const isSubqueryParen = (ctx: ParseContext<SqlTokenType>): boolean => ctx.is("punc", "(") && startsQuery(ctx);
 const parenQuery = seq(skip(punc("(")), field("q", query), skip(punc(")"))).map((s) => s.q);
 
-const numberLit = token("number").map((node, span): Expr => ({ kind: "number", value: Number(node.value), span }));
+// The number node for a literal's text and any sign the grammar folds into it,
+// `raw` attached only when `value` loses the text (see the `number` member of
+// `Expr`). The sign is applied after decoding: `Number("-0x10")` is NaN.
+const numberNode = (text: string, span: Span, sign = ""): Extract<Expr, { kind: "number" }> => {
+  const magnitude = Number(text);
+  const value = sign === "-" ? -magnitude : magnitude;
+  const lossy = !Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value));
+  return { kind: "number", value, ...(lossy && { raw: sign + text }), span };
+};
+const numberLit = token("number").map((node, span): Expr => numberNode(node.value, span));
 const stringLit = token("string").map((node, span): Expr => ({ kind: "string", value: node.value, span }));
 // `B'1011'` and `X'ff'` lex as token types of their own, which is what lets the
 // node record the spelling without re-reading the source. Any literal that
@@ -2151,15 +2210,15 @@ const PRECISION_FUNCTIONS: ReadonlySet<string> = new Set([
   "localtime",
   "localtimestamp",
 ]);
-// An integer constant, as PG lexes one: decimal or hex digits (the lexer has
-// already dropped any `_` separators) that fit in an int4 — PG lexes `1.5` and
-// `3e0` as floats, and a wider integer as a numeric, and its precision slots take
-// neither. The value itself is not range-checked: PG only warns above 6, and
-// clamps.
+// An integer constant, as PG lexes one: decimal, hex, octal or binary digits
+// (the lexer has already dropped any `_` separators) that fit in an int4 — PG
+// lexes `1.5`, `5.` and `3e0` as floats, and a wider integer as a numeric, and
+// its precision slots take neither. The value itself is not range-checked: PG
+// only warns above 6, and clamps.
 const isIntegerConstant = (tok: Token<SqlTokenType> | null): boolean =>
   tok !== null &&
   tok.type === "number" &&
-  /^(?:[0-9]+|0[xX][0-9a-fA-F]+)$/.test(tok.value) &&
+  /^(?:[0-9]+|0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+)$/.test(tok.value) &&
   Number(tok.value) <= 2147483647;
 
 const sqlValueFunction = custom<Expr, SqlTokenType>(
@@ -3375,10 +3434,10 @@ function optionScalar(ctx: ParseContext<SqlTokenType>): RelationOptionScalar {
   const sign = tok?.type === "op" && (tok.value === "-" || tok.value === "+") ? tok.value : null;
   if (sign !== null && ctx.peekAhead(1)?.type === "number") {
     ctx.next(); // the sign
-    const value = Number(ctx.next()!.value);
-    return { kind: "number", value: sign === "-" ? -value : value, span: ctx.spanFrom(start) };
+    const text = ctx.next()!.value;
+    return numberNode(text, ctx.spanFrom(start), sign);
   }
-  if (tok?.type === "number") return { kind: "number", value: Number(ctx.next()!.value), span: ctx.spanFrom(start) };
+  if (tok?.type === "number") return numberNode(ctx.next()!.value, ctx.spanFrom(start));
   if (tok?.type === "string") return { kind: "string", value: ctx.next()!.value, span: ctx.spanFrom(start) };
   if (tok?.type === "ident" && (tok.value === "true" || tok.value === "false")) {
     ctx.next();
@@ -5872,10 +5931,28 @@ const dropStmt = custom<Stmt, SqlTokenType>(
   { expected: '"drop"', first: [{ type: "ident", value: "drop" }] },
 );
 
+// PG's relation_expr, a LOCK, MERGE, UPDATE, DELETE or TRUNCATE target —
+// `[ONLY] name [*]` or `ONLY (name)`.
+// `only` and `table` are reserved, so neither can begin a name.
+const relationExpr = custom<LockTarget, SqlTokenType>(
+  (ctx) => {
+    const only = ctx.eat("ident", "only") !== null;
+    if (only && ctx.eat("punc", "(") !== null) {
+      const name = ctx.parse(qualName);
+      expectClose(ctx);
+      return { name, only };
+    }
+    const name = ctx.parse(qualName);
+    if (!only) ctx.eat("op", "*");
+    return { name, only };
+  },
+  { expected: '"only" or a name', first: [{ type: "ident", value: "only" }, ...nameWord.first()] },
+);
+
 const truncateStmt = seq(
   skip(kw("truncate")),
   skip(optional(kw("table"))), // optional TABLE noise word
-  field("names", sepBy(qualName, P(","))),
+  field("tables", sepBy(relationExpr, P(","))),
   field(
     "identity",
     optional(
@@ -5885,7 +5962,16 @@ const truncateStmt = seq(
     ),
   ),
   field("behavior", dropBehavior),
-).map(({ names, identity, behavior }, span): Stmt => ({ kind: "truncate", names, identity, behavior, span }));
+).map(
+  ({ tables, identity, behavior }, span): Stmt => ({
+    kind: "truncate",
+    names: tables.map((t) => t.name),
+    ...(tables.some((t) => t.only) && { only: tables.map((t) => t.only) }),
+    identity,
+    behavior,
+    span,
+  }),
+);
 
 // `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`. Every word
 // is matched by value and stays a name elsewhere. CONCURRENTLY is taken whenever
@@ -6339,25 +6425,17 @@ const asAlias = custom<string | null, SqlTokenType>(
   { expected: "an alias", first: [{ type: "ident" }, { type: "qident" }] },
 );
 
-// PG's relation_expr, a LOCK or MERGE target — `[ONLY] name [*]` or `ONLY (name)`.
-// `only` and `table` are reserved, so neither can begin a name.
-const relationExpr = custom<LockTarget, SqlTokenType>(
-  (ctx) => {
-    const only = ctx.eat("ident", "only") !== null;
-    if (only && ctx.eat("punc", "(") !== null) {
-      const name = ctx.parse(qualName);
-      expectClose(ctx);
-      return { name, only };
-    }
-    const name = ctx.parse(qualName);
-    if (!only) ctx.eat("op", "*");
-    return { name, only };
-  },
-  { expected: '"only" or a name', first: [{ type: "ident", value: "only" }, ...nameWord.first()] },
+// One item of an INSERT VALUES row or an assigned value: an expression or a
+// bare DEFAULT. A local rule rather than `exprList`, whose other consumers must
+// not take DEFAULT. `default` is reserved, so the keyword branch never shadows
+// an expression.
+const insertValue = oneOf(
+  kw("default").map((_, span): DefaultValue => ({ kind: "default", span })),
+  expression,
 );
 
 const eq = token("op", { values: ["="] });
-const singleAssignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(
+const singleAssignment = seq(field("column", nameWord), skip(eq), field("value", insertValue)).map(
   ({ column, value }): Assignment => ({ column, value }),
 );
 // `(a, b, …) = source`. The row items are read locally (not via `expression`)
@@ -6425,6 +6503,31 @@ const assignment = oneOf(multiAssignment, singleAssignment);
 const setAssignments = seq(skip(kw("set")), field("items", sepBy(assignment, P(",")))).map((s) => s.items);
 
 const whereClause = seq(skip(kw("where")), field("e", expression)).map((s) => s.e);
+
+// PG's where_or_current_clause, for UPDATE and DELETE: `WHERE condition` or
+// `WHERE CURRENT OF cursor`. `current` and `of` are matched by value and only
+// as a pair, so `WHERE current` still reads a column named current.
+type WhereOrCurrent = { where: Expr } | { currentOf: string };
+const whereOrCurrent = custom<WhereOrCurrent, SqlTokenType>(
+  (ctx) => {
+    ctx.parse(kw("where"));
+    if (ctx.is("ident", "current")) {
+      const after = peekOrReport(ctx, 1);
+      if (after !== null && after.type === "ident" && after.value === "of") {
+        ctx.next(); // "current"
+        ctx.next(); // "of"
+        return { currentOf: ctx.parse(nameWord) };
+      }
+    }
+    return { where: ctx.parse(expression) };
+  },
+  { expected: '"where"', first: [{ type: "ident", value: "where" }] },
+);
+// The `where` / `currentOf` fields an optional where_or_current_clause adds.
+function whereFields(clause: WhereOrCurrent | null): { where: Expr | null; currentOf?: string } {
+  if (clause === null) return { where: null };
+  return "currentOf" in clause ? { where: null, currentOf: clause.currentOf } : { where: clause.where };
+}
 
 // One grouping element inside ROLLUP/CUBE/GROUPING SETS: a parenthesised column
 // group `( a, b )` (possibly the empty `()`) or a bare expression (→ `[expr]`).
@@ -6696,6 +6799,60 @@ function parseAliasClause(ctx: ParseContext<SqlTokenType>): { alias: string | nu
   return { alias, columns };
 }
 
+// One `name type [COLLATE collation]` entry of a column definition list. Not
+// the composite type's `compositeAttr`, which takes no COLLATE here.
+const columnDefinition = custom<ColumnDefinition, SqlTokenType>(
+  (ctx) => {
+    const name = ctx.parse(nameWord);
+    const type = ctx.parse(typeRef);
+    const collate = ctx.eat("ident", "collate") !== null ? ctx.parse(qualName) : null;
+    return { name, type, ...(collate !== null && { collate }) };
+  },
+  { expected: "a name", first: nameWord.first() },
+);
+// `( name type, … )`, positioned on the `(` — at least one entry, as in PG.
+function parseColumnDefinitions(ctx: ParseContext<SqlTokenType>): ColumnDefinition[] {
+  ctx.next(); // "("
+  const defs = [ctx.parse(columnDefinition)];
+  while (ctx.eat("punc", ",") !== null) defs.push(ctx.parse(columnDefinition));
+  expectClose(ctx);
+  return defs;
+}
+
+// Whether the cursor sits on `AS (` — a column definition list with no alias.
+// A bare `as` there could open nothing else: an alias is a name, never a `(`.
+const atBareColumnDefinitions = (ctx: ParseContext<SqlTokenType>): boolean =>
+  ctx.is("ident", "as") && isPuncToken(peekOrReport(ctx, 1), "(");
+
+// PG's `func_alias_clause`, after a table function or ROWS FROM: an alias
+// clause, or a column definition list — `AS (a int)`, `[AS] x (a int)`. After
+// an alias, the `(` holds alias columns when its first name is followed by `,`
+// or `)` (`x (a, b)`), and column definitions otherwise (`x (a int)`): a
+// definition always has a type after its name. Pure token lookahead rather than
+// a backtracking attempt.
+function parseFuncAliasClause(ctx: ParseContext<SqlTokenType>): {
+  alias: string | null;
+  columns: string[] | null;
+  columnDefinitions: ColumnDefinition[] | null;
+} {
+  if (atBareColumnDefinitions(ctx)) {
+    ctx.next(); // "as"
+    return { alias: null, columns: null, columnDefinitions: parseColumnDefinitions(ctx) };
+  }
+  const alias = ctx.parse(asAlias);
+  if (alias === null || !ctx.is("punc", "(")) return { alias, columns: null, columnDefinitions: null };
+  const first = peekOrReport(ctx, 1);
+  const isName = first !== null && (first.type === "qident" || (first.type === "ident" && !RESERVED.has(first.value)));
+  const after = isName ? peekOrReport(ctx, 2) : null;
+  if (after !== null && !isPuncToken(after, ",") && !isPuncToken(after, ")")) {
+    return { alias, columns: null, columnDefinitions: parseColumnDefinitions(ctx) };
+  }
+  ctx.next(); // "("
+  const columns = ctx.parse(aliasColumns);
+  expectClose(ctx);
+  return { alias, columns, columnDefinitions: null };
+}
+
 // The rest of a table FROM item once its name is read: the alias clause, then an
 // optional TABLESAMPLE — PG's order, so an alias list always comes before the
 // sample (`t [AS] x (a) TABLESAMPLE …`).
@@ -6752,21 +6909,35 @@ const eatOrdinality = (ctx: ParseContext<SqlTokenType>): boolean => {
   return true;
 };
 
-// `ROWS FROM (f(…), …) [WITH ORDINALITY] [alias clause]`, positioned on `rows`.
+// `ROWS FROM (f(…) [AS (col type, …)], …) [WITH ORDINALITY] [func alias clause]`,
+// positioned on `rows`.
 function parseRowsFrom(ctx: ParseContext<SqlTokenType>, lateral: boolean): FromItem {
   ctx.next(); // "rows"
   ctx.next(); // "from"
   ctx.next(); // "("
-  const calls: Expr[] = [parseFromCall(ctx)];
-  while (ctx.eat("punc", ",") !== null) calls.push(parseFromCall(ctx));
+  const calls: Expr[] = [];
+  const callColumnDefinitions: (ColumnDefinition[] | null)[] = [];
+  do {
+    calls.push(parseFromCall(ctx));
+    // PG's `opt_col_def_list`: only the `AS (…)` spelling, with no alias.
+    if (ctx.is("ident", "as")) {
+      ctx.next(); // "as"
+      if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+      callColumnDefinitions.push(parseColumnDefinitions(ctx));
+    } else {
+      callColumnDefinitions.push(null);
+    }
+  } while (ctx.eat("punc", ",") !== null);
   expectClose(ctx);
   const ordinality = eatOrdinality(ctx);
-  const { alias, columns } = parseAliasClause(ctx);
+  const { alias, columns, columnDefinitions } = parseFuncAliasClause(ctx);
   return {
     kind: "rowsFrom",
     calls,
+    ...(callColumnDefinitions.some((defs) => defs !== null) && { callColumnDefinitions }),
     alias,
     ...(columns !== null && { columns }),
+    ...(columnDefinitions !== null && { columnDefinitions }),
     ...(lateral && { lateral: true }),
     ...(ordinality && { ordinality: true }),
   };
@@ -6887,8 +7058,10 @@ function parenFromItem(ctx: ParseContext<SqlTokenType>): FromItem {
 // PG's `relation_expr` — so a `(` right after the word is that name's
 // parenthesis, never a subquery, and no call parenthesis is read after the
 // name. LATERAL takes no parenthesised join, so its `(` is always a subquery.
-// The `only`/`columns`/`lateral`/`tablesample`/`ordinality` keys are omitted
-// when absent so ordinary items keep their prior shape.
+// A plain table name may carry PG's inheritance star (`t *`), which ONLY may
+// not. The `only`/`columns`/`columnDefinitions`/`lateral`/`tablesample`/
+// `ordinality` keys are omitted when absent so ordinary items keep their prior
+// shape.
 const tableRef = custom<FromItem, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -6908,12 +7081,13 @@ const tableRef = custom<FromItem, SqlTokenType>(
     if (ctx.is("punc", "(")) {
       const call = parseFromCallArgs(ctx, nameParts, start);
       const ordinality = eatOrdinality(ctx);
-      const { alias, columns } = parseAliasClause(ctx);
+      const { alias, columns, columnDefinitions } = parseFuncAliasClause(ctx);
       return {
         kind: "function",
         call,
         alias,
         ...(columns !== null && { columns }),
+        ...(columnDefinitions !== null && { columnDefinitions }),
         ...(lateral && { lateral: true }),
         ...(ordinality && { ordinality: true }),
       };
@@ -6921,6 +7095,9 @@ const tableRef = custom<FromItem, SqlTokenType>(
     if (lateral) {
       return ctx.croak(`Expected a subquery or function after "lateral" but found ${describeFound(ctx.peek())}`);
     }
+    // `t *` — PG's explicit spelling of "t and its inheritance children", which
+    // is what a bare `t` already means, so it records nothing.
+    ctx.eat("op", "*");
     return tableTail(ctx, nameParts, false);
   },
   {
@@ -6929,8 +7106,8 @@ const tableRef = custom<FromItem, SqlTokenType>(
   },
 );
 
-// Reads an optional join lead — `[NATURAL] [INNER|LEFT|RIGHT|FULL [OUTER]|CROSS]
-// JOIN` — consuming the keywords and returning the type, or null (consuming
+// Reads an optional join lead — `[NATURAL] [INNER | LEFT|RIGHT|FULL [OUTER]] JOIN`
+// or `CROSS JOIN` — consuming the keywords and returning the type, or null (consuming
 // nothing) when no JOIN follows. All lead-words are reserved, so this never
 // collides with a preceding table's alias.
 const readJoin = (ctx: ParseContext<SqlTokenType>): { joinType: FromItemJoinType; natural: boolean } | null => {
@@ -6938,6 +7115,10 @@ const readJoin = (ctx: ParseContext<SqlTokenType>): { joinType: FromItemJoinType
   const leads = ["join", "inner", "left", "right", "full", "cross", "natural"];
   if (lead === null || lead.type !== "ident" || !leads.includes(lead.value)) return null;
   const natural = ctx.eat("ident", "natural") !== null;
+  // PG's `join_type` excludes CROSS, so `NATURAL CROSS JOIN` is not a join.
+  if (natural && ctx.is("ident", "cross")) {
+    ctx.croak(`Expected "join", "inner", "left", "right" or "full" but found ${describeFound(ctx.peek())}`);
+  }
   let joinType: FromItemJoinType = "inner";
   if (ctx.eat("ident", "cross") !== null) {
     joinType = "cross";
@@ -6957,30 +7138,51 @@ const readJoin = (ctx: ParseContext<SqlTokenType>): { joinType: FromItemJoinType
   return { joinType, natural };
 };
 
-// One FROM entry and its left-assoc chain of joins. CROSS / NATURAL joins take
-// no ON/USING; every other join takes an optional `ON expr` or `USING (cols)`.
-const joinTail = custom<FromItem, SqlTokenType>(
-  (ctx) => {
-    let left = ctx.parse(tableRef);
-    while (true) {
-      const join = readJoin(ctx);
-      if (join === null) break;
-      const right = ctx.parse(tableRef);
-      let on: Expr | null = null;
-      let using: string[] | null = null;
-      if (!join.natural && join.joinType !== "cross") {
-        if (ctx.eat("ident", "on") !== null) on = ctx.parse(expression);
-        else if (ctx.eat("ident", "using") !== null) using = ctx.parse(columnList);
+// The joins that follow `left`, folded left-associatively. A CROSS or NATURAL
+// join is complete once its right item is read; every other join must close
+// with `ON expr` or `USING (cols) [AS name]` — PG's mandatory `join_qual`. So
+// a join lead met before that qualifier opens a join nested on the right, which
+// takes the first qualifier that follows: `a JOIN b JOIN c ON p ON q` is
+// `a JOIN (b JOIN c ON p) ON q`, as in PG, while `a CROSS JOIN b JOIN c ON p`
+// stays `(a CROSS JOIN b) JOIN c ON p`.
+function parseJoins(ctx: ParseContext<SqlTokenType>, left: FromItem): FromItem {
+  while (true) {
+    const join = readJoin(ctx);
+    if (join === null) return left;
+    let right = ctx.parse(tableRef);
+    let on: Expr | null = null;
+    let using: string[] | null = null;
+    let usingAlias: string | null = null;
+    if (!join.natural && join.joinType !== "cross") {
+      right = parseJoins(ctx, right);
+      if (ctx.eat("ident", "on") !== null) {
+        on = ctx.parse(expression);
+      } else if (ctx.eat("ident", "using") !== null) {
+        using = ctx.parse(columnList);
+        // PG's `join_using_alias`: the AS is required.
+        if (ctx.is("ident", "as")) usingAlias = ctx.parse(asAlias);
+      } else {
+        ctx.croak(`Expected "on" or "using" but found ${describeFound(ctx.peek())}`);
       }
-      left = { kind: "join", joinType: join.joinType, left, right, on, using };
     }
-    return left;
-  },
-  {
-    expected: "a table reference",
-    first: [{ type: "punc", value: "(" }, { type: "ident" }, { type: "qident" }],
-  },
-);
+    left = {
+      kind: "join",
+      joinType: join.joinType,
+      ...(join.natural && { natural: true }),
+      left,
+      right,
+      on,
+      using,
+      ...(usingAlias !== null && { usingAlias }),
+    };
+  }
+}
+
+// One FROM entry and its chain of joins (see parseJoins).
+const joinTail = custom<FromItem, SqlTokenType>((ctx) => parseJoins(ctx, ctx.parse(tableRef)), {
+  expected: "a table reference",
+  first: [{ type: "punc", value: "(" }, { type: "ident" }, { type: "qident" }],
+});
 const fromClause = sepBy(joinTail, P(","));
 
 // --- SELECT core + set-ops + WITH ---
@@ -7260,13 +7462,6 @@ const queryRule = custom<Query, SqlTokenType>(
 
 // --- INSERT / UPDATE / DELETE ---
 
-// One item of an INSERT VALUES row: an expression or a bare DEFAULT. A local
-// row rule rather than `exprList`, whose other consumers must not take DEFAULT.
-// `default` is reserved, so the keyword branch never shadows an expression.
-const insertValue = oneOf(
-  kw("default").map((_, span): DefaultValue => ({ kind: "default", span })),
-  expression,
-);
 const insertValuesRow = delimited(P("("), P(")"), P(","), insertValue, { interleaved: true });
 const valuesSource = seq(skip(kw("values")), field("rows", sepBy(insertValuesRow, P(",")))).map(({ rows }) => ({
   kind: "values" as const,
@@ -7390,20 +7585,21 @@ const insertStmt = seq(
 
 const updateStmt = seq(
   skip(kw("update")),
-  field("table", qualName),
+  field("target", relationExpr),
   field("alias", asAlias),
   field("set", setAssignments),
   field("from", optional(seq(skip(kw("from")), field("f", fromClause)).map((s) => s.f))),
-  field("where", optional(whereClause)),
+  field("where", optional(whereOrCurrent)),
   field("returning", optional(returningClause)),
 ).map(
-  ({ table, alias, set, from, where, returning }, span): Update => ({
+  ({ target, alias, set, from, where, returning }, span): Update => ({
     kind: "update",
-    table,
+    table: target.name,
+    ...(target.only && { only: true as const }),
     alias,
     set,
     from: from ?? null,
-    where: where ?? null,
+    ...whereFields(where),
     returning: returning ?? null,
     span,
   }),
@@ -7412,18 +7608,19 @@ const updateStmt = seq(
 const deleteStmt = seq(
   skip(kw("delete")),
   skip(kw("from")),
-  field("table", qualName),
+  field("target", relationExpr),
   field("alias", asAlias),
   field("using", optional(seq(skip(kw("using")), field("f", fromClause)).map((s) => s.f))),
-  field("where", optional(whereClause)),
+  field("where", optional(whereOrCurrent)),
   field("returning", optional(returningClause)),
 ).map(
-  ({ table, alias, using, where, returning }, span): Delete => ({
+  ({ target, alias, using, where, returning }, span): Delete => ({
     kind: "delete",
-    table,
+    table: target.name,
+    ...(target.only && { only: true as const }),
     alias,
     using: using ?? null,
-    where: where ?? null,
+    ...whereFields(where),
     returning: returning ?? null,
     span,
   }),
