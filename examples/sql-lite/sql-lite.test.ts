@@ -6110,15 +6110,15 @@ describe("SQL-lite object references", () => {
       node({ objectType: "operator", name: ["~~"], operands: [null, ty("text")] }),
     );
     expect(comment("CAST (bigint AS text)")).toEqual(
-      node({ objectType: "cast", name: [], source: ty("bigint"), target: ty("text") }),
+      node({ objectType: "cast", source: ty("bigint"), target: ty("text") }),
     );
     expect(comment("TRANSFORM FOR hstore LANGUAGE plpython3u")).toEqual(
-      node({ objectType: "transform", name: [], type: ty("hstore"), language: "plpython3u" }),
+      node({ objectType: "transform", type: ty("hstore"), language: "plpython3u" }),
     );
     expect(comment("OPERATOR CLASS s.ops USING btree")).toEqual(
       node({ objectType: "operator class", name: ["s", "ops"], using: "btree" }),
     );
-    expect(comment("LARGE OBJECT 16401")).toEqual(node({ objectType: "large object", name: [], oid: 16401 }));
+    expect(comment("LARGE OBJECT 16401")).toEqual(node({ objectType: "large object", oid: 16401 }));
     expect(comment("CONSTRAINT qty_pos ON app.items")).toEqual(
       node({ objectType: "constraint", name: ["qty_pos"], table: ["app", "items"] }),
     );
@@ -6155,6 +6155,7 @@ describe("SQL-lite object references", () => {
       label: null,
     });
     expect(firstStmt("SECURITY LABEL ON LARGE OBJECT 7 IS 'x';")).not.toHaveProperty("provider");
+    expect(firstStmt("SECURITY LABEL ON LARGE OBJECT -7 IS 'x';")).toMatchObject({ oid: -7 });
   });
 
   it("parses ALTER EXTENSION ADD / DROP, SET SCHEMA and UPDATE", () => {
@@ -6196,7 +6197,7 @@ describe("SQL-lite object references", () => {
     });
     expect(alter("ALTER TEXT SEARCH DICTIONARY d SET SCHEMA s;").action).toEqual({ kind: "setSchema", schema: "s" });
     expect(alter("ALTER OPERATOR - (NONE, int) SET SCHEMA s;").object).toMatchObject({ operands: [null, ty("int")] });
-    expect(alter("ALTER LARGE OBJECT 5 OWNER TO r;").object).toEqual({ objectType: "large object", name: [], oid: 5 });
+    expect(alter("ALTER LARGE OBJECT 5 OWNER TO r;").object).toEqual({ objectType: "large object", oid: 5 });
     expect(alter("ALTER DATABASE appdb OWNER TO app_owner;").object).toEqual({
       objectType: "database",
       name: ["appdb"],

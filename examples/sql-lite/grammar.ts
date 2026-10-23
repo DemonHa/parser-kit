@@ -699,8 +699,8 @@ export type DropSignature = { star: boolean; args: FunctionArg[] };
 // and the generic ALTER name it (see OBJECT_KINDS). `objectType` is the folded
 // keyword(s): `"text search dictionary"`, `"large object"`, and `"language"`
 // with or without PROCEDURAL. `name` is dotted where PG takes a qualified name,
-// ends in the symbol for an operator (`["pg_catalog", "+"]`), and is empty for
-// CAST, TRANSFORM and LARGE OBJECT, which other keys name. Those keys belong to
+// ends in the symbol for an operator (`["pg_catalog", "+"]`), and is omitted
+// for CAST, TRANSFORM and LARGE OBJECT, which other keys name. Those keys belong to
 // a few kinds each and are omitted elsewhere:
 // - `signature`: an AGGREGATE's, always; a FUNCTION's, PROCEDURE's or
 //   ROUTINE's when it writes an argument list;
@@ -713,7 +713,7 @@ export type DropSignature = { star: boolean; args: FunctionArg[] };
 // - `oid`: a LARGE OBJECT's number.
 export type ObjectRef = {
   objectType: string;
-  name: string[];
+  name?: string[];
   signature?: DropSignature;
   operands?: [ColType | null, ColType | null];
   table?: string[];
@@ -5534,8 +5534,8 @@ function alterViewRest(ctx: ParseContext<SqlTokenType>, start: Position, materia
 //
 // COMMENT ON, SECURITY LABEL, ALTER EXTENSION ADD / DROP and the generic ALTER
 // all name one existing object as `kind reference`. OBJECT_KINDS is the one
-// list of those kinds: PG 17's CommentStmt, whose kinds are a superset of the
-// others', with what each statement takes flagged per kind. Its keyword(s)
+// list of those kinds: PG 17's CommentStmt, whose kinds cover the others' (bar
+// RenameStmt's GROUP and USER, which take a grammar of their own), with what each statement takes flagged per kind. Its keyword(s)
 // select the kind, and its `shape` says how the reference that follows reads.
 // A statement builds a trie over the kinds it takes (objectKindTrie) and hands
 // it to parseObjectRef. Every kind word is matched by value, so none of them
@@ -5735,13 +5735,13 @@ const OBJECT_REF_SHAPES = {
     ctx.parse(kw("as"));
     const target = ctx.parse(typeRef);
     expectClose(ctx);
-    return { name: [], source, target };
+    return { source, target };
   },
   transform: (ctx) => {
     ctx.parse(kw("for"));
     const type = ctx.parse(typeRef);
     ctx.parse(kw("language"));
-    return { name: [], type, language: ctx.parse(nameWord) };
+    return { type, language: ctx.parse(nameWord) };
   },
   opClass: (ctx) => {
     const name = ctx.parse(qualName);
@@ -5749,8 +5749,12 @@ const OBJECT_REF_SHAPES = {
     return { name, using: ctx.parse(nameWord) };
   },
   largeObject: (ctx) => {
+    // PG's NumericOnly: a number, signed or not.
+    const negate = ctx.eat("op", "-") !== null;
+    if (!negate) ctx.eat("op", "+");
     if (!ctx.is("number")) ctx.croak(`Expected a number but found ${describeFound(ctx.peek())}`);
-    return { name: [], oid: Number(ctx.next()!.value) };
+    const oid = Number(ctx.next()!.value);
+    return { oid: negate ? -oid : oid };
   },
   onTable: (ctx) => parseOnTableRef(ctx, false),
   constraint: (ctx) => parseOnTableRef(ctx, true),
@@ -5896,10 +5900,13 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
     },
   },
 };
-// Every other kind the generic ALTER takes leads it here. A target above keeps
-// its lead word: a dedicated target always wins over the generic one.
+// Every other kind the generic ALTER takes leads it here. A dedicated target
+// that takes one of these lead words must hand that word's generic kinds to
+// alterObjectRest itself (`FOREIGN DATA WRAPPER` beside `FOREIGN TABLE`), and
+// then drop the word from this loop, which refuses to shadow it silently.
 for (const word of ALTER_OBJECTS.next.keys()) {
-  if (!Object.hasOwn(ALTER_TARGETS, word)) ALTER_TARGETS[word] = { parse: alterObjectRest };
+  if (Object.hasOwn(ALTER_TARGETS, word)) throw new Error(`ALTER ${word} has a dedicated target`);
+  ALTER_TARGETS[word] = { parse: alterObjectRest };
 }
 const ALTER_TARGET_EXPECTED = keyList(ALTER_TARGETS);
 
