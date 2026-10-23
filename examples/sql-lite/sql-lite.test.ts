@@ -3448,6 +3448,9 @@ describe("SQL-lite numeric literals and parameters", () => {
       ["0x1g", /Trailing junk after numeric literal/],
       ["0b102", /Trailing junk after numeric literal/],
       ["0o8", /Trailing junk after numeric literal/],
+      ["0x_g", /Trailing junk after numeric literal/],
+      ["0x__ff", /Trailing junk after numeric literal/],
+      ["0x1_", /Trailing junk after numeric literal/],
       ["0x", /Invalid hexadecimal integer/],
       ["0x_", /Invalid hexadecimal integer/],
       ["0o", /Invalid octal integer/],
@@ -3522,6 +3525,8 @@ describe("SQL-lite numeric literals and parameters", () => {
       value: 18446744073709552000,
       raw: "0xFFFFFFFFFFFFFFFF",
     });
+    // The test is on the value: every double from 2^53 up is a whole number.
+    expect(colExpr("1.5e300")).toEqual({ kind: "number", value: 1.5e300, raw: "1.5e300" });
     expect(colExpr("1e400")).toEqual({ kind: "number", value: Number.POSITIVE_INFINITY, raw: "1e400" });
     // JSON writes Infinity as null; `raw` survives it.
     expect(JSON.parse(JSON.stringify(colExpr("1e400")))).toEqual({ kind: "number", value: null, raw: "1e400" });

@@ -86,7 +86,8 @@ export type RowExpr = { kind: "row"; items: Expr[]; implicit?: true; span: Span 
 export type Expr =
   // `raw` is the literal's text (its `_` separators dropped, its sign included
   // where the grammar folds one in), present only when `value` can't stand for
-  // it: an integer beyond `Number.isSafeInteger`, or a value that overflowed to
+  // it: a whole number beyond `Number.isSafeInteger` (which every double from
+  // 2^53 up is, so `1.5e300` has one too), or a value that overflowed to
   // ±Infinity (which JSON would write as `null`). PG keeps every digit of
   // both (as `bigint` or `numeric`); `raw` lets a caller do the same.
   | { kind: "number"; value: number; raw?: string; span: Span }

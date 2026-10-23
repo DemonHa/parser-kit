@@ -31,7 +31,9 @@ export type SqlTokenType =
 // safe while it carries no `g`/`y` flag — both consumers call `.test()`, which
 // is stateless without one and would otherwise desync through `lastIndex`.
 const WHITESPACE = /[ \t\r\n]/;
+const isDecDigit = (char: string) => /[0-9]/.test(char);
 const isHexDigit = (char: string) => /[0-9A-Fa-f]/.test(char);
+const isOctalDigit = (char: string) => /[0-7]/.test(char);
 const isBinaryDigit = (char: string) => /[01]/.test(char);
 const isSpace = (char: string) => WHITESPACE.test(char);
 
@@ -238,8 +240,6 @@ const unicodeStringReader: Reader<SqlTokenType> = readers.custom("string", {
 // the junk check below fires on any non-ASCII character too.
 const isIdentStart = (char: string) => /[A-Za-z_\u0080-\uffff]/.test(char);
 const isIdentCont = (char: string) => /[A-Za-z0-9_$\u0080-\uffff]/.test(char);
-const isDecDigit = (char: string) => char >= "0" && char <= "9";
-const isOctalDigit = (char: string) => char >= "0" && char <= "7";
 const RADIX_DIGITS: Readonly<Record<string, { isDigit: (char: string) => boolean; invalid: string }>> = {
   x: { isDigit: isHexDigit, invalid: "Invalid hexadecimal integer" },
   o: { isDigit: isOctalDigit, invalid: "Invalid octal integer" },

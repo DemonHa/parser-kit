@@ -176,7 +176,7 @@ These statements parse without error, but the tree they produce is wrong:
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
 - **Some `E'…'` escapes are left undecoded.** The backslash is dropped and the rest kept as text: `E'\x41'` gives `x41`, `E'\101'` gives `101`, and `E'\u0041'` gives `u0041`, where PostgreSQL gives `A` for all three. `\n`, `\t` and `\'` are decoded.
 - **`DEFAULT 'x' COLLATE "C"` folds the collation into the default expression** instead of applying it to the column.
-- **Non-integer numbers keep only double precision.** `0.1000000000000000055511151231257827` rounds, and an underflow such as `1e-400` reads as `0`. (An integer beyond 2^53, or a value that overflows to infinity, keeps its exact text in the node's `raw` field.)
+- **Numbers below 2^53 in magnitude keep only double precision.** `0.1000000000000000055511151231257827` rounds, and an underflow such as `1e-400` reads as `0`. A number whose magnitude reaches 2^53 (every such double is a whole number), or that overflows to infinity, keeps its exact text in the node's `raw` field.
 
 ### Accepted, but PostgreSQL rejects
 
