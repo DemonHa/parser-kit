@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { sqlLite } from "./index";
+import { type Copy, type ScriptItem, sqlLite, sqlLiteScript } from "./index";
 import { type DumpOutcome, type DumpRow, PG_DUMP_EXPECTATIONS } from "./pg-dump-corpus";
 import { splitPsqlScript } from "./psql-split";
 
@@ -16,7 +16,11 @@ import { splitPsqlScript } from "./psql-split";
 //                            may move to "fail".
 //
 // COPY data blocks and psql meta-commands (`\connect`, `\restrict`, …) are not
-// SQL `sqlLite.parse` accepts, so they are counted, not parsed.
+// SQL `sqlLite.parse` accepts, so the splitter sets them aside. Each file is
+// also parsed whole, with `sqlLiteScript.diagnose`, which reads them itself:
+// the statements it reports errors in must be exactly the "fail" rows, and
+// its meta-command and COPY items must match what the splitter found. A file
+// with no "fail" row must parse end to end with `sqlLiteScript.parse`.
 
 const FIXTURES = new URL("./fixtures/pg-dump/", import.meta.url);
 const EXPECTATIONS = new URL("./pg-dump-corpus.ts", import.meta.url);
@@ -42,10 +46,24 @@ const files = readdirSync(FIXTURES)
   .sort();
 
 const measured = files.map((file) => {
-  const split = splitPsqlScript(readFileSync(new URL(file, FIXTURES), "utf8"));
+  const text = readFileSync(new URL(file, FIXTURES), "utf8");
+  const split = splitPsqlScript(text);
   const rows: DumpRow[] = split.statements.map((s) => [outcome(s.sql), s.line, head(s.sql)]);
-  return { file, rows, copyBlocks: split.copyBlocks, metaCommands: split.metaCommands };
+  return { file, text, rows, copyBlocks: split.copyBlocks, metaCommands: split.metaCommands };
 });
+
+// The 1-based line of the statement a line falls in: the last one starting at
+// or before it, or 0 before the first statement.
+const statementOf = (rows: readonly DumpRow[], at: number) => {
+  let start = 0;
+  for (const [, line] of rows) if (line <= at) start = line;
+  return start;
+};
+const failingStatements = (rows: readonly DumpRow[], errorLines: readonly number[]) =>
+  [...new Set(errorLines.map((line) => statementOf(rows, line)))].sort((a, b) => a - b);
+
+const isCopyData = (item: ScriptItem): item is Copy & { data: string } =>
+  item.kind === "copy" && item.data !== undefined;
 
 // A string literal the way the formatter would write it: double quotes unless
 // single quotes need fewer escapes.
@@ -76,7 +94,7 @@ describe("pg_dump corpus", () => {
     expect(Object.keys(PG_DUMP_EXPECTATIONS).sort()).toEqual(files);
   });
 
-  for (const { file, rows } of measured) {
+  for (const { file, text, rows, copyBlocks, metaCommands } of measured) {
     describe(file, () => {
       const expected = PG_DUMP_EXPECTATIONS[file] ?? [];
 
@@ -91,6 +109,33 @@ describe("pg_dump corpus", () => {
           .map(([actual, line, text], index) => ({ actual, line, text, expect: expected[index]?.[0] }))
           .filter((row) => row.actual !== row.expect);
         expect(moved.map((row) => `${row.expect} -> ${row.actual}: ${file}:${row.line} ${row.text}`)).toEqual([]);
+      });
+
+      it("parses as a whole script, failing in exactly the recorded statements", () => {
+        const { ast, errors } = sqlLiteScript.diagnose(text);
+        const failing = expected.filter(([o]) => o === "fail").map(([, line]) => line);
+        expect(
+          failingStatements(
+            rows,
+            errors.map((error) => error.start.row),
+          ),
+        ).toEqual(failing);
+        if (failing.length === 0) expect(() => sqlLiteScript.parse(text)).not.toThrow();
+        // Every "ok" statement is an item, and any other statement item is
+        // recovery's leftover from inside a failing one (a routine body cut at
+        // its first `;`).
+        const starts = ast.filter((item) => item.kind !== "psqlMeta").map((item) => item.span.start.row);
+        const ok = expected.filter(([o]) => o === "ok").map(([, line]) => line);
+        expect(ok.filter((line) => !starts.includes(line))).toEqual([]);
+        const stray = starts.filter((line) => !ok.includes(line) && !failing.includes(statementOf(rows, line)));
+        expect(stray).toEqual([]);
+        expect(ast.filter((item) => item.kind === "psqlMeta").map((item) => item.span.start.row)).toEqual(
+          metaCommands.map((meta) => meta.line),
+        );
+        // A row is a line of the block; the splitter doesn't count the terminator.
+        expect(ast.filter(isCopyData).map((copy) => copy.data.split("\n").length - 1)).toEqual(
+          copyBlocks.map((block) => block.rows),
+        );
       });
     });
   }
@@ -107,6 +152,8 @@ describe("pg_dump corpus", () => {
           rate: `${((parsed / statements) * 100).toFixed(1)}%`,
           copyBlocks: list.reduce((n, m) => n + m.copyBlocks.length, 0),
           metaCommands: list.reduce((n, m) => n + m.metaCommands.length, 0),
+          // Files with no failing statement, which the test parses whole.
+          parsesWhole: list.filter((m) => m.rows.every(([o]) => o === "ok")).length,
         };
       };
       // eslint-disable-next-line no-console

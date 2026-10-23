@@ -1,6 +1,14 @@
 import { createInputStream, ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
-import { type Stmt, sqlLexer, sqlLite, sqlParseLexer } from "./index";
+import {
+  type Stmt,
+  sqlLexer,
+  sqlLite,
+  sqlLiteScript,
+  sqlParseLexer,
+  sqlScriptLexer,
+  sqlScriptParseLexer,
+} from "./index";
 
 // --- helpers ---
 
@@ -1756,7 +1764,9 @@ describe("SQL-lite precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts 
   });
 
   it("rejects an AT with no TIME ZONE or no zone after it", () => {
-    expect(() => sqlLite.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected "time"/);
+    // `at` with neither TIME ZONE nor LOCAL after it is a bare alias, as in PG,
+    // so the error falls on the zone that follows it.
+    expect(() => sqlLite.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected ";" but found "z"/);
     expect(() => sqlLite.parse("SELECT a AT TIME ZONE FROM t;")).toThrow(/Expected a name but found "from"/);
   });
 });
@@ -6013,8 +6023,12 @@ describe("SQL-lite numeric literals and parameters", () => {
       { type: "op", value: "=" },
       { type: "number", value: "1" },
     ]);
-    // No rule takes `:=` yet, and the spaced spelling is no named argument.
-    expect(() => sqlLite.parse("SELECT f(a := 1);")).toThrow(/found ":="/);
+    // `:=` names an argument, and the spaced spelling is no named argument.
+    expect(colExpr("f(a := 1)")).toEqual({
+      kind: "call",
+      name: "f",
+      args: [{ kind: "namedArg", name: "a", value: num(1) }],
+    });
     expect(() => sqlLite.parse("SELECT f(a : = 1);")).toThrow(/found ":"/);
     // `:` and `::` lex as before.
     expect(colExpr("a[1:2]")).toMatchObject({ kind: "subscript" });
@@ -11788,9 +11802,197 @@ describe("SQL-lite COPY", () => {
     expect(bad("COPY (SELECT 1) (a) TO STDOUT;")).toThrow(/Expected "to" but found "\("/);
     expect(bad("COPY t FROM PROGRAM gzip;")).toThrow(/Expected a string but found "gzip"/);
     expect(bad("COPY t TO STDOUT WHERE a;")).toThrow(/Expected ";" but found "where"/);
-    expect(bad("COPY t FROM STDIN WITH CSV HEADER;")).toThrow(/Expected "\(" but found "csv"/);
     expect(bad("COPY t () FROM STDIN;")).toThrow(/Expected a name but found "\)"/);
     expect(bad("COPY t FROM STDIN ();")).toThrow(/Expected an option name but found "\)"/);
+  });
+});
+
+// --- COPY: PG's pre-9.0 options ---
+
+describe("SQL-lite COPY legacy options", () => {
+  const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
+  const word = (w: string) => ({ kind: "name", parts: [w] });
+  const list = (...names: string[]) => ({ kind: "optionList", items: names.map(word) });
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const optionsOf = (src: string) => firstStmt(`COPY t FROM STDIN ${src};`).options;
+
+  it("maps each bare-word option onto the parenthesised list's name", () => {
+    expect(
+      optionsOf(
+        "BINARY FREEZE DELIMITER '|' NULL '' CSV HEADER QUOTE '\"' ESCAPE '\\' FORCE NOT NULL a, b FORCE NULL c ENCODING 'UTF8'",
+      ),
+    ).toEqual([
+      opt("format", word("binary")),
+      opt("freeze"),
+      opt("delimiter", str("|")),
+      opt("null", str("")),
+      opt("format", word("csv")),
+      opt("header"),
+      opt("quote", str('"')),
+      opt("escape", str("\\")),
+      opt("force_not_null", list("a", "b")),
+      opt("force_null", list("c")),
+      opt("encoding", str("UTF8")),
+    ]);
+    expect(firstStmt("COPY t TO STDOUT CSV FORCE QUOTE a, b;").options).toEqual([
+      opt("format", word("csv")),
+      opt("force_quote", list("a", "b")),
+    ]);
+    expect(firstStmt("COPY t TO STDOUT CSV FORCE QUOTE *;").options).toEqual([
+      opt("format", word("csv")),
+      opt("force_quote", star()),
+    ]);
+    expect(firstStmt('COPY t TO STDOUT CSV FORCE QUOTE "A", b;').options).toEqual([
+      opt("format", word("csv")),
+      opt("force_quote", list("A", "b")),
+    ]);
+    expect(optionsOf("CSV FORCE NOT NULL * FORCE NULL *")).toEqual([
+      opt("format", word("csv")),
+      opt("force_not_null", star()),
+      opt("force_null", star()),
+    ]);
+  });
+
+  it("reads the optional AS, the optional WITH and a bare WITH", () => {
+    expect(optionsOf("WITH DELIMITER AS ',' NULL AS 'x' QUOTE AS '\"' ESCAPE AS 'e'")).toEqual([
+      opt("delimiter", str(",")),
+      opt("null", str("x")),
+      opt("quote", str('"')),
+      opt("escape", str("e")),
+    ]);
+    expect(firstStmt("COPY users FROM '/tmp/u.txt' DELIMITER '|' CSV HEADER;")).toEqual({
+      kind: "copy",
+      table: ["users"],
+      columns: null,
+      query: null,
+      direction: "from",
+      location: { kind: "file", path: "/tmp/u.txt" },
+      options: [opt("delimiter", str("|")), opt("format", word("csv")), opt("header")],
+      where: null,
+      legacy: true,
+    });
+    // An empty bare-word list: the options are absent, the spelling is not.
+    expect(firstStmt("COPY t TO STDOUT WITH;")).toMatchObject({ options: null, legacy: true });
+    expect(firstStmt("COPY t FROM STDIN WITH WHERE a;")).toMatchObject({
+      options: null,
+      where: name("a"),
+      legacy: true,
+    });
+    // The options come before WHERE, and a query may take them too.
+    expect(firstStmt("COPY t FROM STDIN WITH CSV WHERE a;")).toMatchObject({
+      options: [opt("format", word("csv"))],
+      where: name("a"),
+      legacy: true,
+    });
+    expect(firstStmt("COPY (SELECT 1) TO STDOUT WITH CSV HEADER;")).toMatchObject({
+      options: [opt("format", word("csv")), opt("header")],
+      legacy: true,
+    });
+  });
+
+  it("reads COPY BINARY and USING DELIMITERS, alongside either option form", () => {
+    expect(firstStmt("COPY BINARY s.t (a) TO STDOUT;")).toMatchObject({
+      table: ["s", "t"],
+      columns: ["a"],
+      options: [opt("format", word("binary"))],
+      legacy: true,
+    });
+    expect(firstStmt('COPY BINARY "t" FROM STDIN;')).toMatchObject({ table: ["t"], legacy: true });
+    expect(firstStmt("COPY t FROM STDIN USING DELIMITERS '|';")).toMatchObject({
+      options: [opt("delimiter", str("|"))],
+      legacy: true,
+    });
+    expect(firstStmt("COPY t TO STDOUT DELIMITERS '|' CSV;").options).toEqual([
+      opt("delimiter", str("|")),
+      opt("format", word("csv")),
+    ]);
+    expect(firstStmt("COPY BINARY t FROM STDIN WITH CSV;")).toMatchObject({
+      options: [opt("format", word("binary")), opt("format", word("csv"))],
+      legacy: true,
+    });
+    // PG collects the prefix, then DELIMITERS, then the list.
+    expect(firstStmt("COPY BINARY t FROM STDIN USING DELIMITERS ',' WITH (HEADER);")).toMatchObject({
+      options: [opt("format", word("binary")), opt("delimiter", str(",")), opt("header")],
+      legacy: true,
+    });
+  });
+
+  it("leaves the parenthesised form unmarked", () => {
+    const stmt = firstStmt("COPY t FROM STDIN WITH (FORMAT csv, HEADER);");
+    expect(stmt.options).toEqual([opt("format", word("csv")), opt("header")]);
+    expect(stmt).not.toHaveProperty("legacy");
+    expect(firstStmt("COPY t FROM STDIN;")).not.toHaveProperty("legacy");
+  });
+
+  it("keeps the legacy option words unreserved", () => {
+    const words = [
+      "binary",
+      "csv",
+      "header",
+      "delimiter",
+      "quote",
+      "escape",
+      "force",
+      "freeze",
+      "encoding",
+      "delimiters",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM binary;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["binary"])] }),
+    );
+    expect(firstStmt(`SELECT 1 AS csv, 2 freeze FROM t force;`)).toMatchObject({
+      columns: [{ alias: "csv" }, { alias: "freeze" }],
+    });
+    expect(
+      firstStmt(`CREATE TABLE csv (${words.map((w) => `${w} int`).join(", ")});`).items.map((i: any) => i.name),
+    ).toEqual(words);
+    // …and as the names COPY itself takes: `binary` is the prefix only before
+    // another name.
+    expect(firstStmt("COPY binary (csv, header) FROM STDIN;")).toMatchObject({
+      table: ["binary"],
+      columns: ["csv", "header"],
+      options: null,
+    });
+    expect(firstStmt("COPY binary TO STDOUT;")).not.toHaveProperty("legacy");
+    expect(firstStmt("COPY binary.force FROM STDIN;")).toMatchObject({ table: ["binary", "force"] });
+    expect(firstStmt("COPY BINARY binary FROM STDIN;")).toMatchObject({ table: ["binary"], legacy: true });
+    expect(firstStmt("COPY t TO STDOUT FORCE QUOTE delimiter, force;").options).toEqual([
+      opt("force_quote", list("delimiter", "force")),
+    ]);
+  });
+
+  it("rejects what PG's grammar rejects", () => {
+    // One statement takes one option form.
+    expect(bad("COPY t FROM STDIN WITH CSV (HEADER);")).toThrow(/Expected ";" but found "\("/);
+    expect(bad("COPY t FROM STDIN (HEADER) CSV;")).toThrow(/Expected ";" but found "csv"/);
+    expect(bad("COPY t FROM STDIN FORCE;")).toThrow(/Expected "quote", "not" or "null" but found ";"/);
+    expect(bad("COPY t FROM STDIN FORCE NOT a;")).toThrow(/Expected "null" but found "a"/);
+    expect(bad("COPY t FROM STDIN CSV FORCE NOT NULL *, a;")).toThrow(/Expected ";" but found ","/);
+    expect(bad("COPY t TO STDOUT WITH WHERE a;")).toThrow(/Expected ";" but found "where"/);
+    expect(bad("COPY t FROM STDIN WITH FORMAT csv;")).toThrow(
+      /Expected "\(" or a COPY option but found "format" \(1:23\)/,
+    );
+    expect(bad("COPY t TO STDOUT FORCE QUOTE select;")).toThrow(/Expected "\*" or a name but found "select"/);
+    expect(bad("COPY t TO STDOUT FORCE QUOTE a, select;")).toThrow(/Expected a name but found "select"/);
+    expect(bad("COPY t FROM STDIN WITH DELIMITERS ',';")).toThrow(
+      /Expected "\(" or a COPY option but found "delimiters"/,
+    );
+    expect(bad("COPY t FROM STDIN WITH USING DELIMITERS ',';")).toThrow(
+      /Expected "\(" or a COPY option but found "using"/,
+    );
+    expect(bad("COPY t TO STDOUT FORCE QUOTE;")).toThrow(/Expected "\*" or a name but found ";"/);
+    expect(bad("COPY binary select FROM STDIN;")).toThrow(/Expected "from" or "to" but found "select"/);
+    expect(bad("COPY t FROM STDIN WITH 1;")).toThrow(/Expected "\(" or a COPY option but found "1"/);
+    // The BINARY lookahead reports what does not lex rather than dropping it.
+    expect(sqlLite.diagnose("COPY binary 'x").errors[0]?.message).toMatch(/Unterminated/);
+    expect(bad("COPY t TO STDOUT FORCE QUOTE (a);")).toThrow(/Expected "\*" or a name but found "\("/);
+    expect(bad("COPY t FROM STDIN DELIMITER ,;")).toThrow(/Expected a string but found ","/);
+    expect(bad("COPY t FROM STDIN ENCODING AS 'UTF8';")).toThrow(/Expected a string but found "as"/);
+    expect(bad("COPY t FROM STDIN HEADER true;")).toThrow(/Expected ";" but found "true"/);
+    // DELIMITERS comes before the options, and only after a table.
+    expect(bad("COPY t FROM STDIN CSV DELIMITERS ',';")).toThrow(/Expected ";" but found "delimiters"/);
+    expect(bad("COPY (SELECT 1) TO STDOUT USING DELIMITERS ',';")).toThrow(/Expected ";" but found "using"/);
+    expect(bad("COPY BINARY (SELECT 1) TO STDOUT;")).toThrow(/Expected a name but found "select"/);
   });
 });
 
@@ -13113,6 +13315,412 @@ describe("SQL-lite MERGE", () => {
   });
 });
 
+// --- composite and array access, and call-argument forms ---
+
+describe("SQL-lite composite and array access, and call-argument forms", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const fieldOf = (expr: unknown, field: string | null) => ({ kind: "fieldSelect", expr, field });
+  const sub = (base: unknown, index: unknown) => ({ kind: "subscript", base, index });
+  const call = (fnName: string, args: unknown[] = [], mods: Record<string, unknown> = {}) => ({
+    kind: "call",
+    name: fnName,
+    args,
+    ...mods,
+  });
+  const arr = (...elements: unknown[]) => ({ kind: "array", elements });
+  const row = (...elements: unknown[]) => ({ kind: "array", elements, implicit: true });
+  const named = (argName: string, value: unknown) => ({ kind: "namedArg", name: argName, value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const select1 = sel({ columns: [col(num(1))] });
+
+  it("selects a field, or every field, of a parenthesised expression", () => {
+    expect(colExpr("(t.composite_col).field")).toEqual(fieldOf(name("t", "composite_col"), "field"));
+    expect(colExpr("(compute_row()).*")).toEqual(fieldOf(call("compute_row"), null));
+    expect(colExpr("(t.c).a.b")).toEqual(fieldOf(fieldOf(name("t", "c"), "a"), "b"));
+    expect(colExpr('(r)."Mixed"')).toEqual(fieldOf(name("r"), "Mixed"));
+    // PG's ColLabel would take a reserved word here; like a dotted name's
+    // parts, this grammar wants it quoted.
+    expect(colExpr('(r)."from"')).toEqual(fieldOf(name("r"), "from"));
+    expect(bad("SELECT (r).from FROM t;")).toThrow(/Expected a name but found "from"/);
+  });
+
+  it("selects a field of a subquery and of a call", () => {
+    expect(colExpr("(SELECT 1).f")).toEqual(fieldOf({ kind: "subquery", query: select1 }, "f"));
+    expect(colExpr("(SELECT 1).*")).toEqual(fieldOf({ kind: "subquery", query: select1 }, null));
+    expect(colExpr("(s.f(1, 2)).x")).toEqual(fieldOf(call("s.f", [num(1), num(2)]), "x"));
+  });
+
+  it("mixes subscripts and field selections in any order", () => {
+    expect(colExpr("(arr)[1]")).toEqual(sub(name("arr"), num(1)));
+    expect(colExpr("(arr)[1].f")).toEqual(fieldOf(sub(name("arr"), num(1)), "f"));
+    expect(colExpr("(r).f[2]")).toEqual(sub(fieldOf(name("r"), "f"), num(2)));
+    expect(colExpr("(r).a[1][2].b.*")).toEqual(
+      fieldOf(fieldOf(sub(sub(fieldOf(name("r"), "a"), num(1)), num(2)), "b"), null),
+    );
+    // A column reference takes the same chain once a subscript opens it.
+    expect(colExpr("a[1].f")).toEqual(fieldOf(sub(name("a"), num(1)), "f"));
+    expect(colExpr("t.a[1].f.*")).toEqual(fieldOf(fieldOf(sub(name("t", "a"), num(1)), "f"), null));
+    expect(colExpr("(SELECT a)[1:2]")).toEqual({
+      kind: "subscript",
+      base: { kind: "subquery", query: sel({ columns: [col(name("a"))] }) },
+      index: num(1),
+      upper: num(2),
+    });
+  });
+
+  it("binds the chain tighter than any operator", () => {
+    expect(colExpr("-(r).f")).toEqual({ kind: "unary", op: "-", operand: fieldOf(name("r"), "f") });
+    expect(colExpr("(r).f::int")).toEqual({ kind: "cast", expr: fieldOf(name("r"), "f"), type: ct("int") });
+    expect(colExpr("(r).f + (s).g")).toEqual(bin("+", fieldOf(name("r"), "f"), fieldOf(name("s"), "g")));
+    expect(exprOf("(r).f > 0")).toEqual(bin(">", fieldOf(name("r"), "f"), num(0)));
+    expect(firstStmt("SELECT (r).f AS x FROM t;").columns).toEqual([col(fieldOf(name("r"), "f"), "x")]);
+  });
+
+  it("spans a field selection from its opening parenthesis", () => {
+    const [stmt] = sqlLite.parse("SELECT (r).f[1].g FROM t;") as any[];
+    const g = stmt.columns[0].expr;
+    expect(g.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 17 } });
+    // The subscript keeps the span the postfix gives it, from its base.
+    expect(g.expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 15 } });
+    expect(g.expr.base.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 12 } });
+    const [chained] = sqlLite.parse("SELECT a[1].f FROM t;") as any[];
+    expect(chained.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 13 } });
+  });
+
+  it("takes no indirection where PG takes none", () => {
+    // A row constructor, and a field after a bare `.` of nothing.
+    expect(bad("SELECT (a, b).f FROM t;")).toThrow(/Expected ";" but found "\."/);
+    expect(bad("SELECT (r). FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(bad("SELECT (r).1 FROM t;")).toThrow(/Expected ";" but found "\.1"/);
+  });
+
+  it("builds an array from a subquery", () => {
+    expect(colExpr("ARRAY(SELECT 1)")).toEqual({ kind: "arraySubquery", query: select1 });
+    expect(colExpr("ARRAY(SELECT id FROM users ORDER BY id)").query).toMatchObject({ kind: "select" });
+    expect(bad("SELECT ARRAY() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT ARRAY(1) FROM t;")).toThrow(/but found "1"/);
+    expect(bad("SELECT ARRAY x FROM t;")).toThrow(/Expected "\[" but found "x"/);
+  });
+
+  it("reads bare inner rows of a multidimensional array", () => {
+    expect(colExpr("ARRAY[[1, 2], [3, 4]]")).toEqual(arr(row(num(1), num(2)), row(num(3), num(4))));
+    expect(colExpr("ARRAY[[[1]], [[]]]")).toEqual(arr(row(row(num(1))), row(row())));
+    expect(colExpr("ARRAY[[]]")).toEqual(arr(row()));
+    // Only the inner rows carry `implicit`.
+    expect(Object.keys(colExpr("ARRAY[[1]]"))).toEqual(["kind", "elements"]);
+    // An ARRAY-spelled inner array stays an ordinary element.
+    expect(colExpr("ARRAY[ARRAY[1], ARRAY[2]]")).toEqual(arr(arr(num(1)), arr(num(2))));
+    // Rows and expressions don't mix.
+    expect(bad("SELECT ARRAY[[1], 2] FROM t;")).toThrow(/Expected "\[" but found "2"/);
+    expect(bad("SELECT ARRAY[1, [2]] FROM t;")).toThrow(/but found "\["/);
+    expect(bad("SELECT ARRAY[[1],] FROM t;")).toThrow(/Expected "\[" but found "\]"/);
+    expect(bad("SELECT ARRAY[[1] FROM t;")).toThrow(/Expected "\]" but found "from"/);
+  });
+
+  it("spans an inner row over its brackets", () => {
+    const [stmt] = sqlLite.parse("SELECT ARRAY[[1], [2, 3]];") as any[];
+    const outer = stmt.columns[0].expr;
+    expect(outer.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 25 } });
+    expect(outer.elements[1].span).toEqual({ start: { row: 1, col: 18 }, end: { row: 1, col: 24 } });
+  });
+
+  it("names an argument with := as with =>", () => {
+    expect(colExpr("make_interval(days := 10)")).toEqual(call("make_interval", [named("days", num(10))]));
+    expect(colExpr('f(1, "B" := 2, c => 3)')).toEqual(call("f", [num(1), named("B", num(2)), named("c", num(3))]));
+    expect(firstStmt("CALL p(a := 1);")).toEqual({ kind: "callProcedure", name: ["p"], args: [named("a", num(1))] });
+    expect(bad("SELECT f(a : = 1) FROM t;")).toThrow(/Expected "\)" but found ":"/);
+    expect(bad("SELECT f(a :=) FROM t;")).toThrow(/but found "\)"/);
+  });
+
+  it("passes a last argument as VARIADIC", () => {
+    expect(colExpr("concat_ws(',', VARIADIC ARRAY['a', 'b'])")).toEqual(
+      call("concat_ws", [str(","), arr(str("a"), str("b"))], { variadic: true }),
+    );
+    expect(colExpr("f(VARIADIC arr)")).toEqual(call("f", [name("arr")], { variadic: true }));
+    expect(colExpr("f(VARIADIC a := arr)")).toEqual(call("f", [named("a", name("arr"))], { variadic: true }));
+    expect(colExpr("array_agg(VARIADIC a ORDER BY b)")).toEqual(
+      call("array_agg", [name("a")], { variadic: true, orderBy: [{ expr: name("b"), dir: null, nulls: null }] }),
+    );
+    expect(firstStmt("SELECT * FROM f(1, VARIADIC a);").from[0].call).toEqual(
+      call("f", [num(1), name("a")], { variadic: true }),
+    );
+    expect(firstStmt("CALL p(VARIADIC a);")).toEqual({
+      kind: "callProcedure",
+      name: ["p"],
+      args: [name("a")],
+      variadic: true,
+    });
+    // Omitted when absent, on all three.
+    expect(Object.keys(colExpr("f(a)"))).toEqual(["kind", "name", "args"]);
+    expect(Object.keys(firstStmt("SELECT * FROM f(a);").from[0].call)).toEqual(["kind", "name", "args"]);
+    expect(Object.keys(firstStmt("CALL p(a);"))).toEqual(["kind", "name", "args"]);
+  });
+
+  it("rejects a VARIADIC argument that is not last, or not an expression", () => {
+    expect(bad("SELECT f(VARIADIC a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT * FROM f(VARIADIC a, b);")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("CALL p(VARIADIC a, b);")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT f(VARIADIC *) FROM t;")).toThrow(/but found "\*"/);
+    expect(bad("SELECT f(VARIADIC) FROM t;")).toThrow(/but found "\)"/);
+    // PG's grammar takes VARIADIC after neither DISTINCT nor ALL.
+    expect(bad("SELECT f(DISTINCT VARIADIC a) FROM t;")).toThrow(/Expected a name but found "variadic"/);
+    expect(bad("SELECT f(ALL a, VARIADIC b) FROM t;")).toThrow(/Expected a name but found "variadic"/);
+    // Nor is a VARIADIC typmod a typed literal's.
+    expect(bad("SELECT varchar(VARIADIC 3) 'x' FROM t;")).toThrow(/Expected ";" but found "x"/);
+  });
+
+  it("records ALL ahead of an aggregate's arguments", () => {
+    expect(colExpr("count(ALL x)")).toEqual(call("count", [name("x")], { all: true }));
+    expect(colExpr("string_agg(ALL a, ',' ORDER BY a)")).toEqual(
+      call("string_agg", [name("a"), str(",")], { all: true, orderBy: [{ expr: name("a"), dir: null, nulls: null }] }),
+    );
+    // DISTINCT and ALL each want an argument after them.
+    expect(bad("SELECT count(ALL) FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT count(DISTINCT) FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT count(ALL DISTINCT x) FROM t;")).toThrow(/but found "distinct"/);
+    // Nor does either take a bare `*`, which stands only on its own.
+    expect(bad("SELECT count(ALL *) FROM t;")).toThrow(/but found "\*"/);
+    expect(bad("SELECT count(DISTINCT *) FROM t;")).toThrow(/but found "\*"/);
+    // A FROM call and CALL read neither (see parseCallArgs).
+    expect(bad("SELECT * FROM f(ALL x);")).toThrow(/but found "all"/);
+    expect(bad("CALL p(DISTINCT x);")).toThrow(/but found "distinct"/);
+  });
+
+  it("keeps the OVERLAY keyword form to plain first arguments", () => {
+    expect(bad("SELECT overlay(VARIADIC a PLACING b FROM 1) FROM t;")).toThrow(/Expected "\)" but found "placing"/);
+    expect(bad("SELECT overlay(ALL a PLACING b FROM 1) FROM t;")).toThrow(/Expected "\)" but found "placing"/);
+    expect(colExpr("overlay(a PLACING b FROM 1)")).toMatchObject({ kind: "overlay" });
+  });
+});
+
+// --- special predicates and calls, and non-empty lists ---
+
+describe("SQL-lite special predicates and calls", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const x = name("x");
+
+  it("parses IS [NOT] [form] NORMALIZED", () => {
+    const isNorm = (form: string | null, negated: boolean) => ({ kind: "isNormalized", expr: x, form, negated });
+    expect(colExpr("x IS NORMALIZED")).toEqual(isNorm(null, false));
+    expect(colExpr("x IS NOT NORMALIZED")).toEqual(isNorm(null, true));
+    expect(colExpr("x IS NFC NORMALIZED")).toEqual(isNorm("nfc", false));
+    expect(colExpr("x IS NOT NFD NORMALIZED")).toEqual(isNorm("nfd", true));
+    expect(colExpr("x IS NFKC NORMALIZED")).toEqual(isNorm("nfkc", false));
+    expect(colExpr("x IS NOT NFKD NORMALIZED")).toEqual(isNorm("nfkd", true));
+    // At IS's precedence: below the concatenation, above AND.
+    expect(exprOf("a || b IS NORMALIZED AND c")).toEqual({
+      kind: "binary",
+      op: "and",
+      left: { kind: "isNormalized", expr: bin("||", name("a"), name("b")), form: null, negated: false },
+      right: name("c"),
+    });
+    expect(bad("SELECT x IS NFC FROM t;")).toThrow(/Expected "normalized" but found "from"/);
+    expect(bad("SELECT x IS NFC NFD NORMALIZED FROM t;")).toThrow(/Expected "normalized" but found "nfd"/);
+    // Anything else after IS still reports the NULL it most likely meant.
+    expect(bad("SELECT x IS foo FROM t;")).toThrow(/Expected "null" but found "foo"/);
+  });
+
+  it("parses IS [NOT] DOCUMENT", () => {
+    expect(colExpr("x IS DOCUMENT")).toEqual({ kind: "isDocument", expr: x, negated: false });
+    // PG's b_expr takes it too, so a DEFAULT may end in it.
+    expect(firstStmt("CREATE TABLE t (c bool DEFAULT x IS NOT DOCUMENT NOT NULL);").items[0].constraints).toEqual([
+      { kind: "default", expr: { kind: "isDocument", expr: x, negated: true } },
+      { kind: "notNull" },
+    ]);
+    expect(exprOf("x IS NOT DOCUMENT OR y")).toEqual({
+      kind: "binary",
+      op: "or",
+      left: { kind: "isDocument", expr: x, negated: true },
+      right: name("y"),
+    });
+  });
+
+  it("parses NORMALIZE with and without a normal form", () => {
+    expect(colExpr("normalize(x, NFC)")).toEqual({ kind: "normalize", value: x, form: "nfc" });
+    expect(colExpr("normalize(x || 'a', nfkd)")).toEqual({
+      kind: "normalize",
+      value: bin("||", x, str("a")),
+      form: "nfkd",
+    });
+    expect(colExpr("normalize(x)")).toEqual({ kind: "call", name: "normalize", args: [x] });
+    // The form is a keyword: no string, column or expression takes its place.
+    expect(bad("SELECT normalize(x, 'NFC') FROM t;")).toThrow(
+      /Expected "nfc", "nfd", "nfkc" or "nfkd" but found "NFC"/,
+    );
+    expect(bad("SELECT normalize(x, y) FROM t;")).toThrow(/Expected "nfc", "nfd", "nfkc" or "nfkd" but found "y"/);
+    expect(bad("SELECT normalize(x, NFC, NFD) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT normalize() FROM t;")).toThrow(/but found "\)"/);
+    // A col_name_keyword in PG, so no call modifiers either.
+    expect(bad("SELECT normalize(x) OVER () FROM t;")).toThrow(/Expected ";" but found "\("/);
+    expect(bad("SELECT normalize(VARIADIC x) FROM t;")).toThrow(/but found "variadic"/);
+    // Quoted or qualified, it is an ordinary function.
+    expect(colExpr("\"normalize\"(x, 'NFC')")).toEqual({ kind: "call", name: "normalize", args: [x, str("NFC")] });
+    expect(colExpr("pg_catalog.normalize(x, 'NFC')")).toEqual({
+      kind: "call",
+      name: "pg_catalog.normalize",
+      args: [x, str("NFC")],
+    });
+  });
+
+  it("parses COLLATION FOR in a select list and a WHERE", () => {
+    const collationFor = (expr: unknown) => ({ kind: "collationFor", expr });
+    expect(colExpr("COLLATION FOR (x)")).toEqual(collationFor(x));
+    expect(firstStmt("SELECT collation for ('a' COLLATE \"C\") AS c;").columns).toEqual([
+      col(collationFor({ kind: "collate", expr: str("a"), collation: ["C"] }), "c"),
+    ]);
+    expect(firstStmt("SELECT a FROM t WHERE COLLATION FOR (b) = '\"default\"';").where).toEqual(
+      bin("=", collationFor(name("b")), str('"default"')),
+    );
+    // Without a `(` after FOR, `collation` is a column and FOR a locking clause.
+    // (PG makes `collation` a type_func_name keyword and no column name; this
+    // grammar is looser there.)
+    expect(firstStmt("SELECT collation FROM t FOR UPDATE;")).toMatchObject({
+      columns: [col(name("collation"))],
+      locking: [{ strength: "update" }],
+    });
+    expect(bad("SELECT COLLATION FOR x FROM t;")).toThrow(/Expected "update", "share", "no" or "key" but found "x"/);
+    expect(bad("SELECT COLLATION FOR () FROM t;")).toThrow(/but found "\)"/);
+  });
+
+  it("parses SUBSTRING's SIMILAR form beside its FROM / FOR form", () => {
+    expect(colExpr("substring(x SIMILAR '%#\"o_b#\"%' ESCAPE '#')")).toEqual({
+      kind: "substringSimilar",
+      value: x,
+      pattern: str('%#"o_b#"%'),
+      escape: str("#"),
+    });
+    expect(colExpr("substring(x FROM 2 FOR 3)")).toEqual({ kind: "substring", value: x, from: num(2), for_: num(3) });
+    // SIMILAR TO inside the value is still the operator.
+    expect(colExpr("substring(x SIMILAR TO 'a' FROM 2)")).toEqual({
+      kind: "substring",
+      value: { kind: "similarTo", expr: x, pattern: str("a"), negated: false },
+      from: num(2),
+      for_: null,
+    });
+    // PG requires the ESCAPE.
+    expect(bad("SELECT substring(x SIMILAR 'a') FROM t;")).toThrow(/Expected "escape" but found "\)"/);
+    // Outside SUBSTRING, a SIMILAR with no TO is a bare alias, as in PG.
+    expect(bad("SELECT x SIMILAR 'a' FROM t;")).toThrow(/Expected ";" but found "a"/);
+  });
+
+  it("parses AT LOCAL next to AT TIME ZONE", () => {
+    const atLocal = (expr: unknown) => ({ kind: "atLocal", expr });
+    expect(colExpr("x AT LOCAL")).toEqual(atLocal(x));
+    // Below the sign and COLLATE, like AT TIME ZONE, and chaining to the left.
+    expect(colExpr("-x AT LOCAL")).toEqual(atLocal({ kind: "unary", op: "-", operand: x }));
+    expect(colExpr("x AT TIME ZONE 'UTC' AT LOCAL")).toEqual(
+      atLocal({ kind: "atTimeZone", expr: x, zone: str("UTC") }),
+    );
+    expect(colExpr("x AT LOCAL AT TIME ZONE 'UTC'")).toEqual({
+      kind: "atTimeZone",
+      expr: atLocal(x),
+      zone: str("UTC"),
+    });
+    expect(colExpr("x AT LOCAL + y")).toEqual(bin("+", atLocal(x), name("y")));
+    expect(firstStmt("SELECT x AT LOCAL AS l FROM t;").columns).toEqual([col(atLocal(x), "l")]);
+    // Not a b_expr form, like AT TIME ZONE: a DEFAULT does not take it.
+    expect(bad("CREATE TABLE t (c timestamp DEFAULT x AT LOCAL);")).toThrow(/but found "at"/);
+  });
+
+  it("keeps a bare AT, SIMILAR, NORMALIZED and DOCUMENT as aliases", () => {
+    // PG's BARE_LABEL words: AT without TIME ZONE or LOCAL after it, and
+    // SIMILAR without TO, are no operators.
+    expect(firstStmt("SELECT x at FROM t;").columns).toEqual([col(x, "at")]);
+    expect(firstStmt("SELECT x at, y similar FROM t;").columns).toEqual([col(x, "at"), col(name("y"), "similar")]);
+    expect(firstStmt("SELECT x normalized, y document, z local FROM t;").columns).toEqual([
+      col(x, "normalized"),
+      col(name("y"), "document"),
+      col(name("z"), "local"),
+    ]);
+    expect(bad("SELECT x AT TIME FROM t;")).toThrow(/Expected "zone" but found "from"/);
+  });
+
+  it("keeps the new keywords unreserved as names and aliases", () => {
+    // All but `collation` and `normalize` are unreserved in PG too; those two
+    // are its type_func_name / col_name keywords, which this grammar does not
+    // reserve.
+    for (const word of [
+      "normalized",
+      "document",
+      "nfc",
+      "nfd",
+      "nfkc",
+      "nfkd",
+      "local",
+      "at",
+      "collation",
+      "normalize",
+    ]) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [col(name(word))],
+        from: [{ kind: "table", name: [word], alias: null }],
+      });
+      expect(firstStmt(`SELECT a AS ${word} FROM t ${word};`)).toMatchObject({
+        columns: [col(name("a"), word)],
+        from: [{ kind: "table", name: ["t"], alias: word }],
+      });
+      expect(firstStmt(`CREATE TABLE t (${word} int);`)).toMatchObject({ items: [{ name: word }] });
+    }
+    // A column named like a normal form is an operand, not the form, before IS.
+    expect(colExpr("nfc IS NORMALIZED")).toEqual({
+      kind: "isNormalized",
+      expr: name("nfc"),
+      form: null,
+      negated: false,
+    });
+  });
+});
+
+describe("SQL-lite rejects empty parenthesised lists", () => {
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const emptyList = /but found "\)"/;
+
+  it("rejects the empty forms PG rejects", () => {
+    expect(bad("SELECT x IN () FROM t;")).toThrow(emptyList);
+    expect(bad("SELECT x NOT IN () FROM t;")).toThrow(emptyList);
+    expect(bad("VALUES ();")).toThrow(emptyList);
+    expect(bad("VALUES (1), ();")).toThrow(emptyList);
+    expect(bad("INSERT INTO t VALUES ();")).toThrow(emptyList);
+    expect(bad("INSERT INTO t VALUES (1), ();")).toThrow(emptyList);
+    expect(bad("MERGE INTO t USING s ON t.a = s.a WHEN NOT MATCHED THEN INSERT VALUES ();")).toThrow(emptyList);
+    expect(bad("SELECT DISTINCT ON () a FROM t;")).toThrow(emptyList);
+    expect(bad("EXECUTE p();")).toThrow(emptyList);
+  });
+
+  it("still reads non-empty lists", () => {
+    expect(firstStmt("SELECT x IN (1) FROM t;").columns[0].expr).toEqual({
+      kind: "in",
+      expr: name("x"),
+      list: [num(1)],
+      negated: false,
+    });
+    expect(firstStmt("VALUES (1, 2), (3, 4);")).toMatchObject({
+      rows: [
+        [num(1), num(2)],
+        [num(3), num(4)],
+      ],
+    });
+    expect(firstStmt("SELECT DISTINCT ON (a, b) a FROM t;").distinct).toEqual([name("a"), name("b")]);
+    expect(firstStmt("EXECUTE p(1);")).toMatchObject({ args: [num(1)] });
+  });
+
+  it("keeps the empty lists PG allows", () => {
+    // A call, a ROW constructor and a trigger's function arguments may be empty.
+    expect(firstStmt("SELECT now() FROM t;").columns[0].expr).toEqual({ kind: "call", name: "now", args: [] });
+    expect(firstStmt("SELECT ROW() FROM t;").columns[0].expr).toEqual({ kind: "row", items: [] });
+    expect(firstStmt("EXECUTE p;")).toMatchObject({ args: null });
+    const trigger = (args: string) =>
+      firstStmt(`CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION f(${args});`).execute;
+    expect(trigger("")).toEqual({ routine: "function", name: ["f"], args: [] });
+    expect(trigger("1, 'a'")).toEqual({ routine: "function", name: ["f"], args: [num(1), str("a")] });
+    const trig = "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION f";
+    expect(bad(`${trig}(1,);`)).toThrow(emptyList);
+    expect(bad(`${trig}(1 2);`)).toThrow(/Expected "," but found "2"/);
+    expect(bad(`${trig}(`)).toThrow(/Expected "\)" but found end of input/);
+  });
+});
+
 // --- long-tail objects: definition lists, casts, collations, operators, … ---
 
 describe("SQL-lite long-tail objects with definition lists", () => {
@@ -14151,5 +14759,741 @@ describe("SQL-lite UNLOGGED materialized views and their storage clauses", () =>
       withData: null,
       tablespace: "tablespace",
     });
+  });
+});
+
+// --- psql scripts: sqlLiteScript ---
+
+describe("SQL-lite psql scripts", () => {
+  const script = (text: string) => stripSpans(sqlLiteScript.parse(text)) as Record<string, any>[];
+  const bad = (src: string) => () => sqlLiteScript.parse(src);
+  const meta = (command: string, args = "") => ({ kind: "psqlMeta", command, args });
+  const copyIn = (table: string, data?: string) => ({
+    kind: "copy",
+    table: [table],
+    columns: null,
+    query: null,
+    direction: "from",
+    location: { kind: "stdin" },
+    options: null,
+    where: null,
+    ...(data === undefined ? {} : { data }),
+  });
+  const one = firstStmt("SELECT 1;");
+  const two = firstStmt("SELECT 2;");
+
+  it("attaches the rows after COPY … FROM STDIN as data, verbatim", () => {
+    const rows = "1\tit's; -- not a comment\n2\t\\N\n\n";
+    expect(script(`COPY t FROM stdin;\n${rows}\\.\nSELECT 1;`)).toEqual([copyIn("t", rows), one]);
+    expect(script('COPY t FROM STDIN (FORMAT csv);\na,"b;c"\n\\.\n')).toEqual([
+      { ...copyIn("t", 'a,"b;c"\n'), options: [{ name: "format", value: { kind: "name", parts: ["csv"] } }] },
+    ]);
+    // The pre-9.0 spelling, the BINARY prefix included, takes its rows too.
+    expect(
+      script("COPY BINARY t FROM stdin;\nxx\n\\.\nCOPY t FROM stdin WITH CSV HEADER NULL AS '';\na,b\n\\.\n"),
+    ).toEqual([
+      {
+        ...copyIn("t", "xx\n"),
+        options: [{ name: "format", value: { kind: "name", parts: ["binary"] } }],
+        legacy: true,
+      },
+      {
+        ...copyIn("t", "a,b\n"),
+        options: [
+          { name: "format", value: { kind: "name", parts: ["csv"] } },
+          { name: "header", value: null },
+          { name: "null", value: { kind: "string", value: "" } },
+        ],
+        legacy: true,
+      },
+    ]);
+    // A row is data even when it looks like a terminator or a meta-command.
+    expect(script("COPY t FROM stdin;\n \\.\n\\.x\n\\connect db\n\\.")).toEqual([
+      copyIn("t", " \\.\n\\.x\n\\connect db\n"),
+    ]);
+  });
+
+  it("gives an empty block empty data, and reads CRLF line ends", () => {
+    expect(script("COPY t FROM stdin;\n\\.\nSELECT 1;")).toEqual([copyIn("t", ""), one]);
+    expect(script("COPY t FROM stdin;\r\n1\r\n\\.\r\nSELECT 1;\r\n")).toEqual([copyIn("t", "1\r\n"), one]);
+    // Whitespace or a comment may follow the COPY's `;` on its line.
+    expect(script("COPY t FROM stdin;  -- rows follow\n1\n\\.")).toEqual([copyIn("t", "1\n")]);
+  });
+
+  it("reads the rows once, whatever lookahead the COPY's parse does", () => {
+    const sql = "COPY t (a, b) FROM stdin WITH (FORMAT csv, HEADER) WHERE a IN (SELECT x FROM u) AND (b, a) > (1, 2);";
+    expect(script(`${sql}\na,b\n1,2\n\\.\n${sql}\n\\.\nSELECT 1;`)).toEqual([
+      { ...firstStmt(sql), data: "a,b\n1,2\n" },
+      { ...firstStmt(sql), data: "" },
+      one,
+    ]);
+  });
+
+  it("keeps spans true across the data block", () => {
+    const dataSpan = (text: string) => {
+      const tokens = sqlScriptParseLexer.tokenize(createInputStream(text));
+      for (let token = tokens.next(); token !== null; token = tokens.next()) {
+        if (token.type === "copydata") return token.position;
+      }
+      return null;
+    };
+    // From the first row through the `\.`, a CRLF line's `\r` aside.
+    for (const eol of ["\n", "\r\n"]) {
+      expect(dataSpan(`COPY t FROM stdin;${eol}1${eol}\\.${eol}x`)).toEqual({
+        start: { row: 2, col: 0 },
+        end: { row: 3, col: 2 },
+      });
+    }
+    expect(sqlLiteScript.diagnose("COPY t FROM stdin; ab cd   \n1\n\\.").errors[0]!.end).toEqual({ row: 1, col: 24 });
+    expect(() => sqlLiteScript.parse("COPY t FROM stdin; x \r\n1\n\\.")).toThrow(
+      expect.objectContaining({ end: { row: 1, col: 20 } }),
+    );
+    expect((sqlLiteScript.parse("\\x\r\nSELECT 1;")[0] as any).span).toEqual({
+      start: { row: 1, col: 0 },
+      end: { row: 1, col: 2 },
+    });
+    const [copy, select] = sqlLiteScript.parse("COPY t FROM stdin;\n1\n2\n\\.\nSELECT 1;") as any[];
+    expect(copy.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 17 } });
+    expect(select.span).toEqual({ start: { row: 5, col: 0 }, end: { row: 5, col: 8 } });
+    expect(bad("COPY t FROM stdin;\n1\n\\.\nSELECT 1 +;")).toThrow(/\(4:10\)/);
+  });
+
+  it("reads data only after a COPY from STDIN", () => {
+    const toStdout = { ...copyIn("t"), direction: "to", location: { kind: "stdout" } };
+    expect(script("COPY t TO stdout;\n\\.\n")).toEqual([toStdout, meta(".")]);
+    expect(script("SELECT * FROM stdin;\nSELECT 1;")).toEqual([firstStmt("SELECT * FROM stdin;"), one]);
+    expect(script("COPY t (stdin) FROM 'f';\nSELECT 1;")).toEqual([
+      { ...copyIn("t"), columns: ["stdin"], location: { kind: "file", path: "f" } },
+      one,
+    ]);
+    expect(script("COPY (SELECT 'from stdin') TO STDOUT;\nSELECT 1;")).toHaveLength(2);
+    expect(script("COPY t FROM 'f' WHERE a IS DISTINCT FROM stdin;\nSELECT 1;")).toHaveLength(2);
+    // Rows are read for a statement the grammar rejects, a qualified name included.
+    expect(sqlLiteScript.diagnose("COPY s.from FROM stdin;\n1\n\\.\nSELECT 1;").ast).toHaveLength(1);
+    // A COPY with no `;` ends the input, so it has no rows to read. Without
+    // rows, `data` is absent, not undefined.
+    expect(script("COPY t FROM stdin")).toStrictEqual([copyIn("t")]);
+    expect("data" in parse("COPY t FROM stdin;\nSELECT 1;")[0]!).toBe(false);
+  });
+
+  it("keeps copy and stdin unreserved as names", () => {
+    expect(script("COPY stdin FROM stdin;\n1\n\\.")).toEqual([copyIn("stdin", "1\n")]);
+    // Rows are taken even when a table named `from` is rejected, after an
+    // earlier COPY that ended on a qualified name's dot too.
+    for (const sql of ["COPY from FROM stdin;", "COPY from.t FROM stdin;", "COPY s.;\nCOPY from FROM stdin;"]) {
+      expect(stripSpans(sqlLiteScript.diagnose(`${sql}\n\\connect x\n\\.\nSELECT 1;`).ast)).toEqual([one]);
+    }
+    expect(script("SELECT copy, stdin FROM copy;\nSELECT 1;")).toEqual([
+      firstStmt("SELECT copy, stdin FROM copy;"),
+      one,
+    ]);
+  });
+
+  it("rejects an unterminated block and text after the COPY's semicolon", () => {
+    expect(bad("COPY t FROM stdin;\n1\n2")).toThrow(/COPY data is not terminated by a "\\\." line \(2:0\)/);
+    expect(bad("COPY t FROM stdin;")).toThrow(/COPY data is not terminated/);
+    expect(bad("COPY t FROM stdin; SELECT 1;\n\\.")).toThrow(/Unexpected text after COPY … FROM STDIN \(1:19\)/);
+    expect(bad("COPY t FROM stdin; /* c */\n1\n\\.")).toThrow(/Unexpected text after COPY … FROM STDIN \(1:19\)/);
+    expect(bad("COPY t FROM stdin; -\n1\n\\.")).toThrow(/Unexpected text after COPY … FROM STDIN \(1:19\)/);
+    // With no terminator either, the rows swallowed the rest of the input: that is the error.
+    expect(bad("COPY t FROM stdin; x\nSELECT 2;")).toThrow(/COPY data is not terminated/);
+  });
+
+  it("parses meta-command lines at the start, middle and end", () => {
+    expect(
+      script("\\restrict abc\nSELECT 1;\n\\connect -reuse-previous=on \"dbname='app'\"\nSELECT 2;\n\\unrestrict abc\n"),
+    ).toEqual([
+      meta("restrict", "abc"),
+      one,
+      meta("connect", "-reuse-previous=on \"dbname='app'\""),
+      two,
+      meta("unrestrict", "abc"),
+    ]);
+    // After a `;` on the same line, and with no statement at all.
+    expect(script("SELECT 1; \\gset  \n")).toEqual([one, meta("gset")]);
+    expect(script("\\set ON_ERROR_STOP on\r\n\\.")).toEqual([meta("set", "ON_ERROR_STOP on"), meta(".")]);
+  });
+
+  it("ends a command name at whitespace or a backslash, as psql does", () => {
+    expect(script("\\dt+ s.*")).toEqual([meta("dt+", "s.*")]);
+    expect(script("\\x\\y")).toEqual([meta("x", "\\y")]);
+    expect(script("\\\\")).toEqual([meta("\\")]);
+    expect(script("\\! ls -l")).toEqual([meta("!", "ls -l")]);
+    expect(bad("\\")).toThrow(/Invalid psql meta-command "\\" \(1:0\)/);
+    expect(bad("SELECT 1;\n\\ x")).toThrow(/Invalid psql meta-command "\\" \(2:0\)/);
+  });
+
+  it("parses statements as sqlLite does, spans included", () => {
+    const text = "CREATE TABLE t (a int);\n-- c\nINSERT INTO t VALUES (1) /* c */ ;\nSELECT 1";
+    expect(sqlLiteScript.parse(text)).toEqual(sqlLite.parse(text));
+  });
+
+  it("still rejects a backslash inside a statement", () => {
+    expect(bad("SELECT 1 \\x;")).toThrow(/Unexpected character "\\" \(1:9\)/);
+    expect(bad("SELECT 1 \\x")).toThrow(/Unexpected character "\\"/);
+    // On a line of its own it is a meta-command, which cuts the statement short.
+    expect(bad("SELECT\n\\x\n1;")).toThrow(/but found "\\x" \(2:0\)/);
+    expect(bad("SELECT 1\n\\connect db")).toThrow(/Expected ";" but found "\\connect db" \(2:0\)/);
+  });
+
+  it("leaves sqlLite and sqlLexer strict", () => {
+    expect(() => sqlLite.parse("\\connect db")).toThrow(/Unexpected character "\\"/);
+    expect(() => sqlLite.parse("COPY t FROM stdin;\n1\n\\.")).toThrow(/Expected a statement but found "1" \(2:0\)/);
+    expect(() => lex("\\x")).toThrow(/Unexpected character "\\"/);
+    expect(lex("\\x", sqlScriptLexer)).toEqual([{ type: "psqlmeta", value: "\\x" }]);
+  });
+
+  it("recovers at the next statement, at a meta-command line and past COPY rows", () => {
+    const { ast, errors } = sqlLiteScript.diagnose(
+      [
+        "SELECT FROM WHERE;",
+        "\\connect db",
+        "SELECT (1",
+        "\\connect other",
+        "COPY t FROM stdin WITH junk;",
+        "1;SELECT 1;",
+        "\\.",
+        "bogus",
+        "\\unrestrict k",
+        "SELECT 2;",
+      ].join("\n"),
+    );
+    expect(stripSpans(ast)).toEqual([meta("connect", "db"), meta("connect", "other"), meta("unrestrict", "k"), two]);
+    expect(errors.map((error) => error.message)).toEqual([
+      'Expected a name but found "where" (1:12)',
+      'Expected ")" but found "\\connect other" (4:0)',
+      'Expected "(" or a COPY option but found "junk" (5:23)',
+      'Expected a statement or a psql meta-command but found "bogus" (8:0)',
+    ]);
+  });
+
+  it("reports a backslash with no command name without losing the statement before it", () => {
+    // `f(a)`'s parse looks one token past its `;`, at the bad line.
+    const { ast, errors } = sqlLiteScript.diagnose("SELECT f(a);\n\\ x\n\\connect db\nSELECT 2;");
+    expect(stripSpans(ast)).toEqual([firstStmt("SELECT f(a);"), meta("connect", "db"), two]);
+    expect(errors.map((error) => error.message)).toEqual(['Invalid psql meta-command "\\" (2:0)']);
+  });
+
+  it("keeps a meta-command line that follows a lexer error", () => {
+    const leads: [string, number][] = [
+      ["SELECT 1;\n\\ x", 1],
+      ["SELECT B'102'", 1],
+      // The bad COPY and the text after its `;`.
+      ["COPY t FROM stdin WITH junk; x\n1\n\\.", 2],
+    ];
+    for (const [lead, count] of leads) {
+      const { ast, errors } = sqlLiteScript.diagnose(`${lead}\n\\connect db\nSELECT 2;`);
+      expect(stripSpans(ast).slice(-2)).toEqual([meta("connect", "db"), two]);
+      expect(errors).toHaveLength(count);
+    }
+  });
+
+  it("keeps a COPY whose parse looked ahead into a bad data block", () => {
+    const { ast, errors } = sqlLiteScript.diagnose("COPY t FROM stdin WHERE f(a); x\n1\n\\.\nSELECT 1;");
+    expect(stripSpans(ast)).toEqual([{ ...firstStmt("COPY t FROM stdin WHERE f(a);"), data: "1\n" }, one]);
+    expect(errors.map((error) => error.message)).toEqual(["Unexpected text after COPY … FROM STDIN (1:30)"]);
+  });
+
+  it("reports an error in the data block and keeps the COPY and its rows", () => {
+    const { ast, errors } = sqlLiteScript.diagnose("COPY t FROM stdin; x\n1\n\\.\nSELECT 1;");
+    expect(stripSpans(ast)).toEqual([copyIn("t", "1\n"), one]);
+    expect(errors.map((error) => error.message)).toEqual(["Unexpected text after COPY … FROM STDIN (1:19)"]);
+  });
+});
+
+// --- foreign data: wrappers, servers, user mappings, foreign tables ---
+
+describe("SQL-lite foreign data", () => {
+  const fails = (text: string) => () => sqlLite.parse(text);
+  const ty = (typeName: string, args: number[] = []) => ({
+    name: typeName,
+    args,
+    array: false,
+  });
+  const opt = (optionName: string, value: string) => ({
+    name: optionName,
+    value,
+  });
+
+  it("parses CREATE and ALTER FOREIGN DATA WRAPPER", () => {
+    expect(firstStmt("CREATE FOREIGN DATA WRAPPER w;")).toEqual({
+      kind: "createForeignDataWrapper",
+      name: "w",
+    });
+    expect(
+      firstStmt("CREATE FOREIGN DATA WRAPPER w HANDLER s.h NO VALIDATOR OPTIONS (debug 'true', user 'u');"),
+    ).toEqual({
+      kind: "createForeignDataWrapper",
+      name: "w",
+      functions: [
+        { kind: "handler", name: ["s", "h"] },
+        { kind: "validator", name: null },
+      ],
+      options: [opt("debug", "true"), opt("user", "u")],
+    });
+    // PG takes the clauses in any order.
+    expect(firstStmt("CREATE FOREIGN DATA WRAPPER w VALIDATOR v NO HANDLER;").functions).toEqual([
+      { kind: "validator", name: ["v"] },
+      { kind: "handler", name: null },
+    ]);
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w NO HANDLER OPTIONS (ADD a '1', SET b '2', DROP c, d '4');")).toEqual(
+      {
+        kind: "alterForeignDataWrapper",
+        name: "w",
+        functions: [{ kind: "handler", name: null }],
+        options: [
+          { action: "add", name: "a", value: "1" },
+          { action: "set", name: "b", value: "2" },
+          { action: "drop", name: "c" },
+          opt("d", "4"),
+        ],
+      },
+    );
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w VALIDATOR v;")).toEqual({
+      kind: "alterForeignDataWrapper",
+      name: "w",
+      functions: [{ kind: "validator", name: ["v"] }],
+    });
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w OPTIONS (DROP a);")).toEqual({
+      kind: "alterForeignDataWrapper",
+      name: "w",
+      options: [{ action: "drop", name: "a" }],
+    });
+    // ADD, SET and DROP name an option when a string follows them.
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w OPTIONS (set 'x', drop 'y', SET add 'z');").options).toEqual([
+      opt("set", "x"),
+      opt("drop", "y"),
+      { action: "set", name: "add", value: "z" },
+    ]);
+  });
+
+  it("keeps RENAME TO and OWNER TO on wrappers and servers as alterObject", () => {
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w RENAME TO x;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "foreign data wrapper", name: ["w"] },
+      action: { kind: "rename", to: "x" },
+    });
+    expect(firstStmt("ALTER FOREIGN DATA WRAPPER w OWNER TO CURRENT_USER;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "foreign data wrapper", name: ["w"] },
+      action: { kind: "ownerTo", owner: "current_user" },
+    });
+    expect(firstStmt("ALTER SERVER s RENAME TO t;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "server", name: ["s"] },
+      action: { kind: "rename", to: "t" },
+    });
+    expect(firstStmt("ALTER SERVER s OWNER TO r;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "server", name: ["s"] },
+      action: { kind: "ownerTo", owner: "r" },
+    });
+  });
+
+  it("parses CREATE and ALTER SERVER", () => {
+    expect(firstStmt("CREATE SERVER s FOREIGN DATA WRAPPER postgres_fdw;")).toEqual({
+      kind: "createServer",
+      name: "s",
+      wrapper: "postgres_fdw",
+    });
+    expect(
+      firstStmt(
+        "CREATE SERVER IF NOT EXISTS s TYPE 'pg' VERSION '17' FOREIGN DATA WRAPPER w OPTIONS (host 'foo', dbname 'films');",
+      ),
+    ).toEqual({
+      kind: "createServer",
+      ifNotExists: true,
+      name: "s",
+      type: "pg",
+      version: "17",
+      wrapper: "w",
+      options: [opt("host", "foo"), opt("dbname", "films")],
+    });
+    expect(firstStmt("CREATE SERVER s VERSION NULL FOREIGN DATA WRAPPER w;")).toMatchObject({ version: null });
+    // A server called `if` is no IF NOT EXISTS.
+    expect(firstStmt("CREATE SERVER if FOREIGN DATA WRAPPER w;")).toMatchObject({ name: "if" });
+    expect(firstStmt("ALTER SERVER s VERSION '2' OPTIONS (SET host 'x');")).toEqual({
+      kind: "alterServer",
+      name: "s",
+      version: "2",
+      options: [{ action: "set", name: "host", value: "x" }],
+    });
+    expect(firstStmt("ALTER SERVER s VERSION NULL;")).toEqual({
+      kind: "alterServer",
+      name: "s",
+      version: null,
+    });
+    expect(firstStmt("ALTER SERVER s OPTIONS (port '5432');")).toEqual({
+      kind: "alterServer",
+      name: "s",
+      options: [opt("port", "5432")],
+    });
+  });
+
+  it("parses CREATE, ALTER and DROP USER MAPPING", () => {
+    expect(firstStmt("CREATE USER MAPPING FOR app_user SERVER films OPTIONS (user 'bob', password 'x');")).toEqual({
+      kind: "createUserMapping",
+      user: "app_user",
+      server: "films",
+      options: [opt("user", "bob"), opt("password", "x")],
+    });
+    // PG reads the USER keyword as CURRENT_USER.
+    expect(firstStmt("CREATE USER MAPPING IF NOT EXISTS FOR USER SERVER s;")).toEqual({
+      kind: "createUserMapping",
+      ifNotExists: true,
+      user: "current_user",
+      server: "s",
+    });
+    // A quoted "user" is a role of that name.
+    expect(firstStmt('CREATE USER MAPPING FOR "user" SERVER s;')).toMatchObject({ user: "user" });
+    for (const role of ["current_role", "current_user", "session_user", "public"]) {
+      expect(firstStmt(`CREATE USER MAPPING FOR ${role.toUpperCase()} SERVER s;`)).toMatchObject({ user: role });
+    }
+    expect(firstStmt("ALTER USER MAPPING FOR CURRENT_ROLE SERVER s OPTIONS (DROP password, SET user 'u');")).toEqual({
+      kind: "alterUserMapping",
+      user: "current_role",
+      server: "s",
+      options: [
+        { action: "drop", name: "password" },
+        { action: "set", name: "user", value: "u" },
+      ],
+    });
+    expect(firstStmt("DROP USER MAPPING IF EXISTS FOR u SERVER s;")).toEqual({
+      kind: "dropUserMapping",
+      ifExists: true,
+      user: "u",
+      server: "s",
+    });
+    expect(firstStmt("DROP USER MAPPING FOR USER SERVER s;")).toEqual({
+      kind: "dropUserMapping",
+      ifExists: false,
+      user: "current_user",
+      server: "s",
+    });
+  });
+
+  it("still reads a user called mapping as a user", () => {
+    expect(firstStmt("CREATE USER mapping;")).toEqual({
+      kind: "createRole",
+      user: true,
+      name: "mapping",
+      options: [],
+    });
+    expect(firstStmt("CREATE USER mapping WITH LOGIN;")).toMatchObject({
+      kind: "createRole",
+      name: "mapping",
+    });
+    expect(firstStmt("ALTER USER mapping WITH LOGIN;")).toMatchObject({
+      kind: "alterRole",
+      name: "mapping",
+    });
+    expect(firstStmt("ALTER USER mapping RENAME TO m;")).toMatchObject({
+      kind: "alterRole",
+      name: "mapping",
+    });
+    expect(firstStmt("DROP USER mapping, other;")).toMatchObject({
+      kind: "drop",
+      objectType: "user",
+      names: [["mapping"], ["other"]],
+    });
+    expect(firstStmt("DROP USER IF EXISTS mapping;")).toMatchObject({
+      objectType: "user",
+      ifExists: true,
+    });
+  });
+
+  it("parses CREATE FOREIGN TABLE with column and table options", () => {
+    expect(
+      firstStmt(
+        "CREATE FOREIGN TABLE films (code char(5) OPTIONS (column_name 'c') NOT NULL, title varchar(40)) " +
+          "SERVER films_srv OPTIONS (schema_name 'public');",
+      ),
+    ).toEqual({
+      kind: "createForeignTable",
+      name: ["films"],
+      items: [
+        {
+          kind: "column",
+          name: "code",
+          dataType: ty("char", [5]),
+          options: [opt("column_name", "c")],
+          constraints: [{ kind: "notNull" }],
+        },
+        {
+          kind: "column",
+          name: "title",
+          dataType: ty("varchar", [40]),
+          constraints: [],
+        },
+      ],
+      server: "films_srv",
+      options: [opt("schema_name", "public")],
+    });
+    expect(firstStmt("CREATE FOREIGN TABLE IF NOT EXISTS s.f () INHERITS (p, q) SERVER s;")).toEqual({
+      kind: "createForeignTable",
+      ifNotExists: true,
+      name: ["s", "f"],
+      items: [],
+      inherits: [["p"], ["q"]],
+      server: "s",
+    });
+    expect(firstStmt("CREATE FOREIGN TABLE f (a int, CHECK (a > 0)) SERVER s;").items[1]).toMatchObject({
+      kind: "check",
+    });
+    // PG's columnDef takes OPTIONS on any table.
+    expect(firstStmt("CREATE TABLE t (a int OPTIONS (x 'y') DEFAULT 1);").items[0]).toEqual({
+      kind: "column",
+      name: "a",
+      dataType: ty("int"),
+      options: [opt("x", "y")],
+      constraints: [{ kind: "default", expr: num(1) }],
+    });
+  });
+
+  it("parses CREATE FOREIGN TABLE … PARTITION OF", () => {
+    expect(firstStmt("CREATE FOREIGN TABLE f PARTITION OF p FOR VALUES IN (1) SERVER s;")).toEqual({
+      kind: "createForeignTable",
+      name: ["f"],
+      items: [],
+      partitionOf: { parent: ["p"], bound: { kind: "list", values: [num(1)] } },
+      server: "s",
+    });
+    expect(
+      firstStmt("CREATE FOREIGN TABLE f PARTITION OF p (a NOT NULL) DEFAULT SERVER s OPTIONS (t 'x');"),
+    ).toMatchObject({
+      items: [{ kind: "columnOptions", name: "a" }],
+      partitionOf: { parent: ["p"], bound: { kind: "default" } },
+      options: [opt("t", "x")],
+    });
+    expect(firstStmt("CREATE FOREIGN TABLE IF NOT EXISTS f PARTITION OF p DEFAULT SERVER s;")).toEqual({
+      kind: "createForeignTable",
+      ifNotExists: true,
+      name: ["f"],
+      items: [],
+      partitionOf: { parent: ["p"], bound: { kind: "default" } },
+      server: "s",
+    });
+  });
+
+  it("parses ALTER FOREIGN TABLE with ALTER TABLE's actions and OPTIONS", () => {
+    expect(
+      firstStmt(
+        "ALTER FOREIGN TABLE IF EXISTS ONLY f ADD COLUMN c int OPTIONS (n 'v'), ALTER c OPTIONS (ADD x 'y'), OPTIONS (DROP z);",
+      ),
+    ).toEqual({
+      kind: "alterTable",
+      foreign: true,
+      ifExists: true,
+      name: ["f"],
+      only: true,
+      actions: [
+        {
+          kind: "addColumn",
+          ifNotExists: false,
+          column: {
+            kind: "column",
+            name: "c",
+            dataType: ty("int"),
+            options: [opt("n", "v")],
+            constraints: [],
+          },
+        },
+        {
+          kind: "columnGenericOptions",
+          column: "c",
+          options: [{ action: "add", name: "x", value: "y" }],
+        },
+        { kind: "genericOptions", options: [{ action: "drop", name: "z" }] },
+      ],
+    });
+    expect(firstStmt("ALTER FOREIGN TABLE f RENAME TO g;")).toEqual({
+      kind: "alterTable",
+      foreign: true,
+      ifExists: false,
+      name: ["f"],
+      actions: [{ kind: "renameTable", to: "g" }],
+    });
+    expect(firstStmt("ALTER FOREIGN TABLE f OWNER TO r;").actions).toEqual([{ kind: "ownerTo", owner: "r" }]);
+    expect(firstStmt("ALTER FOREIGN TABLE f SET SCHEMA s;").actions).toEqual([{ kind: "setSchema", schema: "s" }]);
+    expect(firstStmt("ALTER TABLE t ALTER COLUMN c OPTIONS (SET a 'b');").actions).toEqual([
+      { kind: "columnGenericOptions", column: "c", options: [{ action: "set", name: "a", value: "b" }] },
+    ]);
+    expect(firstStmt("ALTER TABLE t ADD COLUMN a int OPTIONS (x 'y');").actions).toEqual([
+      {
+        kind: "addColumn",
+        ifNotExists: false,
+        column: { kind: "column", name: "a", dataType: ty("int"), options: [opt("x", "y")], constraints: [] },
+      },
+    ]);
+    expect(firstStmt("ALTER TABLE t OPTIONS (a 'b');")).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["t"],
+      actions: [{ kind: "genericOptions", options: [opt("a", "b")] }],
+    });
+  });
+
+  it("parses IMPORT FOREIGN SCHEMA", () => {
+    expect(firstStmt("IMPORT FOREIGN SCHEMA remote FROM SERVER srv INTO local;")).toEqual({
+      kind: "importForeignSchema",
+      remoteSchema: "remote",
+      server: "srv",
+      into: "local",
+    });
+    expect(firstStmt("IMPORT FOREIGN SCHEMA r LIMIT TO (t1, s.t2) FROM SERVER srv INTO l;")).toMatchObject({
+      qualification: { kind: "limitTo", tables: [["t1"], ["s", "t2"]] },
+    });
+    // ONLY and `*` are PG's relation_expr, accepted and ignored.
+    expect(firstStmt("IMPORT FOREIGN SCHEMA r LIMIT TO (ONLY a, b *) FROM SERVER srv INTO l;")).toMatchObject({
+      qualification: { kind: "limitTo", tables: [["a"], ["b"]] },
+    });
+    expect(
+      firstStmt("IMPORT FOREIGN SCHEMA r EXCEPT (t3) FROM SERVER srv INTO l OPTIONS (import_default 'true');"),
+    ).toEqual({
+      kind: "importForeignSchema",
+      remoteSchema: "r",
+      qualification: { kind: "except", tables: [["t3"]] },
+      server: "srv",
+      into: "l",
+      options: [opt("import_default", "true")],
+    });
+  });
+
+  it("parses DROP FOREIGN TABLE, FOREIGN DATA WRAPPER and SERVER", () => {
+    const drop = (objectType: string, names: string[][], ifExists: boolean, behavior: string | null) => ({
+      kind: "drop",
+      objectType,
+      concurrently: false,
+      ifExists,
+      names,
+      behavior,
+    });
+    expect(firstStmt("DROP FOREIGN TABLE IF EXISTS a, b.c CASCADE;")).toEqual(
+      drop("foreign table", [["a"], ["b", "c"]], true, "cascade"),
+    );
+    expect(firstStmt("DROP FOREIGN DATA WRAPPER w;")).toEqual(drop("foreign data wrapper", [["w"]], false, null));
+    expect(firstStmt("DROP SERVER IF EXISTS s, t RESTRICT;")).toEqual(drop("server", [["s"], ["t"]], true, "restrict"));
+  });
+
+  it("still comments on servers, wrappers and foreign tables", () => {
+    expect(firstStmt("COMMENT ON SERVER s IS 'x';")).toEqual({
+      kind: "comment",
+      objectType: "server",
+      name: ["s"],
+      comment: "x",
+    });
+    expect(firstStmt("COMMENT ON FOREIGN DATA WRAPPER w IS 'x';")).toMatchObject({
+      objectType: "foreign data wrapper",
+      name: ["w"],
+    });
+    expect(firstStmt("COMMENT ON FOREIGN TABLE s.t IS NULL;")).toMatchObject({
+      objectType: "foreign table",
+      name: ["s", "t"],
+      comment: null,
+    });
+  });
+
+  it("rejects malformed foreign-data statements", () => {
+    expect(fails("CREATE FOREIGN frob x;")).toThrow(/Expected "data" or "table" but found "frob"/);
+    expect(fails("ALTER FOREIGN frob x;")).toThrow(/Expected "data" or "table" but found "frob"/);
+    expect(fails("DROP FOREIGN frob x;")).toThrow(/Expected "data" or "table" but found "frob"/);
+    expect(fails("CREATE FOREIGN DATA WRAPPER w NO frob;")).toThrow(
+      /Expected "handler" or "validator" but found "frob"/,
+    );
+    expect(fails("CREATE FOREIGN DATA WRAPPER w HANDLER;")).toThrow(/Expected a name but found ";"/);
+    expect(fails("ALTER FOREIGN DATA WRAPPER w;")).toThrow(
+      /Expected "handler", "validator", "no", "options", "rename" or "owner" but found ";"/,
+    );
+    expect(fails("ALTER SERVER s;")).toThrow(/Expected "version", "options", "rename" or "owner" but found ";"/);
+    expect(fails("CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (host 1);")).toThrow(
+      /Expected a string but found "1"/,
+    );
+    expect(fails("CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS ();")).toThrow(
+      /Expected an option name but found "\)"/,
+    );
+    expect(fails("CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (ADD a 'b');")).toThrow(
+      /Expected a string but found "a"/,
+    );
+    expect(fails("CREATE SERVER s VERSION 1 FOREIGN DATA WRAPPER w;")).toThrow(
+      /Expected a string or "null" but found "1"/,
+    );
+    expect(fails("CREATE SERVER s TYPE pg FOREIGN DATA WRAPPER w;")).toThrow(/Expected a string but found "pg"/);
+    expect(fails("CREATE SERVER s;")).toThrow(/Expected "foreign data wrapper" but found ";"/);
+    expect(fails("ALTER SERVER s OPTIONS (DROP a 'b');")).toThrow(/Expected "\)" but found "b"/);
+    expect(fails("CREATE USER MAPPING FOR u;")).toThrow(/Expected "server" but found ";"/);
+    expect(fails("ALTER USER MAPPING FOR u SERVER s;")).toThrow(/Expected "options" but found ";"/);
+    expect(fails("CREATE FOREIGN TABLE f (a int);")).toThrow(/Expected "server" but found ";"/);
+    expect(fails("CREATE FOREIGN TABLE f (a int) SERVER s WITH (fillfactor = 70);")).toThrow(/but found "with"/);
+    expect(fails("CREATE FOREIGN TABLE f PARTITION OF p () FOR VALUES IN (1) SERVER s;")).toThrow(/but found "\)"/);
+    expect(fails("CREATE FOREIGN TABLE f PARTITION OF p FOR VALUES IN (1) INHERITS (q) SERVER s;")).toThrow(
+      /Expected "server" but found "inherits"/,
+    );
+    expect(fails("ALTER FOREIGN TABLE f RENAME TO g, OWNER TO r;")).toThrow(
+      /RENAME cannot be combined with other ALTER FOREIGN TABLE actions/,
+    );
+    // PG gives the partition commands and RENAME CONSTRAINT to ALTER TABLE alone.
+    expect(fails("ALTER FOREIGN TABLE f ATTACH PARTITION p DEFAULT;")).toThrow(/but found "attach"/);
+    expect(fails("ALTER FOREIGN TABLE f DETACH PARTITION p;")).toThrow(/but found "detach"/);
+    expect(fails("ALTER FOREIGN TABLE f RENAME CONSTRAINT a TO b;")).toThrow(
+      /Expected "to", "column" or a name but found "constraint"/,
+    );
+    expect(firstStmt("ALTER FOREIGN TABLE f RENAME COLUMN a TO b;").actions).toEqual([
+      { kind: "renameColumn", from: "a", to: "b" },
+    ]);
+    expect(fails("CREATE USER mapping IF;")).toThrow(/Expected "not" but found ";"/);
+    expect(fails("DROP USER MAPPING IF frob FOR u SERVER s;")).toThrow(/Expected "exists" but found "frob"/);
+    expect(fails("ALTER USER MAPPING IF EXISTS FOR u SERVER s OPTIONS (a 'b');")).toThrow(
+      /Expected ";" but found "if"/,
+    );
+    expect(fails("ALTER SERVER s OPTIONS (drop);")).toThrow(/Expected an option name but found "\)"/);
+    expect(fails("ALTER SERVER s OPTIONS (ADD a);")).toThrow(/Expected a string but found "\)"/);
+    // A column's OPTIONS precedes its constraints, and a PARTITION OF column takes none.
+    expect(fails("CREATE FOREIGN TABLE f (a int NOT NULL OPTIONS (x 'y')) SERVER s;")).toThrow(/but found "options"/);
+    expect(fails("CREATE FOREIGN TABLE f PARTITION OF p (a OPTIONS (x 'y')) DEFAULT SERVER s;")).toThrow(
+      /but found "options"/,
+    );
+    expect(fails("ALTER TABLE t ALTER c OPTIONS a;")).toThrow(/Expected "\(" but found "a"/);
+    expect(fails("IMPORT FOREIGN SCHEMA r LIMIT (t) FROM SERVER s INTO l;")).toThrow(/Expected "to" but found "\("/);
+    expect(fails("IMPORT FOREIGN SCHEMA r FROM s INTO l;")).toThrow(/Expected "server" but found "s"/);
+    expect(fails("IMPORT FOREIGN SCHEMA r EXCEPT () FROM SERVER s INTO l;")).toThrow(/but found "\)"/);
+  });
+
+  it("keeps the foreign-data words unreserved as names and aliases", () => {
+    const words = "options wrapper server mapping handler validator import version data".split(" ");
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS options, 2 server FROM mapping AS wrapper;")).toMatchObject({
+      columns: [{ alias: "options" }, { alias: "server" }],
+      from: [{ name: ["mapping"], alias: "wrapper" }],
+    });
+    expect(firstStmt("CREATE TABLE import (options int, server text, handler int, version int);")).toMatchObject({
+      name: ["import"],
+      items: [{ name: "options" }, { name: "server" }, { name: "handler" }, { name: "version" }],
+    });
+    // …and as the names of the objects being created.
+    expect(
+      firstStmt("CREATE FOREIGN DATA WRAPPER wrapper HANDLER handler VALIDATOR validator OPTIONS (options 'o');"),
+    ).toMatchObject({
+      name: "wrapper",
+      functions: [{ name: ["handler"] }, { name: ["validator"] }],
+    });
+    expect(firstStmt("CREATE SERVER server FOREIGN DATA WRAPPER wrapper;")).toMatchObject({
+      name: "server",
+      wrapper: "wrapper",
+    });
+    expect(firstStmt("CREATE USER MAPPING FOR mapping SERVER server;")).toMatchObject({
+      user: "mapping",
+      server: "server",
+    });
+    expect(firstStmt("CREATE FOREIGN TABLE options (options int OPTIONS (options 'x')) SERVER server;")).toMatchObject({
+      name: ["options"],
+      items: [{ name: "options", options: [opt("options", "x")] }],
+    });
+    expect(firstStmt("IMPORT FOREIGN SCHEMA import FROM SERVER server INTO version;")).toMatchObject({
+      remoteSchema: "import",
+      into: "version",
+    });
+    expect(firstStmt("ALTER TABLE t ALTER options TYPE int;").actions[0]).toMatchObject({ column: "options" });
   });
 });
