@@ -861,12 +861,17 @@ export type TransactionMode =
   | { kind: "deferrable"; value: boolean }; // true = DEFERRABLE, false = NOT DEFERRABLE
 
 // BEGIN / START TRANSACTION / COMMIT / ROLLBACK / SAVEPOINT / RELEASE SAVEPOINT.
+// END is COMMIT and ABORT is ROLLBACK (without TO SAVEPOINT), as in PG, so each
+// gives the node of the word it stands for. The two-phase forms carry the
+// transaction's string identifier: `PREPARE TRANSACTION 'gid'`, `COMMIT
+// PREPARED 'gid'` and `ROLLBACK PREPARED 'gid'`.
 export type Transaction =
   | { kind: "begin"; start: boolean; modes: TransactionMode[]; span: Span } // start = `START TRANSACTION`
   | { kind: "commit"; chain: boolean; span: Span } // chain = AND CHAIN
   | { kind: "rollback"; chain: boolean; savepoint: string | null; span: Span } // savepoint = ROLLBACK TO [SAVEPOINT] name
   | { kind: "savepoint"; name: string; span: Span }
-  | { kind: "releaseSavepoint"; name: string; span: Span };
+  | { kind: "releaseSavepoint"; name: string; span: Span }
+  | { kind: "prepareTransaction" | "commitPrepared" | "rollbackPrepared"; gid: string; span: Span };
 
 // SET [SESSION|LOCAL] { name {=|TO} value[, …] | name FROM CURRENT | TIME ZONE
 // value | ROLE|SCHEMA|NAMES|… value | SESSION AUTHORIZATION value }. `name` is
@@ -999,6 +1004,34 @@ export type Explain = {
 // EXPLAIN. `tables` is `[]` when none is named (the whole database).
 export type Analyze = { kind: "analyze"; options: RelationOption[]; tables: MaintenanceTarget[]; span: Span };
 export type Vacuum = { kind: "vacuum"; options: RelationOption[]; tables: MaintenanceTarget[]; span: Span };
+
+// `CLUSTER [(option, …) | VERBOSE] [table [USING index]]`, and the pre-8.3
+// `CLUSTER [VERBOSE] index ON table`, with `options` as on EXPLAIN. `table` is
+// omitted when none is named (every previously clustered table), `index` when
+// neither USING nor the old ON form names one.
+export type Cluster = { kind: "cluster"; options: RelationOption[]; table?: string[]; index?: string; span: Span };
+// `REINDEX [(option, …)] {INDEX | TABLE | SCHEMA | DATABASE | SYSTEM}
+// [CONCURRENTLY] name`. The name is qualified for INDEX and TABLE, a single
+// part otherwise, and may be left off (omitted) for DATABASE and SYSTEM, which
+// then mean the current database. `concurrently` is present only when written.
+export type Reindex = {
+  kind: "reindex";
+  options: RelationOption[];
+  target: "index" | "table" | "schema" | "database" | "system";
+  concurrently?: true;
+  name?: string[];
+  span: Span;
+};
+// CHECKPOINT; LOAD 'file'; DISCARD {ALL | PLANS | SEQUENCES | TEMP |
+// TEMPORARY}, the two spellings of the last both "temp".
+export type Checkpoint = { kind: "checkpoint"; span: Span };
+export type Load = { kind: "load"; file: string; span: Span };
+export type Discard = { kind: "discard"; target: "all" | "plans" | "sequences" | "temp"; span: Span };
+// LISTEN channel; NOTIFY channel [, 'payload'] (`payload` present only when
+// written); UNLISTEN {channel | *}, `channel` null for `*`.
+export type Listen = { kind: "listen"; channel: string; span: Span };
+export type Notify = { kind: "notify"; channel: string; payload?: string; span: Span };
+export type Unlisten = { kind: "unlisten"; channel: string | null; span: Span };
 
 // Where COPY reads from or writes to: a server-side file, a shell command's
 // pipe, or the client connection: STDIN for FROM, STDOUT for TO, as PG's docs
@@ -1175,6 +1208,14 @@ export type Stmt =
   | Explain
   | Analyze
   | Vacuum
+  | Cluster
+  | Reindex
+  | Checkpoint
+  | Load
+  | Discard
+  | Listen
+  | Notify
+  | Unlisten
   | Lock
   | CallProcedure
   | DeclareCursor
@@ -6716,6 +6757,15 @@ function parseAndChain(ctx: ParseContext<SqlTokenType>): boolean {
   return !no;
 }
 
+// The string identifier of a two-phase transaction (PG's Sconst).
+function gidString(ctx: ParseContext<SqlTokenType>): string {
+  if (!ctx.is("string")) return ctx.croak(`Expected a string but found ${describeFound(ctx.peek())}`);
+  return ctx.parse(strValue);
+}
+
+// `end` is reserved, so it is matched by value here, at a statement's head only:
+// a construct that closes with END (a CASE, a `BEGIN ATOMIC … END` routine body)
+// consumes its own END before statement dispatch could see it.
 const transactionStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -6729,13 +6779,28 @@ const transactionStmt = custom<Stmt, SqlTokenType>(
       ctx.parse(kwseq("start", "transaction"));
       return { kind: "begin", start: true, modes: parseTransactionModes(ctx), span: ctx.spanFrom(start) };
     }
-    if (head.value === "commit") {
+    // END [WORK | TRANSACTION] [AND [NO] CHAIN] is COMMIT's synonym; only
+    // COMMIT takes PREPARED.
+    if (head.value === "commit" || head.value === "end") {
       ctx.next();
+      if (head.value === "commit" && ctx.eat("ident", "prepared") !== null) {
+        return { kind: "commitPrepared", gid: gidString(ctx), span: ctx.spanFrom(start) };
+      }
       ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
       return { kind: "commit", chain: parseAndChain(ctx), span: ctx.spanFrom(start) };
     }
+    // ABORT [WORK | TRANSACTION] [AND [NO] CHAIN] is ROLLBACK's, without the TO
+    // SAVEPOINT and PREPARED forms.
+    if (head.value === "abort") {
+      ctx.next();
+      ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
+      return { kind: "rollback", chain: parseAndChain(ctx), savepoint: null, span: ctx.spanFrom(start) };
+    }
     if (head.value === "rollback") {
       ctx.next();
+      if (ctx.eat("ident", "prepared") !== null) {
+        return { kind: "rollbackPrepared", gid: gidString(ctx), span: ctx.spanFrom(start) };
+      }
       ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
       // `ROLLBACK TO [SAVEPOINT] name` and `ROLLBACK AND CHAIN` are exclusive.
       if (ctx.eat("ident", "to") !== null) {
@@ -6758,7 +6823,9 @@ const transactionStmt = custom<Stmt, SqlTokenType>(
       { type: "ident", value: "begin" },
       { type: "ident", value: "start" },
       { type: "ident", value: "commit" },
+      { type: "ident", value: "end" },
       { type: "ident", value: "rollback" },
+      { type: "ident", value: "abort" },
       { type: "ident", value: "savepoint" },
       { type: "ident", value: "release" },
     ],
@@ -6880,6 +6947,72 @@ const deallocateStmt = custom<Stmt, SqlTokenType>(
     return { kind: "deallocate", name, span: ctx.spanFrom(start) };
   },
   { expected: '"deallocate"', first: [{ type: "ident", value: "deallocate" }] },
+);
+
+// --- LISTEN / NOTIFY / UNLISTEN, LOAD, DISCARD ---
+//
+// Every lead word stays UNRESERVED, matched by value; so do DISCARD's targets.
+
+const listenStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("listen"));
+    return { kind: "listen", channel: ctx.parse(nameWord), span: ctx.spanFrom(start) };
+  },
+  { expected: '"listen"', first: [{ type: "ident", value: "listen" }] },
+);
+
+const notifyStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("notify"));
+    const channel = ctx.parse(nameWord);
+    if (ctx.eat("punc", ",") === null) return { kind: "notify", channel, span: ctx.spanFrom(start) };
+    if (!ctx.is("string")) return ctx.croak(`Expected a payload string but found ${describeFound(ctx.peek())}`);
+    return { kind: "notify", channel, payload: ctx.parse(strValue), span: ctx.spanFrom(start) };
+  },
+  { expected: '"notify"', first: [{ type: "ident", value: "notify" }] },
+);
+
+const unlistenStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("unlisten"));
+    const channel = ctx.eat("op", "*") !== null ? null : ctx.parse(nameWord);
+    return { kind: "unlisten", channel, span: ctx.spanFrom(start) };
+  },
+  { expected: '"unlisten"', first: [{ type: "ident", value: "unlisten" }] },
+);
+
+const loadStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("load"));
+    if (!ctx.is("string")) return ctx.croak(`Expected a file name but found ${describeFound(ctx.peek())}`);
+    return { kind: "load", file: ctx.parse(strValue), span: ctx.spanFrom(start) };
+  },
+  { expected: '"load"', first: [{ type: "ident", value: "load" }] },
+);
+
+const DISCARD_TARGETS: Readonly<Record<string, Discard["target"]>> = {
+  all: "all",
+  plans: "plans",
+  sequences: "sequences",
+  temp: "temp",
+  temporary: "temp",
+};
+const discardStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("discard"));
+    const tok = ctx.peek();
+    if (tok?.type !== "ident" || !Object.hasOwn(DISCARD_TARGETS, tok.value)) {
+      return ctx.croak(`Expected ${keyList(DISCARD_TARGETS)} but found ${describeFound(tok)}`);
+    }
+    ctx.next();
+    return { kind: "discard", target: DISCARD_TARGETS[tok.value]!, span: ctx.spanFrom(start) };
+  },
+  { expected: '"discard"', first: [{ type: "ident", value: "discard" }] },
 );
 
 // --- DML: shared clause pieces ---
@@ -8484,10 +8617,17 @@ function optParenList<T>(ctx: ParseContext<SqlTokenType>, list: Rule<T[], SqlTok
 // than dmlStatement's generic "a statement" (which CREATE TABLE is).
 const PREPARABLE = "a SELECT, VALUES, INSERT, UPDATE, DELETE or MERGE statement";
 const PREPARABLE_FIRST = dmlStatement.first();
+// `PREPARE TRANSACTION 'gid'` (two-phase commit) shares the lead word, and
+// `transaction` is unreserved, so a statement may be named it: the string after
+// the word tells the two apart, as in PG.
 const prepareStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
     ctx.parse(kw("prepare"));
+    if (ctx.is("ident", "transaction") && peekOrReport(ctx, 1)?.type === "string") {
+      ctx.next(); // TRANSACTION
+      return { kind: "prepareTransaction", gid: gidString(ctx), span: ctx.spanFrom(start) };
+    }
     const name = ctx.parse(nameWord);
     const types = optParenList(ctx, prepareTypes);
     ctx.parse(kw("as"));
@@ -8545,6 +8685,11 @@ const maintenanceTarget = custom<MaintenanceTarget, SqlTokenType>(
 );
 const maintenanceTargets = sepBy(maintenanceTarget, P(","));
 
+// Whether the statement ends at the cursor.
+function atStatementEnd(ctx: ParseContext<SqlTokenType>): boolean {
+  return ctx.is("punc", ";") || ctx.peek() === null;
+}
+
 // `[(option, …) | flags] [target, …]` — the tail ANALYZE and VACUUM share. PG
 // takes either option form but not both; the target list ends the statement.
 // A bare flag word left over after the flags (one out of order, or repeated)
@@ -8557,7 +8702,7 @@ function maintenanceTail(ctx: ParseContext<SqlTokenType>, flags: readonly (reado
   if (!parenthesised && tok?.type === "ident" && flags.some((spellings) => spellings.includes(tok.value))) {
     return ctx.croak(`Expected a name but found ${describeFound(tok)}`);
   }
-  const tables = ctx.is("punc", ";") || ctx.peek() === null ? [] : ctx.parse(maintenanceTargets);
+  const tables = atStatementEnd(ctx) ? [] : ctx.parse(maintenanceTargets);
   return { options, tables };
 }
 
@@ -8578,6 +8723,81 @@ const vacuumStmt = custom<Stmt, SqlTokenType>(
     return { kind: "vacuum", ...tail, span: ctx.spanFrom(start) };
   },
   { expected: '"vacuum"', first: [{ type: "ident", value: "vacuum" }] },
+);
+
+// --- CHECKPOINT, CLUSTER and REINDEX ---
+//
+// The lead words, REINDEX's target words and CONCURRENTLY stay UNRESERVED,
+// matched by value (`table` is reserved already). VERBOSE and CONCURRENTLY
+// never name the relation, index or schema here: PG reserves both from a
+// name's position (type_func_name keywords), so `CLUSTER verbose` and
+// `REINDEX INDEX concurrently` name none there either.
+const FLAG_WORDS: readonly string[] = ["verbose", "concurrently"];
+// `rule`'s name, croaking on a bare flag word where it would start.
+function flagFreeName<T>(ctx: ParseContext<SqlTokenType>, rule: Rule<T, SqlTokenType>): T {
+  const tok = ctx.peek();
+  if (tok?.type === "ident" && FLAG_WORDS.includes(tok.value)) {
+    return ctx.croak(`Expected a name but found ${describeFound(tok)}`);
+  }
+  return ctx.parse(rule);
+}
+
+const checkpointStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("checkpoint"));
+    return { kind: "checkpoint", span: ctx.spanFrom(start) };
+  },
+  { expected: '"checkpoint"', first: [{ type: "ident", value: "checkpoint" }] },
+);
+
+const clusterStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("cluster"));
+    const parenthesised = ctx.is("punc", "(");
+    const options = parenthesised ? ctx.parse(relationOptions) : legacyFlags(ctx, [["verbose"]]);
+    if (atStatementEnd(ctx)) return { kind: "cluster", options, span: ctx.spanFrom(start) };
+    const name = flagFreeName(ctx, qualName);
+    // The pre-8.3 `index ON table`, which only the unparenthesised form takes.
+    if (!parenthesised && name.length === 1 && ctx.eat("ident", "on") !== null) {
+      const table = flagFreeName(ctx, qualName);
+      return { kind: "cluster", options, table, index: name[0]!, span: ctx.spanFrom(start) };
+    }
+    if (ctx.eat("ident", "using") === null) return { kind: "cluster", options, table: name, span: ctx.spanFrom(start) };
+    return { kind: "cluster", options, table: name, index: flagFreeName(ctx, nameWord), span: ctx.spanFrom(start) };
+  },
+  { expected: '"cluster"', first: [{ type: "ident", value: "cluster" }] },
+);
+
+const REINDEX_TARGETS = ["index", "table", "schema", "database", "system"] as const;
+const reindexStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("reindex"));
+    const options = ctx.is("punc", "(") ? ctx.parse(relationOptions) : [];
+    const tok = ctx.peek();
+    const target = REINDEX_TARGETS.find((t) => tok?.type === "ident" && tok.value === t);
+    if (target === undefined) {
+      return ctx.croak(`Expected ${quoteList(REINDEX_TARGETS)} but found ${describeFound(tok)}`);
+    }
+    ctx.next();
+    const concurrently = ctx.eat("ident", "concurrently") !== null;
+    // INDEX and TABLE name a relation; SCHEMA names a schema; DATABASE and
+    // SYSTEM may name the current database, or leave it off.
+    let name: string[] | undefined;
+    if (target === "index" || target === "table") name = flagFreeName(ctx, qualName);
+    else if (target === "schema" || !atStatementEnd(ctx)) name = [flagFreeName(ctx, nameWord)];
+    return {
+      kind: "reindex",
+      options,
+      target,
+      ...(concurrently ? { concurrently: true as const } : {}),
+      ...(name === undefined ? {} : { name }),
+      span: ctx.spanFrom(start),
+    };
+  },
+  { expected: '"reindex"', first: [{ type: "ident", value: "reindex" }] },
 );
 
 // PG's ExplainableStmt, as far as sql-lite parses it: a preparable statement
@@ -8897,6 +9117,14 @@ const utilityStmt = oneOf(
   explainStmt,
   analyzeStmt,
   vacuumStmt,
+  clusterStmt,
+  reindexStmt,
+  checkpointStmt,
+  loadStmt,
+  discardStmt,
+  listenStmt,
+  notifyStmt,
+  unlistenStmt,
   lockStmt,
   callStmt,
   declareCursorStmt,
