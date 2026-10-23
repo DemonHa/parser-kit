@@ -1075,8 +1075,9 @@ export type CreateOperator = { kind: "createOperator"; name: string[]; definitio
 
 // One item of an operator class's `AS` list. An OPERATOR's `operands` are
 // present when written, null where NONE stands; `purpose` is omitted when no
-// FOR clause is written (PG's default, FOR SEARCH). A FUNCTION's `types` are the optional `(left,
-// right)` before its name, and its `signature` is present when written.
+// FOR clause is written (PG's default, FOR SEARCH). A FUNCTION's `types` are
+// the optional `(left, right)` before its name, and its `signature` is present
+// when written.
 export type OpClassItem =
   | {
       kind: "operator";
@@ -7448,7 +7449,7 @@ function alterSubscriptionRest(ctx: ParseContext<SqlTokenType>, start: Position)
 // parseDefinition's to read. Every lead and clause word is matched by value, so
 // none of them stops being usable as a name.
 
-// A number in a definition list or an operator class item, a sign folded in.
+// A number in a definition list, a sign folded in.
 // The node carries no span, so numberNode's is dropped.
 function definitionNumber(ctx: ParseContext<SqlTokenType>, start: Position, sign: string): DefinitionArg {
   const text = ctx.next()!.value;
@@ -7600,16 +7601,33 @@ function createConversionRest(ctx: ParseContext<SqlTokenType>): Stmt {
   };
 }
 
+// The expression kinds PG's func_expr_windowless builds: a plain call, and the
+// special-syntax forms of its func_expr_common_subexpr. CAST is one of them
+// too, but shares its kind with `::`, so parseStatsParam admits it by its lead
+// word instead.
+const STATS_CALL_KINDS: ReadonlySet<Expr["kind"]> = new Set([
+  "call",
+  "extract",
+  "substring",
+  "position",
+  "trim",
+  "overlay",
+  "sqlValueFunction",
+]);
+
 // One item after CREATE STATISTICS … ON: a column, a function call, or a
-// parenthesised expression, which PG's stats_param admits and nothing else.
+// parenthesised expression, as PG's stats_param admits; any other expression
+// must be parenthesised.
 function parseStatsParam(ctx: ParseContext<SqlTokenType>): Expr {
   if (ctx.eat("punc", "(") !== null) {
     const expr = ctx.parse(expression);
     expectClose(ctx);
     return expr;
   }
+  const castCall = ctx.is("ident", "cast");
   const expr = ctx.parse(expression);
-  if (expr.kind === "call" || (expr.kind === "name" && expr.parts.length === 1)) return expr;
+  if (STATS_CALL_KINDS.has(expr.kind) || (castCall && expr.kind === "cast")) return expr;
+  if (expr.kind === "name" && expr.parts.length === 1) return expr;
   return ctx.croak("A statistics expression other than a column or a function call must be parenthesised");
 }
 

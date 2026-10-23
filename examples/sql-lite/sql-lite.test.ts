@@ -12167,6 +12167,12 @@ describe("SQL-lite long-tail objects with definition lists", () => {
       on: [bin("+", name("a"), name("b")), { kind: "call", name: "lower", args: [name("c")] }],
       from: [["s", "t"]],
     });
+    // The special-syntax calls are function calls too; `::` is not.
+    expect(
+      firstStmt("CREATE STATISTICS s ON CAST(a AS int), extract(year FROM d), current_date FROM t;").on.map(
+        (e: any) => e.kind,
+      ),
+    ).toEqual(["cast", "extract", "sqlValueFunction"]);
     expect(firstStmt("CREATE STATISTICS IF NOT EXISTS s.st ON a, b FROM t;")).toMatchObject({
       ifNotExists: true,
       name: ["s", "st"],
@@ -12369,6 +12375,7 @@ describe("SQL-lite long-tail objects with definition lists", () => {
     expect(fails("CREATE DEFAULT x;")).toThrow(/Expected "conversion" but found "x"/);
     expect(fails("CREATE STATISTICS s ON a + b FROM t;")).toThrow(/must be parenthesised/);
     expect(fails("CREATE STATISTICS s ON t.a FROM t;")).toThrow(/must be parenthesised/);
+    expect(fails("CREATE STATISTICS s ON a::int FROM t;")).toThrow(/must be parenthesised/);
     expect(fails("CREATE STATISTICS IF NOT EXISTS ON a FROM t;")).toThrow(/Expected a name but found "on"/);
     expect(fails("CREATE STATISTICS s ON a;")).toThrow(/Expected "from" but found ";"/);
     expect(fails("CREATE EVENT TRIGGER e ON x EXECUTE FUNCTION f(1);")).toThrow(/Expected "\)" but found "1"/);
