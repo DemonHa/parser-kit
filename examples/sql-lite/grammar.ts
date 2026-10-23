@@ -557,8 +557,10 @@ export type AlterSequenceAction =
 
 // --- Phase 7: more CREATE objects ---
 
-// `CREATE TYPE` in its three body shapes, all sharing the `createType` kind and
-// discriminated by `form`. The enum form keeps its original `values` payload.
+// `CREATE TYPE` in its body shapes, all sharing the `createType` kind and
+// discriminated by `form`. The enum form keeps its original `values` payload;
+// `base` is the `( definition )` of a base type, and `shell` the bare `CREATE
+// TYPE name` that reserves a name for one.
 export type CompositeAttr = { name: string; type: ColType };
 // A `name = value` option in a `RANGE` type body (`SUBTYPE = float8`, …). `value`
 // is the raw (possibly qualified) name / type on the right of the `=`.
@@ -566,7 +568,25 @@ export type RangeOption = { name: string; value: string };
 export type CreateType =
   | { kind: "createType"; form: "enum"; name: string[]; values: string[]; span: Span }
   | { kind: "createType"; form: "composite"; name: string[]; attributes: CompositeAttr[]; span: Span }
-  | { kind: "createType"; form: "range"; name: string[]; options: RangeOption[]; span: Span };
+  | { kind: "createType"; form: "range"; name: string[]; options: RangeOption[]; span: Span }
+  | { kind: "createType"; form: "base"; name: string[]; definition: DefinitionElem[]; span: Span }
+  | { kind: "createType"; form: "shell"; name: string[]; span: Span };
+
+// One value in a definition list (PG's `def_arg`): a type or plain word
+// (`int4`, `btree`, `icu`), a word in RESERVED (`true`, `null`, `default`, …,
+// kept as written rather than read as a boolean or null), an operator (`<>`, or
+// `OPERATOR(pg_catalog.=)` as its dotted name), a number (with `raw` as on the
+// number expression), a string, or NONE.
+export type DefinitionArg =
+  | { kind: "type"; type: ColType }
+  | { kind: "keyword"; value: string }
+  | { kind: "operator"; name: string[] }
+  | { kind: "number"; value: number; raw?: string }
+  | { kind: "string"; value: string }
+  | { kind: "none" };
+// One `name [= value]` element of a parenthesised definition list (PG's
+// `def_elem`); `value` is omitted for a bare name (`PASSEDBYVALUE`).
+export type DefinitionElem = { name: string; value?: DefinitionArg };
 
 // A single `CREATE SEQUENCE` option. Numeric operands are full expressions (so a
 // signed `MINVALUE -100` parses); the flag / ownership forms carry their own shape.
@@ -866,6 +886,136 @@ export type CreateTrigger = {
   execute: { routine: "function" | "procedure"; name: string[]; args: Expr[] };
   span: Span;
 };
+
+// --- long-tail objects: casts, collations, operators, text search, … ---
+
+// `CREATE CAST (source AS target) {WITH FUNCTION f[(args)] | WITHOUT FUNCTION |
+// WITH INOUT} [AS ASSIGNMENT | AS IMPLICIT]`. `function` is present only for
+// the `function` method, its `signature` only when an argument list is written;
+// `context` is omitted for an explicit-only cast.
+export type CreateCast = {
+  kind: "createCast";
+  source: ColType;
+  target: ColType;
+  method: "function" | "withoutFunction" | "inout";
+  function?: { name: string[]; signature?: DropSignature };
+  context?: "assignment" | "implicit";
+  span: Span;
+};
+
+// `CREATE COLLATION [IF NOT EXISTS] name {( definition ) | FROM existing}`;
+// exactly one of `definition` and `from` is present.
+export type CreateCollation = {
+  kind: "createCollation";
+  ifNotExists: boolean;
+  name: string[];
+  definition?: DefinitionElem[];
+  from?: string[];
+  span: Span;
+};
+
+// `CREATE [DEFAULT] CONVERSION name FOR 'source' TO 'target' FROM function`.
+export type CreateConversion = {
+  kind: "createConversion";
+  default?: true;
+  name: string[];
+  source: string;
+  target: string;
+  function: string[];
+  span: Span;
+};
+
+// `CREATE STATISTICS [IF NOT EXISTS] [name] [(kind, …)] ON item, … FROM t, …`.
+// Each `on` item is a column name, a function call or a parenthesised
+// expression, as PG's grammar allows; `name` and `kinds` are omitted when absent.
+export type CreateStatistics = {
+  kind: "createStatistics";
+  ifNotExists: boolean;
+  name?: string[];
+  kinds?: string[];
+  on: Expr[];
+  from: string[][];
+  span: Span;
+};
+
+// `CREATE EVENT TRIGGER name ON event [WHEN var IN ('v', …) [AND …]] EXECUTE
+// {FUNCTION | PROCEDURE} f()`; `when` is omitted when absent.
+export type CreateEventTrigger = {
+  kind: "createEventTrigger";
+  name: string;
+  event: string;
+  when?: { variable: string; values: string[] }[];
+  execute: { routine: "function" | "procedure"; name: string[] };
+  span: Span;
+};
+
+// `CREATE [OR REPLACE] [TRUSTED] [PROCEDURAL] LANGUAGE name [HANDLER h [INLINE
+// i] [VALIDATOR v | NO VALIDATOR]]`. The flags and handlers are omitted when
+// not written; `validator` is null for NO VALIDATOR.
+export type CreateLanguage = {
+  kind: "createLanguage";
+  orReplace: boolean;
+  trusted?: true;
+  procedural?: true;
+  name: string;
+  handler?: string[];
+  inline?: string[];
+  validator?: string[] | null;
+  span: Span;
+};
+
+// `CREATE ACCESS METHOD name TYPE {TABLE | INDEX} HANDLER handler`.
+export type CreateAccessMethod = {
+  kind: "createAccessMethod";
+  name: string;
+  type: "table" | "index";
+  handler: string[];
+  span: Span;
+};
+
+// `CREATE TEXT SEARCH {PARSER | DICTIONARY | TEMPLATE | CONFIGURATION} name (
+// definition )`.
+export type CreateTextSearch = {
+  kind: "createTextSearch";
+  objectType: "parser" | "dictionary" | "template" | "configuration";
+  name: string[];
+  definition: DefinitionElem[];
+  span: Span;
+};
+
+// `CREATE OPERATOR [schema.]op ( definition )`; `name` ends in the symbol.
+export type CreateOperator = { kind: "createOperator"; name: string[]; definition: DefinitionElem[]; span: Span };
+
+// One item of an operator class's `AS` list. An OPERATOR's `operands` are
+// present when written, null where NONE stands; `purpose` is omitted when no
+// FOR clause is written (PG's default, FOR SEARCH). A FUNCTION's `types` are the optional `(left,
+// right)` before its name, and its `signature` is present when written.
+export type OpClassItem =
+  | {
+      kind: "operator";
+      strategy: number;
+      operator: string[];
+      operands?: [ColType | null, ColType | null];
+      purpose?: { kind: "search" } | { kind: "orderBy"; family: string[] };
+    }
+  | { kind: "function"; support: number; types?: ColType[]; name: string[]; signature?: DropSignature }
+  | { kind: "storage"; type: ColType };
+
+// `CREATE OPERATOR CLASS name [DEFAULT] FOR TYPE type USING method [FAMILY f]
+// AS item, …`; `default` and `family` are omitted when absent.
+export type CreateOperatorClass = {
+  kind: "createOperatorClass";
+  name: string[];
+  default?: true;
+  type: ColType;
+  using: string;
+  family?: string[];
+  items: OpClassItem[];
+  span: Span;
+};
+
+// `CREATE OPERATOR FAMILY name USING method`.
+export type CreateOperatorFamily = { kind: "createOperatorFamily"; name: string[]; using: string; span: Span };
 
 // --- Phase 9: DCL / TCL / session ---
 
@@ -1223,6 +1373,17 @@ export type Stmt =
   | CreateProcedure
   | CreateAggregate
   | CreateTrigger
+  | CreateCast
+  | CreateCollation
+  | CreateConversion
+  | CreateStatistics
+  | CreateEventTrigger
+  | CreateLanguage
+  | CreateAccessMethod
+  | CreateTextSearch
+  | CreateOperator
+  | CreateOperatorClass
+  | CreateOperatorFamily
   // `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`; `withData`
   // is null when the clause is absent, as on createView.
   | { kind: "refreshMaterializedView"; concurrently: boolean; name: string[]; withData: boolean | null; span: Span }
@@ -1270,7 +1431,11 @@ export type Stmt =
   // - `signatures` (FUNCTION / PROCEDURE / AGGREGATE): one entry per name, null
   //   where a function or procedure name carries no argument list;
   // - `table` (TRIGGER): the `ON table` the trigger belongs to;
-  // - `force` (DATABASE): present, as true, only when `(FORCE)` is written.
+  // - `force` (DATABASE): present, as true, only when `(FORCE)` is written;
+  // - `operands` (OPERATOR): one `(left, right)` pair per name, null where NONE
+  //   stands;
+  // - `using` (OPERATOR CLASS / FAMILY): the index access method;
+  // - `source` and `target` (CAST): its two types, with `names` empty.
   | {
       kind: "drop";
       objectType: string;
@@ -1281,6 +1446,10 @@ export type Stmt =
       signatures?: (DropSignature | null)[];
       table?: string[];
       force?: true;
+      operands?: [ColType | null, ColType | null][];
+      using?: string;
+      source?: ColType;
+      target?: ColType;
       span: Span;
     }
   // `TRUNCATE [TABLE] {[ONLY] name [*] | ONLY (name)}[, …]
@@ -4537,6 +4706,13 @@ const createTypeRest = custom<Stmt, SqlTokenType>(
     const start = ctx.position();
     ctx.parse(kw("type"));
     const name = ctx.parse(qualName);
+    // `( definition )` is a base type; nothing at all, a shell type.
+    if (ctx.is("punc", "(")) {
+      return { kind: "createType", form: "base", name, definition: parseDefinition(ctx), span: ctx.spanFrom(start) };
+    }
+    if (ctx.peek() === null || ctx.is("punc", ";")) {
+      return { kind: "createType", form: "shell", name, span: ctx.spanFrom(start) };
+    }
     ctx.parse(kw("as"));
     if (ctx.eat("ident", "enum") !== null) {
       return { kind: "createType", form: "enum", name, values: ctx.parse(enumValues), span: ctx.spanFrom(start) };
@@ -5603,6 +5779,15 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   role: { parse: (ctx) => createRoleRest(ctx, "role") },
   user: { parse: (ctx) => createRoleRest(ctx, "user") },
   group: { parse: (ctx) => createRoleRest(ctx, "group") },
+  cast: { parse: createCastRest },
+  collation: { parse: createCollationRest },
+  default: { parse: createConversionRest },
+  conversion: { parse: createConversionRest },
+  statistics: { parse: createStatisticsRest },
+  event: { parse: createEventTriggerRest },
+  access: { parse: createAccessMethodRest },
+  text: { parse: createTextSearchRest },
+  operator: { parse: createOperatorRest },
 };
 
 // REPLACEABLE_CREATE dispatch CONSUMES the lead word: these bodies are entered
@@ -5620,6 +5805,9 @@ const REPLACEABLE_CREATE: DispatchMap<Stmt, [Position, boolean]> = {
   procedure: { parse: (ctx, start, orReplace) => parseProcedureBody(ctx, start, orReplace) },
   aggregate: { parse: (ctx, start, orReplace) => parseAggregateBody(ctx, start, orReplace) },
   trigger: { parse: (ctx, start, orReplace) => parseTriggerBody(ctx, start, orReplace) },
+  language: { parse: (ctx, start, orReplace) => parseLanguageBody(ctx, start, orReplace, "language") },
+  trusted: { parse: (ctx, start, orReplace) => parseLanguageBody(ctx, start, orReplace, "trusted") },
+  procedural: { parse: (ctx, start, orReplace) => parseLanguageBody(ctx, start, orReplace, "procedural") },
 };
 
 // PLAIN_CREATE is reached through an `oneOf`-shaped message, REPLACEABLE_CREATE
@@ -5650,12 +5838,14 @@ for (const target of SCHEMA_REPLACEABLE_TARGETS) {
 }
 
 // After CREATE: an optional `OR REPLACE`, then one of the objects that permit it
-// (VIEW / MATERIALIZED VIEW / FUNCTION / PROCEDURE / AGGREGATE / TRIGGER) — or,
-// with no such prefix, one of the remaining keyword-led targets (TABLE /
-// [UNIQUE] INDEX / TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION /
-// TABLESPACE / ROLE / USER), TABLE alone taking the TEMP / UNLOGGED prefix. `OR
-// REPLACE` before a non-replaceable object croaks, as does a prefix before
-// anything but TABLE — PG's TEMP VIEW and TEMP SEQUENCE are not parsed.
+// (VIEW / MATERIALIZED VIEW / FUNCTION / PROCEDURE / AGGREGATE / TRIGGER /
+// [TRUSTED] [PROCEDURAL] LANGUAGE) — or, with no such prefix, one of the
+// remaining keyword-led targets (TABLE / [UNIQUE] INDEX / TYPE / SEQUENCE /
+// DOMAIN / DATABASE / SCHEMA / EXTENSION / TABLESPACE / ROLE / USER, and CAST,
+// COLLATION, CONVERSION, OPERATOR and the other PLAIN_CREATE keys), TABLE
+// alone taking the TEMP / UNLOGGED prefix. `OR REPLACE` before a
+// non-replaceable object croaks, as does a prefix before anything but TABLE —
+// PG's TEMP VIEW and TEMP SEQUENCE are not parsed.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -6442,14 +6632,27 @@ function parseObjectKind(ctx: ParseContext<SqlTokenType>, trie: ObjectKindTrie):
 // An OPERATOR reference: `[schema.]op`, then `(left, right)` where NONE stands
 // for the missing side of a prefix operator. PG has no `(type)` form, and no
 // operator lacks both sides.
-function parseOperatorRef(ctx: ParseContext<SqlTokenType>): Pick<ObjectRef, "name" | "operands"> {
+function parseOperatorRef(ctx: ParseContext<SqlTokenType>): Required<Pick<ObjectRef, "name" | "operands">> {
+  const name = parseAnyOperator(ctx);
+  return { name, operands: parseOperandTypes(ctx) };
+}
+
+// PG's any_operator, `[schema.]op`: the dotted name ends in the symbol, which is
+// any operator but `=>`, as in PG.
+function parseAnyOperator(ctx: ParseContext<SqlTokenType>): string[] {
   const name: string[] = [];
   while (!ctx.is("op")) {
     if (!isNameToken(ctx.peek())) ctx.croak(`Expected an operator but found ${describeFound(ctx.peek())}`);
     name.push(ctx.parse(nameWord));
     ctx.parse(punc("."));
   }
-  name.push(ctx.parse(sortOperator)); // any operator but `=>`, as in PG
+  name.push(ctx.parse(sortOperator));
+  return name;
+}
+
+// PG's oper_argtypes, `(left, right)`, with NONE for the missing side of a
+// prefix operator.
+function parseOperandTypes(ctx: ParseContext<SqlTokenType>): [ColType | null, ColType | null] {
   ctx.parse(punc("("));
   const operand = () => (ctx.eat("ident", "none") !== null ? null : ctx.parse(typeRef));
   const left = operand();
@@ -6457,7 +6660,17 @@ function parseOperatorRef(ctx: ParseContext<SqlTokenType>): Pick<ObjectRef, "nam
   const right = operand();
   expectClose(ctx);
   if (left === null && right === null) ctx.croak("An operator takes at least one operand type, not NONE twice");
-  return { name, operands: [left, right] };
+  return [left, right];
+}
+
+// A cast's `(source AS target)`, as CREATE, DROP and COMMENT ON name it.
+function parseCastTypes(ctx: ParseContext<SqlTokenType>): { source: ColType; target: ColType } {
+  ctx.parse(punc("("));
+  const source = ctx.parse(typeRef);
+  ctx.parse(kw("as"));
+  const target = ctx.parse(typeRef);
+  expectClose(ctx);
+  return { source, target };
 }
 
 // `name ON table`, and for a CONSTRAINT `name ON DOMAIN domain`. DOMAIN is the
@@ -6488,14 +6701,7 @@ const OBJECT_REF_SHAPES = {
   },
   aggregate: (ctx) => ctx.parse(aggregateRef),
   operator: parseOperatorRef,
-  cast: (ctx) => {
-    ctx.parse(punc("("));
-    const source = ctx.parse(typeRef);
-    ctx.parse(kw("as"));
-    const target = ctx.parse(typeRef);
-    expectClose(ctx);
-    return { source, target };
-  },
+  cast: parseCastTypes,
   transform: (ctx) => {
     ctx.parse(kw("for"));
     const type = ctx.parse(typeRef);
@@ -6571,6 +6777,396 @@ const EXTENSION_ACTIONS: DispatchMap<AlterExtensionAction> = {
   },
 };
 const EXTENSION_ACTION_EXPECTED = keyList(EXTENSION_ACTIONS);
+
+// --- long-tail objects: casts, collations, operators, text search, … ---
+//
+// Most of these objects are created from PG's `definition`, a parenthesised
+// `name [= value]` list whose names are ColLabels and whose values are
+// parseDefinition's to read. Every lead and clause word is matched by value, so
+// none of them stops being usable as a name.
+
+// A number in a definition list or an operator class item, a sign folded in.
+// The node carries no span, so numberNode's is dropped.
+function definitionNumber(ctx: ParseContext<SqlTokenType>, start: Position, sign: string): DefinitionArg {
+  const text = ctx.next()!.value;
+  const { value, raw } = numberNode(text, ctx.spanFrom(start), sign);
+  return { kind: "number", value, ...(raw !== undefined && { raw }) };
+}
+
+// One definition value, PG's def_arg: a string, a signed number, an operator
+// (bare, or as `OPERATOR(schema.op)`), NONE, a reserved keyword, or else a type
+// name, which covers every plain word (`btree`, `icu`, `int4`).
+function parseDefinitionArg(ctx: ParseContext<SqlTokenType>): DefinitionArg {
+  const start = ctx.position();
+  const tok = ctx.peek();
+  if (tok?.type === "string") {
+    ctx.next();
+    return { kind: "string", value: tok.value };
+  }
+  if (tok?.type === "number") return definitionNumber(ctx, start, "");
+  if (tok?.type === "op") {
+    if ((tok.value === "-" || tok.value === "+") && ctx.peekAhead(1)?.type === "number") {
+      ctx.next(); // the sign
+      return definitionNumber(ctx, start, tok.value);
+    }
+    return { kind: "operator", name: [ctx.parse(sortOperator)] };
+  }
+  if (tok?.type === "ident") {
+    if (tok.value === "operator" && isPuncToken(ctx.peekAhead(1), "(")) {
+      ctx.next(); // OPERATOR
+      ctx.next(); // "("
+      const name = parseAnyOperator(ctx);
+      expectClose(ctx);
+      return { kind: "operator", name };
+    }
+    if (tok.value === "none") {
+      ctx.next();
+      return { kind: "none" };
+    }
+    if (RESERVED.has(tok.value)) {
+      ctx.next();
+      return { kind: "keyword", value: tok.value };
+    }
+  }
+  if (tok?.type === "ident" || tok?.type === "qident") return { kind: "type", type: ctx.parse(typeRef) };
+  return ctx.croak(`Expected a name, a number, a string or an operator but found ${describeFound(tok)}`);
+}
+
+// PG's `definition`, `( name [= value], … )`, entered on the `(`.
+function parseDefinition(ctx: ParseContext<SqlTokenType>): DefinitionElem[] {
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const elements = commaList(ctx, (c): DefinitionElem => {
+    const name = optionName(c);
+    return c.eat("op", "=") === null ? { name } : { name, value: parseDefinitionArg(c) };
+  });
+  expectClose(ctx);
+  return elements;
+}
+
+// A bare string, PG's Sconst.
+function stringConst(ctx: ParseContext<SqlTokenType>): string {
+  if (!ctx.is("string")) return ctx.croak(`Expected a string but found ${describeFound(ctx.peek())}`);
+  return ctx.next()!.value;
+}
+
+// A plain integer, PG's Iconst.
+function integerConst(ctx: ParseContext<SqlTokenType>): number {
+  if (!isIntegerConstant(ctx.peek())) ctx.croak(`Expected an integer but found ${describeFound(ctx.peek())}`);
+  return Number(ctx.next()!.value);
+}
+
+// A function named with its optional argument list, as a routine reference
+// reads it, the list omitted when not written.
+function routineWithArgs(ctx: ParseContext<SqlTokenType>): { name: string[]; signature?: DropSignature } {
+  const { name, signature } = ctx.parse(routineRef);
+  return signature === null ? { name } : { name, signature };
+}
+
+function createCastRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("cast"));
+  const { source, target } = parseCastTypes(ctx);
+  let method: CreateCast["method"];
+  let fn: CreateCast["function"];
+  if (ctx.eat("ident", "without") !== null) {
+    ctx.parse(kw("function"));
+    method = "withoutFunction";
+  } else {
+    if (ctx.eat("ident", "with") === null) {
+      return ctx.croak(`Expected "with" or "without" but found ${describeFound(ctx.peek())}`);
+    }
+    if (ctx.eat("ident", "inout") !== null) {
+      method = "inout";
+    } else if (ctx.eat("ident", "function") !== null) {
+      method = "function";
+      fn = routineWithArgs(ctx);
+    } else {
+      return ctx.croak(`Expected "function" or "inout" but found ${describeFound(ctx.peek())}`);
+    }
+  }
+  let context: CreateCast["context"];
+  if (ctx.eat("ident", "as") !== null) {
+    if (ctx.eat("ident", "assignment") !== null) context = "assignment";
+    else if (ctx.eat("ident", "implicit") !== null) context = "implicit";
+    else return ctx.croak(`Expected "assignment" or "implicit" but found ${describeFound(ctx.peek())}`);
+  }
+  return {
+    kind: "createCast",
+    source,
+    target,
+    method,
+    ...(fn !== undefined && { function: fn }),
+    ...(context !== undefined && { context }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+function createCollationRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("collation"));
+  const ifNotExists = parseIfNotExists(ctx);
+  const name = ctx.parse(qualName);
+  if (ctx.eat("ident", "from") !== null) {
+    return { kind: "createCollation", ifNotExists, name, from: ctx.parse(qualName), span: ctx.spanFrom(start) };
+  }
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" or "from" but found ${describeFound(ctx.peek())}`);
+  return { kind: "createCollation", ifNotExists, name, definition: parseDefinition(ctx), span: ctx.spanFrom(start) };
+}
+
+// `[DEFAULT] CONVERSION …`; DEFAULT is the dispatch key of the DEFAULT form.
+function createConversionRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  const isDefault = ctx.eat("ident", "default") !== null;
+  ctx.parse(kw("conversion"));
+  const name = ctx.parse(qualName);
+  ctx.parse(kw("for"));
+  const source = stringConst(ctx);
+  ctx.parse(kw("to"));
+  const target = stringConst(ctx);
+  ctx.parse(kw("from"));
+  const fn = ctx.parse(qualName);
+  return {
+    kind: "createConversion",
+    ...(isDefault && { default: true }),
+    name,
+    source,
+    target,
+    function: fn,
+    span: ctx.spanFrom(start),
+  };
+}
+
+// One item after CREATE STATISTICS … ON: a column, a function call, or a
+// parenthesised expression, which PG's stats_param admits and nothing else.
+function parseStatsParam(ctx: ParseContext<SqlTokenType>): Expr {
+  if (ctx.eat("punc", "(") !== null) {
+    const expr = ctx.parse(expression);
+    expectClose(ctx);
+    return expr;
+  }
+  const expr = ctx.parse(expression);
+  if (expr.kind === "call" || (expr.kind === "name" && expr.parts.length === 1)) return expr;
+  return ctx.croak("A statistics expression other than a column or a function call must be parenthesised");
+}
+
+// The name is optional unless IF NOT EXISTS is written; `on` is reserved, so it
+// can never be read as one.
+function createStatisticsRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("statistics"));
+  const ifNotExists = parseIfNotExists(ctx);
+  const name = ifNotExists || isNameToken(ctx.peek()) ? ctx.parse(qualName) : undefined;
+  let kinds: string[] | undefined;
+  if (ctx.eat("punc", "(") !== null) {
+    kinds = commaList(ctx, (c) => c.parse(nameWord));
+    expectClose(ctx);
+  }
+  ctx.parse(kw("on"));
+  const on = commaList(ctx, parseStatsParam);
+  ctx.parse(kw("from"));
+  const from = commaList(ctx, (c) => c.parse(qualName));
+  return {
+    kind: "createStatistics",
+    ifNotExists,
+    ...(name !== undefined && { name }),
+    ...(kinds !== undefined && { kinds }),
+    on,
+    from,
+    span: ctx.spanFrom(start),
+  };
+}
+
+// `EXECUTE {FUNCTION | PROCEDURE} name()` — the empty argument list is required.
+function createEventTriggerRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kwseq("event", "trigger"));
+  const name = ctx.parse(nameWord);
+  ctx.parse(kw("on"));
+  const event = ctx.parse(nameWord);
+  let when: CreateEventTrigger["when"];
+  if (ctx.eat("ident", "when") !== null) {
+    when = [];
+    do {
+      const variable = ctx.parse(nameWord);
+      ctx.parse(kw("in"));
+      ctx.parse(punc("("));
+      const values = commaList(ctx, stringConst);
+      expectClose(ctx);
+      when.push({ variable, values });
+    } while (ctx.eat("ident", "and") !== null);
+  }
+  ctx.parse(kw("execute"));
+  let routine: "function" | "procedure";
+  if (ctx.eat("ident", "function") !== null) routine = "function";
+  else if (ctx.eat("ident", "procedure") !== null) routine = "procedure";
+  else return ctx.croak(`Expected "function" or "procedure" but found ${describeFound(ctx.peek())}`);
+  const fn = ctx.parse(qualName);
+  ctx.parse(punc("("));
+  expectClose(ctx);
+  return {
+    kind: "createEventTrigger",
+    name,
+    event,
+    ...(when !== undefined && { when }),
+    execute: { routine, name: fn },
+    span: ctx.spanFrom(start),
+  };
+}
+
+// `[TRUSTED] [PROCEDURAL] LANGUAGE …`, entered past `lead`, the first of those
+// words, which REPLACEABLE_CREATE consumes.
+function parseLanguageBody(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  orReplace: boolean,
+  lead: "trusted" | "procedural" | "language",
+): Stmt {
+  const trusted = lead === "trusted";
+  const procedural = lead === "procedural" || (trusted && ctx.eat("ident", "procedural") !== null);
+  if (lead !== "language" && ctx.eat("ident", "language") === null) {
+    const expected = trusted && !procedural ? '"procedural" or "language"' : '"language"';
+    return ctx.croak(`Expected ${expected} but found ${describeFound(ctx.peek())}`);
+  }
+  const name = ctx.parse(nameWord);
+  const handlers: Pick<CreateLanguage, "handler" | "inline" | "validator"> = {};
+  if (ctx.eat("ident", "handler") !== null) {
+    handlers.handler = ctx.parse(qualName);
+    if (ctx.eat("ident", "inline") !== null) handlers.inline = ctx.parse(qualName);
+    if (ctx.eat("ident", "validator") !== null) {
+      handlers.validator = ctx.parse(qualName);
+    } else if (ctx.is("ident", "no")) {
+      ctx.parse(kwseq("no", "validator"));
+      handlers.validator = null;
+    }
+  }
+  return {
+    kind: "createLanguage",
+    orReplace,
+    ...(trusted && { trusted: true }),
+    ...(procedural && { procedural: true }),
+    name,
+    ...handlers,
+    span: ctx.spanFrom(start),
+  };
+}
+
+function createAccessMethodRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kwseq("access", "method"));
+  const name = ctx.parse(nameWord);
+  ctx.parse(kw("type"));
+  let type: CreateAccessMethod["type"];
+  if (ctx.eat("ident", "table") !== null) type = "table";
+  else if (ctx.eat("ident", "index") !== null) type = "index";
+  else return ctx.croak(`Expected "table" or "index" but found ${describeFound(ctx.peek())}`);
+  ctx.parse(kw("handler"));
+  return { kind: "createAccessMethod", name, type, handler: ctx.parse(qualName), span: ctx.spanFrom(start) };
+}
+
+// The word after TEXT SEARCH that names one of its four object kinds.
+type TextSearchKind = CreateTextSearch["objectType"];
+const TEXT_SEARCH_KINDS: readonly TextSearchKind[] = ["parser", "dictionary", "template", "configuration"];
+const TEXT_SEARCH_KIND_EXPECTED = quoteList([...TEXT_SEARCH_KINDS]);
+function parseTextSearchKind(ctx: ParseContext<SqlTokenType>): TextSearchKind {
+  ctx.parse(kwseq("text", "search"));
+  const tok = ctx.peek();
+  const kind = TEXT_SEARCH_KINDS.find((k) => tok?.type === "ident" && tok.value === k);
+  if (kind === undefined) return ctx.croak(`Expected ${TEXT_SEARCH_KIND_EXPECTED} but found ${describeFound(tok)}`);
+  ctx.next();
+  return kind;
+}
+
+function createTextSearchRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  const objectType = parseTextSearchKind(ctx);
+  const name = ctx.parse(qualName);
+  return { kind: "createTextSearch", objectType, name, definition: parseDefinition(ctx), span: ctx.spanFrom(start) };
+}
+
+// Whether the cursor sits on `OPERATOR CLASS` or `OPERATOR FAMILY`: as in
+// parseObjectKind, CLASS or FAMILY is the keyword only when a name follows it,
+// so `OPERATOR class.+` is an operator in a schema called `class`.
+function opClassWordAhead(ctx: ParseContext<SqlTokenType>): "class" | "family" | null {
+  const word = ctx.peekAhead(1);
+  if (word?.type !== "ident" || (word.value !== "class" && word.value !== "family")) return null;
+  return isNameToken(ctx.peekAhead(2)) ? word.value : null;
+}
+
+// One item of an operator class's AS list (PG's opclass_item).
+function parseOpClassItem(ctx: ParseContext<SqlTokenType>): OpClassItem {
+  if (ctx.eat("ident", "operator") !== null) {
+    const strategy = integerConst(ctx);
+    const operator = parseAnyOperator(ctx);
+    const operands = ctx.is("punc", "(") ? parseOperandTypes(ctx) : undefined;
+    let purpose: Extract<OpClassItem, { kind: "operator" }>["purpose"];
+    if (ctx.eat("ident", "for") !== null) {
+      if (ctx.eat("ident", "search") !== null) {
+        purpose = { kind: "search" };
+      } else if (ctx.is("ident", "order")) {
+        ctx.parse(kwseq("order", "by"));
+        purpose = { kind: "orderBy", family: ctx.parse(qualName) };
+      } else {
+        return ctx.croak(`Expected "search" or "order" but found ${describeFound(ctx.peek())}`);
+      }
+    }
+    return {
+      kind: "operator",
+      strategy,
+      operator,
+      ...(operands !== undefined && { operands }),
+      ...(purpose !== undefined && { purpose }),
+    };
+  }
+  if (ctx.eat("ident", "function") !== null) {
+    const support = integerConst(ctx);
+    let types: ColType[] | undefined;
+    if (ctx.eat("punc", "(") !== null) {
+      types = commaList(ctx, (c) => c.parse(typeRef));
+      expectClose(ctx);
+    }
+    return { kind: "function", support, ...(types !== undefined && { types }), ...routineWithArgs(ctx) };
+  }
+  if (ctx.eat("ident", "storage") !== null) return { kind: "storage", type: ctx.parse(typeRef) };
+  return ctx.croak(`Expected "operator", "function" or "storage" but found ${describeFound(ctx.peek())}`);
+}
+
+// `OPERATOR op (definition)`, `OPERATOR CLASS …` or `OPERATOR FAMILY …`.
+function createOperatorRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  const sub = opClassWordAhead(ctx);
+  if (sub === "family") {
+    ctx.parse(kwseq("operator", "family"));
+    const name = ctx.parse(qualName);
+    ctx.parse(kw("using"));
+    return { kind: "createOperatorFamily", name, using: ctx.parse(nameWord), span: ctx.spanFrom(start) };
+  }
+  if (sub === "class") {
+    ctx.parse(kwseq("operator", "class"));
+    const name = ctx.parse(qualName);
+    const isDefault = ctx.eat("ident", "default") !== null;
+    ctx.parse(kw("for"));
+    ctx.parse(kw("type"));
+    const type = ctx.parse(typeRef);
+    ctx.parse(kw("using"));
+    const using = ctx.parse(nameWord);
+    const family = ctx.eat("ident", "family") !== null ? ctx.parse(qualName) : undefined;
+    ctx.parse(kw("as"));
+    return {
+      kind: "createOperatorClass",
+      name,
+      ...(isDefault && { default: true }),
+      type,
+      using,
+      ...(family !== undefined && { family }),
+      items: commaList(ctx, parseOpClassItem),
+      span: ctx.spanFrom(start),
+    };
+  }
+  ctx.parse(kw("operator"));
+  const name = parseAnyOperator(ctx);
+  return { kind: "createOperator", name, definition: parseDefinition(ctx), span: ctx.spanFrom(start) };
+}
 
 // The ALTER targets. Dispatch peeks, as PLAIN_CREATE's does: each handler
 // consumes its own lead word, and is handed the position before ALTER so its
@@ -6704,7 +7300,7 @@ const dropNode = (
   start: Position,
   objectType: string,
   fields: Pick<DropStmt, "concurrently" | "ifExists" | "names" | "behavior">,
-  extra: Pick<DropStmt, "signatures" | "table" | "force"> = {},
+  extra: Pick<DropStmt, "signatures" | "table" | "force" | "operands" | "using" | "source" | "target"> = {},
 ): Stmt => ({ kind: "drop", objectType, ...fields, ...extra, span: ctx.spanFrom(start) });
 
 const unqualName = nameWord.map((n) => [n]);
@@ -6738,6 +7334,12 @@ const routineDrop = (objectType: string, ref: Rule<RoutineRef, SqlTokenType>): D
     const signatures = items.map((i) => i.signature);
     return dropNode(ctx, start, objectType, { concurrently: false, ifExists, names, behavior }, { signatures });
   },
+});
+
+// An operator and its `(left, right)` operand types, as DROP OPERATOR lists them.
+const operatorWithArgtypes = custom<Required<Pick<ObjectRef, "name" | "operands">>, SqlTokenType>(parseOperatorRef, {
+  expected: "an operator",
+  first: [{ type: "op" }, ...nameWord.first()],
 });
 
 const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
@@ -6794,6 +7396,55 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
   // USER only; `DROP USER MAPPING` is not supported and reads as a user named
   // `mapping` followed by stray words.
   user: listDrop("user", unqualName, { behavior: false }),
+  collation: listDrop("collation", qualName),
+  conversion: listDrop("conversion", qualName),
+  statistics: listDrop("statistics", qualName),
+  event: listDrop("event trigger", unqualName, { lead: kwseq("event", "trigger") }),
+  language: listDrop("language", unqualName),
+  procedural: listDrop("language", unqualName, { lead: kwseq("procedural", "language") }),
+  access: listDrop("access method", unqualName, { lead: kwseq("access", "method") }),
+  // `DROP TEXT SEARCH {PARSER | DICTIONARY | TEMPLATE | CONFIGURATION} …`.
+  text: {
+    parse: (ctx, start) => {
+      const objectType = `text search ${parseTextSearchKind(ctx)}`;
+      const { ifExists, items: names } = parseDropNames(ctx, qualName);
+      const fields = { concurrently: false, ifExists, names, behavior: ctx.parse(dropBehavior) };
+      return dropNode(ctx, start, objectType, fields);
+    },
+  },
+  // `DROP CAST [IF EXISTS] (source AS target) [CASCADE|RESTRICT]` — one cast,
+  // named by its types alone.
+  cast: {
+    parse: (ctx, start) => {
+      ctx.next(); // CAST
+      const ifExists = parseIfExists(ctx);
+      const { source, target } = parseCastTypes(ctx);
+      const fields = { concurrently: false, ifExists, names: [], behavior: ctx.parse(dropBehavior) };
+      return dropNode(ctx, start, "cast", fields, { source, target });
+    },
+  },
+  // `DROP OPERATOR [IF EXISTS] op (left, right)[, …]`, and `DROP OPERATOR
+  // {CLASS | FAMILY} [IF EXISTS] name USING method` — one class or family.
+  operator: {
+    parse: (ctx, start) => {
+      const sub = opClassWordAhead(ctx);
+      if (sub !== null) {
+        ctx.next(); // OPERATOR
+        ctx.next(); // CLASS / FAMILY
+        const ifExists = parseIfExists(ctx);
+        const name = ctx.parse(qualName);
+        ctx.parse(kw("using"));
+        const using = ctx.parse(nameWord);
+        const fields = { concurrently: false, ifExists, names: [name], behavior: ctx.parse(dropBehavior) };
+        return dropNode(ctx, start, `operator ${sub}`, fields, { using });
+      }
+      ctx.next(); // OPERATOR
+      const { ifExists, items } = parseDropNames(ctx, operatorWithArgtypes);
+      const names = items.map((i) => i.name);
+      const fields = { concurrently: false, ifExists, names, behavior: ctx.parse(dropBehavior) };
+      return dropNode(ctx, start, "operator", fields, { operands: items.map((i) => i.operands) });
+    },
+  },
 };
 const DROP_TARGET_EXPECTED = keyList(DROP_TARGETS);
 
@@ -7818,8 +8469,8 @@ const windowClause = seq(skip(kw("window")), field("defs", sepBy(namedWindowDef,
 
 // The operator after `USING`: any operator token except `=>`, which PG lexes
 // as its own named-argument token rather than an operator (see `functionArg`).
-// PG's `OPERATOR(schema.op)` spelling is deliberately not taken — no other
-// position in this grammar parses it either.
+// PG's `OPERATOR(schema.op)` spelling is not taken here; only a definition
+// value (parseDefinitionArg) parses it.
 const sortOperator = custom<string, SqlTokenType>(
   (ctx) => {
     const tok = ctx.peek();
