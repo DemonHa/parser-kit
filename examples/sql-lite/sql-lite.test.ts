@@ -11795,9 +11795,197 @@ describe("SQL-lite COPY", () => {
     expect(bad("COPY (SELECT 1) (a) TO STDOUT;")).toThrow(/Expected "to" but found "\("/);
     expect(bad("COPY t FROM PROGRAM gzip;")).toThrow(/Expected a string but found "gzip"/);
     expect(bad("COPY t TO STDOUT WHERE a;")).toThrow(/Expected ";" but found "where"/);
-    expect(bad("COPY t FROM STDIN WITH CSV HEADER;")).toThrow(/Expected "\(" but found "csv"/);
     expect(bad("COPY t () FROM STDIN;")).toThrow(/Expected a name but found "\)"/);
     expect(bad("COPY t FROM STDIN ();")).toThrow(/Expected an option name but found "\)"/);
+  });
+});
+
+// --- COPY: PG's pre-9.0 options ---
+
+describe("SQL-lite COPY legacy options", () => {
+  const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
+  const word = (w: string) => ({ kind: "name", parts: [w] });
+  const list = (...names: string[]) => ({ kind: "optionList", items: names.map(word) });
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const optionsOf = (src: string) => firstStmt(`COPY t FROM STDIN ${src};`).options;
+
+  it("maps each bare-word option onto the parenthesised list's name", () => {
+    expect(
+      optionsOf(
+        "BINARY FREEZE DELIMITER '|' NULL '' CSV HEADER QUOTE '\"' ESCAPE '\\' FORCE NOT NULL a, b FORCE NULL c ENCODING 'UTF8'",
+      ),
+    ).toEqual([
+      opt("format", word("binary")),
+      opt("freeze"),
+      opt("delimiter", str("|")),
+      opt("null", str("")),
+      opt("format", word("csv")),
+      opt("header"),
+      opt("quote", str('"')),
+      opt("escape", str("\\")),
+      opt("force_not_null", list("a", "b")),
+      opt("force_null", list("c")),
+      opt("encoding", str("UTF8")),
+    ]);
+    expect(firstStmt("COPY t TO STDOUT CSV FORCE QUOTE a, b;").options).toEqual([
+      opt("format", word("csv")),
+      opt("force_quote", list("a", "b")),
+    ]);
+    expect(firstStmt("COPY t TO STDOUT CSV FORCE QUOTE *;").options).toEqual([
+      opt("format", word("csv")),
+      opt("force_quote", star()),
+    ]);
+    expect(firstStmt('COPY t TO STDOUT CSV FORCE QUOTE "A", b;').options).toEqual([
+      opt("format", word("csv")),
+      opt("force_quote", list("A", "b")),
+    ]);
+    expect(optionsOf("CSV FORCE NOT NULL * FORCE NULL *")).toEqual([
+      opt("format", word("csv")),
+      opt("force_not_null", star()),
+      opt("force_null", star()),
+    ]);
+  });
+
+  it("reads the optional AS, the optional WITH and a bare WITH", () => {
+    expect(optionsOf("WITH DELIMITER AS ',' NULL AS 'x' QUOTE AS '\"' ESCAPE AS 'e'")).toEqual([
+      opt("delimiter", str(",")),
+      opt("null", str("x")),
+      opt("quote", str('"')),
+      opt("escape", str("e")),
+    ]);
+    expect(firstStmt("COPY users FROM '/tmp/u.txt' DELIMITER '|' CSV HEADER;")).toEqual({
+      kind: "copy",
+      table: ["users"],
+      columns: null,
+      query: null,
+      direction: "from",
+      location: { kind: "file", path: "/tmp/u.txt" },
+      options: [opt("delimiter", str("|")), opt("format", word("csv")), opt("header")],
+      where: null,
+      legacy: true,
+    });
+    // An empty bare-word list: the options are absent, the spelling is not.
+    expect(firstStmt("COPY t TO STDOUT WITH;")).toMatchObject({ options: null, legacy: true });
+    expect(firstStmt("COPY t FROM STDIN WITH WHERE a;")).toMatchObject({
+      options: null,
+      where: name("a"),
+      legacy: true,
+    });
+    // The options come before WHERE, and a query may take them too.
+    expect(firstStmt("COPY t FROM STDIN WITH CSV WHERE a;")).toMatchObject({
+      options: [opt("format", word("csv"))],
+      where: name("a"),
+      legacy: true,
+    });
+    expect(firstStmt("COPY (SELECT 1) TO STDOUT WITH CSV HEADER;")).toMatchObject({
+      options: [opt("format", word("csv")), opt("header")],
+      legacy: true,
+    });
+  });
+
+  it("reads COPY BINARY and USING DELIMITERS, alongside either option form", () => {
+    expect(firstStmt("COPY BINARY s.t (a) TO STDOUT;")).toMatchObject({
+      table: ["s", "t"],
+      columns: ["a"],
+      options: [opt("format", word("binary"))],
+      legacy: true,
+    });
+    expect(firstStmt('COPY BINARY "t" FROM STDIN;')).toMatchObject({ table: ["t"], legacy: true });
+    expect(firstStmt("COPY t FROM STDIN USING DELIMITERS '|';")).toMatchObject({
+      options: [opt("delimiter", str("|"))],
+      legacy: true,
+    });
+    expect(firstStmt("COPY t TO STDOUT DELIMITERS '|' CSV;").options).toEqual([
+      opt("delimiter", str("|")),
+      opt("format", word("csv")),
+    ]);
+    expect(firstStmt("COPY BINARY t FROM STDIN WITH CSV;")).toMatchObject({
+      options: [opt("format", word("binary")), opt("format", word("csv"))],
+      legacy: true,
+    });
+    // PG collects the prefix, then DELIMITERS, then the list.
+    expect(firstStmt("COPY BINARY t FROM STDIN USING DELIMITERS ',' WITH (HEADER);")).toMatchObject({
+      options: [opt("format", word("binary")), opt("delimiter", str(",")), opt("header")],
+      legacy: true,
+    });
+  });
+
+  it("leaves the parenthesised form unmarked", () => {
+    const stmt = firstStmt("COPY t FROM STDIN WITH (FORMAT csv, HEADER);");
+    expect(stmt.options).toEqual([opt("format", word("csv")), opt("header")]);
+    expect(stmt).not.toHaveProperty("legacy");
+    expect(firstStmt("COPY t FROM STDIN;")).not.toHaveProperty("legacy");
+  });
+
+  it("keeps the legacy option words unreserved", () => {
+    const words = [
+      "binary",
+      "csv",
+      "header",
+      "delimiter",
+      "quote",
+      "escape",
+      "force",
+      "freeze",
+      "encoding",
+      "delimiters",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM binary;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["binary"])] }),
+    );
+    expect(firstStmt(`SELECT 1 AS csv, 2 freeze FROM t force;`)).toMatchObject({
+      columns: [{ alias: "csv" }, { alias: "freeze" }],
+    });
+    expect(
+      firstStmt(`CREATE TABLE csv (${words.map((w) => `${w} int`).join(", ")});`).items.map((i: any) => i.name),
+    ).toEqual(words);
+    // …and as the names COPY itself takes: `binary` is the prefix only before
+    // another name.
+    expect(firstStmt("COPY binary (csv, header) FROM STDIN;")).toMatchObject({
+      table: ["binary"],
+      columns: ["csv", "header"],
+      options: null,
+    });
+    expect(firstStmt("COPY binary TO STDOUT;")).not.toHaveProperty("legacy");
+    expect(firstStmt("COPY binary.force FROM STDIN;")).toMatchObject({ table: ["binary", "force"] });
+    expect(firstStmt("COPY BINARY binary FROM STDIN;")).toMatchObject({ table: ["binary"], legacy: true });
+    expect(firstStmt("COPY t TO STDOUT FORCE QUOTE delimiter, force;").options).toEqual([
+      opt("force_quote", list("delimiter", "force")),
+    ]);
+  });
+
+  it("rejects what PG's grammar rejects", () => {
+    // One statement takes one option form.
+    expect(bad("COPY t FROM STDIN WITH CSV (HEADER);")).toThrow(/Expected ";" but found "\("/);
+    expect(bad("COPY t FROM STDIN (HEADER) CSV;")).toThrow(/Expected ";" but found "csv"/);
+    expect(bad("COPY t FROM STDIN FORCE;")).toThrow(/Expected "quote", "not" or "null" but found ";"/);
+    expect(bad("COPY t FROM STDIN FORCE NOT a;")).toThrow(/Expected "null" but found "a"/);
+    expect(bad("COPY t FROM STDIN CSV FORCE NOT NULL *, a;")).toThrow(/Expected ";" but found ","/);
+    expect(bad("COPY t TO STDOUT WITH WHERE a;")).toThrow(/Expected ";" but found "where"/);
+    expect(bad("COPY t FROM STDIN WITH FORMAT csv;")).toThrow(
+      /Expected "\(" or a COPY option but found "format" \(1:23\)/,
+    );
+    expect(bad("COPY t TO STDOUT FORCE QUOTE select;")).toThrow(/Expected "\*" or a name but found "select"/);
+    expect(bad("COPY t TO STDOUT FORCE QUOTE a, select;")).toThrow(/Expected a name but found "select"/);
+    expect(bad("COPY t FROM STDIN WITH DELIMITERS ',';")).toThrow(
+      /Expected "\(" or a COPY option but found "delimiters"/,
+    );
+    expect(bad("COPY t FROM STDIN WITH USING DELIMITERS ',';")).toThrow(
+      /Expected "\(" or a COPY option but found "using"/,
+    );
+    expect(bad("COPY t TO STDOUT FORCE QUOTE;")).toThrow(/Expected "\*" or a name but found ";"/);
+    expect(bad("COPY binary select FROM STDIN;")).toThrow(/Expected "from" or "to" but found "select"/);
+    expect(bad("COPY t FROM STDIN WITH 1;")).toThrow(/Expected "\(" or a COPY option but found "1"/);
+    // The BINARY lookahead reports what does not lex rather than dropping it.
+    expect(sqlLite.diagnose("COPY binary 'x").errors[0]?.message).toMatch(/Unterminated/);
+    expect(bad("COPY t TO STDOUT FORCE QUOTE (a);")).toThrow(/Expected "\*" or a name but found "\("/);
+    expect(bad("COPY t FROM STDIN DELIMITER ,;")).toThrow(/Expected a string but found ","/);
+    expect(bad("COPY t FROM STDIN ENCODING AS 'UTF8';")).toThrow(/Expected a string but found "as"/);
+    expect(bad("COPY t FROM STDIN HEADER true;")).toThrow(/Expected ";" but found "true"/);
+    // DELIMITERS comes before the options, and only after a table.
+    expect(bad("COPY t FROM STDIN CSV DELIMITERS ',';")).toThrow(/Expected ";" but found "delimiters"/);
+    expect(bad("COPY (SELECT 1) TO STDOUT USING DELIMITERS ',';")).toThrow(/Expected ";" but found "using"/);
+    expect(bad("COPY BINARY (SELECT 1) TO STDOUT;")).toThrow(/Expected a name but found "select"/);
   });
 });
 
@@ -14027,6 +14215,25 @@ describe("SQL-lite psql scripts", () => {
     expect(script('COPY t FROM STDIN (FORMAT csv);\na,"b;c"\n\\.\n')).toEqual([
       { ...copyIn("t", 'a,"b;c"\n'), options: [{ name: "format", value: { kind: "name", parts: ["csv"] } }] },
     ]);
+    // The pre-9.0 spelling, the BINARY prefix included, takes its rows too.
+    expect(
+      script("COPY BINARY t FROM stdin;\nxx\n\\.\nCOPY t FROM stdin WITH CSV HEADER NULL AS '';\na,b\n\\.\n"),
+    ).toEqual([
+      {
+        ...copyIn("t", "xx\n"),
+        options: [{ name: "format", value: { kind: "name", parts: ["binary"] } }],
+        legacy: true,
+      },
+      {
+        ...copyIn("t", "a,b\n"),
+        options: [
+          { name: "format", value: { kind: "name", parts: ["csv"] } },
+          { name: "header", value: null },
+          { name: "null", value: { kind: "string", value: "" } },
+        ],
+        legacy: true,
+      },
+    ]);
     // A row is data even when it looks like a terminator or a meta-command.
     expect(script("COPY t FROM stdin;\n \\.\n\\.x\n\\connect db\n\\.")).toEqual([
       copyIn("t", " \\.\n\\.x\n\\connect db\n"),
@@ -14182,7 +14389,7 @@ describe("SQL-lite psql scripts", () => {
     expect(errors.map((error) => error.message)).toEqual([
       'Expected a name but found "where" (1:12)',
       'Expected ")" but found "\\connect other" (4:0)',
-      'Expected "(" but found "junk" (5:23)',
+      'Expected "(" or a COPY option but found "junk" (5:23)',
       'Expected a statement or a psql meta-command but found "bogus" (8:0)',
     ]);
   });
