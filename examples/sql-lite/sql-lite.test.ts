@@ -2409,8 +2409,9 @@ describe("SQL-lite FETCH / OFFSET row words", () => {
   it("maps FETCH FIRST … ROWS ONLY onto limit", () => {
     expect(firstStmt("SELECT 1 FETCH FIRST 10 ROWS ONLY;")).toMatchObject({ limit: num(10), offset: null });
     // OFFSET … ROWS then FETCH NEXT … ROWS WITH TIES, standard-SQL spelling.
-    expect(firstStmt("SELECT 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;")).toMatchObject({
+    expect(firstStmt("SELECT 1 ORDER BY 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;")).toMatchObject({
       limit: num(3),
+      withTies: true,
       offset: num(5),
     });
   });
@@ -2435,6 +2436,275 @@ describe("SQL-lite FOR UPDATE / SHARE locking", () => {
     expect((firstStmt("SELECT * FROM t FOR SHARE;") as any).locking).toEqual([
       { strength: "share", of: [], wait: null },
     ]);
+  });
+});
+
+// --- set-operation precedence and query-level tails ---
+
+describe("SQL-lite set-operation precedence and query-level tails", () => {
+  const one = sel({ columns: [col(num(1))] });
+  const two = sel({ columns: [col(num(2))] });
+  const three = sel({ columns: [col(num(3))] });
+  const setOp = (op: string, left: unknown, right: unknown, tail: Record<string, unknown> = {}) => ({
+    kind: "setOp",
+    op,
+    left,
+    right,
+    ...tail,
+  });
+  const values1 = { kind: "values", rows: [[num(1)]], orderBy: null, limit: null, offset: null };
+  const ord = (expr: unknown) => ({ expr, dir: null, nulls: null });
+  const forUpdate = { strength: "update", of: [], wait: null };
+  const forShare = { strength: "share", of: [], wait: null };
+
+  it("binds INTERSECT tighter than UNION and EXCEPT", () => {
+    expect(firstStmt("SELECT 1 UNION SELECT 2 INTERSECT SELECT 3;")).toEqual(
+      setOp("union", one, setOp("intersect", two, three)),
+    );
+    expect(firstStmt("SELECT 1 EXCEPT ALL SELECT 2 INTERSECT ALL SELECT 3;")).toEqual(
+      setOp("exceptAll", one, setOp("intersectAll", two, three)),
+    );
+    expect(firstStmt("SELECT 1 INTERSECT SELECT 2 UNION SELECT 3;")).toEqual(
+      setOp("union", setOp("intersect", one, two), three),
+    );
+    // UNION and EXCEPT share a level and associate to the left, as does INTERSECT.
+    expect(firstStmt("SELECT 1 EXCEPT SELECT 2 UNION SELECT 3;")).toEqual(
+      setOp("union", setOp("except", one, two), three),
+    );
+    expect(firstStmt("SELECT 1 INTERSECT SELECT 2 INTERSECT SELECT 3;")).toEqual(
+      setOp("intersect", setOp("intersect", one, two), three),
+    );
+    // Parentheses override the precedence.
+    expect(firstStmt("(SELECT 1 UNION SELECT 2) INTERSECT SELECT 3;")).toEqual(
+      setOp("intersect", setOp("union", one, two), three),
+    );
+  });
+
+  it("accepts the DISTINCT quantifier, which records nothing", () => {
+    expect(
+      firstStmt("SELECT 1 UNION DISTINCT SELECT 2 INTERSECT DISTINCT SELECT 3 EXCEPT DISTINCT VALUES (1);"),
+    ).toEqual(setOp("except", setOp("union", one, setOp("intersect", two, three)), values1));
+  });
+
+  // Each tail as written, and the fields it sets. A SELECT or VALUES carries
+  // them in its own (null-defaulted) fields; a set operation only when written.
+  const TAILS: [string, Record<string, unknown>][] = [
+    ["ORDER BY 1", { orderBy: [ord(num(1))] }],
+    ["LIMIT 2", { limit: num(2) }],
+    ["LIMIT ALL", {}],
+    ["OFFSET 3", { offset: num(3) }],
+    ["OFFSET 3 ROWS", { offset: num(3) }],
+    ["LIMIT 2 OFFSET 3", { limit: num(2), offset: num(3) }],
+    ["OFFSET 3 LIMIT 2", { limit: num(2), offset: num(3) }],
+    ["FETCH FIRST 2 ROWS ONLY", { limit: num(2) }],
+    ["OFFSET 3 ROW FETCH NEXT 2 ROW ONLY", { limit: num(2), offset: num(3) }],
+    ["ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES", { orderBy: [ord(num(1))], limit: num(2), withTies: true }],
+    [
+      "ORDER BY 1 OFFSET 3 FETCH FIRST 2 ROWS WITH TIES",
+      { orderBy: [ord(num(1))], limit: num(2), withTies: true, offset: num(3) },
+    ],
+    ["FOR UPDATE", { locking: [forUpdate] }],
+    ["FOR UPDATE FOR SHARE", { locking: [forUpdate, forShare] }],
+    ["FOR UPDATE LIMIT 2", { limit: num(2), locking: [forUpdate] }],
+    ["LIMIT 2 FOR UPDATE", { limit: num(2), locking: [forUpdate] }],
+    ["FOR UPDATE OFFSET 3 LIMIT 2", { limit: num(2), offset: num(3), locking: [forUpdate] }],
+    [
+      "ORDER BY 1 LIMIT 2 OFFSET 3 FOR UPDATE",
+      { orderBy: [ord(num(1))], limit: num(2), offset: num(3), locking: [forUpdate] },
+    ],
+    [
+      "ORDER BY 1 FOR UPDATE FETCH FIRST 2 ROWS WITH TIES",
+      { orderBy: [ord(num(1))], limit: num(2), withTies: true, locking: [forUpdate] },
+    ],
+    ["FOR READ ONLY", {}],
+    ["FOR READ ONLY LIMIT 2", { limit: num(2) }],
+    ["ORDER BY 1 LIMIT 2 FOR READ ONLY", { orderBy: [ord(num(1))], limit: num(2) }],
+  ];
+  // The bodies a tail can follow, and the node each one gives untailed.
+  const BODIES: [string, Record<string, unknown>][] = [
+    ["SELECT 1", one],
+    ["VALUES (1)", values1],
+    ["(SELECT 1)", one],
+    ["((SELECT 1))", one],
+    ["SELECT 1 UNION SELECT 2", setOp("union", one, two)],
+    ["(SELECT 1) UNION (SELECT 2)", setOp("union", one, two)],
+    ["(SELECT 1 UNION SELECT 2)", setOp("union", one, two)],
+    ["((SELECT 1) UNION (SELECT 2))", setOp("union", one, two)],
+    ["SELECT 1 UNION SELECT 2 INTERSECT SELECT 3", setOp("union", one, setOp("intersect", two, three))],
+  ];
+
+  it("attaches every tail to the query it follows, never to a set-op arm", () => {
+    for (const [body, node] of BODIES) {
+      for (const [tail, fields] of TAILS) {
+        expect(firstStmt(`${body} ${tail};`), `${body} ${tail}`).toEqual({ ...node, ...fields });
+      }
+    }
+  });
+
+  it("omits withTies unless WITH TIES is written, and the set-op tail fields unless they are", () => {
+    expect("withTies" in firstStmt("SELECT 1 FETCH FIRST 2 ROWS ONLY;")).toBe(false);
+    expect("withTies" in firstStmt("SELECT 1 ORDER BY 1 LIMIT 2;")).toBe(false);
+    expect("withTies" in firstStmt("VALUES (1) ORDER BY 1 FETCH NEXT 2 ROWS ONLY;")).toBe(false);
+    expect(Object.keys(firstStmt("SELECT 1 UNION SELECT 2 FOR READ ONLY;"))).toEqual(["kind", "op", "left", "right"]);
+    expect("locking" in firstStmt("VALUES (1) LIMIT 1;")).toBe(false);
+  });
+
+  it("merges a tail written after the parentheses into the one inside them", () => {
+    // PG's insertSelectOptions: each clause may come from either side, once.
+    expect(firstStmt("(SELECT 1 ORDER BY 1) LIMIT 2;")).toEqual({ ...one, orderBy: [ord(num(1))], limit: num(2) });
+    expect(firstStmt("(SELECT 1 LIMIT 2) ORDER BY 1;")).toEqual({ ...one, orderBy: [ord(num(1))], limit: num(2) });
+    expect(firstStmt("(SELECT 1 OFFSET 3) FETCH FIRST 2 ROWS ONLY;")).toEqual({
+      ...one,
+      limit: num(2),
+      offset: num(3),
+    });
+    expect(firstStmt("(SELECT 1 ORDER BY 1) FETCH FIRST 2 ROWS WITH TIES;")).toEqual({
+      ...one,
+      orderBy: [ord(num(1))],
+      limit: num(2),
+      withTies: true,
+    });
+    expect(firstStmt("((SELECT 1 FOR UPDATE) FOR SHARE) LIMIT 2;")).toEqual({
+      ...one,
+      limit: num(2),
+      locking: [forUpdate, forShare],
+    });
+    expect(firstStmt("((SELECT 1) UNION (SELECT 2) ORDER BY 1) LIMIT 2;")).toEqual(
+      setOp("union", one, two, { orderBy: [ord(num(1))], limit: num(2) }),
+    );
+    expect(firstStmt("(VALUES (1) ORDER BY 1) LIMIT 2;")).toEqual({
+      ...values1,
+      orderBy: [ord(num(1))],
+      limit: num(2),
+    });
+    // A tail inside an arm's parentheses stays on that arm.
+    expect(firstStmt("(SELECT 1 LIMIT 1) UNION (SELECT 2 LIMIT 2) LIMIT 3;")).toEqual(
+      setOp("union", { ...one, limit: num(1) }, { ...two, limit: num(2) }, { limit: num(3) }),
+    );
+  });
+
+  it("attaches the tail the same way inside CTEs, subqueries and INSERT … SELECT", () => {
+    const tailed = setOp("union", one, two, { orderBy: [ord(num(1))], limit: num(1) });
+    const q = "SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1";
+    expect(firstStmt(`WITH c AS (${q}) SELECT * FROM c;`).with_[0].query).toEqual(tailed);
+    expect(firstStmt(`SELECT * FROM (${q}) s;`).from[0].query).toEqual(tailed);
+    expect(firstStmt(`SELECT * FROM t WHERE a IN (${q});`).where.query).toEqual(tailed);
+    expect(firstStmt(`SELECT (${q});`).columns[0].expr.query).toEqual(tailed);
+    expect(firstStmt(`INSERT INTO t ${q};`).source).toEqual({ kind: "select", query: tailed });
+    expect(firstStmt(`INSERT INTO t (a) (SELECT 1) UNION (SELECT 2) ORDER BY 1 LIMIT 1;`).source).toEqual({
+      kind: "select",
+      query: tailed,
+    });
+    // A WITH prefix still binds to the leftmost SELECT, and the tail to the set operation.
+    const withTail = firstStmt(`WITH c AS (SELECT 1) ${q};`);
+    expect(withTail).toMatchObject({ kind: "setOp", orderBy: [ord(num(1))], limit: num(1) });
+    expect(withTail.left.with_).toHaveLength(1);
+  });
+
+  it("ends a SELECT's span at its tail, and a set operation's at the tail after it", () => {
+    const [plain] = sqlLite.parse("SELECT a FROM t ORDER BY a LIMIT 1 FOR UPDATE;");
+    expect(plain!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 45 } });
+    const [union] = sqlLite.parse("SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1;") as any[];
+    expect(union.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 42 } });
+    // The right-hand arm ends at its own last token, before the tail.
+    expect(union.right.span).toEqual({ start: { row: 1, col: 15 }, end: { row: 1, col: 23 } });
+    // A parenthesised query keeps its start and stretches to the tail written after it.
+    const [paren] = sqlLite.parse("(SELECT 1) ORDER BY 1;");
+    expect(paren!.span).toEqual({ start: { row: 1, col: 1 }, end: { row: 1, col: 21 } });
+  });
+
+  it("rejects a repeated LIMIT, OFFSET or ORDER BY, within one tail or across parentheses", () => {
+    const bad = (sql: string) => () => sqlLite.parse(sql);
+    expect(bad("SELECT 1 LIMIT 1 LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed \(1:17\)/);
+    expect(bad("SELECT 1 LIMIT 1 FETCH FIRST 2 ROWS ONLY;")).toThrow(/multiple LIMIT clauses not allowed \(1:17\)/);
+    expect(bad("SELECT 1 FETCH FIRST 2 ROWS ONLY LIMIT 1;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("SELECT 1 LIMIT 1 OFFSET 2 LIMIT 3;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("SELECT 1 OFFSET 1 OFFSET 2;")).toThrow(/multiple OFFSET clauses not allowed \(1:18\)/);
+    expect(bad("SELECT 1 UNION SELECT 2 LIMIT 1 LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("(SELECT 1 LIMIT 1) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed \(1:19\)/);
+    // LIMIT ALL and a count-less FETCH record no value, but are still a LIMIT.
+    expect(bad("(SELECT 1 LIMIT ALL) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("(SELECT 1 FETCH FIRST ROW ONLY) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("((SELECT 1 LIMIT 1)) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("(SELECT 1 OFFSET 1) OFFSET 2;")).toThrow(/multiple OFFSET clauses not allowed/);
+    expect(bad("(SELECT 1 ORDER BY 1) ORDER BY 1;")).toThrow(/multiple ORDER BY clauses not allowed \(1:22\)/);
+    expect(bad("(SELECT 1 UNION SELECT 2 ORDER BY 1) ORDER BY 1;")).toThrow(/multiple ORDER BY clauses not allowed/);
+    expect(bad("(VALUES (1) LIMIT 1) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+  });
+
+  it("rejects WITH TIES without an ORDER BY", () => {
+    const bad = (sql: string) => () => sqlLite.parse(sql);
+    expect(bad("SELECT 1 FETCH FIRST 2 ROWS WITH TIES;")).toThrow(
+      /WITH TIES cannot be specified without ORDER BY clause \(1:9\)/,
+    );
+    expect(bad("SELECT 1 UNION SELECT 2 FETCH FIRST 2 ROWS WITH TIES;")).toThrow(/WITH TIES cannot be specified/);
+    expect(bad("VALUES (1) FETCH FIRST 2 ROWS WITH TIES;")).toThrow(/WITH TIES cannot be specified/);
+    // The ORDER BY must be there when WITH TIES is applied: a later one is too late.
+    expect(bad("(SELECT 1 FETCH FIRST 2 ROWS WITH TIES) ORDER BY 1;")).toThrow(/WITH TIES cannot be specified/);
+    // An ORDER BY on an arm doesn't order the set operation.
+    expect(bad("(SELECT 1 ORDER BY 1) UNION SELECT 2 FETCH FIRST 2 ROWS WITH TIES;")).toThrow(
+      /WITH TIES cannot be specified/,
+    );
+  });
+
+  it("rejects WITH TIES together with SKIP LOCKED", () => {
+    const bad = (sql: string) => () => sqlLite.parse(sql);
+    expect(bad("SELECT 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES FOR UPDATE SKIP LOCKED;")).toThrow(
+      /SKIP LOCKED and WITH TIES options cannot be used together \(1:20\)/,
+    );
+    expect(bad("SELECT 1 ORDER BY 1 FOR SHARE SKIP LOCKED FETCH FIRST 2 ROWS WITH TIES;")).toThrow(
+      /SKIP LOCKED and WITH TIES options cannot be used together/,
+    );
+    expect(bad("(SELECT 1 ORDER BY 1 FOR UPDATE SKIP LOCKED) FETCH FIRST 2 ROWS WITH TIES;")).toThrow(
+      /SKIP LOCKED and WITH TIES options cannot be used together/,
+    );
+    // PG checks only when the WITH TIES is applied, so SKIP LOCKED added after
+    // the parentheses, or NOWAIT anywhere, is accepted.
+    expect(firstStmt("(SELECT 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES) FOR UPDATE SKIP LOCKED;")).toMatchObject({
+      withTies: true,
+      locking: [{ strength: "update", of: [], wait: "skipLocked" }],
+    });
+    expect(firstStmt("SELECT 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES FOR UPDATE NOWAIT;")).toMatchObject({
+      withTies: true,
+      locking: [{ strength: "update", of: [], wait: "nowait" }],
+    });
+  });
+
+  it("rejects a misplaced or malformed tail clause", () => {
+    const bad = (sql: string) => () => sqlLite.parse(sql);
+    // An arm takes no tail of its own: only parentheses give it one.
+    expect(bad("SELECT 1 ORDER BY 1 UNION SELECT 2;")).toThrow(/Expected ";" but found "union"/);
+    expect(bad("SELECT 1 LIMIT 1 UNION SELECT 2;")).toThrow(/Expected ";" but found "union"/);
+    expect(bad("SELECT 1 FOR UPDATE UNION SELECT 2;")).toThrow(/Expected ";" but found "union"/);
+    // Locking goes on one side of the LIMIT / OFFSET pair, and ORDER BY first.
+    expect(bad("SELECT 1 FOR UPDATE LIMIT 1 FOR UPDATE;")).toThrow(/Expected ";" but found "for"/);
+    expect(bad("SELECT 1 LIMIT 1 FOR UPDATE OFFSET 1;")).toThrow(/Expected ";" but found "offset"/);
+    expect(bad("SELECT 1 LIMIT 1 ORDER BY 1;")).toThrow(/Expected ";" but found "order"/);
+    // FOR READ ONLY stands alone.
+    expect(bad("SELECT 1 FOR READ ONLY FOR UPDATE;")).toThrow(/Expected ";" but found "for"/);
+    expect(bad("SELECT 1 FOR UPDATE FOR READ ONLY;")).toThrow(
+      /Expected "update", "share", "no" or "key" but found "read"/,
+    );
+    expect(bad("SELECT 1 FOR READ;")).toThrow(/Expected "only" but found ";"/);
+    // FETCH spells out FIRST | NEXT, ROW | ROWS and ONLY | WITH TIES.
+    expect(bad("SELECT 1 FETCH 2 ROWS ONLY;")).toThrow(/Expected "first" or "next" but found "2"/);
+    expect(bad("SELECT 1 FETCH FIRST 2 ONLY;")).toThrow(/Expected "row" or "rows" but found "only"/);
+    expect(bad("SELECT 1 FETCH FIRST 2 ROWS;")).toThrow(/Expected "only" or "with ties" but found ";"/);
+    expect(bad("SELECT 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH;")).toThrow(/Expected "ties" but found ";"/);
+    expect(bad("SELECT 1 UNION ALL DISTINCT SELECT 2;")).toThrow(/but found "distinct"/);
+  });
+
+  it("keeps the new tail words unreserved as names and aliases", () => {
+    // `read` is matched only after the reserved `for`, the FETCH words only after
+    // `fetch`, so all of them stay ordinary names.
+    const words = ["read", "ties", "first", "next", "row", "rows"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM read;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["read"])] }),
+    );
+    expect(firstStmt(`SELECT ${words.map((w) => `a ${w}`).join(", ")} FROM t read;`)).toEqual(
+      sel({ columns: words.map((w) => col(name("a"), w)), from: [tableFrom(["t"], "read")] }),
+    );
+    expect(firstStmt("CREATE TABLE read (ties int, first int);").name).toEqual(["read"]);
   });
 });
 
@@ -5460,9 +5730,15 @@ describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
     expect(() => sqlLite.parse("SELECT * FROM ((TABLE t)) x;")).toThrow(
       /Expected "select" or "values" or "\(" but found "table"/,
     );
-    // A trailing query clause continues a query, which sql-lite reads no ORDER
-    // BY after when parenthesised; the run still takes the query reading.
-    expect(() => sqlLite.parse("SELECT * FROM ((SELECT 1) ORDER BY 1) x;")).toThrow(/Expected "\)" but found "order"/);
+    // A trailing query clause continues a query, so the run still takes the
+    // query reading — and a parenthesised query takes an ORDER BY after its `)`.
+    expect(from("SELECT * FROM ((SELECT 1) ORDER BY 1) x;")).toEqual([
+      {
+        kind: "subquery",
+        query: sel({ columns: [col(num(1))], orderBy: [{ expr: num(1), dir: null, nulls: null }] }),
+        alias: "x",
+      },
+    ]);
     // LATERAL takes no parenthesised join, as in PG: its `(` is a subquery.
     expect(() => sqlLite.parse("SELECT * FROM LATERAL (a JOIN b ON true);")).toThrow(/Expected "select"/);
     expect(() => sqlLite.parse("SELECT * FROM ROWS FROM ();")).toThrow(/Expected a name but found "\)"/);
@@ -6877,7 +7153,7 @@ describe("SQL-lite cursors", () => {
     expect(firstStmt("SELECT a FROM t FETCH FIRST 3 ROWS ONLY;")).toEqual(
       sel({ columns: [col(name("a"))], from: [tableFrom(["t"])], limit: num(3) }),
     );
-    expect(firstStmt("SELECT a FROM t OFFSET 1 ROWS FETCH NEXT ROW WITH TIES;").offset).toEqual(num(1));
+    expect(firstStmt("SELECT a FROM t ORDER BY a OFFSET 1 ROWS FETCH NEXT ROW WITH TIES;").offset).toEqual(num(1));
   });
 
   it("keeps the cursor words unreserved", () => {

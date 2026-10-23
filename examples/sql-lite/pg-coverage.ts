@@ -126,6 +126,10 @@ export const PG_BATTERY: BatteryRow[] = [
     ["setop", "sql-lite", "SELECT a FROM t1 INTERSECT SELECT a FROM t2 EXCEPT SELECT a FROM t3;"],
     ["setop", "sql-lite", "SELECT a FROM t1 EXCEPT ALL SELECT a FROM t2;"],
     ["setop", "both", "(SELECT a FROM t1 ORDER BY a LIMIT 1) UNION (SELECT a FROM t2 ORDER BY a LIMIT 1);"],
+    ["setop", "both", "SELECT a FROM t1 UNION SELECT a FROM t2 INTERSECT SELECT a FROM t3;"],
+    ["setop", "both", "SELECT a FROM t1 UNION DISTINCT SELECT a FROM t2;"],
+    ["setop", "both", "(SELECT a FROM t1) UNION (SELECT a FROM t2) ORDER BY a LIMIT 10;"],
+    ["setop", "both", "(SELECT a FROM t ORDER BY a) LIMIT 5;"],
     ["setop", "sql-lite", "VALUES (1, 'a'), (2, 'b');"],
     ["setop", "sql-lite", "VALUES (1), (2) ORDER BY 1 DESC LIMIT 1;"],
     [
@@ -202,6 +206,8 @@ export const PG_BATTERY: BatteryRow[] = [
     ["lock", "sql-lite", "SELECT * FROM a JOIN b ON a.id = b.id FOR NO KEY UPDATE OF a;"],
     ["lock", "sql-lite", "SELECT * FROM t FOR KEY SHARE;"],
     ["lock", "sql-lite", "SELECT * FROM a, b FOR UPDATE OF a FOR SHARE OF b;"],
+    ["lock", "sql-lite", "SELECT * FROM jobs WHERE status = 'pending' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1;"],
+    ["lock", "sql-lite", "SELECT * FROM t FOR READ ONLY;"],
   ]),
   ...section("expressions", [
     ["expr", "both", "SELECT a + b * c - d / e % f FROM t;"],

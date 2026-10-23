@@ -10958,7 +10958,7 @@
     ]
   },
   {
-    "source": "SELECT 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;",
+    "source": "SELECT 1 ORDER BY 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;",
     "ast": [
       {
         "kind": "select",
@@ -10989,32 +10989,52 @@
         "groupBy": null,
         "having": null,
         "window": null,
-        "orderBy": null,
+        "orderBy": [
+          {
+            "expr": {
+              "kind": "number",
+              "value": 1,
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 18
+                },
+                "end": {
+                  "row": 1,
+                  "col": 19
+                }
+              }
+            },
+            "dir": null,
+            "nulls": null
+          }
+        ],
         "limit": {
           "kind": "number",
           "value": 3,
           "span": {
             "start": {
               "row": 1,
-              "col": 34
+              "col": 45
             },
             "end": {
               "row": 1,
-              "col": 35
+              "col": 46
             }
           }
         },
+        "withTies": true,
         "offset": {
           "kind": "number",
           "value": 5,
           "span": {
             "start": {
               "row": 1,
-              "col": 16
+              "col": 27
             },
             "end": {
               "row": 1,
-              "col": 17
+              "col": 28
             }
           }
         },
@@ -11026,7 +11046,7 @@
           },
           "end": {
             "row": 1,
-            "col": 50
+            "col": 61
           }
         }
       }
