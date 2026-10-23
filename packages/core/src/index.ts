@@ -45,7 +45,7 @@ export {
   readers,
 } from "./lexer";
 export type { Position, Span } from "./position";
-export { type PrattDef, type PrattHelpers, type PrattInfix, pratt } from "./pratt";
+export { type PrattDef, type PrattGuard, type PrattHelpers, type PrattInfix, pratt } from "./pratt";
 export {
   createParseContext,
   type FirstEntry,

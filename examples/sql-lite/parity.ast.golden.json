@@ -4581,12 +4581,12 @@
           },
           {
             "expr": {
-              "kind": "unary",
-              "op": "-",
-              "operand": {
-                "kind": "binary",
-                "op": "^",
-                "left": {
+              "kind": "binary",
+              "op": "^",
+              "left": {
+                "kind": "unary",
+                "op": "-",
+                "operand": {
                   "kind": "number",
                   "value": 2,
                   "span": {
@@ -4600,24 +4600,24 @@
                     }
                   }
                 },
-                "right": {
-                  "kind": "number",
-                  "value": 2,
-                  "span": {
-                    "start": {
-                      "row": 1,
-                      "col": 16
-                    },
-                    "end": {
-                      "row": 1,
-                      "col": 17
-                    }
-                  }
-                },
                 "span": {
                   "start": {
                     "row": 1,
-                    "col": 12
+                    "col": 11
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 13
+                  }
+                }
+              },
+              "right": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 16
                   },
                   "end": {
                     "row": 1,

@@ -84,8 +84,13 @@ interface GrammarCommon<TT extends string> {
    * substituted error may point into an abandoned backtracking branch; that
    * is usually the better message, and the flag scopes the risk (off = every
    * message byte-identical to today).
+   *
+   * propagateLexerErrors: a lexer error raised inside attempt()/tryParse()
+   * fails the parse (or reaches diagnose() recovery) as itself, instead of
+   * rolling back as a failed alternative and resurfacing as a misleading
+   * parser error. Off = errors and messages unchanged.
    */
-  errorReporting?: { preferFarthest?: boolean };
+  errorReporting?: { preferFarthest?: boolean; propagateLexerErrors?: boolean };
 }
 
 export interface RootGrammarDef<R extends Rule<unknown, TT>, TT extends string> extends GrammarCommon<TT> {
@@ -164,10 +169,18 @@ export function defineGrammar<TT extends string>(
   }
 
   const preferFarthest = def.errorReporting?.preferFarthest ?? false;
+  const propagateLexerErrors = def.errorReporting?.propagateLexerErrors ?? false;
 
   const run = (text: string, errors?: ParseError[]) => {
     const stream = def.lexer.tokenize(createInputStream(text));
-    const ctx = createParseContext(stream, { labels: def.lexer.labels, trivia, sync, errors, preferFarthest });
+    const ctx = createParseContext(stream, {
+      labels: def.lexer.labels,
+      trivia,
+      sync,
+      errors,
+      preferFarthest,
+      propagateLexerErrors,
+    });
     let ast: unknown;
     try {
       ast = root.parse(ctx);
@@ -205,7 +218,7 @@ export function defineGrammar<TT extends string>(
     },
     parseValue: (rule, text) => {
       const stream = def.lexer.tokenize(createInputStream(text));
-      const ctx = createParseContext(stream, { labels: def.lexer.labels, trivia });
+      const ctx = createParseContext(stream, { labels: def.lexer.labels, trivia, propagateLexerErrors });
       ctx.skipTrivia();
       const value = rule.parse(ctx);
       ctx.skipTrivia();

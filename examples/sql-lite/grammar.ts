@@ -26,7 +26,7 @@ import {
   skip,
   type Token,
 } from "@parser-kit/core";
-import { type SqlTokenType, sqlLexer } from "./lexer";
+import { type SqlTokenType, sqlParseLexer } from "./lexer";
 
 // SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
@@ -1215,6 +1215,12 @@ export type FromItemJoinType = "inner" | "left" | "right" | "full" | "cross";
 // `TABLESAMPLE method (arg, …) [REPEATABLE (seed)]` on a table FROM item.
 export type TableSample = { method: string; args: Expr[]; repeatable: Expr | null };
 
+// One `name type [COLLATE collation]` entry of a column definition list — PG's
+// `TableFuncElement`, which spells out the result columns of a function
+// returning `record` (`f() AS x (a int, b text)`). `collate` is present only
+// when written.
+export type ColumnDefinition = { name: string; type: ColType; collate?: string[] };
+
 // `columns` is the column-alias list that may follow an alias — `t AS x (a, b)`
 // renames t's first two columns — on any of the three leaf items. Like `only`,
 // `lateral` and `tablesample`, it is present only when written, so an item
@@ -1228,27 +1234,47 @@ export type FromItem =
   // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
   // is the underlying `call` expression node. `ordinality` is present (and
   // true) only for `WITH ORDINALITY`, as on a `rowsFrom` item.
-  | { kind: "function"; call: Expr; alias: string | null; columns?: string[]; lateral?: boolean; ordinality?: boolean }
+  // `columnDefinitions` is present only for a column definition list
+  // (`f() AS x (a int)`, `f() AS (a int)`), which takes the place of `columns`.
+  | {
+      kind: "function";
+      call: Expr;
+      alias: string | null;
+      columns?: string[];
+      columnDefinitions?: ColumnDefinition[];
+      lateral?: boolean;
+      ordinality?: boolean;
+    }
   // `ROWS FROM (f(…), g(…))` — several table functions zipped side by side,
   // optionally LATERAL. `calls` are the underlying `call` expression nodes.
+  // `callColumnDefinitions` is present only when some call carries its own
+  // `AS (col type, …)` list; it runs parallel to `calls`, with null for a call
+  // without one. `columnDefinitions` is a list after the whole item, as on a
+  // `function` item.
   | {
       kind: "rowsFrom";
       calls: Expr[];
+      callColumnDefinitions?: (ColumnDefinition[] | null)[];
       alias: string | null;
       columns?: string[];
+      columnDefinitions?: ColumnDefinition[];
       lateral?: boolean;
       ordinality?: boolean;
     }
   // `alias` and `columns` are present only on a parenthesised join that carries
   // an alias clause — `(a JOIN b ON …) AS x (c, d)`. A parenthesised join
-  // without one is the bare join node: the parentheses only group.
+  // without one is the bare join node: the parentheses only group. `natural`
+  // is present (and true) only for a NATURAL join, and `usingAlias` only for
+  // `USING (…) AS name`.
   | {
       kind: "join";
       joinType: FromItemJoinType;
+      natural?: true;
       left: FromItem;
       right: FromItem;
       on: Expr | null;
       using: string[] | null;
+      usingAlias?: string;
       alias?: string;
       columns?: string[];
     };
@@ -1582,7 +1608,8 @@ const bareStar = token("op", { values: ["*"] }).map((_node, span): Expr => ({ ki
 
 // `(` opens both `(expr)` and `(SELECT …)`; they share the first token, so the
 // atom peeks one token past it — a `select`/`with` there means a subquery. No
-// attempt() cost. (`peekAhead` gives raw tokens, which is what we want here.)
+// attempt() cost. (`peekAhead` doesn't skip trivia, but `sqlParseLexer` has
+// already dropped comments, so `( /* c */ SELECT` is still a subquery.)
 const startsQuery = (ctx: ParseContext<SqlTokenType>): boolean => {
   const after = ctx.peekAhead(1);
   return after !== null && after.type === "ident" && (after.value === "select" || after.value === "with");
@@ -2405,12 +2432,12 @@ const typeRef = custom<ColType, SqlTokenType>(
 );
 
 // --- pratt operator table ---
-// Binding powers follow PG (highest binds tightest): :: cast, ^, unary + -,
-// * / %, + -, other operators (|| @> & | # << >> -> @?), BETWEEN/IN/LIKE,
-// comparisons (nonassoc), IS, NOT, AND, OR — with one deliberate departure
-// among those tiers, at `^`, documented where that group is declared. Keyword operators
-// are plain `ident`-typed matches thanks to folding; multi-word ones (NOT
-// LIKE, BETWEEN … AND) use match-based groups.
+// Binding powers follow PG's gram.y (highest binds tightest): :: cast and
+// [ ] subscript (19), unary + - (18), COLLATE (17), AT TIME ZONE (16), ^ (15),
+// * / % (14), + - (13), other operators (|| @> & | # << >> -> @?) (12),
+// BETWEEN/IN/LIKE (10), comparisons (9, nonassoc), IS (8), NOT (6), AND (4),
+// OR (2). Keyword operators are plain `ident`-typed matches thanks to folding;
+// multi-word ones (NOT LIKE, BETWEEN … AND) use match-based groups.
 const binary = (ops: string[], bp: number, assoc?: "nonassoc") => ({
   ops,
   bp,
@@ -2475,7 +2502,7 @@ const escapeTail = (ctx: ParseContext<SqlTokenType>, h: PrattHelpers<Expr>): Exp
 const unarySignPrefix = {
   ops: ["-", "+"],
   type: "op" as const,
-  bp: 16,
+  bp: 18,
   map: (op: string, operand: Expr, span: Span): Expr => ({ kind: "unary", op, operand, span }),
 };
 
@@ -2483,17 +2510,13 @@ const unarySignPrefix = {
 // everything above the comparison/logical forms. Shared verbatim with the
 // b-expression.
 const arithInfix = [
-  // Exponentiation, left-associative (`a ^ b ^ c` is `(a ^ b) ^ c`) and tighter
-  // than the unary sign, so `-2 ^ 2` reads as `-(2 ^ 2)`. That is where the
-  // table departs from PG, which declares UMINUS *above* `^` and so reads the
-  // same input as `(-2) ^ 2`; the usual reading of `-2 ^ 2` wins here instead.
-  // (Only the sign relationship diverges — the left-associativity above is
-  // PG's own `%left '^'`, not the right-associativity maths would give it.)
-  // The departure has a tail: a sign on the *right* re-enters at the prefix's
-  // own bp 16, which is below 17, so `2 ^ -3 ^ 4` is `2 ^ (-(3 ^ 4))` rather
-  // than left-nesting. bp 17 also sits below the bp-18 postfixes, which is what
-  // keeps `a ^ b::int` casting the right operand alone instead of the power.
-  binary(["^"], 17),
+  // Exponentiation, left-associative as in PG's `%left '^'` (`a ^ b ^ c` is
+  // `(a ^ b) ^ c`, not the right-associativity maths would give it) and looser
+  // than the unary sign, so `-2 ^ 2` is `(-2) ^ 2` and `2 ^ -3 ^ 4` is
+  // `(2 ^ (-3)) ^ 4`. The `::`, `[ ]`, COLLATE and AT TIME ZONE postfixes all
+  // sit above it, so `a ^ b::int` casts the right operand alone and
+  // `a ^ b AT TIME ZONE z` converts it.
+  binary(["^"], 15),
   binary(["*", "/", "%"], 14),
   binary(["+", "-"], 13),
   binary(["||"], 12),
@@ -2513,11 +2536,12 @@ const arithInfix = [
   binary(["->", "->>", "#>", "#>>", "#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@?", "@@"], 12),
 ];
 
-// `::` cast and `[…]` subscript bind tightest (bp 18). Both are shared with the
-// b-expression so `POSITION(a[1]::text IN b)` parses its first operand fully.
+// `::` cast and `[…]` subscript bind tightest (bp 19), above the unary sign:
+// `-x::int` is `-(x::int)`. Both are shared with the b-expression so
+// `POSITION(a[1]::text IN b)` parses its first operand fully.
 const castPostfix = {
   match: punc("::"),
-  bp: 18,
+  bp: 19,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
     ctx.next(); // "::"
     const type = ctx.parse(typeRef);
@@ -2529,7 +2553,7 @@ const castPostfix = {
 // may be omitted (`a[:hi]`, `a[lo:]`). The non-slice form omits the `upper` key.
 const subscriptPostfix = {
   match: punc("["),
-  bp: 18,
+  bp: 19,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
     ctx.next(); // "["
     const hasIndex = !ctx.is("punc", ":") && !ctx.is("punc", "]");
@@ -2547,10 +2571,13 @@ const subscriptPostfix = {
   },
 };
 
-// `x COLLATE collation` and `x AT TIME ZONE zone` — postfixes near the cast tier.
+// `x COLLATE collation` (bp 17) and `x AT TIME ZONE zone` (bp 16) sit below the
+// unary sign, so `-x COLLATE "C"` is `(-x) COLLATE "C"`, and above `^`. The zone
+// is read at bp 17: it takes a COLLATE but not another AT, so a chain of AT TIME
+// ZONE nests to the left as PG's `%left AT` does.
 const collatePostfix = {
   match: kw("collate"),
-  bp: 18,
+  bp: 17,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
     ctx.parse(kw("collate"));
     const collation = ctx.parse(qualName);
@@ -2559,10 +2586,10 @@ const collatePostfix = {
 };
 const atTimeZonePostfix = {
   match: kw("at"),
-  bp: 18,
+  bp: 16,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
     ctx.parse(kwseq("at", "time", "zone"));
-    const zone = h.parseRhs(18);
+    const zone = h.parseRhs(17);
     return { kind: "atTimeZone", expr: left, zone, span: closeSpan(left, ctx.lastEnd()) };
   },
 };
@@ -6578,6 +6605,60 @@ function parseAliasClause(ctx: ParseContext<SqlTokenType>): { alias: string | nu
   return { alias, columns };
 }
 
+// One `name type [COLLATE collation]` entry of a column definition list. Not
+// the composite type's `compositeAttr`, which takes no COLLATE here.
+const columnDefinition = custom<ColumnDefinition, SqlTokenType>(
+  (ctx) => {
+    const name = ctx.parse(nameWord);
+    const type = ctx.parse(typeRef);
+    const collate = ctx.eat("ident", "collate") !== null ? ctx.parse(qualName) : null;
+    return { name, type, ...(collate !== null && { collate }) };
+  },
+  { expected: "a name", first: nameWord.first() },
+);
+// `( name type, … )`, positioned on the `(` — at least one entry, as in PG.
+function parseColumnDefinitions(ctx: ParseContext<SqlTokenType>): ColumnDefinition[] {
+  ctx.next(); // "("
+  const defs = [ctx.parse(columnDefinition)];
+  while (ctx.eat("punc", ",") !== null) defs.push(ctx.parse(columnDefinition));
+  expectClose(ctx);
+  return defs;
+}
+
+// Whether the cursor sits on `AS (` — a column definition list with no alias.
+// A bare `as` there could open nothing else: an alias is a name, never a `(`.
+const atBareColumnDefinitions = (ctx: ParseContext<SqlTokenType>): boolean =>
+  ctx.is("ident", "as") && isPuncToken(peekOrReport(ctx, 1), "(");
+
+// PG's `func_alias_clause`, after a table function or ROWS FROM: an alias
+// clause, or a column definition list — `AS (a int)`, `[AS] x (a int)`. After
+// an alias, the `(` holds alias columns when its first name is followed by `,`
+// or `)` (`x (a, b)`), and column definitions otherwise (`x (a int)`): a
+// definition always has a type after its name. Pure token lookahead rather than
+// a backtracking attempt.
+function parseFuncAliasClause(ctx: ParseContext<SqlTokenType>): {
+  alias: string | null;
+  columns: string[] | null;
+  columnDefinitions: ColumnDefinition[] | null;
+} {
+  if (atBareColumnDefinitions(ctx)) {
+    ctx.next(); // "as"
+    return { alias: null, columns: null, columnDefinitions: parseColumnDefinitions(ctx) };
+  }
+  const alias = ctx.parse(asAlias);
+  if (alias === null || !ctx.is("punc", "(")) return { alias, columns: null, columnDefinitions: null };
+  const first = peekOrReport(ctx, 1);
+  const isName = first !== null && (first.type === "qident" || (first.type === "ident" && !RESERVED.has(first.value)));
+  const after = isName ? peekOrReport(ctx, 2) : null;
+  if (after !== null && !isPuncToken(after, ",") && !isPuncToken(after, ")")) {
+    return { alias, columns: null, columnDefinitions: parseColumnDefinitions(ctx) };
+  }
+  ctx.next(); // "("
+  const columns = ctx.parse(aliasColumns);
+  expectClose(ctx);
+  return { alias, columns, columnDefinitions: null };
+}
+
 // The rest of a table FROM item once its name is read: the alias clause, then an
 // optional TABLESAMPLE — PG's order, so an alias list always comes before the
 // sample (`t [AS] x (a) TABLESAMPLE …`).
@@ -6634,21 +6715,35 @@ const eatOrdinality = (ctx: ParseContext<SqlTokenType>): boolean => {
   return true;
 };
 
-// `ROWS FROM (f(…), …) [WITH ORDINALITY] [alias clause]`, positioned on `rows`.
+// `ROWS FROM (f(…) [AS (col type, …)], …) [WITH ORDINALITY] [func alias clause]`,
+// positioned on `rows`.
 function parseRowsFrom(ctx: ParseContext<SqlTokenType>, lateral: boolean): FromItem {
   ctx.next(); // "rows"
   ctx.next(); // "from"
   ctx.next(); // "("
-  const calls: Expr[] = [parseFromCall(ctx)];
-  while (ctx.eat("punc", ",") !== null) calls.push(parseFromCall(ctx));
+  const calls: Expr[] = [];
+  const callColumnDefinitions: (ColumnDefinition[] | null)[] = [];
+  do {
+    calls.push(parseFromCall(ctx));
+    // PG's `opt_col_def_list`: only the `AS (…)` spelling, with no alias.
+    if (ctx.is("ident", "as")) {
+      ctx.next(); // "as"
+      if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+      callColumnDefinitions.push(parseColumnDefinitions(ctx));
+    } else {
+      callColumnDefinitions.push(null);
+    }
+  } while (ctx.eat("punc", ",") !== null);
   expectClose(ctx);
   const ordinality = eatOrdinality(ctx);
-  const { alias, columns } = parseAliasClause(ctx);
+  const { alias, columns, columnDefinitions } = parseFuncAliasClause(ctx);
   return {
     kind: "rowsFrom",
     calls,
+    ...(callColumnDefinitions.some((defs) => defs !== null) && { callColumnDefinitions }),
     alias,
     ...(columns !== null && { columns }),
+    ...(columnDefinitions !== null && { columnDefinitions }),
     ...(lateral && { lateral: true }),
     ...(ordinality && { ordinality: true }),
   };
@@ -6769,8 +6864,10 @@ function parenFromItem(ctx: ParseContext<SqlTokenType>): FromItem {
 // PG's `relation_expr` — so a `(` right after the word is that name's
 // parenthesis, never a subquery, and no call parenthesis is read after the
 // name. LATERAL takes no parenthesised join, so its `(` is always a subquery.
-// The `only`/`columns`/`lateral`/`tablesample`/`ordinality` keys are omitted
-// when absent so ordinary items keep their prior shape.
+// A plain table name may carry PG's inheritance star (`t *`), which ONLY may
+// not. The `only`/`columns`/`columnDefinitions`/`lateral`/`tablesample`/
+// `ordinality` keys are omitted when absent so ordinary items keep their prior
+// shape.
 const tableRef = custom<FromItem, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -6790,12 +6887,13 @@ const tableRef = custom<FromItem, SqlTokenType>(
     if (ctx.is("punc", "(")) {
       const call = parseFromCallArgs(ctx, nameParts, start);
       const ordinality = eatOrdinality(ctx);
-      const { alias, columns } = parseAliasClause(ctx);
+      const { alias, columns, columnDefinitions } = parseFuncAliasClause(ctx);
       return {
         kind: "function",
         call,
         alias,
         ...(columns !== null && { columns }),
+        ...(columnDefinitions !== null && { columnDefinitions }),
         ...(lateral && { lateral: true }),
         ...(ordinality && { ordinality: true }),
       };
@@ -6803,6 +6901,9 @@ const tableRef = custom<FromItem, SqlTokenType>(
     if (lateral) {
       return ctx.croak(`Expected a subquery or function after "lateral" but found ${describeFound(ctx.peek())}`);
     }
+    // `t *` — PG's explicit spelling of "t and its inheritance children", which
+    // is what a bare `t` already means, so it records nothing.
+    ctx.eat("op", "*");
     return tableTail(ctx, nameParts, false);
   },
   {
@@ -6811,8 +6912,8 @@ const tableRef = custom<FromItem, SqlTokenType>(
   },
 );
 
-// Reads an optional join lead — `[NATURAL] [INNER|LEFT|RIGHT|FULL [OUTER]|CROSS]
-// JOIN` — consuming the keywords and returning the type, or null (consuming
+// Reads an optional join lead — `[NATURAL] [INNER | LEFT|RIGHT|FULL [OUTER]] JOIN`
+// or `CROSS JOIN` — consuming the keywords and returning the type, or null (consuming
 // nothing) when no JOIN follows. All lead-words are reserved, so this never
 // collides with a preceding table's alias.
 const readJoin = (ctx: ParseContext<SqlTokenType>): { joinType: FromItemJoinType; natural: boolean } | null => {
@@ -6820,6 +6921,10 @@ const readJoin = (ctx: ParseContext<SqlTokenType>): { joinType: FromItemJoinType
   const leads = ["join", "inner", "left", "right", "full", "cross", "natural"];
   if (lead === null || lead.type !== "ident" || !leads.includes(lead.value)) return null;
   const natural = ctx.eat("ident", "natural") !== null;
+  // PG's `join_type` excludes CROSS, so `NATURAL CROSS JOIN` is not a join.
+  if (natural && ctx.is("ident", "cross")) {
+    ctx.croak(`Expected "join", "inner", "left", "right" or "full" but found ${describeFound(ctx.peek())}`);
+  }
   let joinType: FromItemJoinType = "inner";
   if (ctx.eat("ident", "cross") !== null) {
     joinType = "cross";
@@ -6839,30 +6944,51 @@ const readJoin = (ctx: ParseContext<SqlTokenType>): { joinType: FromItemJoinType
   return { joinType, natural };
 };
 
-// One FROM entry and its left-assoc chain of joins. CROSS / NATURAL joins take
-// no ON/USING; every other join takes an optional `ON expr` or `USING (cols)`.
-const joinTail = custom<FromItem, SqlTokenType>(
-  (ctx) => {
-    let left = ctx.parse(tableRef);
-    while (true) {
-      const join = readJoin(ctx);
-      if (join === null) break;
-      const right = ctx.parse(tableRef);
-      let on: Expr | null = null;
-      let using: string[] | null = null;
-      if (!join.natural && join.joinType !== "cross") {
-        if (ctx.eat("ident", "on") !== null) on = ctx.parse(expression);
-        else if (ctx.eat("ident", "using") !== null) using = ctx.parse(columnList);
+// The joins that follow `left`, folded left-associatively. A CROSS or NATURAL
+// join is complete once its right item is read; every other join must close
+// with `ON expr` or `USING (cols) [AS name]` — PG's mandatory `join_qual`. So
+// a join lead met before that qualifier opens a join nested on the right, which
+// takes the first qualifier that follows: `a JOIN b JOIN c ON p ON q` is
+// `a JOIN (b JOIN c ON p) ON q`, as in PG, while `a CROSS JOIN b JOIN c ON p`
+// stays `(a CROSS JOIN b) JOIN c ON p`.
+function parseJoins(ctx: ParseContext<SqlTokenType>, left: FromItem): FromItem {
+  while (true) {
+    const join = readJoin(ctx);
+    if (join === null) return left;
+    let right = ctx.parse(tableRef);
+    let on: Expr | null = null;
+    let using: string[] | null = null;
+    let usingAlias: string | null = null;
+    if (!join.natural && join.joinType !== "cross") {
+      right = parseJoins(ctx, right);
+      if (ctx.eat("ident", "on") !== null) {
+        on = ctx.parse(expression);
+      } else if (ctx.eat("ident", "using") !== null) {
+        using = ctx.parse(columnList);
+        // PG's `join_using_alias`: the AS is required.
+        if (ctx.is("ident", "as")) usingAlias = ctx.parse(asAlias);
+      } else {
+        ctx.croak(`Expected "on" or "using" but found ${describeFound(ctx.peek())}`);
       }
-      left = { kind: "join", joinType: join.joinType, left, right, on, using };
     }
-    return left;
-  },
-  {
-    expected: "a table reference",
-    first: [{ type: "punc", value: "(" }, { type: "ident" }, { type: "qident" }],
-  },
-);
+    left = {
+      kind: "join",
+      joinType: join.joinType,
+      ...(join.natural && { natural: true }),
+      left,
+      right,
+      on,
+      using,
+      ...(usingAlias !== null && { usingAlias }),
+    };
+  }
+}
+
+// One FROM entry and its chain of joins (see parseJoins).
+const joinTail = custom<FromItem, SqlTokenType>((ctx) => parseJoins(ctx, ctx.parse(tableRef)), {
+  expected: "a table reference",
+  first: [{ type: "punc", value: "(" }, { type: "ident" }, { type: "qident" }],
+});
 const fromClause = sepBy(joinTail, P(","));
 
 // --- SELECT core + set-ops + WITH ---
@@ -7913,12 +8039,13 @@ const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt
 // --- grammar ---
 
 export const sqlLite = defineGrammar({
-  lexer: sqlLexer,
+  lexer: sqlParseLexer,
   root: repeat(statement),
-  trivia: { between: [{ type: "comment" }] },
   recovery: { sync: [{ type: "punc", value: ";", consume: true }] },
   // Opt into PG-style farthest-failure reporting: when a discarded backtracking
   // branch (a mistyped IF NOT EXISTS) got deeper than the error that surfaced,
-  // report the deeper one.
-  errorReporting: { preferFarthest: true },
+  // report the deeper one. Lexer errors propagate: a bad literal inside a
+  // backtracking branch (`INSERT INTO t (a, X'G1')`) reports itself rather
+  // than whatever the rolled-back parse trips over next.
+  errorReporting: { preferFarthest: true, propagateLexerErrors: true },
 });

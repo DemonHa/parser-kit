@@ -6,7 +6,7 @@ A PostgreSQL-flavoured SQL grammar built with [`@parser-kit/core`](../../package
 - **The kit's integration test.** Its 400+ unit tests, plus byte-exact AST and diagnostic goldens, are what catch a "generic" core change that quietly breaks a real grammar.
 - **A benchmark.** It is measured against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) (PostgreSQL mode), the most widely used JavaScript SQL parser.
 
-Despite the name, it covers most of the SQL applications send to PostgreSQL, though gaps remain, most notably comments inside a statement and some pg_dump-style DDL (see [PostgreSQL coverage](#postgresql-coverage)).
+Despite the name, it covers most of the SQL applications send to PostgreSQL, though gaps remain, most notably some pg_dump-style DDL (see [PostgreSQL coverage](#postgresql-coverage)).
 
 ## Usage
 
@@ -17,7 +17,7 @@ const ast = sqlLite.parse("SELECT id, count(DISTINCT tag) FROM posts WHERE creat
 // → Stmt[]: one node per statement, every node carrying a { start, end } span
 ```
 
-The root is a list of statements, and **every statement needs its terminating `;`**. Unquoted identifiers fold to lower case, quoted ones keep their case, and keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. The node types are exported from `grammar.ts` (`Stmt`, `Query`, `Expr`, …).
+The root is a list of statements, and **every statement needs its terminating `;`**. Unquoted identifiers fold to lower case, quoted ones keep their case, and keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is (except around a `U&'…'` literal's `UESCAPE` clause; see [Not yet supported](#not-yet-supported)); they are not kept in the AST. The node types are exported from `grammar.ts` (`Stmt`, `Query`, `Expr`, …).
 
 `parse` throws a `ParseError` at the first problem:
 
@@ -38,7 +38,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 | File | What it is |
 |---|---|
-| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, PostgreSQL numbers (`1e5`, `.5`, `0xff`, `1_000`), `$1` parameters, comments, and the operator reader |
+| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, PostgreSQL numbers (`1e5`, `.5`, `0xff`, `1_000`), `$1` parameters, comments, and the operator reader. `sqlLexer` emits `comment` tokens; `sqlParseLexer`, which the grammar uses, drops them |
 | `grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, and one rule per statement |
 | `index.ts` | Re-exports both |
 | `sql-lite.test.ts` | Unit tests, one `describe` per feature |
@@ -53,7 +53,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 ### What's supported
 
-- **Queries.** `SELECT` with `DISTINCT [ON]`, every join type (`NATURAL`, `USING`, `LATERAL`, parenthesised joins), subqueries and derived tables, `ONLY`, alias column lists, `TABLESAMPLE … REPEATABLE`, `ROWS FROM (…)` and `WITH ORDINALITY`. Also: `GROUP BY [DISTINCT | ALL]` with `ROLLUP` / `CUBE` / `GROUPING SETS`, `HAVING`, `WINDOW`, `ORDER BY … USING` and `NULLS FIRST/LAST`, `LIMIT` / `OFFSET` / `FETCH FIRST … ROWS ONLY | WITH TIES`, every locking clause (`FOR [NO KEY] UPDATE`, `FOR [KEY] SHARE`, `OF`, `NOWAIT`, `SKIP LOCKED`, and `FOR READ ONLY`) before or after the limit, `UNION` / `INTERSECT` / `EXCEPT [ALL | DISTINCT]` with PostgreSQL's precedence (`INTERSECT` binds tighter). The `ORDER BY` / `LIMIT` / locking tail after a set operation or a parenthesised query applies to the whole query, as in PostgreSQL (see below for the scalar-subquery exception). Standalone `VALUES` and `SELECT INTO` work too. CTEs can be `RECURSIVE`, `[NOT] MATERIALIZED`, use `SEARCH` and `CYCLE`, and be data-modifying.
+- **Queries.** `SELECT` with `DISTINCT [ON]`, every join type (`NATURAL`, `USING [AS alias]`, `LATERAL`, parenthesised and right-nested joins), subqueries and derived tables, `ONLY` and the inheritance `*`, alias column lists, column definition lists for record-returning functions, `TABLESAMPLE … REPEATABLE`, `ROWS FROM (…)` and `WITH ORDINALITY`. Also: `GROUP BY [DISTINCT | ALL]` with `ROLLUP` / `CUBE` / `GROUPING SETS`, `HAVING`, `WINDOW`, `ORDER BY … USING` and `NULLS FIRST/LAST`, `LIMIT` / `OFFSET` / `FETCH FIRST … ROWS ONLY | WITH TIES`, every locking clause (`FOR [NO KEY] UPDATE`, `FOR [KEY] SHARE`, `OF`, `NOWAIT`, `SKIP LOCKED`, and `FOR READ ONLY`) before or after the limit, `UNION` / `INTERSECT` / `EXCEPT [ALL | DISTINCT]` with PostgreSQL's precedence (`INTERSECT` binds tighter). The `ORDER BY` / `LIMIT` / locking tail after a set operation or a parenthesised query applies to the whole query, as in PostgreSQL (see below for the scalar-subquery exception). Standalone `VALUES` and `SELECT INTO` work too. CTEs can be `RECURSIVE`, `[NOT] MATERIALIZED`, use `SEARCH` and `CYCLE`, and be data-modifying.
 - **Expressions.** The full operator precedence table: arithmetic, bitwise, `||`, comparison, `LIKE` / `ILIKE` / `SIMILAR TO` with `ESCAPE`, regex `~` operators, `IS [NOT] DISTINCT FROM`, `IS [NOT] NULL / TRUE / UNKNOWN`, `IS JSON [OBJECT | ARRAY | SCALAR] [WITH UNIQUE KEYS]`, `BETWEEN [SYMMETRIC]`, `IN`, `ANY` / `SOME` / `ALL`, `EXISTS`, `OVERLAPS`, `AT TIME ZONE`, `COLLATE`. JSON and jsonpath operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`, `?&`, `@?`, `@@`, `#-`), `::` casts and `CAST`, `CASE`, `ROW(…)`, `ARRAY[…]`, subscripts and slices. Special-syntax functions: `EXTRACT`, `POSITION`, `SUBSTRING … FROM … FOR`, `TRIM`, `OVERLAY`, the niladic `CURRENT_DATE` / `CURRENT_TIMESTAMP(p)` / `LOCALTIME` / `CURRENT_USER` family. Aggregate modifiers: `DISTINCT`, `ORDER BY` inside the call, `FILTER (WHERE …)`, `WITHIN GROUP`, `=>` named arguments, `OVER` with `ROWS` / `RANGE` / `GROUPS` frames and `EXCLUDE`.
 - **Types and literals.** Multi-word types (`double precision`, `character varying(n)`, `timestamp(p) with time zone`, `bit varying`, `interval day to second`), array types, schema-qualified types, typed literals (`DATE '…'`, `TIMESTAMP '…'`, `INTERVAL '…' HOUR TO MINUTE`), dollar-quoted strings, bit / hex / Unicode-escape strings with `UESCAPE`.
 - **DML.** `INSERT` with `DEFAULT VALUES`, `DEFAULT` row items, `OVERRIDING`, `ON CONFLICT (cols) | ON CONSTRAINT … DO NOTHING | DO UPDATE … WHERE`, a target alias, and `RETURNING`. `UPDATE … FROM` with multi-column `(a, b) = (…)` / `= (SELECT …)` assignments. `DELETE … USING`. `MERGE` with every `WHEN [NOT] MATCHED [BY SOURCE | TARGET]` form, plus `RETURNING`. `COPY` to and from a file, `STDIN` / `STDOUT` or a `PROGRAM`, with a parenthesised option list and `WHERE`. `TRUNCATE`.
@@ -72,18 +72,18 @@ The battery in `pg-coverage.ts` has 605 distinct statements, all syntactically v
 
 | Area | Statements | Both | sql-lite only | node-sql-parser only | Neither |
 |---|---:|---:|---:|---:|---:|
-| Queries | 99 | 62 | 32 | 2 | 3 |
+| Queries | 99 | 63 | 34 | 1 | 1 |
 | Expressions | 87 | 47 | 21 | 4 | 15 |
-| Types and lexical | 34 | 16 | 11 | 4 | 3 |
+| Types and lexical | 34 | 18 | 11 | 2 | 3 |
 | DML | 77 | 32 | 35 | 6 | 4 |
 | Transactions and session | 70 | 17 | 33 | 0 | 20 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **605** | **212** | **236** | **21** | **136** |
+| **Total** | **605** | **215** | **238** | **18** | **134** |
 
-So sql-lite accepts 448 of the 605 statements (74%) and node-sql-parser accepts 233 (39%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 453 of the 605 statements (75%) and node-sql-parser accepts 233 (39%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -97,9 +97,9 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 
 **Lexical**
 
-- **Comments inside a statement.** Comments are only trivia *between* statements: `SELECT id, -- primary key` followed by a line break fails, as does `SELECT /* note */ 1;`. This is the most common real-world failure.
 - String constants continued across a line break (`'foo'` newline `'bar'`).
 - Numbers with a trailing dot (`5.`, `1.e3`).
+- A comment between a `U&'…'` literal and its `UESCAPE` clause, or inside that clause (`U&'…' /* c */ UESCAPE '!'`, `U&'…' UESCAPE /* c */ '!'`).
 - `U&"…"` Unicode-escaped identifiers. These parse, but into the wrong tree (see below).
 
 **Statements**
@@ -146,8 +146,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - **Routine bodies and triggers:** SQL-standard function bodies (`RETURN expr`, `BEGIN ATOMIC … END`), trigger `REFERENCING OLD / NEW TABLE`, `CREATE CONSTRAINT TRIGGER`.
 - **Views:** `CREATE RECURSIVE VIEW`, `CREATE TEMP VIEW`.
 - A scalar, `IN` or `ANY` subquery whose query starts with a nested `(`, such as `SELECT ((SELECT 1) LIMIT 1)` or `x IN ((SELECT 1) UNION SELECT 2)`. The same query works in `FROM`, `EXISTS`, a CTE or at the top level.
-- Column definition lists for record-returning functions (`FROM json_to_record(…) AS x(a int, b text)`).
-- `JOIN … USING (…) AS alias`, the legacy inheritance `*` after a table name, and the empty select list `SELECT;`.
+- The empty select list `SELECT;`.
 
 **Expressions**
 
@@ -171,8 +170,6 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 
 These statements parse without error, but the tree they produce is wrong:
 
-- **`-2 ^ 2` parses as `-(2 ^ 2)`.** In PostgreSQL, unary minus binds tighter than `^`, so the value is 4, not -4.
-- **`NATURAL` is dropped.** `a NATURAL JOIN b` yields the same node as `a JOIN b` with no condition.
 - **`SELECT a ISNULL FROM t` reads `isnull` as a column alias.** PostgreSQL reads it as the null test.
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
 - **Some `E'…'` escapes are left undecoded.** The backslash is dropped and the rest kept as text: `E'\x41'` gives `x41`, `E'\101'` gives `101`, and `E'\u0041'` gives `u0041`, where PostgreSQL gives `A` for all three. `\n`, `\t` and `\'` are decoded.
@@ -185,7 +182,6 @@ These statements parse without error, but the tree they produce is wrong:
 The grammar is deliberately more permissive than PostgreSQL in places. These inputs are syntax errors in PostgreSQL but parse here:
 
 - **`DEFAULT` accepts a full expression.** PostgreSQL's restricted form doesn't allow `DEFAULT 5 IS NULL`, `DEFAULT a = 1 AND b`, and so on.
-- **Joins with no condition:** `a JOIN b` without `ON` / `USING`, and `NATURAL CROSS JOIN`.
 - **Window frames PostgreSQL rejects:** `ROWS BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING`, `ROWS 1 FOLLOWING`.
 - **Empty lists:** `IN ()`, `USING ()`, `VALUES ()`.
 - **Subscripting a call without parentheses:** `f(x)[1]`. PostgreSQL requires `(f(x))[1]`.
@@ -198,13 +194,18 @@ Some errors PostgreSQL raises during analysis rather than parsing are also accep
 
 ### Behaviour changes
 
+Inputs that used to parse and are now rejected, because PostgreSQL's grammar rejects them:
+
+- A join other than `CROSS` or `NATURAL` with no `ON` / `USING` qualifier: `a JOIN b`, `a LEFT JOIN b`, and `a JOIN b JOIN c ON p` (the inner join takes the only `ON`, leaving the outer one without a qualifier).
+- `NATURAL CROSS JOIN`.
+
 Set operations and their tails now follow PostgreSQL:
 
 - `INTERSECT` binds tighter than `UNION` and `EXCEPT`. `SELECT 1 UNION SELECT 2 INTERSECT SELECT 3` used to parse as `(1 UNION 2) INTERSECT 3`.
 - An `ORDER BY` / `LIMIT` / `OFFSET` / `FETCH` / locking tail after a set operation is stored on the `setOp` node, as optional fields. It used to be stored on the right-hand arm.
 - `WITH TIES` is recorded as `withTies: true` beside `limit`.
 
-These inputs used to parse and are now rejected, because PostgreSQL rejects them too:
+These query-tail inputs used to parse and are now rejected, because PostgreSQL rejects them too:
 
 - A second `LIMIT` or `OFFSET` (`LIMIT 1 LIMIT 2`, `LIMIT … FETCH FIRST …`). The last one used to win silently. A parenthesised query that already has a clause can't be given it again after the `)` either: `(SELECT 1 LIMIT 1) LIMIT 2`.
 - `FETCH … WITH TIES` with no `ORDER BY`, or together with `SKIP LOCKED`.
@@ -270,4 +271,4 @@ The repo-wide workflow is in [CONTRIBUTING.md](../../CONTRIBUTING.md). Specific 
 - **Tests first, at the level the change lives.** New syntax gets a `describe` block in `sql-lite.test.ts` asserting the span-stripped AST with `toEqual`, plus the error message for the nearest malformed input.
 - **Prove new keywords stay unreserved.** PostgreSQL leaves most keywords usable as names, and so does this grammar: only the words in `RESERVED` are refused as bare names. Every feature that matches a new word by value comes with a "keeps … unreserved as names and aliases" test showing the word still works as a column, table and alias (for example `SELECT rows, ordinality FROM t AS rows;`). Don't add to `RESERVED` to make a parse work.
 - **Pin observable output in the parity golden.** `parity.test.ts` serialises the full AST, spans included, for every `corpus.ts` row and its own `SUPPLEMENTAL` / `MULTI_LINE` / `LEXER_EDGE_CASES` lists, plus `diagnose()` output for `MALFORMED`. New node shapes go in `SUPPLEMENTAL`, not `corpus.ts`: the benchmark's group names count the corpus's shared rows, `bench-baseline.json` keys on those names, and a new `pg: true` corpus row renames them, which silently disconnects `pnpm bench:compare`. When output is *meant* to move, regenerate with `pnpm test -- -u` (the `--` matters) and call the diff out in review. Never regenerate to make a refactor pass.
-- **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README. Update the "Not yet supported", "Known wrong ASTs" and "Accepted, but PostgreSQL rejects" lists too: they aren't pinned by any test.
+- **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README. Update the "Not yet supported", "Known wrong ASTs" and "Accepted, but PostgreSQL rejects" lists too, and add any input that stops parsing to "Behaviour changes": they aren't pinned by any test.
