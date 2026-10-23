@@ -8,12 +8,14 @@ import {
   type FirstEntry,
   field,
   lazy,
+  makeRule,
   matchesFirst,
   oneOf,
   optional,
   type ParseContext,
   ParseError,
   type Position,
+  type PrattDef,
   type PrattHelpers,
   pratt,
   quoteList,
@@ -116,8 +118,10 @@ export type Expr =
   | { kind: "call"; name: string; args: Expr[]; distinct?: true; orderBy?: OrderItem[]; span: Span }
   // `name => value` in argument position — PG's named function-call notation.
   | { kind: "namedArg"; name: string; value: Expr; span: Span }
-  | { kind: "unary"; op: string; operand: Expr; span: Span }
-  | { kind: "binary"; op: string; left: Expr; right: Expr; span: Span }
+  // `opSchema` is present only on the `OPERATOR(schema.op)` spelling: the
+  // qualifying names, empty for an unqualified `OPERATOR(op)`.
+  | { kind: "unary"; op: string; operand: Expr; opSchema?: string[]; span: Span }
+  | { kind: "binary"; op: string; left: Expr; right: Expr; opSchema?: string[]; span: Span }
   | { kind: "cast"; expr: Expr; type: ColType; span: Span }
   | { kind: "is"; expr: Expr; negated: boolean; span: Span }
   // `IS [NOT] DISTINCT FROM x` and `IS [NOT] TRUE/FALSE/UNKNOWN` — companions to
@@ -145,10 +149,20 @@ export type Expr =
   // keyword was written; ASYMMETRIC is the default, so its absence means the same.
   | { kind: "between"; expr: Expr; lo: Expr; hi: Expr; negated: boolean; symmetric?: boolean; span: Span }
   | { kind: "in"; expr: Expr; list: Expr[]; negated: boolean; span: Span }
-  // `x <cmp> ANY|ALL|SOME (array|subquery)` — a comparison whose RHS is
-  // quantified. `right` is a scalar subquery or a parenthesised array expr (a row
-  // only with a second pair of parentheses, `x = ANY ((a, b))`, as in PG).
-  | { kind: "anyAll"; op: string; quantifier: "any" | "all" | "some"; left: Expr; right: Expr; span: Span }
+  // `x <op> ANY|ALL|SOME (array|subquery)` — an operator whose RHS is
+  // quantified. `op` is any operator, or `like` / `ilike` / `not like` /
+  // `not ilike`; `opSchema` is as on `binary`. `right` is a scalar subquery or a
+  // parenthesised array expr (a row only with a second pair of parentheses,
+  // `x = ANY ((a, b))`, as in PG).
+  | {
+      kind: "anyAll";
+      op: string;
+      quantifier: "any" | "all" | "some";
+      left: Expr;
+      right: Expr;
+      opSchema?: string[];
+      span: Span;
+    }
   // --- DML expression additions (all pure-additive; existing nodes untouched) ---
   // `*` and `t.*` — used in select lists and `count(*)`. `table` is the dotted
   // qualifier for `t.*` / `s.t.*`, null for a bare `*`.
@@ -888,6 +902,26 @@ export type AlterExtensionAction =
   | AlterSetSchema
   | { kind: "update"; version?: string };
 
+// The SET / RESET of a role's or database's parameter defaults: SET as the SET
+// statement's `name` and `values`, RESET as the RESET statement's `name` ("all"
+// for RESET ALL).
+export type AlterConfigAction =
+  | { kind: "set"; name: string; values: Expr[] | "default" | "fromCurrent" }
+  | { kind: "reset"; name: string };
+// ALTER ROLE's `options` are CREATE ROLE's, bar the membership ones (IN ROLE,
+// ROLE, ADMIN, and the undocumented USER that PG keeps for ALTER GROUP), which
+// are not taken; PG lets the run be empty.
+export type AlterRoleAction = { kind: "options"; options: RoleOption[] } | AlterRenameTo | AlterConfigAction;
+// ALTER DATABASE's `options` are CREATE DATABASE's entries; RENAME TO and
+// OWNER TO build the generic `alterObject` node instead.
+export type AlterDatabaseAction =
+  | { kind: "options"; options: RelationOption[] }
+  | Extract<AlterIndexAction, { kind: "setTablespace" }>
+  | { kind: "refreshCollationVersion" }
+  | AlterConfigAction;
+// ALTER TABLESPACE's; RENAME TO and OWNER TO build `alterObject`, as on ALTER DATABASE.
+export type AlterTablespaceAction = Extract<AlterIndexAction, { kind: "setOptions" | "resetOptions" }>;
+
 // `RETURNS [SETOF] type` or `RETURNS TABLE (col type, …)`.
 export type FunctionReturns =
   | { kind: "type"; setof: boolean; type: ColType }
@@ -1509,6 +1543,19 @@ export type Stmt =
     }
   | { kind: "alterSequence"; ifExists: boolean; name: string[]; action: AlterSequenceAction; span: Span }
   | { kind: "alterExtension"; name: string; action: AlterExtensionAction; span: Span }
+  // `ALTER {ROLE | USER} role …`; `user` marks the USER spelling. `name` is null
+  // for ALL, which only SET and RESET take, and `database` is the IN DATABASE
+  // they may scope to, omitted when absent.
+  | {
+      kind: "alterRole";
+      user: boolean;
+      name: string | null;
+      database?: string;
+      action: AlterRoleAction;
+      span: Span;
+    }
+  | { kind: "alterDatabase"; name: string; action: AlterDatabaseAction; span: Span }
+  | { kind: "alterTablespace"; name: string; action: AlterTablespaceAction; span: Span }
   // `ALTER POLICY name ON table [TO role, …] [USING (expr)] [WITH CHECK (expr)]`;
   // PG's grammar takes all three clauses as optional, so none may be written.
   // `ALTER POLICY … RENAME TO` is an alterObject node, as TRIGGER's is.
@@ -1532,7 +1579,7 @@ export type Stmt =
   // [CASCADE|RESTRICT]`. `objectType` is the folded keyword (`"materialized
   // view"` for the two-word one); `behavior` is the trailing CASCADE/RESTRICT
   // (null when absent, and always null where PG takes none: DATABASE, ROLE,
-  // USER). CONCURRENTLY is only accepted on the original six object kinds.
+  // USER, TABLESPACE). CONCURRENTLY is only accepted on the original six object kinds.
   // The remaining keys belong to one object kind each and are omitted elsewhere:
   // - `signatures` (FUNCTION / PROCEDURE / AGGREGATE): one entry per name, null
   //   where a function or procedure name carries no argument list;
@@ -2381,10 +2428,10 @@ function parseRow(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
 }
 
 // --- OVERLAPS ---
-// `row OVERLAPS row`. `overlaps` is unreserved here — PG reserves it, but this
-// grammar never did, so `SELECT a overlaps FROM t` reads it as an alias — and a
-// pratt infix group cannot decline once it has matched, so the operator never
-// enters the pratt table. The row constructors that may lead it (the implicit
+// `row OVERLAPS row`. `overlaps` is not in RESERVED — PG reserves it from
+// names, but this grammar never did — though as an AS_LABEL keyword it is an
+// alias only after AS (see asAlias). The operator stays out of the pratt table:
+// it applies to rows alone, so the row constructors that may lead it (the implicit
 // `(a, b)` in parenOrSubquery, and ROW(…) above) look for the tail themselves,
 // and only claim `overlaps` when a row can follow it: a `(` or a `ROW (`.
 // Consuming the tail at atom level gives OVERLAPS the tightest precedence there
@@ -3311,10 +3358,11 @@ const typeRef = custom<ColType, SqlTokenType>(
 // --- pratt operator table ---
 // Binding powers follow PG's gram.y (highest binds tightest): :: cast and
 // [ ] subscript (19), unary + - (18), COLLATE (17), AT TIME ZONE (16), ^ (15),
-// * / % (14), + - (13), other operators (|| @> & | # << >> -> @?) (12),
-// BETWEEN/IN/LIKE (10), comparisons (9, nonassoc), IS (8), NOT (6), AND (4),
-// OR (2). Keyword operators are plain `ident`-typed matches thanks to folding;
-// multi-word ones (NOT LIKE, BETWEEN … AND) use match-based groups.
+// * / % (14), + - (13), every other operator (|| @> & | # << >> -> @? and the
+// open-ended rest, see genericInfix) (12), BETWEEN/IN/LIKE (10), comparisons
+// (9, nonassoc), IS / ISNULL / NOTNULL (8), NOT (6), AND (4), OR (2). Keyword
+// operators are plain `ident`-typed matches thanks to folding; multi-word ones
+// (NOT LIKE, BETWEEN … AND) use match-based groups.
 const binary = (ops: string[], bp: number, assoc?: "nonassoc") => ({
   ops,
   bp,
@@ -3371,6 +3419,220 @@ const inTail = (ctx: ParseContext<SqlTokenType>, left: Expr, negated: boolean): 
 // operators. `escape` is unreserved, matched by value.
 const escapeTail = (ctx: ParseContext<SqlTokenType>, h: PrattHelpers<Expr>): Expr | undefined =>
   ctx.eat("ident", "escape") !== null ? h.parseRhs(11) : undefined;
+
+// A pratt match rule whose first set is built once. Pratt reads a match group's
+// first set on every operator lookup — at each token that might continue an
+// expression — and `token()` / `word()` build a fresh one per call, so the
+// groups added after the original table use this to stay off the hot path.
+const fixedFirst = <T>(rule: Rule<T, SqlTokenType>): Rule<T, SqlTokenType> => {
+  const first = rule.first();
+  return makeRule<T, SqlTokenType>({
+    parse: (ctx) => rule.parse(ctx),
+    first: () => first,
+    expected: (labels) => rule.expected(labels),
+  });
+};
+
+// --- quantified operators ---
+// PG's `a_expr subquery_Op sub_type (…)`: ANY / SOME / ALL may follow any
+// operator — a comparison, arithmetic, a generic operator, `OPERATOR(…)`, and
+// [NOT] LIKE / ILIKE. All three words are reserved, so after an operator they
+// can only open the quantifier.
+const QUANTIFIERS = ["any", "all", "some"];
+const isQuantifier = (tok: Token<SqlTokenType> | null): boolean =>
+  tok !== null && tok.type === "ident" && QUANTIFIERS.includes(tok.value);
+
+// Entered on the quantifier word, the operator already consumed. The operand is
+// a `(subquery)` or a `(array expr)` — not the parenOrSubquery atom, whose
+// implicit row PG does not allow here: `x = ANY (a, b)` is a syntax error there,
+// and only `x = ANY ((a, b))` reaches the row.
+const quantifiedTail = (ctx: ParseContext<SqlTokenType>, op: string, left: Expr, opSchema?: string[]): Expr => {
+  const quantifier = ctx.next()!.value as "any" | "all" | "some";
+  const right = isSubqueryParen(ctx) ? ctx.parse(subqueryExpr) : ctx.parse(parenExpr);
+  return {
+    kind: "anyAll",
+    op,
+    quantifier,
+    left,
+    right,
+    ...(opSchema !== undefined && { opSchema }),
+    span: closeSpan(left, ctx.lastEnd()),
+  };
+};
+
+// The quantified twin of an operator group: listed ahead of it, it claims the
+// operator only when a quantifier follows and otherwise declines, so the plain
+// group (and its span) is untouched. It keeps the group's bp, which decides how
+// much of the left operand the operator takes, as in PG.
+const quantifiedTwin = (group: { ops: readonly string[]; bp: number }) => ({
+  ops: group.ops,
+  bp: group.bp,
+  type: "op" as const,
+  when: (ctx: ParseContext<SqlTokenType>) => isQuantifier(ctx.peekAhead(1)),
+  parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => quantifiedTail(ctx, ctx.next()!.value, left),
+});
+
+// --- generic operators ---
+// PG's scanner reads any run of operator characters as one operator (`&&`,
+// `<->`, `-|-`, `^@`, the `~~` that pg_dump writes for LIKE, …), and its grammar
+// gives every operator outside the named tiers one precedence, `Op` — bp 12
+// here, left-associative. `=>` is the one run that is not an operator: PG lexes
+// it as its own named-argument token (see functionArg), so it ends an expression.
+const anyOperator = fixedFirst(token("op"));
+const isGenericOp = (tok: Token<SqlTokenType> | null): boolean => tok !== null && tok.value !== "=>";
+
+// The catch-all. It must stay last among the infix groups: groups are tried in
+// order and it matches every operator token, so anywhere earlier it would take
+// `=`, `+` or `||` away from the group that gives them their own precedence.
+const genericInfix = {
+  match: anyOperator,
+  bp: 12,
+  when: (ctx: ParseContext<SqlTokenType>) => isGenericOp(ctx.peek()),
+  parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
+    const op = ctx.next()!.value;
+    const right = h.parseRhs(13);
+    return { kind: "binary", op, left, right, span: closeSpan(left, ctx.lastEnd()) };
+  },
+};
+
+// The quantified twin of every bp-12 operator (see quantifiedTwin), fixed or
+// generic, ahead of the bp-12 groups. Comparisons have their own quantified
+// form at their own bp, so they are left to it.
+const quantifiedGeneric = {
+  match: anyOperator,
+  bp: 12,
+  when: (ctx: ParseContext<SqlTokenType>) => {
+    const tok = ctx.peek();
+    return isQuantifier(ctx.peekAhead(1)) && isGenericOp(tok) && !COMPARISON_OPS.includes(tok!.value);
+  },
+  parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => quantifiedTail(ctx, ctx.next()!.value, left),
+};
+
+// PG's prefix operators. Any operator may lead an operand in its grammar, but
+// a prefix group matches by value only, so the built-in ones are listed: `~`
+// (bitwise NOT), `@` (absolute value), `|/` and `||/` (square and cube root),
+// `!!` (tsquery NOT), and the geometric `@-@` (length), `@@` (centre), `#`
+// (number of points), `?-` (horizontal) and `?|` (vertical). They take PG's
+// `Op` precedence: the operand runs on through `+ -` and tighter (`@ a + b` is
+// `@ (a + b)`) but stops at another bp-12 operator (`@ a <-> b` is
+// `(@ a) <-> b`), hence bp 13.
+const genericPrefix = {
+  ops: ["~", "@", "|/", "||/", "!!", "@-@", "@@", "#", "?-", "?|"],
+  type: "op" as const,
+  bp: 13,
+  map: (op: string, operand: Expr, span: Span): Expr => ({ kind: "unary", op, operand, span }),
+};
+
+// --- OPERATOR(schema.op) ---
+// PG's explicit operator spelling, `OPERATOR(op)` or `OPERATOR(a.b.op)`, which
+// always binds at the generic `Op` level, whatever the operator. `operator` is
+// unreserved, so it is taken only once the whole `( [name .]… op )` has been
+// seen: `SELECT a operator FROM t` keeps `operator` as an alias, and any other
+// `operator(x)` stays a call. That is lenient: where an operand starts, PG reads
+// every `operator (` as this spelling and rejects `SELECT operator(1)`, but in
+// an index, exclusion or partition element (`func_expr_windowless`) the same
+// text is a call there too, and all three reach `expression` here. The one
+// spelling read the other way round is `operator(<op>)`: always the operator
+// here, so `operator(*)` in those elements, a call to PG, is rejected.
+// The `(` is a plain peek, which reading `operator` as an alias or a call
+// would do too; anything further goes through peekOrReport.
+//
+// The answer is kept for the token it was asked about: pratt may ask its infix
+// guard again for the same token, and a lex error the first lookahead reported
+// (and so consumed) must not let a second one see a different spelling.
+let operatorRefAsked: Token<SqlTokenType> | null = null;
+let operatorRefAnswer = false;
+function startsOperatorRef(ctx: ParseContext<SqlTokenType>): boolean {
+  if (!ctx.is("ident", "operator")) return false;
+  const lead = ctx.peek();
+  if (lead !== operatorRefAsked) {
+    const answer = scanOperatorRef(ctx);
+    operatorRefAsked = lead;
+    operatorRefAnswer = answer;
+  }
+  return operatorRefAnswer;
+}
+function scanOperatorRef(ctx: ParseContext<SqlTokenType>): boolean {
+  const open = ctx.peekAhead(1);
+  if (open === null || open.type !== "punc" || open.value !== "(") return false;
+  let index = 2;
+  let tok = peekOrReport(ctx, index);
+  while (tok !== null && (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value)))) {
+    const dot = peekOrReport(ctx, index + 1);
+    if (dot === null || dot.type !== "punc" || dot.value !== ".") return false;
+    index += 2;
+    tok = peekOrReport(ctx, index);
+  }
+  if (tok === null || tok.type !== "op" || !isGenericOp(tok)) return false;
+  const close = peekOrReport(ctx, index + 1);
+  return close !== null && close.type === "punc" && close.value === ")";
+}
+
+// Consumes an `OPERATOR(…)` that startsOperatorRef has vouched for.
+function readOperatorSpelling(ctx: ParseContext<SqlTokenType>): { op: string; opSchema: string[] } {
+  ctx.next(); // operator
+  ctx.next(); // "("
+  const opSchema: string[] = [];
+  while (!ctx.is("op")) {
+    opSchema.push(ctx.parse(nameWord));
+    ctx.next(); // "."
+  }
+  const op = ctx.next()!.value;
+  ctx.next(); // ")"
+  return { op, opSchema };
+}
+
+// `quantified` is false for the b-expression, which has no ANY / ALL form.
+const operatorRefInfix = (quantified: boolean) => ({
+  match: fixedFirst(kw("operator")),
+  bp: 12,
+  when: startsOperatorRef,
+  parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
+    const { op, opSchema } = readOperatorSpelling(ctx);
+    if (quantified && isQuantifier(ctx.peek())) return quantifiedTail(ctx, op, left, opSchema);
+    const right = h.parseRhs(13);
+    return { kind: "binary", op, left, right, opSchema, span: closeSpan(left, ctx.lastEnd()) };
+  },
+});
+
+// The atom, with the prefix `OPERATOR(…) operand` in front of it. A prefix group
+// cannot peek past its operator, so the spelling is read here, and its operand
+// is parsed by `operand`: the same pratt table cut down to the groups that bind
+// tighter than `Op` (bp ≥ 13), which is what a bp-13 prefix would have read
+// (see cutTable for the one prefix the cut has to treat specially, NOT).
+// The atom's first set is built once, on first use (pratt asks for it at every
+// expression it enters, and `oneOf` would rebuild it from every branch each time).
+const withOperatorRefPrefix = (operand: () => Rule<Expr, SqlTokenType>): Rule<Expr, SqlTokenType> => {
+  let first: readonly FirstEntry<SqlTokenType>[] | undefined;
+  return makeRule<Expr, SqlTokenType>({
+    parse: (ctx) => {
+      if (!startsOperatorRef(ctx)) return atom.parse(ctx);
+      const start = ctx.position();
+      const { op, opSchema } = readOperatorSpelling(ctx);
+      const value = ctx.parse(operand());
+      return { kind: "unary", op, operand: value, opSchema, span: ctx.spanFrom(start) };
+    },
+    first: () => (first ??= atom.first()),
+    expected: (labels) => atom.expected(labels),
+  });
+};
+
+// The groups of a pratt table that an operand parsed at `minBp` can reach. For
+// the infix and postfix groups this is equivalent to re-entering the table at
+// `minBp`: every operator a dropped group could take is either one no kept
+// group accepts (where the loop stops either way) or one a kept group ahead of
+// it takes first — the bp-12 catch-alls only ever see what the kept groups
+// decline. Prefixes are different: pratt applies one wherever an operand
+// starts, whatever the bp, and parses its operand in the same table, so a
+// looser prefix (NOT, bp 6) cannot stay — its operand would lose the
+// comparisons the cut drops. The cut keeps only the prefixes that bind at least
+// as tightly, and the bp-13 operand reads NOT at atom level instead (notAtom).
+type PrattTable = Required<Omit<PrattDef<Expr, SqlTokenType>, "atom">>;
+const cutTable = (table: PrattTable, minBp: number): PrattTable => ({
+  prefix: table.prefix.filter((group) => group.bp >= minBp),
+  infix: table.infix.filter((group) => group.bp >= minBp),
+  postfix: table.postfix.filter((group) => group.bp >= minBp),
+});
 
 // --- shared pratt groups (reused by the full expression rule and the b-expr) ---
 // Unary sign. PG accepts a leading `+` wherever it accepts a leading `-`, and
@@ -3493,27 +3755,30 @@ const isDistinctTail = (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHel
   return { kind: "isDistinct", expr: left, from, negated, span: closeSpan(left, ctx.lastEnd()) };
 };
 
-const expressionRule = pratt<Expr, SqlTokenType>({
-  atom,
-  prefix: [
-    unarySignPrefix,
-    {
-      ops: ["not"],
-      type: "ident",
-      bp: 6,
-      // `NOT EXISTS (…)` folds into the exists node's `negated` flag rather than
-      // wrapping it — mirroring how NOT IN / NOT LIKE carry their own negation.
-      map: (_op, operand, span): Expr =>
-        operand.kind === "exists"
-          ? { kind: "exists", query: operand.query, negated: !operand.negated, span }
-          : { kind: "unary", op: "not", operand, span },
-    },
-  ],
+const notPrefix = {
+  ops: ["not"],
+  type: "ident" as const,
+  bp: 6,
+  // `NOT EXISTS (…)` folds into the exists node's `negated` flag rather than
+  // wrapping it — mirroring how NOT IN / NOT LIKE carry their own negation.
+  map: (_op: string, operand: Expr, span: Span): Expr =>
+    operand.kind === "exists"
+      ? { kind: "exists", query: operand.query, negated: !operand.negated, span }
+      : { kind: "unary", op: "not", operand, span },
+};
+
+const expressionTable: PrattTable = {
+  prefix: [unarySignPrefix, genericPrefix, notPrefix],
   infix: [
+    // The quantified twins go first, so each plain group below still sees every
+    // operator that no quantifier follows.
+    ...arithInfix.filter((group) => group.bp > 12).map(quantifiedTwin),
+    quantifiedGeneric,
     ...arithInfix,
     {
       // LIKE / ILIKE / SIMILAR TO. RHS at bp 11 keeps it out of the looser
-      // comparison level; an optional `ESCAPE x` tail follows the pattern.
+      // comparison level; an optional `ESCAPE x` tail follows the pattern, or
+      // the pattern is quantified (`LIKE ANY (…)`, which takes no ESCAPE).
       match: token("ident", { values: ["like", "ilike", "similar"] }),
       bp: 10,
       parse: (ctx, left, h): Expr => {
@@ -3531,6 +3796,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
             span: closeSpan(left, ctx.lastEnd()),
           };
         }
+        if (isQuantifier(ctx.peek())) return quantifiedTail(ctx, op, left);
         const pattern = h.parseRhs(11);
         const esc = escapeTail(ctx, h);
         return {
@@ -3563,6 +3829,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({
         ctx.parse(kw("not"));
         if (ctx.is("ident", ["like", "ilike"])) {
           const op = ctx.next()!.value;
+          if (isQuantifier(ctx.peek())) return quantifiedTail(ctx, `not ${op}`, left);
           const pattern = h.parseRhs(11);
           const esc = escapeTail(ctx, h);
           return {
@@ -3601,31 +3868,32 @@ const expressionRule = pratt<Expr, SqlTokenType>({
         );
       },
     },
-    // Same-precedence comparisons in one nonassoc group: `a < b < c` errors,
-    // `(a < b) < c` parses. A custom parse so the RHS can be quantified with
-    // ANY / ALL / SOME (`x = ANY (array|subquery)`); otherwise it builds the
-    // ordinary binary node with a bp-10 RHS (nonassoc = bp + 1).
+    // Same-precedence comparisons in one group: `a < b < c` errors, `(a < b) <
+    // c` parses. A custom parse so the RHS can be quantified with ANY / ALL /
+    // SOME (`x = ANY (array|subquery)`); otherwise it builds the ordinary binary
+    // node with a bp-10 RHS. The chain check is done here rather than by
+    // `assoc: "nonassoc"`, which would run after the quantified form too and
+    // reject `x = ANY (a) = y` — legal in PG, since that form ends in its `)`.
     {
       ops: COMPARISON_OPS,
       bp: 9,
       type: "op",
-      assoc: "nonassoc",
       parse: (ctx, left, h): Expr => {
         const op = ctx.next()!.value;
-        if (ctx.is("ident", ["any", "all", "some"])) {
-          const quantifier = ctx.next()!.value as "any" | "all" | "some";
-          // `(subquery)` or `(array expr)` — not the parenOrSubquery atom, whose
-          // implicit row PG does not allow here: `x = ANY (a, b)` is a syntax
-          // error there, and only `x = ANY ((a, b))` reaches the row.
-          const right = isSubqueryParen(ctx) ? ctx.parse(subqueryExpr) : ctx.parse(parenExpr);
-          return { kind: "anyAll", op, quantifier, left, right, span: closeSpan(left, ctx.lastEnd()) };
-        }
+        if (isQuantifier(ctx.peek())) return quantifiedTail(ctx, op, left);
         const right = h.parseRhs(10);
+        const after = ctx.peek();
+        if (after !== null && after.type === "op" && COMPARISON_OPS.includes(after.value)) {
+          ctx.croak(`Operator "${after.value}" is non-associative`);
+        }
         return { kind: "binary", op, left, right, span: closeSpan(left, ctx.lastEnd()) };
       },
     },
     kwBinary("and", 4),
     kwBinary("or", 2),
+    operatorRefInfix(true),
+    // Last, see genericInfix.
+    genericInfix,
   ],
   postfix: [
     castPostfix,
@@ -3674,6 +3942,17 @@ const expressionRule = pratt<Expr, SqlTokenType>({
       },
     },
     {
+      // PG's postfix ISNULL / NOTNULL, spellings of IS [NOT] NULL at IS's own
+      // precedence. Both words are AS_LABEL keywords in PG, so asAlias leaves
+      // them alone and `SELECT a isnull FROM t` is the test, never an alias.
+      match: fixedFirst(token("ident", { values: ["isnull", "notnull"] })),
+      bp: 8,
+      parse: (ctx, left): Expr => {
+        const negated = ctx.next()!.value === "notnull";
+        return { kind: "is", expr: left, negated, span: closeSpan(left, ctx.lastEnd()) };
+      },
+    },
+    {
       match: kw("in"),
       bp: 10,
       parse: (ctx, left): Expr => {
@@ -3682,7 +3961,25 @@ const expressionRule = pratt<Expr, SqlTokenType>({
       },
     },
   ],
+};
+const expressionAtom = withOperatorRefPrefix(() => tightExpression);
+// In the bp-13 operand of a prefix `OPERATOR(…)`, a NOT anywhere an operand
+// starts (`OPERATOR(-) NOT a = b`, `OPERATOR(-) a * NOT b`) is read here, its
+// own operand by the table cut at NOT's bp 6 — exactly what the NOT prefix
+// reads in the full table. `not` is reserved, so it never starts a name.
+const notAtom = makeRule<Expr, SqlTokenType>({
+  parse: (ctx) => {
+    if (!ctx.is("ident", "not")) return expressionAtom.parse(ctx);
+    const start = ctx.position();
+    ctx.next(); // not
+    return notPrefix.map("not", ctx.parse(notOperandExpression), ctx.spanFrom(start));
+  },
+  first: () => expressionAtom.first(),
+  expected: (labels) => expressionAtom.expected(labels),
 });
+const tightExpression = pratt<Expr, SqlTokenType>({ atom: notAtom, ...cutTable(expressionTable, 13) });
+const notOperandExpression = pratt<Expr, SqlTokenType>({ atom: expressionAtom, ...cutTable(expressionTable, 6) });
+const expressionRule = pratt<Expr, SqlTokenType>({ atom: expressionAtom, ...expressionTable });
 
 // The b-expression, PG's `b_expr`: the tight sublanguage (arithmetic / concat /
 // JSON / cast / subscript), the plain comparisons and `IS [NOT] DISTINCT FROM`,
@@ -3690,9 +3987,8 @@ const expressionRule = pratt<Expr, SqlTokenType>({
 // ALL or the other IS tests — see `bExpression` above. (OVERLAPS lives in the
 // shared atom, so it is the one predicate that still reaches it.) A
 // parenthesised operand is a full expression again, as in PG.
-const bExprRule = pratt<Expr, SqlTokenType>({
-  atom,
-  prefix: [unarySignPrefix],
+const bExprTable: PrattTable = {
+  prefix: [unarySignPrefix, genericPrefix],
   infix: [
     ...arithInfix,
     {
@@ -3702,6 +3998,9 @@ const bExprRule = pratt<Expr, SqlTokenType>({
       assoc: "nonassoc",
       map: (op, left, right, span): Expr => ({ kind: "binary", op, left, right, span }),
     },
+    operatorRefInfix(false),
+    // Last, see genericInfix.
+    genericInfix,
   ],
   postfix: [
     castPostfix,
@@ -3718,7 +4017,10 @@ const bExprRule = pratt<Expr, SqlTokenType>({
       },
     },
   ],
-});
+};
+const bExprAtom = withOperatorRefPrefix(() => tightBExpr);
+const tightBExpr = pratt<Expr, SqlTokenType>({ atom: bExprAtom, ...cutTable(bExprTable, 13) });
+const bExprRule = pratt<Expr, SqlTokenType>({ atom: bExprAtom, ...bExprTable });
 
 // --- keyword dispatch maps ---
 // Six rules below (column constraints, a foreign key's referential actions,
@@ -5231,14 +5533,22 @@ function parseRoleSpec(ctx: ParseContext<SqlTokenType>): string {
 // already makes. So is a lone `CONNECTION = n`, read as an ordinary option
 // named `connection`. The list has no delimiter, so it runs while a name leads:
 // an unreserved word or a quoted one, as PG's own option names are IDENT bar a
-// few.
+// few — and bar the words that lead ALTER DATABASE's other actions, which are
+// keywords to PG and never an option's name. OWNER is an option name, but never
+// before TO, which is reserved and so no value.
+const DATABASE_ACTION_WORDS: ReadonlySet<string> = new Set(["rename", "set", "reset", "refresh"]);
 function isDatabaseOptionStart(ctx: ParseContext<SqlTokenType>): boolean {
   const tok = ctx.peek();
-  return tok !== null && (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value)));
+  if (tok?.type === "qident") return true;
+  return tok?.type === "ident" && !RESERVED.has(tok.value) && !DATABASE_ACTION_WORDS.has(tok.value);
 }
 
 function parseDatabaseOption(ctx: ParseContext<SqlTokenType>): RelationOption {
   const next = ctx.peekAhead(1);
+  if (ctx.is("ident", "owner") && isWordAhead(ctx, 1, "to")) {
+    ctx.next(); // OWNER
+    return ctx.croak(`Expected an option value but found ${describeFound(ctx.peek())}`);
+  }
   if (!(ctx.is("ident", "connection") && next?.type === "ident" && next.value === "limit")) {
     return ctx.parse(relationOption);
   }
@@ -5396,10 +5706,13 @@ function parseSignedInt(ctx: ParseContext<SqlTokenType>, what = "an integer"): n
 // word is matched by value and stays unreserved (bar `in`, `group`, `limit`,
 // `null` and `user`, reserved already); the list has no delimiter, so it simply
 // runs until a word leads no option. PG's legacy spellings `IN GROUP` and
-// `USER` read as `IN ROLE` and `ROLE`; its SYSID is not taken.
-function parseRoleOption(ctx: ParseContext<SqlTokenType>): RoleOption | null {
+// `USER` read as `IN ROLE` and `ROLE`; its SYSID is not taken. With `alter`,
+// the membership options (IN ROLE, ROLE, USER, ADMIN) lead none: ALTER ROLE
+// takes none of them in PG bar an undocumented USER, which is not taken here.
+const MEMBERSHIP_OPTIONS: ReadonlySet<string> = new Set(["in", "role", "user", "admin"]);
+function parseRoleOption(ctx: ParseContext<SqlTokenType>, alter = false): RoleOption | null {
   const tok = ctx.peek();
-  if (tok === null || tok.type !== "ident") return null;
+  if (tok === null || tok.type !== "ident" || (alter && MEMBERSHIP_OPTIONS.has(tok.value))) return null;
   const flag = tok.value.startsWith("no") ? tok.value.slice(2) : tok.value;
   if (ROLE_FLAGS.has(flag)) {
     ctx.next();
@@ -5716,16 +6029,17 @@ function zoneValue(ctx: ParseContext<SqlTokenType>): Expr[] | "default" {
   return value !== null ? [value] : ctx.croak(`Expected a time zone but found ${describeFound(ctx.peek())}`);
 }
 
-// Whether the token after the current one is `=`, `.`, TO or FROM — what
-// follows (part of) a parameter name in a generic SET, and never a special
-// form's second word. PG reads `SET session TO 1` and `SET role.x = 1` that way.
-const isGenericSet = (ctx: ParseContext<SqlTokenType>): boolean => {
-  const tok = ctx.peekAhead(1);
+// Whether the token after the current one (or after the one `at` tokens on) is
+// `=`, `.`, TO or FROM — what follows (part of) a parameter name in a generic
+// SET, and never a special form's second word. PG reads `SET session TO 1` and
+// `SET role.x = 1` that way.
+const isGenericSet = (ctx: ParseContext<SqlTokenType>, at = 0): boolean => {
+  const tok = ctx.peekAhead(at + 1);
   return (
     (tok?.type === "op" && tok.value === "=") ||
     (tok?.type === "punc" && tok.value === ".") ||
-    isWordAhead(ctx, 1, "to") ||
-    isWordAhead(ctx, 1, "from")
+    isWordAhead(ctx, at + 1, "to") ||
+    isWordAhead(ctx, at + 1, "from")
   );
 };
 
@@ -6870,7 +7184,7 @@ type ObjectKind = {
   member?: true;
   // The generic ALTER's actions on the kind, for a kind with no ALTER target of
   // its own; absent where PG has none, a dedicated target owns the ALTER (as
-  // for TABLE, POLICY or PUBLICATION), or one is to (ROLE, FOREIGN TABLE).
+  // for TABLE, POLICY or PUBLICATION), or one is to (FOREIGN TABLE).
   alter?: readonly AlterObjectVerb[];
 };
 
@@ -6879,9 +7193,9 @@ const RENAME_OWNER: readonly AlterObjectVerb[] = ["rename", "owner"];
 const RENAME_SCHEMA: readonly AlterObjectVerb[] = ["rename", "set"];
 
 // Grouped as gram.y groups them; the order is the order an "Expected …" croak
-// lists the lead words in. ROLE and FOREIGN TABLE take no generic ALTER: each
-// is left for a dedicated target that will own its whole ALTER, as POLICY,
-// PUBLICATION and SUBSCRIPTION already have.
+// lists the lead words in. FOREIGN TABLE takes no generic ALTER: it is left
+// for a dedicated target that will own its whole ALTER, as ROLE, DATABASE,
+// TABLESPACE, POLICY, PUBLICATION and SUBSCRIPTION already have.
 const OBJECT_KINDS: readonly ObjectKind[] = [
   // object_type_any_name
   { objectType: "table", shape: "qualName", label: true, member: true },
@@ -6916,10 +7230,12 @@ const OBJECT_KINDS: readonly ObjectKind[] = [
   { objectType: "publication", shape: "name", label: true, member: true },
   { objectType: "schema", shape: "name", label: true, member: true },
   { objectType: "server", shape: "name", label: true, member: true, alter: RENAME_OWNER },
-  { objectType: "database", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  // DATABASE and TABLESPACE have ALTER targets of their own, which hand RENAME
+  // TO and OWNER TO back to the generic node (see alterRenameOwner).
+  { objectType: "database", shape: "name", label: true, member: true },
   { objectType: "role", shape: "name", label: true, member: true },
   { objectType: "subscription", shape: "name", label: true, member: true },
-  { objectType: "tablespace", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "tablespace", shape: "name", label: true, member: true },
   // The kinds with a reference shape of their own.
   { objectType: "type", shape: "qualName", label: true, member: true },
   { objectType: "domain", shape: "qualName", label: true, member: true },
@@ -7147,6 +7463,146 @@ const EXTENSION_ACTIONS: DispatchMap<AlterExtensionAction> = {
   },
 };
 const EXTENSION_ACTION_EXPECTED = keyList(EXTENSION_ACTIONS);
+
+// `SET …` (a parseConfigSet form) or `RESET target` (parseConfigTarget's), the
+// parameter defaults ALTER ROLE and ALTER DATABASE set, or null when neither
+// leads. Of PG's SET forms there, only the parameter ones are taken, not SET
+// TRANSACTION or SESSION CHARACTERISTICS.
+function parseAlterConfig(ctx: ParseContext<SqlTokenType>): AlterConfigAction | null {
+  if (ctx.eat("ident", "set") !== null) return { kind: "set", ...parseConfigSet(ctx) };
+  if (ctx.eat("ident", "reset") !== null) return { kind: "reset", name: parseConfigTarget(ctx) };
+  return null;
+}
+
+// `ALTER {ROLE | USER} …` once ALTER is consumed: `{role | ALL} [IN DATABASE
+// db] {SET … | RESET …}`, `role RENAME TO name`, or `role [WITH] option …`.
+// The role is a role spec, bar RENAME's, which PG will not take as one of the
+// pseudo-roles; ALL is reserved, so an unquoted one never names a role.
+function alterRoleRest(ctx: ParseContext<SqlTokenType>, start: Position, lead: "role" | "user"): Stmt {
+  ctx.next(); // ROLE / USER
+  const user = lead === "user";
+  const roleStart = ctx.position();
+  const tok = ctx.peek();
+  const name = ctx.eat("ident", "all") !== null ? null : parseRoleSpec(ctx);
+  const node = (action: AlterRoleAction, database?: string): Stmt => ({
+    kind: "alterRole",
+    user,
+    name,
+    ...(database !== undefined && { database }),
+    action,
+    span: ctx.spanFrom(start),
+  });
+  // `in` is reserved, so it can only open IN DATABASE here.
+  let database: string | undefined;
+  if (ctx.eat("ident", "in") !== null) {
+    ctx.parse(kw("database"));
+    database = ctx.parse(nameWord);
+  }
+  const config = parseAlterConfig(ctx);
+  if (config !== null) return node(config, database);
+  if (name === null || database !== undefined) {
+    const expected = database === undefined ? ["in", "set", "reset"] : ["set", "reset"];
+    return ctx.croak(`Expected ${quoteList(expected)} but found ${describeFound(ctx.peek())}`);
+  }
+  if (ctx.is("ident", "rename")) {
+    if (tok?.type === "ident" && ROLE_KEYWORDS.has(tok.value)) {
+      ctx.croak(`${tok.value.toUpperCase()} cannot be used as a role name here`, roleStart);
+    }
+    checkRoleName(ctx, tok, roleStart);
+    ctx.next(); // RENAME
+    if (ctx.eat("ident", "to") === null) ctx.croak(`Expected "to" but found ${describeFound(ctx.peek())}`);
+    const toStart = ctx.position();
+    const toTok = ctx.peek();
+    const to = ctx.parse(nameWord);
+    checkRoleName(ctx, toTok, toStart);
+    return node({ kind: "rename", to });
+  }
+  // `with` is reserved, so it can only open the list.
+  ctx.eat("ident", "with");
+  const options: RoleOption[] = [];
+  for (let option = parseRoleOption(ctx, true); option !== null; option = parseRoleOption(ctx, true)) {
+    options.push(option);
+  }
+  return node({ kind: "options", options });
+}
+
+// PG reserves the role names `public` and `none`, quoted or not, wherever a
+// role is named rather than specified: RENAME's two names here.
+function checkRoleName(ctx: ParseContext<SqlTokenType>, tok: Token<SqlTokenType> | null, at: Position): void {
+  const word = tok?.type === "ident" || tok?.type === "qident" ? tok.value : null;
+  if (word === "public" || word === "none") {
+    ctx.croak(`Role name "${word}" is reserved`, at);
+  }
+}
+
+// RENAME TO and OWNER TO on ALTER DATABASE and ALTER TABLESPACE, which build
+// the generic `alterObject` node these two kinds have always had, or null when
+// neither leads. With `ownerOption`, OWNER leads OWNER TO only before TO, as it
+// is a database option name too (`OWNER = role`).
+function alterRenameOwner(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  objectType: string,
+  name: string,
+  ownerOption = false,
+): Stmt | null {
+  let action: AlterRenameTo | AlterOwnerTo;
+  if (ctx.is("ident", "rename")) action = parseRenameTo(ctx);
+  else if (ctx.is("ident", "owner") && (!ownerOption || isWordAhead(ctx, 1, "to"))) action = parseOwnerTo(ctx);
+  else return null;
+  return { kind: "alterObject", object: { objectType, name: [name] }, action, span: ctx.spanFrom(start) };
+}
+
+// `ALTER DATABASE name …` once ALTER is consumed: RENAME TO, OWNER TO, SET
+// TABLESPACE, REFRESH COLLATION VERSION, SET / RESET, or `[WITH] option …`, a
+// run of CREATE DATABASE's entries that PG lets be empty. RENAME, SET, RESET
+// and REFRESH are keywords to PG and never an option's name, so each commits
+// where it leads, and ends the option run elsewhere (see isDatabaseOptionStart).
+function alterDatabaseRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // DATABASE
+  const name = ctx.parse(nameWord);
+  const renameOwner = alterRenameOwner(ctx, start, "database", name, true);
+  if (renameOwner !== null) return renameOwner;
+  const node = (action: AlterDatabaseAction): Stmt => ({
+    kind: "alterDatabase",
+    name,
+    action,
+    span: ctx.spanFrom(start),
+  });
+  // SET TABLESPACE, unless isGenericSet reads a parameter named `tablespace`.
+  if (ctx.is("ident", "set") && isWordAhead(ctx, 1, "tablespace") && !isGenericSet(ctx, 1)) {
+    ctx.next(); // SET
+    return node(parseSetTablespace(ctx));
+  }
+  const config = parseAlterConfig(ctx);
+  if (config !== null) return node(config);
+  if (ctx.is("ident", "refresh")) {
+    ctx.parse(kwseq("refresh", "collation", "version"));
+    return node({ kind: "refreshCollationVersion" });
+  }
+  // `with` is reserved, so it can only open the list.
+  ctx.eat("ident", "with");
+  const options: RelationOption[] = [];
+  while (isDatabaseOptionStart(ctx)) options.push(parseDatabaseOption(ctx));
+  return node({ kind: "options", options });
+}
+
+// `ALTER TABLESPACE name {RENAME TO | OWNER TO | SET (option, …) | RESET
+// (name, …)}` once ALTER is consumed.
+function alterTablespaceRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // TABLESPACE
+  const name = ctx.parse(nameWord);
+  const renameOwner = alterRenameOwner(ctx, start, "tablespace", name);
+  if (renameOwner !== null) return renameOwner;
+  let action: AlterTablespaceAction;
+  if (ctx.eat("ident", "set") !== null) action = { kind: "setOptions", options: ctx.parse(relationOptions) };
+  else if (ctx.is("ident", "reset")) action = parseResetOptions(ctx);
+  else {
+    const expected = quoteList(["rename", "owner", "set", "reset"]);
+    return ctx.croak(`Expected ${expected} but found ${describeFound(ctx.peek())}`);
+  }
+  return { kind: "alterTablespace", name, action, span: ctx.spanFrom(start) };
+}
 
 // --- policies, publications and subscriptions ---
 //
@@ -7929,6 +8385,12 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
     },
   },
   default: { parse: alterDefaultPrivilegesRest },
+  role: { parse: (ctx, start) => alterRoleRest(ctx, start, "role") },
+  // USER only; `ALTER USER MAPPING` is not supported and reads as a user named
+  // `mapping` followed by stray words, as on DROP.
+  user: { parse: (ctx, start) => alterRoleRest(ctx, start, "user") },
+  database: { parse: alterDatabaseRest },
+  tablespace: { parse: alterTablespaceRest },
   policy: { parse: alterPolicyRest },
   publication: { parse: alterPublicationRest },
   subscription: { parse: alterSubscriptionRest },
@@ -8075,6 +8537,15 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
   // USER only; `DROP USER MAPPING` is not supported and reads as a user named
   // `mapping` followed by stray words.
   user: listDrop("user", unqualName, { behavior: false }),
+  // `DROP TABLESPACE [IF EXISTS] name` — one tablespace, and no CASCADE / RESTRICT.
+  tablespace: {
+    parse: (ctx, start) => {
+      ctx.next(); // TABLESPACE
+      const ifExists = parseIfExists(ctx);
+      const names = [[ctx.parse(nameWord)]];
+      return dropNode(ctx, start, "tablespace", { concurrently: false, ifExists, names, behavior: null });
+    },
+  },
   policy: onTableDrop("policy"),
   publication: listDrop("publication", unqualName),
   // `DROP SUBSCRIPTION [IF EXISTS] name [CASCADE|RESTRICT]` — one subscription.
@@ -8907,16 +9378,29 @@ const discardStmt = custom<Stmt, SqlTokenType>(
 
 // --- DML: shared clause pieces ---
 
+// The AS_LABEL words of PG's kwlist.h that continue an expression (`a ISNULL`,
+// `a NOTNULL`, `(a, b) OVERLAPS (c, d)`): an alias only after AS, as in PG,
+// whose grammar cannot take them as a bare alias — `SELECT a overlaps FROM t` is
+// a syntax error there, and here. PG marks more words AS_LABEL (`day`, `over`,
+// `filter`, `without`, …); this grammar still takes those bare. PG also keeps
+// these three out of table aliases altogether (they are not ColIds), even after
+// AS; that is not checked here.
+const AS_LABEL_KEYWORDS: ReadonlySet<string> = new Set(["isnull", "notnull", "overlaps"]);
+
 // `[AS] alias`. A custom rule rather than optional(seq(...)) because the
 // alias's first set is a bare `ident`, which also matches every following
 // clause keyword — so it checks RESERVED directly and stops at a clause/join
 // word (that is why `set`, `values`, and the join leads are reserved). A
-// quoted identifier is always a name; a bare word only when unreserved.
+// quoted identifier is always a name; a bare word only when unreserved, and
+// not one of AS_LABEL_KEYWORDS unless AS precedes it.
 const asAlias = custom<string | null, SqlTokenType>(
   (ctx) => {
     const hasAs = ctx.eat("ident", "as") !== null;
     const tok = ctx.peek();
-    const isName = tok !== null && (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value)));
+    const isName =
+      tok !== null &&
+      (tok.type === "qident" ||
+        (tok.type === "ident" && !RESERVED.has(tok.value) && (hasAs || !AS_LABEL_KEYWORDS.has(tok.value))));
     if (isName) return ctx.parse(nameWord);
     if (hasAs) return ctx.croak(`Expected an alias but found ${describeFound(ctx.peek())}`);
     return null;
@@ -9163,8 +9647,9 @@ const windowClause = seq(skip(kw("window")), field("defs", sepBy(namedWindowDef,
 
 // The operator after `USING`: any operator token except `=>`, which PG lexes
 // as its own named-argument token rather than an operator (see `functionArg`).
-// PG's `OPERATOR(schema.op)` spelling is not taken here; only a definition
-// value (parseDefinitionArg) parses it.
+// PG's `OPERATOR(schema.op)` spelling is taken only inside expressions and
+// definition values (parseDefinitionArg); here, as after an exclusion
+// constraint's WITH, it is not supported yet.
 const sortOperator = custom<string, SqlTokenType>(
   (ctx) => {
     const tok = ctx.peek();
