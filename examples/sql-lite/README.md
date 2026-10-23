@@ -6,7 +6,7 @@ A PostgreSQL 17 SQL grammar built with [`@parser-kit/core`](../../packages/core)
 - **The kit's integration test.** Its unit tests, plus byte-exact AST and diagnostic goldens, are what catch a "generic" core change that quietly breaks a real grammar.
 - **A benchmark.** It is measured against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) (PostgreSQL mode), the most widely used JavaScript SQL parser.
 
-Despite the name, it covers nearly all of PostgreSQL 17's grammar. It accepts 601 of the 609 statements in the coverage battery, and every statement in the pg_dump corpus. Both dump files parse end to end. See [PostgreSQL coverage](#postgresql-coverage) for what is still missing.
+Despite the name, it covers nearly all of PostgreSQL 17's grammar. It accepts 604 of the 609 statements in the coverage battery, and every statement in the pg_dump corpus. Both dump files parse end to end. See [PostgreSQL coverage](#postgresql-coverage) for what is still missing.
 
 ## Usage
 
@@ -14,7 +14,7 @@ Despite the name, it covers nearly all of PostgreSQL 17's grammar. It accepts 60
 import { sqlLite } from "./index";
 
 const ast = sqlLite.parse("SELECT id, count(DISTINCT tag) FROM posts WHERE created_at > now() - interval '7 days' GROUP BY id");
-// → Stmt[]: one node per statement, every node carrying a { start, end } span
+// → Stmt[]: one node per statement, statements and expressions carrying a { start, end } span
 ```
 
 The root is a list of statements. `;` separates them, and the last one may leave it out. Empty statements (`;;`, a leading `;`, input that is only comments) produce no node, and `SELECT 1 SELECT 2` is still an error. Unquoted identifiers fold ASCII letters to lower case, as PostgreSQL does, and quoted ones keep their case. Keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is, and they are not kept in the AST. The node types are exported from `grammar.ts` (`Stmt`, `Query`, `Expr`, `ScriptItem`, …).
@@ -23,7 +23,7 @@ The root is a list of statements. `;` separates them, and the last one may leave
 
 ```ts
 sqlLite.parse("SELECT id FROM users WHERE;");
-// ParseError: Expected a number or a string or … or "(" or a name but found ";" (1:26)
+// Parse Error: Expected a number or a string or … or "(" or a name but found ";" (1:26)
 ```
 
 `diagnose` recovers at each `;` instead. It returns everything it could parse alongside every error, which is the mode editor tooling wants:
@@ -48,12 +48,12 @@ sqlLiteScript.parse("\\connect app\nCOPY t (a, b) FROM stdin;\n1\tx\n2\ty\n\\.\n
 //   { kind: "select", … }
 ```
 
-The statements are read by the same rules as `sqlLite`'s, so a script differs from plain SQL only in what sits between statements. `diagnose` also resumes at a meta-command line. A meta-command line ends a statement left unfinished before it.
+The statements are read by the same rules as `sqlLite`'s, so a script differs from plain SQL only in what sits between statements. `diagnose` also resumes at a meta-command line: a statement left unfinished before one is reported as an error, and the meta-command and what follows it are kept.
 
 ## AST conventions
 
-- **Spans.** Every node has a `span: { start, end }`. Each end is a `{ row, col }`, with a 1-based `row` and a 0-based `col` (the `(1:26)` in error messages). A span starts and ends at real tokens, so a comment after a node is outside its span. `stripSpans` from `@parser-kit/core` removes them recursively, and the unit tests compare span-stripped trees.
-- **Absent fields.** The fields of the original node shapes are always present, with `null` (or `false`) when the clause isn't written: `alias: null`, `where: null`, `ifExists: false`. Fields added since are optional, and they are **left out** when the clause is absent. They are never `null` and never `false`. Examples: `natural?: true` on a join, `withTies?: true` beside `limit`, `only?: true` on a target, `notValid?: true` on a constraint, `variadic?: true` on a call. Test such a field with `in` or `=== true`, not by comparing to `null`.
+- **Spans.** Statements, expressions, column definitions and constraints have a `span: { start, end }`. Structural parts such as select items, FROM items, CTE entries, `ORDER BY` items, locking clauses and assignments don't. Each end is a `{ row, col }`, with a 1-based `row` and a 0-based `col` (the `(1:26)` in error messages). A span starts and ends at real tokens, so a comment after a node is outside its span. `stripSpans` from `@parser-kit/core` removes them recursively, and the unit tests compare span-stripped trees.
+- **Absent fields.** The fields of the original node shapes are always present, with `null` (or `false`) when the clause isn't written: `alias: null`, `where: null`, `ifExists: false`. Fields added since are optional, and they are **left out** when the clause is absent, never `null`. A flag typed `?: true` (`natural?: true` on a join, `withTies?: true` beside `limit`, `only?: true` on a target, `notValid?: true` on a constraint, `variadic?: true` on a call) is either `true` or missing. A `?: boolean` field is present only when the clause is written, and is `false` when its negative spelling is (`NOT MATERIALIZED`, `NOT DEFERRABLE`, `NO INDENT`, `ASYMMETRIC`). Test such a field with `in` or `=== true`/`=== false`, not by comparing to `null`.
 - **Numbers.** A number is `{ kind: "number", value: number }`. It gets a `raw?: string` holding the literal's text (`_` separators dropped, and the sign included where the grammar folds one in) only when `value` can't stand for it. That is a whole number beyond `Number.isSafeInteger` (`9007199254740993`, `1.5e300`), or a value that overflows to ±Infinity (`1e400`, which JSON would write as `null`). Other numbers keep double precision only: `0.1000000000000000055511151231257827` rounds, and `1e-400` reads as `0`.
 - **Comments** are dropped from the token stream the grammar sees (`sqlParseLexer`). The exported `sqlLexer` still emits `comment` tokens, for highlighters and formatters that tokenize directly.
 - **Strings** are decoded. `E'\x41'`, `U&'\0041'` and `'A'` all give `{ kind: "string", value: "A" }`, and `'foo'` + newline + `'bar'` gives `"foobar"`. `N'…'` is a `typedLiteral` of type `bpchar`, as PostgreSQL reads it.
@@ -146,7 +146,7 @@ The target is PostgreSQL 17's `gram.y`. The lists below are grouped the way the 
   - PK / `UNIQUE` with `INCLUDE`, `WITH` and `USING INDEX TABLESPACE`, and `UNIQUE NULLS [NOT] DISTINCT`;
   - foreign-key actions (including `ON DELETE SET NULL (cols)`) and `MATCH`, and `EXCLUDE`;
   - `DEFAULT` as PostgreSQL's restricted expression, so `DEFAULT nextval('s') NOT NULL` works;
-  - identity columns, and stored and virtual generated columns;
+  - identity columns and stored generated columns (PostgreSQL 18's `VIRTUAL` is accepted too; see [below](#accepted-but-postgresql-rejects));
   - column `COLLATE`, `STORAGE` and `COMPRESSION`;
   - `LIKE … INCLUDING`, `INHERITS`, typed tables (`OF type`);
   - range / list / hash partitioning and `PARTITION OF … FOR VALUES`;
@@ -165,9 +165,9 @@ The target is PostgreSQL 17's `gram.y`. The lists below are grouped the way the 
 
 **Other schema objects**
 
-- Views: `CREATE [OR REPLACE] [TEMP] [RECURSIVE] VIEW`, materialized views (`UNLOGGED`, `USING`, `TABLESPACE`, `WITH [NO] DATA`), and `ALTER` on both.
+- Views: `CREATE [OR REPLACE] [TEMP] [RECURSIVE] VIEW`, materialized views (`UNLOGGED`, `USING`, `TABLESPACE`, `WITH [NO] DATA`), and `ALTER` on both (rename, `SET SCHEMA`, `OWNER TO`, `SET` / `RESET (…)`, and `SET TABLESPACE` for materialized views).
 - Sequences, domains, schemas (with schema elements), databases, extensions and tablespaces: `CREATE`, `ALTER` and `DROP`. `ALTER EXTENSION` covers `ADD` / `DROP` member, `SET SCHEMA` and `UPDATE`.
-- Types: enum, composite, range, base (`CREATE TYPE t (INPUT = …)`) and shell (`CREATE TYPE t`). `ALTER TYPE` supports `ADD VALUE`, `RENAME VALUE`, `RENAME`, `OWNER TO` and `SET SCHEMA`.
+- Types: enum, composite (without a per-attribute `COLLATE`), range, base (`CREATE TYPE t (INPUT = …)`) and shell (`CREATE TYPE t`). `ALTER TYPE` supports `ADD VALUE`, `RENAME VALUE`, `RENAME`, `OWNER TO` and `SET SCHEMA`.
 - Routines: functions, procedures and aggregates, with SQL-standard bodies (`RETURN expr`, `BEGIN ATOMIC … END`). Also triggers, including `CREATE CONSTRAINT TRIGGER`, `REFERENCING OLD | NEW TABLE` and `WHEN`.
 - Policies, publications and subscriptions: `CREATE`, `ALTER` and `DROP`.
 - The long tail: `CAST`, `COLLATION`, `CONVERSION`, `STATISTICS`, `EVENT TRIGGER`, `LANGUAGE`, `ACCESS METHOD`, `TEXT SEARCH {PARSER | DICTIONARY | TEMPLATE | CONFIGURATION}`, and `OPERATOR [CLASS | FAMILY]` (`CREATE` and `DROP`). Generic `ALTER … RENAME TO | OWNER TO | SET SCHEMA` covers those kinds, plus procedures, routines, rules, triggers and large objects, as far as PostgreSQL allows each.
@@ -179,6 +179,15 @@ The target is PostgreSQL 17's `gram.y`. The lists below are grouped the way the 
 - `CREATE` / `ALTER` / `DROP ROLE` and `USER`, and `CREATE GROUP`. `ALTER ROLE` covers options, `RENAME` and `[IN DATABASE] SET` / `RESET`.
 - `GRANT` / `REVOKE` on every object kind, routines with argument lists included (`ON FUNCTION f(int)`), `ALL … IN SCHEMA`, column privileges, `GRANTED BY`, and role membership with `WITH ADMIN | INHERIT | SET`.
 - `ALTER DEFAULT PRIVILEGES`, `DROP OWNED`, `REASSIGN OWNED`.
+
+**SQL/JSON**
+
+- Constructors: `JSON_OBJECT(k VALUE v | k : v, … [{NULL | ABSENT} ON NULL] [{WITH | WITHOUT} UNIQUE [KEYS]] [RETURNING t [FORMAT JSON [ENCODING e]]])`, `JSON_ARRAY(v [FORMAT JSON], …)` and its query form `JSON_ARRAY(SELECT …)`.
+- Aggregates: `JSON_OBJECTAGG(k VALUE v …)` and `JSON_ARRAYAGG(v [ORDER BY …] …)`, with `FILTER` and `OVER`.
+- Query functions: `JSON_VALUE`, `JSON_QUERY` and `JSON_EXISTS`, with `PASSING`, `RETURNING`, the wrapper and `QUOTES` clauses, and `ON EMPTY` / `ON ERROR`, each taking only the clauses PostgreSQL gives it.
+- `JSON_TABLE` as a FROM item, with `FOR ORDINALITY`, regular, `EXISTS` and `NESTED [PATH] … COLUMNS (…)` columns.
+- `JSON(v [WITH | WITHOUT UNIQUE [KEYS]])`, `JSON_SERIALIZE(v [RETURNING t])` and `JSON_SCALAR(x)`.
+- The callee names stay unreserved. A call with none of the clauses (`json_object(k, v)`, `json_array(1, 2)`) is a plain `call` node, and so is a quoted or qualified name.
 
 **XML**
 
@@ -199,7 +208,7 @@ The battery in `pg-coverage.ts` has 609 distinct statements, all syntactically v
 | Area | Statements | Both | sql-lite only | node-sql-parser only | Neither |
 |---|---:|---:|---:|---:|---:|
 | Queries | 99 | 64 | 35 | 0 | 0 |
-| Expressions | 87 | 51 | 33 | 0 | 3 |
+| Expressions | 87 | 51 | 36 | 0 | 0 |
 | Types and lexical | 36 | 20 | 16 | 0 | 0 |
 | DML | 77 | 38 | 39 | 0 | 0 |
 | Transactions and session | 72 | 19 | 53 | 0 | 0 |
@@ -207,11 +216,10 @@ The battery in `pg-coverage.ts` has 609 distinct statements, all syntactically v
 | Tables and indexes | 84 | 15 | 68 | 0 | 1 |
 | Other schema objects | 93 | 18 | 71 | 0 | 4 |
 | Roles and privileges | 26 | 8 | 18 | 0 | 0 |
-| **Total** | **609** | **235** | **366** | **0** | **8** |
+| **Total** | **609** | **235** | **369** | **0** | **5** |
 
-So sql-lite accepts 601 of the 609 statements (98.7%), and node-sql-parser accepts 235 (38.6%). No statement is accepted by node-sql-parser alone. The eight sql-lite rejects:
+So sql-lite accepts 604 of the 609 statements (99.2%), and node-sql-parser accepts 235 (38.6%). No statement is accepted by node-sql-parser alone. The five sql-lite rejects:
 
-- SQL/JSON clause syntax (3 rows): `JSON_OBJECT('a' VALUE 1)`, `JSON_VALUE(… RETURNING int)`, `JSON_TABLE(…)`.
 - `ALTER TABLE … ADD CONSTRAINT … UNIQUE USING INDEX idx`.
 - `ALTER TYPE … ADD / DROP ATTRIBUTE`.
 - `ALTER SYSTEM`.
@@ -258,6 +266,8 @@ Every item here was checked against the current grammar and fails to parse.
 **Actions on objects that are otherwise supported**
 
 - `ALTER TYPE … ADD | DROP | ALTER | RENAME ATTRIBUTE`, and `ALTER TYPE … SET (…)`.
+- `COLLATE` on a composite type's attribute (`CREATE TYPE c AS (a text COLLATE "C")`).
+- `ALTER MATERIALIZED VIEW` table-style actions: `CLUSTER ON`, `SET WITHOUT CLUSTER`, `ALTER COLUMN … SET STATISTICS | STORAGE | (…)`, `SET ACCESS METHOD`. Also `ALTER SEQUENCE … SET LOGGED | UNLOGGED`.
 - `ADD CONSTRAINT … UNIQUE | PRIMARY KEY USING INDEX idx`.
 - `ALTER FUNCTION … RESET`, and `ALTER PROCEDURE` / `ALTER ROUTINE` attributes (`SECURITY DEFINER`, `IMMUTABLE`, …). Their `RENAME` / `OWNER TO` / `SET SCHEMA` work.
 - `… [NO] DEPENDS ON EXTENSION` on functions, procedures, triggers, indexes and materialized views.
@@ -276,10 +286,10 @@ Every item here was checked against the current grammar and fails to parse.
 
 **Clauses and expressions**
 
-- SQL/JSON clause syntax: `JSON_OBJECT('a' VALUE 1)`, `JSON_VALUE(… RETURNING int)`, `JSON_TABLE(… COLUMNS (…))`. The plain-argument forms parse as ordinary calls.
+- A parenthesised set operation as `JSON_ARRAY`'s query (`JSON_ARRAY((SELECT 1) UNION (SELECT 2))`). `JSON_ARRAY(SELECT …)` works, and `JSON_ARRAY((SELECT 1))` is a one-element array of a scalar subquery, as in PostgreSQL.
 - `INSERT … VALUES (…)` followed by a set operation or a query tail (`VALUES (1) UNION SELECT 2`, `VALUES (1) LIMIT 1`). `INSERT … SELECT …` takes both.
 - `OPERATOR(…)` in `ORDER BY … USING` and in an exclusion constraint's `WITH` (a plain operator works in both).
-- Indirection straight after a parameter: `$1.f`, `$1[1]`. `($1).f` works.
+- Field selection straight after a parameter: `$1.f`, `$1.*`. `($1).f` and `$1[1]` work.
 - An unquoted reserved word as a field step in an assignment target (`SET c.from = …`). Quote it (`c."from"`), as for dotted names' parts.
 - `SET col = (DEFAULT)`. `SET col = DEFAULT` works.
 - Operator-class options in an `ON CONFLICT` element (`(a ops (k = v))`).
@@ -298,7 +308,7 @@ Every item here was checked against the current grammar and fails to parse.
 
 This statement parses without error, but the tree it produces is wrong:
 
-- **A `FETCH` with no count records no `limit`.** `FETCH FIRST ROW ONLY` gives `limit: null`, the same as no limit at all. PostgreSQL reads a count of 1.
+- **A `FETCH` with no count records no `limit`.** `FETCH FIRST ROW ONLY` and `FETCH NEXT ROWS WITH TIES` give `limit: null`, the same as no limit at all. PostgreSQL reads a count of 1.
 
 Numbers below 2^53 in magnitude keep only double precision (see [AST conventions](#ast-conventions)). That is a documented limitation of the number node, not a wrong tree.
 
@@ -326,7 +336,8 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
   - `COPY binary FROM stdin` copies a table named `binary`, where `BINARY` is a `type_func_name` keyword in PostgreSQL.
 - **`CREATE INDEX IF NOT EXISTS ON t (…)`** with no index name.
 - **`CREATE OR REPLACE MATERIALIZED VIEW`.**
-- **Publication and subscription `WITH (…)` lists** take the general option shape: `ns.name` keys, entries with no `=`, and parenthesised values. PostgreSQL's `definition` has none of them.
+- **Publication and subscription `WITH (…)` lists** take the general option shape, so `ns.name` keys and parenthesised values parse. PostgreSQL's `definition` has neither.
+- **PostgreSQL 18's `GENERATED ALWAYS AS (…) VIRTUAL`** columns parse (pagila's schema dump has one), though PostgreSQL 17 requires `STORED`. The PostgreSQL 18 spelling with neither keyword is rejected.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted:
 
@@ -343,7 +354,7 @@ Two smaller divergences: quoted identifiers longer than 63 bytes are not truncat
 
 sql-lite isn't published yet, so these breaks come before any 0.x release. They are listed for anyone tracking the grammar in this repo.
 
-**Inputs that used to parse and are now rejected**, because PostgreSQL's grammar rejects them:
+**Inputs that used to parse and are now rejected**, because PostgreSQL rejects them, almost all in its grammar. A few (`GRANT r TO u WITH GRANT OPTION`, `ALTER COLUMN … SET RESTART`, `SEQUENCE NAME` in `CREATE SEQUENCE`) are analysis-time errors there, refused here because the check is local:
 
 - **Literals and lexing:**
   - unterminated `'…'`, `E'…'`, `"…"`, `B'…'`, `X'…'`, `U&'…'`, `U&"…"` or `/* …` at end of input;
@@ -380,7 +391,7 @@ sql-lite isn't published yet, so these breaks come before any 0.x release. They 
   - `ALTER INDEX IF EXISTS i ATTACH PARTITION j`.
 - **Session and utility:**
   - `SET` values that are expressions (`SET x = 1 + 2`, `SET x = lower('A')`, `SET x = null`), also in a routine's `SET` option;
-  - `SET NAMES`, `SET ROLE DEFAULT`, `SET SCHEMA DEFAULT`, `SET TIME ZONE true`, and a trailing comma in a transaction-mode list;
+  - `SET NAMES utf8` (an unquoted value), `SET ROLE DEFAULT`, `SET SCHEMA DEFAULT`, `SET TIME ZONE true`, and a trailing comma in a transaction-mode list;
   - `ABORT TO SAVEPOINT`, `END PREPARED`, `COMMIT WORK PREPARED`, `COMMIT | ROLLBACK PREPARED` without a string, and `NOTIFY ch, <non-string>`.
 
 **Trees that changed shape:**
@@ -399,7 +410,7 @@ sql-lite isn't published yet, so these breaks come before any 0.x release. They 
 
 - `Assignment.value` is `Expr | DefaultValue`, `SetStmt.values` is `Expr[] | "default" | "fromCurrent"`, and `CreateTableAs.query` is `Query | Execute`.
 - A `comment` statement is `{ kind: "comment" } & ObjectRef & { comment }`, so its `name` is optional (`COMMENT ON CAST` has none).
-- `Query` has a new kind, `tableCmd`. `Expr` has `fieldSelect`, `arraySubquery`, `isNormalized`, `isDocument`, `normalize`, `collationFor`, `substringSimilar`, `atLocal` and the `xml*` nodes. `Stmt` has many new kinds.
+- `Query` has a new kind, `tableCmd`. `Expr` has `fieldSelect`, `arraySubquery`, `isNormalized`, `isDocument`, `normalize`, `collationFor`, `substringSimilar`, `atLocal` and the `xml*` nodes. `Stmt` has many new kinds. `Expr` also has the SQL/JSON nodes (`jsonObject`, `jsonArray`, `jsonArrayQuery`, `jsonObjectAgg`, `jsonArrayAgg`, `jsonValue`, `jsonQuery`, `jsonExists`, `jsonParse`, `jsonSerialize`), and FROM items have `jsonTable` and `xmlTable`.
 - `anyAll.op` can be `like`, `ilike`, `not like` or `not ilike`. `unary`, `binary` and `anyAll` can carry `opSchema`.
 - `sqlLiteScript` returns `ScriptItem[]`, not `Stmt[]`.
 
@@ -411,30 +422,30 @@ Three bench files compare sql-lite with node-sql-parser 5.1.0 in PostgreSQL mode
 
 | Workload | sql-lite ops/s | mean | node-sql-parser ops/s | mean | Relative |
 |---|---:|---:|---:|---:|---|
-| OLTP mix: 16 statements, one `parse` call each | 573 | 1.75 ms | 156 | 6.41 ms | sql-lite 3.67× faster |
-| Analytics report: 2 CTEs, 3 window functions, 3 joins, `CASE` | 852 | 1.17 ms | 283 | 3.53 ms | sql-lite 3.01× faster |
-| Migration script: 19 DDL statements in one 1.6 KB file | 727 | 1.37 ms | 182 | 5.50 ms | sql-lite 4.00× faster |
-| Bulk `INSERT`: 10,000 rows of 5 values, 406.5 KB | 2.02 | 495 ms | 1.87 | 535 ms | about even (sql-lite 1.08×, within noise) |
-| Wide `SELECT`: 1,000 columns, 21.3 KB | 32.7 | 30.6 ms | 10.5 | 95.6 ms | sql-lite 3.13× faster |
-| Malformed input: 8 statements, every one throws | 2,003 | 0.50 ms | 383 | 2.61 ms | sql-lite 5.23× faster |
+| OLTP mix: 16 statements, one `parse` call each | 555 | 1.80 ms | 162 | 6.17 ms | sql-lite 3.42× faster |
+| Analytics report: 2 CTEs, 3 window functions, 3 joins, `CASE` | 957 | 1.04 ms | 317 | 3.15 ms | sql-lite 3.02× faster |
+| Migration script: 19 DDL statements in one 1.6 KB file | 781 | 1.28 ms | 220 | 4.56 ms | sql-lite 3.56× faster |
+| Bulk `INSERT`: 10,000 rows of 5 values, 406.5 KB | 2.16 | 463 ms | 1.86 | 538 ms | sql-lite 1.16× faster |
+| Wide `SELECT`: 1,000 columns, 21.3 KB | 37.7 | 26.5 ms | 9.52 | 105 ms | sql-lite 3.96× faster |
+| Malformed input: 8 statements, every one throws | 1,920 | 0.52 ms | 301 | 3.32 ms | sql-lite 6.38× faster |
 
-The bulk `INSERT` is the closest workload. Nearly all of that input is literals and commas, so the work is per token. sql-lite costs roughly 50 µs per 5-value row, and the cost is linear in the row count. The previous recording had node-sql-parser 1.29× ahead here, so treat this row as a tie. Malformed input shows the widest gap.
+The bulk `INSERT` is the closest workload. Nearly all of that input is literals and commas, so the work is per token. sql-lite costs roughly 46 µs per 5-value row, and the cost is linear in the row count. The previous recording had node-sql-parser 1.29× ahead here, so treat this row as roughly even. Malformed input shows the widest gap.
 
 ### Statement corpus and large files
 
 | Group | sql-lite ops/s | node-sql-parser ops/s | Relative |
 |---|---:|---:|---|
-| Whole shared corpus (28 statements) | 463 | 110 | 4.20× |
-| `select` (5) | 4,386 | 1,134 | 3.87× |
-| `select-adv` (4) | 4,260 | 877 | 4.86× |
-| `cte` (2) | 10,523 | 2,602 | 4.04× |
-| `dml` (4) | 3,334 | 1,718 | 1.94× |
-| `ddl` (6) | 2,851 | 881 | 3.24× |
-| `expr` (7) | 3,304 | 621 | 5.32× |
-| 64 KB file (1,722 statements) | 6.96 | 2.85 | 2.45× |
-| 256 KB file (6,889 statements) | 2.69 | 0.74 | 3.64× |
-| 1 MB file (27,557 statements) | 0.59 | 0.18 | 3.21× |
-| pagila schema dump (388 statements) | 30.5 | — | sql-lite only |
+| Whole shared corpus (28 statements) | 365 | 131 | 2.79× |
+| `select` (5) | 5,072 | 1,085 | 4.68× |
+| `select-adv` (4) | 3,293 | 943 | 3.49× |
+| `cte` (2) | 9,847 | 2,889 | 3.41× |
+| `dml` (4) | 4,132 | 1,345 | 3.07× |
+| `ddl` (6) | 2,535 | 853 | 2.97× |
+| `expr` (7) | 3,345 | 640 | 5.23× |
+| 64 KB file (1,722 statements) | 7.98 | 2.52 | 3.17× |
+| 256 KB file (6,889 statements) | 2.56 | 0.66 | 3.85× |
+| 1 MB file (27,557 statements) | 0.63 | 0.18 | 3.50× |
+| pagila schema dump (388 statements) | 31.3 | — | sql-lite only |
 
 "Relative" is sql-lite's speed-up over node-sql-parser. `sql-lite.large.bench.ts` also has a sql-lite-only group that parses the pagila schema dump statement by statement. node-sql-parser rejects most pg_dump DDL, so there is no comparison.
 
@@ -444,7 +455,7 @@ The bulk `INSERT` is the closest workload. Nearly all of that input is literals 
 - Each workload is built once at module load. Generated inputs are deterministic (no `Math.random`), so every run parses identical text.
 - Both parsers are called the way an application would call them: `sqlLite.parse(sql)` against `new Parser().astify(sql, { database: "PostgreSQL" })`, with one `Parser` instance reused.
 - **Recorded on:** 2026-10-23, with Node 22.22.0, vitest 3.2.7 and node-sql-parser 5.1.0. The machine was a Linux container with 4 vCPUs (Intel Xeon @ 2.80 GHz) and 15 GB RAM.
-- The run was one `pnpm bench:save` with nothing else running. **The numbers are noisy.** The same container measured both parsers 10–45% faster on 2026-10-22, so compare the ratios, not raw ops/s across runs. Variance (`rme`) stayed within ±7% for most groups. The migration script (node-sql-parser), the wide `SELECT` and the 64 KB file ranged from ±8% to ±13%.
+- The run was one `pnpm bench:save` with nothing else running. **The numbers are noisy.** The previous recording, from the same container on 2026-10-22 and an older grammar, had node-sql-parser 8–68% faster per group. That parser's code hasn't changed, so the gap is machine noise. Compare the ratios, not raw ops/s across runs. Variance (`rme`) stayed within ±7% for most groups. The wide `SELECT` (node-sql-parser, ±10%) and the 64 KB file (±13% and ±16%) were the noisiest.
 
 ### Running them
 
