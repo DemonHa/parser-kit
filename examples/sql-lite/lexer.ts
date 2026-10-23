@@ -1,4 +1,4 @@
-import { defineLexer, type InputStream, type Position, type Reader, readers } from "@parser-kit/core";
+import { defineLexer, type InputStream, type Lexer, type Position, type Reader, readers } from "@parser-kit/core";
 
 // SQL-lite is the PostgreSQL-flavoured counterpart to js-lite: it exercises the
 // reader and keyword machinery DBML doesn't touch. Identifiers fold to
@@ -633,3 +633,37 @@ export const sqlLexer = defineLexer({
   // SQL is newline-insensitive: newlines are ordinary whitespace.
   whitespace: WHITESPACE,
 });
+
+// What the grammar parses: `sqlLexer`'s tokens with every `comment` dropped, so
+// a comment is legal anywhere whitespace is (`SELECT /* x */ 1`, `count -- n
+// ⏎ (*)`), as in PG's scanner — except around `UESCAPE` (see
+// `readUescapeTail`). Core skips trivia only in the list-shaped combinators and
+// at the grammar's root boundaries, and `peek`/`peekAhead` lookahead never
+// skips, so the comments are removed before the parse context sees them.
+// Comments are not kept in the AST, and spans end at the last real token rather
+// than at a trailing comment. `sqlLexer` itself still emits `comment` tokens
+// for anyone tokenizing SQL directly (highlighters, formatters).
+export const sqlParseLexer: Lexer<SqlTokenType> = {
+  labels: sqlLexer.labels,
+  tokenize: (input) => {
+    const tokens = sqlLexer.tokenize(input);
+    const peek = () => {
+      let token = tokens.peek();
+      while (token !== null && token.type === "comment") {
+        tokens.next();
+        token = tokens.peek();
+      }
+      return token;
+    };
+    return {
+      next: () => {
+        peek();
+        return tokens.next();
+      },
+      peek,
+      eof: () => peek() === null,
+      croak: tokens.croak,
+      position: tokens.position,
+    };
+  },
+};
