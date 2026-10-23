@@ -12376,6 +12376,7 @@ describe("SQL-lite long-tail objects with definition lists", () => {
     expect(fails("CREATE STATISTICS s ON a + b FROM t;")).toThrow(/must be parenthesised/);
     expect(fails("CREATE STATISTICS s ON t.a FROM t;")).toThrow(/must be parenthesised/);
     expect(fails("CREATE STATISTICS s ON a::int FROM t;")).toThrow(/must be parenthesised/);
+    expect(fails("CREATE STATISTICS s ON CAST(a AS int)::text FROM t;")).toThrow(/must be parenthesised/);
     expect(fails("CREATE STATISTICS IF NOT EXISTS ON a FROM t;")).toThrow(/Expected a name but found "on"/);
     expect(fails("CREATE STATISTICS s ON a;")).toThrow(/Expected "from" but found ";"/);
     expect(fails("CREATE EVENT TRIGGER e ON x EXECUTE FUNCTION f(1);")).toThrow(/Expected "\)" but found "1"/);

@@ -4620,6 +4620,19 @@ const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "sqlValueFunction",
 ]);
 
+// Whether `expr`, read unparenthesised, is one of the forms BARE_PARTITION_KEYS
+// describes: CREATE STATISTICS's items take the same ones. `castCall` says the
+// expression was led by `cast`; a `CAST(…)` is then a cast node whose operand
+// starts after it, where `CAST(a AS int)::text`'s outer cast has its operand
+// start where it does.
+function isBareFuncExpr(expr: Expr, castCall: boolean): boolean {
+  if (expr.kind === "cast") {
+    const operand = expr.expr.span.start;
+    return castCall && (operand.row !== expr.span.start.row || operand.col !== expr.span.start.col);
+  }
+  return BARE_PARTITION_KEYS.has(expr.kind) && !(expr.kind === "name" && expr.parts.length > 1);
+}
+
 // `column | func(…) | (expr)`, then `[COLLATE collation] [opclass]`. A bare key
 // goes through the full expression rule, whose COLLATE postfix takes the
 // collation; it is lifted off the node here, since in PG it belongs to the key,
@@ -4642,12 +4655,7 @@ function partitionKey(ctx: ParseContext<SqlTokenType>, what = "a partition key")
       collate = expr.collation;
       expr = expr.expr;
     }
-    const bare =
-      expr.kind === "cast"
-        ? castCall &&
-          (expr.expr.span.start.row !== expr.span.start.row || expr.expr.span.start.col !== expr.span.start.col)
-        : BARE_PARTITION_KEYS.has(expr.kind) && !(expr.kind === "name" && expr.parts.length > 1);
-    if (!bare) {
+    if (!isBareFuncExpr(expr, castCall)) {
       return ctx.croak(`${what} expression must be parenthesised`, start, ctx.lastEnd());
     }
   }
@@ -7601,20 +7609,6 @@ function createConversionRest(ctx: ParseContext<SqlTokenType>): Stmt {
   };
 }
 
-// The expression kinds PG's func_expr_windowless builds: a plain call, and the
-// special-syntax forms of its func_expr_common_subexpr. CAST is one of them
-// too, but shares its kind with `::`, so parseStatsParam admits it by its lead
-// word instead.
-const STATS_CALL_KINDS: ReadonlySet<Expr["kind"]> = new Set([
-  "call",
-  "extract",
-  "substring",
-  "position",
-  "trim",
-  "overlay",
-  "sqlValueFunction",
-]);
-
 // One item after CREATE STATISTICS … ON: a column, a function call, or a
 // parenthesised expression, as PG's stats_param admits; any other expression
 // must be parenthesised.
@@ -7626,8 +7620,7 @@ function parseStatsParam(ctx: ParseContext<SqlTokenType>): Expr {
   }
   const castCall = ctx.is("ident", "cast");
   const expr = ctx.parse(expression);
-  if (STATS_CALL_KINDS.has(expr.kind) || (castCall && expr.kind === "cast")) return expr;
-  if (expr.kind === "name" && expr.parts.length === 1) return expr;
+  if (isBareFuncExpr(expr, castCall)) return expr;
   return ctx.croak("A statistics expression other than a column or a function call must be parenthesised");
 }
 
