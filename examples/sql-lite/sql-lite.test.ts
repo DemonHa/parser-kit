@@ -7011,6 +7011,203 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
   });
 });
 
+// --- object references: COMMENT ON, SECURITY LABEL, ALTER EXTENSION, generic ALTER ---
+
+describe("SQL-lite object references", () => {
+  const ty = (typeName: string) => ({ name: typeName, args: [], array: false });
+  const arg = (typeName: string, mode: string | null = null) => ({
+    mode,
+    name: null,
+    type: ty(typeName),
+    defaultValue: null,
+  });
+  const comment = (sql: string) => firstStmt(`COMMENT ON ${sql} IS 'c';`);
+  const fails = (text: string) => () => sqlLite.parse(text);
+
+  it("reads each reference shape after COMMENT ON", () => {
+    const node = (ref: Record<string, unknown>) => ({ kind: "comment", ...ref, comment: "c" });
+    expect(comment("EXTENSION pgcrypto")).toEqual(node({ objectType: "extension", name: ["pgcrypto"] }));
+    expect(comment("TEXT SEARCH CONFIGURATION s.cfg")).toEqual(
+      node({ objectType: "text search configuration", name: ["s", "cfg"] }),
+    );
+    expect(comment("PROCEDURAL LANGUAGE plpgsql")).toEqual(node({ objectType: "language", name: ["plpgsql"] }));
+    // A routine's argument list is optional and omitted when absent; an
+    // aggregate's is not.
+    expect(comment("FUNCTION f")).toEqual(node({ objectType: "function", name: ["f"] }));
+    expect(comment("PROCEDURE s.p(IN integer, text)")).toEqual(
+      node({
+        objectType: "procedure",
+        name: ["s", "p"],
+        signature: { star: false, args: [arg("integer", "in"), arg("text")] },
+      }),
+    );
+    expect(comment("AGGREGATE a(*)")).toEqual(
+      node({ objectType: "aggregate", name: ["a"], signature: { star: true, args: [] } }),
+    );
+    expect(comment("OPERATOR pg_catalog.+ (int4, int4)")).toEqual(
+      node({ objectType: "operator", name: ["pg_catalog", "+"], operands: [ty("int4"), ty("int4")] }),
+    );
+    expect(comment("OPERATOR ~~ (NONE, text)")).toEqual(
+      node({ objectType: "operator", name: ["~~"], operands: [null, ty("text")] }),
+    );
+    expect(comment("CAST (bigint AS text)")).toEqual(
+      node({ objectType: "cast", source: ty("bigint"), target: ty("text") }),
+    );
+    expect(comment("TRANSFORM FOR hstore LANGUAGE plpython3u")).toEqual(
+      node({ objectType: "transform", type: ty("hstore"), language: "plpython3u" }),
+    );
+    expect(comment("OPERATOR CLASS s.ops USING btree")).toEqual(
+      node({ objectType: "operator class", name: ["s", "ops"], using: "btree" }),
+    );
+    expect(comment("LARGE OBJECT 16401")).toEqual(node({ objectType: "large object", oid: 16401 }));
+    expect(comment("CONSTRAINT qty_pos ON app.items")).toEqual(
+      node({ objectType: "constraint", name: ["qty_pos"], table: ["app", "items"] }),
+    );
+    expect(comment("CONSTRAINT positive ON DOMAIN app.qty")).toEqual(
+      node({ objectType: "constraint", name: ["positive"], domain: ["app", "qty"] }),
+    );
+    expect(comment("POLICY own_rows ON docs")).toEqual(
+      node({ objectType: "policy", name: ["own_rows"], table: ["docs"] }),
+    );
+  });
+
+  it("tells a kind word from a name the way PostgreSQL does", () => {
+    // OPERATOR CLASS needs a name after CLASS; `class.+` is a qualified operator.
+    expect(comment("OPERATOR class.+ (int, int)")).toMatchObject({ objectType: "operator", name: ["class", "+"] });
+    // DOMAIN needs a name after it; alone, it is the table's name.
+    expect(comment("CONSTRAINT c ON domain")).toMatchObject({ table: ["domain"] });
+    expect(comment("TRIGGER trigger ON rule")).toMatchObject({ name: ["trigger"], table: ["rule"] });
+  });
+
+  it("parses SECURITY LABEL with and without a provider", () => {
+    expect(firstStmt("SECURITY LABEL FOR selinux ON TABLE s.t IS 'system_u';")).toEqual({
+      kind: "securityLabel",
+      provider: "selinux",
+      objectType: "table",
+      name: ["s", "t"],
+      label: "system_u",
+    });
+    expect(firstStmt("SECURITY LABEL FOR 'dummy' ON ROUTINE r(int) IS NULL;")).toEqual({
+      kind: "securityLabel",
+      provider: "dummy",
+      objectType: "routine",
+      name: ["r"],
+      signature: { star: false, args: [arg("int")] },
+      label: null,
+    });
+    expect(firstStmt("SECURITY LABEL ON LARGE OBJECT 7 IS 'x';")).not.toHaveProperty("provider");
+    expect(firstStmt("SECURITY LABEL ON LARGE OBJECT -7 IS 'x';")).toMatchObject({ oid: -7 });
+    expect(comment("LARGE OBJECT +7")).toMatchObject({ oid: 7 });
+  });
+
+  it("parses ALTER EXTENSION ADD / DROP, SET SCHEMA and UPDATE", () => {
+    const ext = (action: Record<string, unknown>) => ({ kind: "alterExtension", name: "e", action });
+    expect(firstStmt("ALTER EXTENSION e ADD FUNCTION f(int);")).toEqual(
+      ext({
+        kind: "add",
+        object: { objectType: "function", name: ["f"], signature: { star: false, args: [arg("int")] } },
+      }),
+    );
+    expect(firstStmt("ALTER EXTENSION e DROP OPERATOR FAMILY f USING gin;")).toEqual(
+      ext({ kind: "drop", object: { objectType: "operator family", name: ["f"], using: "gin" } }),
+    );
+    expect(firstStmt("ALTER EXTENSION e SET SCHEMA s;")).toEqual(ext({ kind: "setSchema", schema: "s" }));
+    expect(firstStmt("ALTER EXTENSION e UPDATE TO '3.4.0';")).toEqual(ext({ kind: "update", version: "3.4.0" }));
+    expect(firstStmt("ALTER EXTENSION e UPDATE;")).toEqual(ext({ kind: "update" }));
+  });
+
+  it("parses RENAME TO, OWNER TO and SET SCHEMA on the kinds with no ALTER target of their own", () => {
+    const alter = (sql: string) => firstStmt(sql) as any;
+    expect(alter("ALTER PROCEDURE app.archive(IN integer) OWNER TO app_owner;")).toEqual({
+      kind: "alterObject",
+      object: {
+        objectType: "procedure",
+        name: ["app", "archive"],
+        signature: { star: false, args: [arg("integer", "in")] },
+      },
+      action: { kind: "ownerTo", owner: "app_owner" },
+    });
+    expect(alter("ALTER PUBLICATION pub OWNER TO CURRENT_USER;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "publication", name: ["pub"] },
+      action: { kind: "ownerTo", owner: "current_user" },
+    });
+    expect(alter("ALTER TRIGGER audit ON users RENAME TO users_audit;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "trigger", name: ["audit"], table: ["users"] },
+      action: { kind: "rename", to: "users_audit" },
+    });
+    expect(alter("ALTER TEXT SEARCH DICTIONARY d SET SCHEMA s;").action).toEqual({ kind: "setSchema", schema: "s" });
+    expect(alter("ALTER OPERATOR - (NONE, int) SET SCHEMA s;").object).toMatchObject({ operands: [null, ty("int")] });
+    expect(alter("ALTER LARGE OBJECT 5 OWNER TO r;").object).toEqual({ objectType: "large object", oid: 5 });
+    expect(alter("ALTER DATABASE appdb OWNER TO app_owner;").object).toEqual({
+      objectType: "database",
+      name: ["appdb"],
+    });
+  });
+
+  it("rejects unknown kinds, kinds a statement does not take and malformed references", () => {
+    expect(fails("COMMENT ON frob x IS 'c';")).toThrow(expectsKeys(["table", "extension", "cast", "large"], '"frob"'));
+    expect(fails("COMMENT ON TEXT x IS 'c';")).toThrow(/Expected "search" but found "x"/);
+    expect(fails("COMMENT ON LARGE x IS 'c';")).toThrow(/Expected "object" but found "x"/);
+    expect(fails("COMMENT ON SCHEMA a.b IS 'c';")).toThrow(/Expected "is" but found "\."/);
+    expect(fails("COMMENT ON OPERATOR + (int) IS 'c';")).toThrow(/Expected "," but found "\)"/);
+    expect(fails("COMMENT ON OPERATOR + (NONE, NONE) IS 'c';")).toThrow(/not NONE twice/);
+    expect(fails("COMMENT ON OPERATOR (int, int) IS 'c';")).toThrow(/Expected an operator but found "\("/);
+    expect(fails("COMMENT ON OPERATOR => (int, int) IS 'c';")).toThrow(/Expected an operator but found "=>"/);
+    expect(fails("COMMENT ON CAST (int, text) IS 'c';")).toThrow(/Expected "as" but found ","/);
+    expect(fails("COMMENT ON OPERATOR CLASS c IS 'c';")).toThrow(/Expected "using" but found "is"/);
+    expect(fails("COMMENT ON LARGE OBJECT x IS 'c';")).toThrow(/Expected a number but found "x"/);
+    expect(fails("COMMENT ON TRIGGER t IS 'c';")).toThrow(/Expected "on" but found "is"/);
+    expect(fails("COMMENT ON AGGREGATE a IS 'c';")).toThrow(/Expected "\(" but found "is"/);
+    expect(fails("COMMENT ON FUNCTION f(a int = 1) IS 'c';")).toThrow(/takes no argument defaults/);
+    expect(fails("COMMENT ON TABLE t IS 42;")).toThrow(/Expected a string or "null" but found "42"/);
+    expect(fails("SECURITY LABEL ON CAST (int AS text) IS 'l';")).toThrow(/but found "cast"/);
+    expect(fails("SECURITY LABEL ON CONSTRAINT c ON t IS 'l';")).toThrow(/but found "constraint"/);
+    expect(fails("SECURITY LABEL FOR ON TABLE t IS 'l';")).toThrow(/Expected a name but found "on"/);
+    expect(fails("ALTER EXTENSION e ADD COLUMN t.c;")).toThrow(/but found "column"/);
+    expect(fails("ALTER EXTENSION e RENAME TO f;")).toThrow(
+      /Expected "add", "drop", "set" or "update" but found "rename"/,
+    );
+    expect(fails("ALTER OPERATOR + (int, int) RENAME TO x;")).toThrow(/Expected "owner" or "set" but found "rename"/);
+    expect(fails("ALTER TEXT SEARCH PARSER p OWNER TO r;")).toThrow(/Expected "rename" or "set" but found "owner"/);
+    expect(fails("ALTER LARGE OBJECT 5 SET SCHEMA s;")).toThrow(/Expected "owner" but found "set"/);
+    expect(fails("ALTER CAST (int AS text) OWNER TO r;")).toThrow(
+      expectsKeys(["table", "procedure", "large"], '"cast"'),
+    );
+  });
+
+  it("keeps the object kind words unreserved as names and aliases", () => {
+    const words = [
+      "security label extension routine procedure transform procedural language large object operator class family",
+      "access method event data wrapper text search parser dictionary template configuration collation conversion",
+      "statistics publication subscription server policy rule none add update",
+    ]
+      .join(" ")
+      .split(" ");
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS security, 2 label FROM extension AS routine;")).toMatchObject({
+      columns: [{ alias: "security" }, { alias: "label" }],
+      from: [{ name: ["extension"], alias: "routine" }],
+    });
+    expect(firstStmt("CREATE TABLE security (label text, transform int, routine int);")).toMatchObject({
+      name: ["security"],
+    });
+    // …and as the names of the objects referred to.
+    expect(comment("EXTENSION extension")).toMatchObject({ name: ["extension"] });
+    expect(firstStmt("SECURITY LABEL FOR label ON ROUTINE routine IS 'l';")).toMatchObject({
+      provider: "label",
+      name: ["routine"],
+    });
+    expect(firstStmt("ALTER ROUTINE transform RENAME TO security;")).toMatchObject({
+      object: { name: ["transform"] },
+      action: { to: "security" },
+    });
+  });
+});
+
 // --- INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT ---
 
 describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT", () => {
@@ -9137,6 +9334,197 @@ describe("SQL-lite ONLY targets, WHERE CURRENT OF and SET col = DEFAULT", () => 
     expect(bad("UPDATE t SET a = 1 WHERE a = DEFAULT;")).toThrow(/Expected a name but found "default"/);
     // A parenthesised DEFAULT is a limit of this grammar, which PG would accept.
     expect(bad("UPDATE t SET a = (DEFAULT);")).toThrow(/Expected a name but found "default"/);
+  });
+});
+
+// --- assignment indirection and ON CONFLICT inference ---
+
+describe("SQL-lite assignment indirection and ON CONFLICT inference", () => {
+  const sub = (index: unknown, upper?: unknown) => ({
+    kind: "subscript",
+    index,
+    ...(upper !== undefined && { upper }),
+  });
+  const fld = (n: string) => ({ kind: "field", name: n });
+  const row = (...items: unknown[]) => ({ kind: "row", items, implicit: true });
+  const values = (...items: unknown[]) => ({ kind: "values", rows: [items] });
+  const conflict = (src: string) => firstStmt(`INSERT INTO t VALUES (1) ON CONFLICT ${src};`).onConflict;
+  const key = (expr: unknown, over: Record<string, unknown> = {}) => ({ expr, ...over });
+  const lower = { kind: "call", name: "lower", args: [name("email")] };
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("reads subscript and field steps on a single UPDATE target", () => {
+    expect(firstStmt("UPDATE t SET a[1] = 1, c.f = 2, a[i + 1] = 3;").set).toEqual([
+      { column: "a", indirection: [sub(num(1))], value: num(1) },
+      { column: "c", indirection: [fld("f")], value: num(2) },
+      { column: "a", indirection: [sub(bin("+", name("i"), num(1)))], value: num(3) },
+    ]);
+  });
+
+  it("reads slices and chained steps", () => {
+    expect(firstStmt('UPDATE t SET a[1:2] = x, a[:3] = y, a[2:] = z, a[:] = w, m[1][2].f."G" = 0;').set).toEqual([
+      { column: "a", indirection: [sub(num(1), num(2))], value: name("x") },
+      { column: "a", indirection: [sub(null, num(3))], value: name("y") },
+      { column: "a", indirection: [sub(num(2), null)], value: name("z") },
+      { column: "a", indirection: [sub(null, null)], value: name("w") },
+      { column: "m", indirection: [sub(num(1)), sub(num(2)), fld("f"), fld("G")], value: num(0) },
+    ]);
+  });
+
+  it("runs multi-column steps parallel to the columns", () => {
+    expect(firstStmt("UPDATE t SET (a[1], b.f, c) = (1, 2, DEFAULT), (d, e) = (SELECT 1, 2);").set).toEqual([
+      {
+        columns: ["a", "b", "c"],
+        indirection: [[sub(num(1))], [fld("f")], []],
+        value: row(num(1), num(2), { kind: "default" }),
+      },
+      { columns: ["d", "e"], value: expect.objectContaining({ kind: "subquery" }) },
+    ]);
+  });
+
+  it("reads steps under ON CONFLICT DO UPDATE and MERGE's UPDATE SET", () => {
+    expect(conflict("(a) DO UPDATE SET a[1] = 1, (b.f) = ROW(2)").action.set).toEqual([
+      { column: "a", indirection: [sub(num(1))], value: num(1) },
+      { columns: ["b"], indirection: [[fld("f")]], value: { kind: "row", items: [num(2)] } },
+    ]);
+    expect(
+      firstStmt("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a[1] = s.a, (b.f, c) = (1, 2);")
+        .when[0].action,
+    ).toEqual({
+      kind: "update",
+      set: [
+        { column: "a", indirection: [sub(num(1))], value: name("s", "a") },
+        { columns: ["b", "c"], indirection: [[fld("f")], []], value: row(num(1), num(2)) },
+      ],
+    });
+  });
+
+  it("reads steps in INSERT's and MERGE's INSERT column lists", () => {
+    expect(firstStmt("INSERT INTO t (a[1], b, c.f) OVERRIDING USER VALUE VALUES (1, 2, 3);")).toEqual({
+      kind: "insert",
+      table: ["t"],
+      columns: ["a", "b", "c"],
+      indirection: [[sub(num(1))], [], [fld("f")]],
+      overriding: "user",
+      source: values(num(1), num(2), num(3)),
+      onConflict: null,
+      returning: null,
+    });
+    expect(firstStmt("INSERT INTO t (a[1:2]) SELECT x FROM u;")).toMatchObject({
+      columns: ["a"],
+      indirection: [[sub(num(1), num(2))]],
+      source: { kind: "select" },
+    });
+    expect(
+      firstStmt("MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (a[1], c.f) VALUES (1, 2);").when[0]
+        .action,
+    ).toEqual({
+      kind: "insert",
+      columns: ["a", "c"],
+      indirection: [[sub(num(1))], [fld("f")]],
+      source: values(num(1), num(2)),
+    });
+  });
+
+  it("omits indirection when no target has steps", () => {
+    expect(firstStmt("UPDATE t SET a = 1, (b, c) = (1, 2);").set).toEqual([
+      { column: "a", value: num(1) },
+      { columns: ["b", "c"], value: row(num(1), num(2)) },
+    ]);
+    expect(firstStmt("INSERT INTO t (a, b) VALUES (1, 2);")).not.toHaveProperty("indirection");
+    const merge = firstStmt("MERGE INTO t USING s ON true WHEN NOT MATCHED THEN INSERT (a) VALUES (1);");
+    expect(merge.when[0].action).not.toHaveProperty("indirection");
+    // A parenthesised query is still INSERT's source, not a column list.
+    expect(firstStmt("INSERT INTO t ((SELECT 1));")).toMatchObject({ columns: null, source: { kind: "select" } });
+  });
+
+  it("reads ON CONFLICT index expressions, COLLATE and operator classes", () => {
+    expect(conflict("((lower(email))) DO NOTHING")).toEqual({
+      target: null,
+      inference: { elements: [key(lower)] },
+      action: { kind: "nothing" },
+    });
+    expect(
+      conflict('(lower(email) COLLATE "C" text_pattern_ops, (a + b), c s.ops, d COLLATE "de_DE") DO NOTHING'),
+    ).toEqual({
+      target: null,
+      inference: {
+        elements: [
+          key(lower, { collate: ["C"], opclass: ["text_pattern_ops"] }),
+          key(bin("+", name("a"), name("b"))),
+          key(name("c"), { opclass: ["s", "ops"] }),
+          key(name("d"), { collate: ["de_DE"] }),
+        ],
+      },
+      action: { kind: "nothing" },
+    });
+  });
+
+  it("reads a WHERE predicate after the ON CONFLICT list", () => {
+    expect(conflict("(a, b) WHERE c > 0 DO UPDATE SET a = 1 WHERE d")).toEqual({
+      target: null,
+      inference: { elements: [key(name("a")), key(name("b"))], where: bin(">", name("c"), num(0)) },
+      action: { kind: "update", set: [{ column: "a", value: num(1) }], where: name("d") },
+    });
+    expect(conflict("((lower(email))) WHERE deleted_at IS NULL DO NOTHING").inference).toEqual({
+      elements: [key(lower)],
+      where: { kind: "is", expr: name("deleted_at"), negated: false },
+    });
+  });
+
+  it("keeps a plain ON CONFLICT column list as target", () => {
+    expect(conflict('(a, "B") DO NOTHING')).toEqual({ target: ["a", "B"], action: { kind: "nothing" } });
+    // A parenthesised column is still the column, as in PG's arbiter inference.
+    expect(conflict("((a), b) DO NOTHING")).toEqual({ target: ["a", "b"], action: { kind: "nothing" } });
+    // Keyword-like column names stay plain columns through the element reader.
+    expect(conflict("(time, year, filter) DO NOTHING").target).toEqual(["time", "year", "filter"]);
+    // A WHERE predicate moves even a plain list into inference.
+    expect(conflict("(a) WHERE b DO NOTHING")).toEqual({
+      target: null,
+      inference: { elements: [key(name("a"))], where: name("b") },
+      action: { kind: "nothing" },
+    });
+    expect(conflict("DO NOTHING")).toEqual({ target: null, action: { kind: "nothing" } });
+    expect(conflict("ON CONSTRAINT c DO NOTHING")).toEqual({
+      target: null,
+      constraint: "c",
+      action: { kind: "nothing" },
+    });
+  });
+
+  it("rejects the malformed forms", () => {
+    // A target step is `.name` or a bracketed subscript; PG rejects `.*` in analysis.
+    expect(bad("UPDATE t SET c.* = 1;")).toThrow(/Expected a field name but found "\*"/);
+    expect(bad("INSERT INTO t (c.*) VALUES (1);")).toThrow(/Expected a field name but found "\*"/);
+    expect(bad("UPDATE t SET a. = 1;")).toThrow(/Expected a name but found "="/);
+    expect(bad("UPDATE t SET a[1 = 1;")).toThrow(/Expected "\]" but found ";"/);
+    expect(bad("UPDATE t SET (a[1) = (1);")).toThrow(/Expected "\]" but found "\)"/);
+    // Column lists may not be empty.
+    expect(bad("INSERT INTO t () VALUES (1);")).toThrow(/Expected a name but found "\)" \(1:15\)/);
+    expect(bad("INSERT INTO t () SELECT 1;")).toThrow(/Expected a name but found "\)" \(1:15\)/);
+    // A subscript names an index or a slice.
+    expect(bad("UPDATE t SET a[] = 1;")).toThrow(/Expected an expression or ":" but found "\]" \(1:15\)/);
+    expect(bad("SELECT a[] FROM t;")).toThrow(/Expected an expression or ":" but found "\]"/);
+    expect(bad("MERGE INTO t USING s ON true WHEN NOT MATCHED THEN INSERT () VALUES (1);")).toThrow(
+      /Expected a name but found "\)"/,
+    );
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT () DO NOTHING;")).toThrow(/but found "\)" \(1:38\)/);
+    // An element other than a column or call must be parenthesised.
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a + b) DO NOTHING;")).toThrow(
+      /an ON CONFLICT index expression must be parenthesised/,
+    );
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (t.a) DO NOTHING;")).toThrow(
+      /an ON CONFLICT index expression must be parenthesised/,
+    );
+    // Sort options, which PG's analysis rejects in an arbiter.
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a DESC) DO NOTHING;")).toThrow(/Expected "\)" but found "desc"/);
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a ASC) DO NOTHING;")).toThrow(/Expected "\)" but found "asc"/);
+    // WHERE follows a list only, and needs a predicate.
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT ON CONSTRAINT c WHERE x DO NOTHING;")).toThrow(
+      /Expected "do" but found "where"/,
+    );
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT WHERE x DO NOTHING;")).toThrow(/found "where"/);
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a) WHERE DO NOTHING;")).toThrow(/found "do"/);
   });
 });
 
