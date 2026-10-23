@@ -44,7 +44,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 | `sql-lite.test.ts` | Unit tests, one `describe` per feature |
 | `corpus.ts` | The statements the benchmark measures and the parity golden pins |
 | `parity.test.ts` + `parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus a supplemental list |
-| `pg-coverage.ts` + `pg-coverage.test.ts` | The PostgreSQL coverage battery: 599 statements with the bucket each one lands in |
+| `pg-coverage.ts` + `pg-coverage.test.ts` | The PostgreSQL coverage battery: 601 statements with the bucket each one lands in |
 | `sql-lite.bench.ts` | Throughput over the corpus, per category |
 | `sql-lite.large.bench.ts` | Throughput on 64 KB / 256 KB / 1 MB multi-statement files |
 | `sql-lite.workloads.bench.ts` | Throughput on real-world workloads |
@@ -64,11 +64,11 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
   - **`DROP`:** all of those except tablespaces.
   - **`ALTER`:** schemas, domains, types, indexes, functions, aggregates, views, materialized views and sequences.
   - Plus `COMMENT ON` and `REFRESH MATERIALIZED VIEW`.
-- **Access control and utility.** `GRANT` / `REVOKE` on tables, columns, sequences, schemas, databases, types and `ALL … IN SCHEMA`, and role membership. Transactions with isolation modes, `AND [NO] CHAIN` and savepoints. `SET` / `SHOW` / `RESET`. `LOCK`, `CALL`, `DO`, `PREPARE` / `EXECUTE` / `DEALLOCATE`. Cursors (`DECLARE` / `FETCH` / `MOVE` / `CLOSE`). `EXPLAIN` (option list and legacy forms), `ANALYZE`, `VACUUM`.
+- **Access control and utility.** `GRANT` / `REVOKE` on tables, columns, sequences, schemas, databases, types and `ALL … IN SCHEMA`, and role membership. Transactions with isolation modes, `AND [NO] CHAIN` and savepoints. `SET` / `SHOW` / `RESET`, including `SET TRANSACTION`, `SET SESSION CHARACTERISTICS`, `SET CONSTRAINTS`, `SET SESSION AUTHORIZATION`, `SET … FROM CURRENT` and the multi-word `SHOW` / `RESET` targets (`TIME ZONE`, `TRANSACTION ISOLATION LEVEL`, `SESSION AUTHORIZATION`). A `SET` value is a single value, as in PostgreSQL: `on` / `off` / `true` / `false`, a word, a string or a number, so `SET x = 1 + 2` is rejected. `LOCK`, `CALL`, `DO`, `PREPARE` / `EXECUTE` / `DEALLOCATE`. Cursors (`DECLARE` / `FETCH` / `MOVE` / `CLOSE`). `EXPLAIN` (option list and legacy forms), `ANALYZE`, `VACUUM`.
 
 ### Compared with node-sql-parser
 
-The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically valid in PostgreSQL 17 (a few need 17 rather than 16). They cover the command reference and the query and expression chapters, from everyday idioms (upserts, pagination, `date_trunc` reports, pg_dump-style DDL) to the long tail. Each statement goes through `sqlLite.parse(sql)` and node-sql-parser 5.1.0's `new Parser().astify(sql, { database: "PostgreSQL" })`:
+The battery in `pg-coverage.ts` has 601 distinct statements, all syntactically valid in PostgreSQL 17 (a few need 17 rather than 16). They cover the command reference and the query and expression chapters, from everyday idioms (upserts, pagination, `date_trunc` reports, pg_dump-style DDL) to the long tail. Each statement goes through `sqlLite.parse(sql)` and node-sql-parser 5.1.0's `new Parser().astify(sql, { database: "PostgreSQL" })`:
 
 | Area | Statements | Both | sql-lite only | node-sql-parser only | Neither |
 |---|---:|---:|---:|---:|---:|
@@ -76,14 +76,14 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 | Expressions | 87 | 47 | 21 | 4 | 15 |
 | Types and lexical | 34 | 18 | 11 | 2 | 3 |
 | DML | 77 | 32 | 35 | 6 | 4 |
-| Transactions and session | 70 | 17 | 33 | 0 | 20 |
+| Transactions and session | 72 | 19 | 40 | 0 | 13 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **210** | **234** | **19** | **136** |
+| **Total** | **601** | **212** | **241** | **19** | **129** |
 
-So sql-lite accepts 444 of the 599 statements (74%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 453 of the 601 statements (75%) and node-sql-parser accepts 231 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -107,7 +107,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - `CREATE` / `ALTER` / `DROP POLICY`, `ALTER DEFAULT PRIVILEGES`, `ALTER ROLE` / `ALTER USER`, `CREATE GROUP`, `DROP OWNED`, `REASSIGN OWNED`.
 - `REINDEX`, `CLUSTER`, `CHECKPOINT`, `LOAD`.
 - `LISTEN` / `NOTIFY` / `UNLISTEN`, `DISCARD`.
-- `SET TRANSACTION`, `SET SESSION CHARACTERISTICS`, `SET CONSTRAINTS`, `SET` / `RESET SESSION AUTHORIZATION`, `SET … FROM CURRENT`, multi-word `SHOW TRANSACTION ISOLATION LEVEL`.
+- `RESET` among a routine's options (`ALTER FUNCTION f() RESET search_path`), and `SET TIME ZONE INTERVAL(p) '…'`.
 - `END` and `ABORT` (the transaction synonyms), and two-phase commit (`PREPARE TRANSACTION`, `COMMIT PREPARED`, `ROLLBACK PREPARED`).
 - `ALTER DATABASE`, `ALTER EXTENSION`, `ALTER PROCEDURE`, `ALTER TABLESPACE`, `ALTER TRIGGER`, `ALTER SYSTEM`, `DROP TABLESPACE`.
 - Some actions on objects that are otherwise supported: `ALTER INDEX … ATTACH PARTITION`, `ALTER MATERIALIZED VIEW … SET TABLESPACE`, `ALTER TYPE … ADD / DROP ATTRIBUTE`, and the shell type `CREATE TYPE name;`.
@@ -191,6 +191,8 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **Impossible type modifiers and interval ranges:** `x::int(4)`, `interval '1' DAY TO YEAR`.
 - **Junk after a number:** `SELECT 123abc` reads as `123 AS abc`. PostgreSQL 15+ rejects it.
 - **The zero-length identifier `""`.**
+- **`SET TIME ZONE` with a non-reserved keyword as the zone** (`SET TIME ZONE zone`, `SET TIME ZONE outer`). PostgreSQL takes only a plain identifier there.
+- **Configuration parameter names that are `type_func_name` keywords** (`SET outer = 1`, `SHOW authorization`). PostgreSQL's `var_name` takes only a `ColId`.
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.

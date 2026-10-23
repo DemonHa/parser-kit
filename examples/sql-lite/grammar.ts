@@ -694,8 +694,8 @@ export type FunctionReturns =
   | { kind: "type"; setof: boolean; type: ColType }
   | { kind: "table"; columns: CompositeAttr[] };
 
-// A `SET config = value` value: an ordered value list, or `FROM CURRENT`.
-export type FunctionSetValue = { kind: "list"; values: Expr[] } | { kind: "fromCurrent" };
+// A `SET config = value` value: an ordered value list, `DEFAULT`, or `FROM CURRENT`.
+export type FunctionSetValue = { kind: "list"; values: Expr[] } | { kind: "default" } | { kind: "fromCurrent" };
 
 // One characteristic clause of a CREATE FUNCTION. Order-free (parsed by a loop);
 // all option words stay unreserved and are matched by value.
@@ -824,20 +824,44 @@ export type Transaction =
   | { kind: "savepoint"; name: string; span: Span }
   | { kind: "releaseSavepoint"; name: string; span: Span };
 
-// SET [SESSION|LOCAL] { name {=|TO} value[, …] | TIME ZONE value | ROLE|SCHEMA|NAMES
-// value }. `name` is the dotted config parameter (or "time zone"/"role"/…);
-// `values` is the value list, or "default" for the DEFAULT keyword.
+// SET [SESSION|LOCAL] { name {=|TO} value[, …] | name FROM CURRENT | TIME ZONE
+// value | ROLE|SCHEMA|NAMES|… value | SESSION AUTHORIZATION value }. `name` is
+// the dotted config parameter, or the special form's words ("time zone",
+// "session authorization", …); `values` is the value list, "default" for the
+// DEFAULT keyword (and for `TIME ZONE LOCAL` or a bare `NAMES`, which PG treats
+// the same way), or "fromCurrent".
 export type SetStmt = {
   kind: "set";
   scope: "session" | "local" | null;
   name: string;
-  values: Expr[] | "default";
+  values: Expr[] | "default" | "fromCurrent";
   span: Span;
 };
 
-// SHOW {name | ALL} — `name` is "all" for SHOW ALL.
+// `SET [SESSION|LOCAL] TRANSACTION mode[, …]` sets the current transaction's
+// characteristics; `SET SESSION CHARACTERISTICS AS TRANSACTION mode[, …]`
+// (`characteristics` true) sets the session's defaults. `modes` is never empty.
+export type SetTransaction = {
+  kind: "setTransaction";
+  scope: "session" | "local" | null;
+  characteristics: boolean;
+  modes: TransactionMode[];
+  span: Span;
+};
+
+// `SET CONSTRAINTS {ALL | name[, …]} {DEFERRED | IMMEDIATE}`.
+export type SetConstraints = {
+  kind: "setConstraints";
+  constraints: string[][] | "all";
+  mode: "deferred" | "immediate";
+  span: Span;
+};
+
+// SHOW {name | ALL | TIME ZONE | TRANSACTION ISOLATION LEVEL | SESSION
+// AUTHORIZATION} — `name` is "all" for SHOW ALL, and the words of a multi-word
+// form joined by spaces ("time zone", …).
 export type Show = { kind: "show"; name: string; span: Span };
-// RESET {name | ALL}.
+// RESET, with the same targets as SHOW.
 export type Reset = { kind: "reset"; name: string; span: Span };
 
 // DO [LANGUAGE lang] 'body' — the body is one (dollar-quoted) string, kept opaque
@@ -1080,6 +1104,8 @@ export type Stmt =
   | Revoke
   | Transaction
   | SetStmt
+  | SetTransaction
+  | SetConstraints
   | Show
   | Reset
   | Do
@@ -4419,6 +4445,211 @@ function parseSecurityKind(ctx: ParseContext<SqlTokenType>): boolean {
   return ctx.croak(`Expected "definer" or "invoker" but found ${describeFound(ctx.peek())}`);
 }
 
+// --- configuration parameters (SET / SHOW / RESET, and a routine's SET) ---
+
+// A dotted config parameter name (`search_path`, `my.custom.guc`) → one string.
+const configName = sepBy(nameWord, P(".")).map((parts) => parts.join("."));
+
+// Whether the token `n` ahead is the bare (unquoted) word `value`.
+const isWordAhead = (ctx: ParseContext<SqlTokenType>, n: number, value: string): boolean => {
+  const tok = ctx.peekAhead(n);
+  return tok !== null && tok.type === "ident" && tok.value === value;
+};
+
+// The words RESERVED holds that PG does not reserve (its type_func_name
+// keywords, plus SET and VALUES), so PG's NonReservedWord still admits them as
+// a SET value.
+const CONFIG_VALUE_WORDS: ReadonlySet<string> = new Set([
+  "cross",
+  "full",
+  "inner",
+  "is",
+  "join",
+  "left",
+  "like",
+  "natural",
+  "right",
+  "set",
+  "tablesample",
+  "values",
+]);
+
+// PG reserved words RESERVED lacks, kept out of a SET value.
+const CONFIG_RESERVED_WORDS: ReadonlySet<string> = new Set(["current_catalog", "system_user"]);
+
+// A string, or a word (→ a name) of the kind `mode` allows:
+// - "word": PG's NonReservedWord_or_Sconst, a non-reserved or quoted word;
+// - "value": also ON (a name, like OFF) and TRUE / FALSE (bool nodes), which
+//   PG's opt_boolean_or_string adds because all three are reserved;
+// - "zone": zone_value's IDENT, so not the CONFIG_VALUE_WORDS keywords either.
+// Null when the next token is none of these.
+function configWordOrString(ctx: ParseContext<SqlTokenType>, mode: "word" | "value" | "zone"): Expr | null {
+  const start = ctx.position();
+  const tok = ctx.peek();
+  if (tok?.type === "string") return ctx.parse(stringLit);
+  const booleans = mode === "value";
+  if (booleans && tok?.type === "ident" && (tok.value === "true" || tok.value === "false")) return ctx.parse(boolLit);
+  const word =
+    tok?.type === "qident" ||
+    (tok?.type === "ident" &&
+      !CONFIG_RESERVED_WORDS.has(tok.value) &&
+      (!RESERVED.has(tok.value) ||
+        (mode !== "zone" && CONFIG_VALUE_WORDS.has(tok.value)) ||
+        (booleans && tok.value === "on")));
+  if (!word) return null;
+  ctx.next();
+  return { kind: "name", parts: [tok.value], span: ctx.spanFrom(start) };
+}
+
+// PG's NumericOnly: a number, a leading sign included (kept as a `unary` node,
+// as an expression would). Null when no number follows.
+function configNumber(ctx: ParseContext<SqlTokenType>): Expr | null {
+  const start = ctx.position();
+  const tok = ctx.peek();
+  if (tok?.type === "op" && (tok.value === "-" || tok.value === "+") && ctx.peekAhead(1)?.type === "number") {
+    ctx.next(); // the sign
+    const operand = ctx.parse(numberLit);
+    return { kind: "unary", op: tok.value, operand, span: ctx.spanFrom(start) };
+  }
+  return tok?.type === "number" ? ctx.parse(numberLit) : null;
+}
+
+// One value of a SET list, as PG's var_value: a number, a string, ON / OFF /
+// TRUE / FALSE, or a word. Never a general expression: PG rejects `SET x = 1 +
+// 2` and `SET x = a.b`.
+const varValue = (ctx: ParseContext<SqlTokenType>): Expr =>
+  configNumber(ctx) ??
+  configWordOrString(ctx, "value") ??
+  ctx.croak(`Expected a parameter value but found ${describeFound(ctx.peek())}`);
+
+// The value of SET ROLE and SET SESSION AUTHORIZATION.
+const configWord = (ctx: ParseContext<SqlTokenType>): Expr =>
+  configWordOrString(ctx, "word") ?? ctx.croak(`Expected a name or a string but found ${describeFound(ctx.peek())}`);
+
+// A bare string, for the forms PG writes as `Sconst`.
+const configString = (ctx: ParseContext<SqlTokenType>): Expr => {
+  if (!ctx.is("string")) return ctx.croak(`Expected a string but found ${describeFound(ctx.peek())}`);
+  return ctx.parse(stringLit);
+};
+
+// The value of `SET TIME ZONE`, PG's zone_value: LOCAL and DEFAULT (both mean
+// the default, so both → "default"), `INTERVAL 'value' [HOUR [TO MINUTE]]`, or
+// a number, string or word. (The `INTERVAL(p) 'value'` spelling is not parsed.)
+// The interval goes through columnRef's INTERVAL-literal branch, which an
+// `interval` followed by a string always takes.
+function zoneValue(ctx: ParseContext<SqlTokenType>): Expr[] | "default" {
+  if (ctx.eat("ident", "local") !== null || ctx.eat("ident", "default") !== null) return "default";
+  if (ctx.is("ident", "interval") && ctx.peekAhead(1)?.type === "string") {
+    const start = ctx.position();
+    const interval = ctx.parse(columnRef);
+    if (interval.kind === "interval" && interval.fields !== undefined && !/^hour( to minute)?$/.test(interval.fields)) {
+      ctx.croak(
+        `A time zone interval must be HOUR or HOUR TO MINUTE, but found ${interval.fields.toUpperCase()}`,
+        start,
+      );
+    }
+    return [interval];
+  }
+  const value = configNumber(ctx) ?? configWordOrString(ctx, "zone");
+  return value !== null ? [value] : ctx.croak(`Expected a time zone but found ${describeFound(ctx.peek())}`);
+}
+
+// Whether the token after the current one is `=`, `.`, TO or FROM — what
+// follows (part of) a parameter name in a generic SET, and never a special
+// form's second word. PG reads `SET session TO 1` and `SET role.x = 1` that way.
+const isGenericSet = (ctx: ParseContext<SqlTokenType>): boolean => {
+  const tok = ctx.peekAhead(1);
+  return (
+    (tok?.type === "op" && tok.value === "=") ||
+    (tok?.type === "punc" && tok.value === ".") ||
+    isWordAhead(ctx, 1, "to") ||
+    isWordAhead(ctx, 1, "from")
+  );
+};
+
+type ConfigSet = { name: string; values: Expr[] | "default" | "fromCurrent" };
+
+// PG's set_rest_more, shared by the SET statement and a routine's SET option:
+// `name {= | TO} {value[, …] | DEFAULT}`, `name FROM CURRENT`, or one of the
+// operator-less special forms (TIME ZONE, SCHEMA, NAMES, ROLE, SESSION
+// AUTHORIZATION, XML OPTION, TRANSACTION SNAPSHOT). A form's lead word is a
+// parameter name too, read as one when isGenericSet says so (`SET role TO x`).
+function parseConfigSet(ctx: ParseContext<SqlTokenType>): ConfigSet {
+  const lead = ctx.peek();
+  const generic = isGenericSet(ctx);
+  if (lead?.type === "ident" && !generic) {
+    switch (lead.value) {
+      case "time":
+        if (!isWordAhead(ctx, 1, "zone")) break;
+        ctx.parse(kwseq("time", "zone"));
+        return { name: "time zone", values: zoneValue(ctx) };
+      case "schema":
+        ctx.next();
+        return { name: "schema", values: [configString(ctx)] };
+      case "names":
+        // `NAMES` alone, like `NAMES DEFAULT`, resets the client encoding.
+        ctx.next();
+        if (ctx.is("string")) return { name: "names", values: [ctx.parse(stringLit)] };
+        ctx.eat("ident", "default");
+        return { name: "names", values: "default" };
+      case "role":
+        ctx.next();
+        return { name: "role", values: [configWord(ctx)] };
+      case "session":
+        if (!isWordAhead(ctx, 1, "authorization")) break;
+        ctx.parse(kwseq("session", "authorization"));
+        if (ctx.eat("ident", "default") !== null) return { name: "session authorization", values: "default" };
+        return { name: "session authorization", values: [configWord(ctx)] };
+      case "xml": {
+        if (!isWordAhead(ctx, 1, "option")) break;
+        ctx.parse(kwseq("xml", "option"));
+        const start = ctx.position();
+        const tok = ctx.peek();
+        if (tok?.type !== "ident" || (tok.value !== "document" && tok.value !== "content")) {
+          return ctx.croak(`Expected "document" or "content" but found ${describeFound(tok)}`);
+        }
+        ctx.next();
+        return { name: "xml option", values: [{ kind: "name", parts: [tok.value], span: ctx.spanFrom(start) }] };
+      }
+      case "transaction":
+        if (!isWordAhead(ctx, 1, "snapshot")) break;
+        ctx.parse(kwseq("transaction", "snapshot"));
+        return { name: "transaction snapshot", values: [configString(ctx)] };
+    }
+  }
+  const name = ctx.parse(configName);
+  if (ctx.eat("ident", "from") !== null) {
+    ctx.parse(kw("current"));
+    return { name, values: "fromCurrent" };
+  }
+  if (ctx.eat("op", "=") === null && ctx.eat("ident", "to") === null) {
+    ctx.croak(`Expected "to" or "=" but found ${describeFound(ctx.peek())}`);
+  }
+  if (ctx.eat("ident", "default") !== null) return { name, values: "default" };
+  return { name, values: commaList(ctx, varValue) };
+}
+
+// The target of SHOW and RESET: ALL, one of the multi-word forms (TIME ZONE,
+// TRANSACTION ISOLATION LEVEL, SESSION AUTHORIZATION, joined by spaces), or a
+// parameter name. Each form's lead word is also a parameter name, so the form
+// is taken only when its second word follows.
+function parseConfigTarget(ctx: ParseContext<SqlTokenType>): string {
+  if (ctx.eat("ident", "all") !== null) return "all";
+  if (ctx.is("ident", "time") && isWordAhead(ctx, 1, "zone")) {
+    ctx.parse(kwseq("time", "zone"));
+    return "time zone";
+  }
+  if (ctx.is("ident", "transaction") && isWordAhead(ctx, 1, "isolation")) {
+    ctx.parse(kwseq("transaction", "isolation", "level"));
+    return "transaction isolation level";
+  }
+  if (ctx.is("ident", "session") && isWordAhead(ctx, 1, "authorization")) {
+    ctx.parse(kwseq("session", "authorization"));
+    return "session authorization";
+  }
+  return ctx.parse(configName);
+}
+
 // The order-free characteristic loop of CREATE FUNCTION. Stops at the first token
 // that is not an option lead-word (the trailing `;`), or, given `only`, at the
 // first that `only` does not name. All option words stay unreserved and are
@@ -4506,17 +4737,10 @@ function parseFunctionOptions(ctx: ParseContext<SqlTokenType>, only?: ReadonlySe
         break;
       case "set": {
         ctx.next();
-        const parameter = ctx.parse(qualName).join(".");
-        if (ctx.eat("ident", "from") !== null) {
-          ctx.parse(kw("current"));
-          options.push({ kind: "set", parameter, value: { kind: "fromCurrent" } });
-        } else {
-          if (ctx.eat("ident", "to") === null && ctx.eat("op", "=") === null) {
-            ctx.croak(`Expected "to" or "=" but found ${describeFound(ctx.peek())}`);
-          }
-          const values = ctx.parse(sepBy(expression, P(",")));
-          options.push({ kind: "set", parameter, value: { kind: "list", values } });
-        }
+        const { name, values } = parseConfigSet(ctx);
+        const value: FunctionSetValue =
+          values === "default" || values === "fromCurrent" ? { kind: values } : { kind: "list", values };
+        options.push({ kind: "set", parameter: name, value });
         break;
       }
       default:
@@ -5899,16 +6123,27 @@ function parseTransactionMode(ctx: ParseContext<SqlTokenType>): TransactionMode 
 }
 
 const TRANSACTION_MODE_LEADS: ReadonlySet<string> = new Set(["isolation", "read", "not", "deferrable"]);
-// Zero or more transaction modes (commas between them are optional in PG).
+// Whether `t` (a peeked token) can open a transaction mode.
+const isTransactionModeLead = (t: ReturnType<ParseContext<SqlTokenType>["peek"]>): boolean =>
+  t !== null && t.type === "ident" && TRANSACTION_MODE_LEADS.has(t.value);
+// Zero or more transaction modes (commas between them are optional in PG, but
+// a comma must be followed by another mode).
 function parseTransactionModes(ctx: ParseContext<SqlTokenType>): TransactionMode[] {
   const modes: TransactionMode[] = [];
   while (true) {
-    const t = ctx.peek();
-    if (t === null || t.type !== "ident" || !TRANSACTION_MODE_LEADS.has(t.value)) break;
+    if (!isTransactionModeLead(ctx.peek())) break;
     modes.push(parseTransactionMode(ctx));
-    ctx.eat("punc", ","); // optional separator
+    if (ctx.eat("punc", ",") !== null) expectTransactionMode(ctx);
   }
   return modes;
+}
+
+// Croaks unless a transaction mode follows (after a comma, or to open a list
+// that must not be empty).
+function expectTransactionMode(ctx: ParseContext<SqlTokenType>): void {
+  if (!isTransactionModeLead(ctx.peek())) {
+    ctx.croak(`Expected "isolation", "read", "not" or "deferrable" but found ${describeFound(ctx.peek())}`);
+  }
 }
 
 // `AND [NO] CHAIN` on COMMIT / ROLLBACK — returns whether CHAIN (not NO CHAIN).
@@ -5968,45 +6203,80 @@ const transactionStmt = custom<Stmt, SqlTokenType>(
   },
 );
 
-// A dotted config parameter name (`search_path`, `my.custom.guc`) → one string.
-const configName = sepBy(nameWord, P(".")).map((parts) => parts.join("."));
-// The single-value SET forms that take no `=`/`TO` operator.
-const SET_SINGLE_FORMS: ReadonlySet<string> = new Set(["role", "schema", "names"]);
+// `{ALL | name[, …]} {DEFERRED | IMMEDIATE}` after SET CONSTRAINTS.
+function parseSetConstraints(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.parse(kw("constraints"));
+  const constraints = ctx.eat("ident", "all") !== null ? "all" : commaList(ctx, (c) => c.parse(qualName));
+  const mode =
+    ctx.eat("ident", "deferred") !== null
+      ? "deferred"
+      : ctx.eat("ident", "immediate") !== null
+        ? "immediate"
+        : ctx.croak(`Expected "deferred" or "immediate" but found ${describeFound(ctx.peek())}`);
+  return { kind: "setConstraints", constraints, mode, span: ctx.spanFrom(start) };
+}
+
+// A transaction-mode list that must name at least one mode.
+function parseTransactionModeList(ctx: ParseContext<SqlTokenType>): TransactionMode[] {
+  expectTransactionMode(ctx);
+  return parseTransactionModes(ctx);
+}
+
+// Whether SESSION CHARACTERISTICS AS starts here (and SESSION is not a scope).
+const isSessionCharacteristics = (ctx: ParseContext<SqlTokenType>): boolean =>
+  ctx.is("ident", "session") && isWordAhead(ctx, 1, "characteristics") && isWordAhead(ctx, 2, "as");
+
+type SetRest =
+  | ({ kind: "config" } & ConfigSet)
+  | { kind: "transaction"; characteristics: boolean; modes: TransactionMode[] };
+
+// PG's set_rest, what follows SET [SESSION | LOCAL]: TRANSACTION mode…,
+// SESSION CHARACTERISTICS AS TRANSACTION mode…, or a parseConfigSet form
+// (TRANSACTION SNAPSHOT among them).
+function parseSetRest(ctx: ParseContext<SqlTokenType>): SetRest {
+  if (isSessionCharacteristics(ctx)) {
+    ctx.parse(kwseq("session", "characteristics", "as", "transaction"));
+    return { kind: "transaction", characteristics: true, modes: parseTransactionModeList(ctx) };
+  }
+  if (ctx.is("ident", "transaction") && !isGenericSet(ctx) && !isWordAhead(ctx, 1, "snapshot")) {
+    ctx.next(); // TRANSACTION
+    return { kind: "transaction", characteristics: false, modes: parseTransactionModeList(ctx) };
+  }
+  return { kind: "config", ...parseConfigSet(ctx) };
+}
 
 const sessionStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
     if (ctx.eat("ident", "show") !== null) {
-      const name = ctx.eat("ident", "all") !== null ? "all" : ctx.parse(configName);
-      return { kind: "show", name, span: ctx.spanFrom(start) };
+      return { kind: "show", name: parseConfigTarget(ctx), span: ctx.spanFrom(start) };
     }
     if (ctx.eat("ident", "reset") !== null) {
-      const name = ctx.eat("ident", "all") !== null ? "all" : ctx.parse(configName);
-      return { kind: "reset", name, span: ctx.spanFrom(start) };
+      return { kind: "reset", name: parseConfigTarget(ctx), span: ctx.spanFrom(start) };
     }
     ctx.parse(kw("set"));
+    // A form or scope word right after SET is a parameter name when isGenericSet
+    // says so (`SET constraints TO x`, `SET local = 1`). SET CONSTRAINTS takes
+    // no SESSION / LOCAL.
+    if (ctx.is("ident", "constraints") && !isGenericSet(ctx)) return parseSetConstraints(ctx, start);
+    // SESSION is the scope unless it leads SESSION AUTHORIZATION or SESSION
+    // CHARACTERISTICS AS (`SET SESSION SESSION AUTHORIZATION` has both).
     let scope: "session" | "local" | null = null;
-    if (ctx.eat("ident", "session") !== null) scope = "session";
-    else if (ctx.eat("ident", "local") !== null) scope = "local";
-    // `SET TIME ZONE value` — a single value, no operator.
-    if (ctx.is("ident", "time")) {
-      ctx.parse(kwseq("time", "zone"));
-      const values: Expr[] | "default" = ctx.eat("ident", "default") !== null ? "default" : [ctx.parse(expression)];
-      return { kind: "set", scope, name: "time zone", values, span: ctx.spanFrom(start) };
-    }
-    // `SET {ROLE|SCHEMA|NAMES} value` — likewise operator-less.
-    const lead = ctx.peek();
-    if (lead !== null && lead.type === "ident" && SET_SINGLE_FORMS.has(lead.value)) {
+    if (ctx.is("ident", "session") && !isGenericSet(ctx) && !isWordAhead(ctx, 1, "authorization")) {
+      if (!isSessionCharacteristics(ctx)) {
+        ctx.next();
+        scope = "session";
+      }
+    } else if (ctx.is("ident", "local") && !isGenericSet(ctx)) {
       ctx.next();
-      const values: Expr[] | "default" = ctx.eat("ident", "default") !== null ? "default" : [ctx.parse(expression)];
-      return { kind: "set", scope, name: lead.value, values, span: ctx.spanFrom(start) };
+      scope = "local";
     }
-    // Generic `SET name {=|TO} value[, …]`.
-    const name = ctx.parse(configName);
-    if (ctx.eat("op", "=") === null) ctx.parse(kw("to"));
-    const values: Expr[] | "default" =
-      ctx.eat("ident", "default") !== null ? "default" : commaList(ctx, (c) => c.parse(expression));
-    return { kind: "set", scope, name, values, span: ctx.spanFrom(start) };
+    const rest = parseSetRest(ctx);
+    if (rest.kind === "transaction") {
+      const { characteristics, modes } = rest;
+      return { kind: "setTransaction", scope, characteristics, modes, span: ctx.spanFrom(start) };
+    }
+    return { kind: "set", scope, name: rest.name, values: rest.values, span: ctx.spanFrom(start) };
   },
   {
     expected: "a SET / SHOW / RESET statement",
