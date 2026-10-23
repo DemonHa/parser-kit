@@ -695,6 +695,44 @@ export type FunctionArg = {
 // ALTER and DROP AGGREGATE parse it: `(*)` (aggregates only) is `star` with no args.
 export type DropSignature = { star: boolean; args: FunctionArg[] };
 
+// One existing object as COMMENT ON, SECURITY LABEL, ALTER EXTENSION ADD / DROP
+// and the generic ALTER name it (see OBJECT_KINDS). `objectType` is the folded
+// keyword(s): `"text search dictionary"`, `"large object"`, and `"language"`
+// with or without PROCEDURAL. `name` is dotted where PG takes a qualified name,
+// ends in the symbol for an operator (`["pg_catalog", "+"]`), and is omitted
+// for CAST, TRANSFORM and LARGE OBJECT, which other keys name. Those keys belong to
+// a few kinds each and are omitted elsewhere:
+// - `signature`: an AGGREGATE's, always; a FUNCTION's, PROCEDURE's or
+//   ROUTINE's when it writes an argument list;
+// - `operands`: an OPERATOR's `(left, right)` types, null where NONE stands;
+// - `table`: the `ON table` of a CONSTRAINT, POLICY, RULE or TRIGGER;
+// - `domain`: the `ON DOMAIN d` of a domain's CONSTRAINT, in place of `table`;
+// - `using`: an OPERATOR CLASS's or FAMILY's index access method;
+// - `source` and `target`: a CAST's two types;
+// - `type` and `language`: a TRANSFORM's;
+// - `oid`: a LARGE OBJECT's number.
+export type ObjectRef = {
+  objectType: string;
+  name?: string[];
+  signature?: DropSignature;
+  operands?: [ColType | null, ColType | null];
+  table?: string[];
+  domain?: string[];
+  using?: string;
+  source?: ColType;
+  target?: ColType;
+  type?: ColType;
+  language?: string;
+  oid?: number;
+};
+
+// ALTER EXTENSION's actions. `add` and `drop` move a member object in or out;
+// `version` is omitted from an UPDATE with no `TO`.
+export type AlterExtensionAction =
+  | { kind: "add" | "drop"; object: ObjectRef }
+  | AlterSetSchema
+  | { kind: "update"; version?: string };
+
 // `RETURNS [SETOF] type` or `RETURNS TABLE (col type, …)`.
 export type FunctionReturns =
   | { kind: "type"; setof: boolean; type: ColType }
@@ -1077,6 +1115,11 @@ export type Stmt =
       span: Span;
     }
   | { kind: "alterSequence"; ifExists: boolean; name: string[]; action: AlterSequenceAction; span: Span }
+  | { kind: "alterExtension"; name: string; action: AlterExtensionAction; span: Span }
+  // `ALTER kind object {RENAME TO | OWNER TO | SET SCHEMA} …` for the object
+  // kinds with no ALTER target of their own; which of the three a kind takes
+  // follows PG (OBJECT_KINDS).
+  | { kind: "alterObject"; object: ObjectRef; action: AlterRenameTo | AlterOwnerTo | AlterSetSchema; span: Span }
   // Generalized DROP: `DROP <object> [CONCURRENTLY] [IF EXISTS] name[, …]
   // [CASCADE|RESTRICT]`. `objectType` is the folded keyword (`"materialized
   // view"` for the two-word one); `behavior` is the trailing CASCADE/RESTRICT
@@ -1111,7 +1154,11 @@ export type Stmt =
       behavior: "cascade" | "restrict" | null;
       span: Span;
     }
-  | { kind: "comment"; objectType: string; name: string[]; comment: string | null; span: Span }
+  // `COMMENT ON object IS text`; `comment` is null for `IS NULL`.
+  | ({ kind: "comment" } & ObjectRef & { comment: string | null; span: Span })
+  // `SECURITY LABEL [FOR provider] ON object IS label`; `provider` is omitted
+  // when absent, and `label` is null for `IS NULL`.
+  | ({ kind: "securityLabel"; provider?: string } & ObjectRef & { label: string | null; span: Span })
   // DCL / TCL / session (Phase 9).
   | Grant
   | Revoke
@@ -4303,8 +4350,13 @@ function createSchemaRest(ctx: ParseContext<SqlTokenType>): Stmt {
   return { kind: "createSchema", ifNotExists, name, authorization, elements, span: ctx.spanFrom(start) };
 }
 
+// A string or a word, PG's NonReservedWord_or_Sconst: an extension version, a
+// security label provider.
+function parseWordOrString(ctx: ParseContext<SqlTokenType>): string {
+  return ctx.is("string") ? ctx.next()!.value : ctx.parse(nameWord);
+}
+
 // `SCHEMA s`, `VERSION v` and `CASCADE`, in any order, after an optional WITH.
-// A version is a string or a word (PG's NonReservedWord_or_Sconst).
 function parseExtensionOptions(ctx: ParseContext<SqlTokenType>): ExtensionOption[] {
   ctx.eat("ident", "with");
   const options: ExtensionOption[] = [];
@@ -4312,9 +4364,7 @@ function parseExtensionOptions(ctx: ParseContext<SqlTokenType>): ExtensionOption
     if (ctx.eat("ident", "schema") !== null) {
       options.push({ kind: "schema", schema: ctx.parse(nameWord) });
     } else if (ctx.eat("ident", "version") !== null) {
-      const tok = ctx.peek();
-      const version = tok?.type === "string" ? ctx.next()!.value : ctx.parse(nameWord);
-      options.push({ kind: "version", version });
+      options.push({ kind: "version", version: parseWordOrString(ctx) });
     } else if (ctx.eat("ident", "cascade") !== null) {
       options.push({ kind: "cascade" });
     } else {
@@ -5789,6 +5839,290 @@ function alterViewRest(ctx: ParseContext<SqlTokenType>, start: Position, materia
   return { kind: "alterView", materialized, ifExists, name, actions, span: ctx.spanFrom(start) };
 }
 
+// --- object references ---
+//
+// COMMENT ON, SECURITY LABEL, ALTER EXTENSION ADD / DROP and the generic ALTER
+// all name one existing object as `kind reference`. OBJECT_KINDS is the one
+// list of those kinds: PG 17's CommentStmt, whose kinds cover the others' (bar
+// RenameStmt's GROUP and USER, which take a grammar of their own), with what each statement takes flagged per kind. Its keyword(s)
+// select the kind, and its `shape` says how the reference that follows reads.
+// A statement builds a trie over the kinds it takes (objectKindTrie) and hands
+// it to parseObjectRef. Every kind word is matched by value, so none of them
+// stops being usable as a name; `table`, `column`, `constraint`, `foreign` and
+// `cast` are reserved and match here all the same.
+
+// The generic ALTER's actions, keyed by lead word: RENAME TO, OWNER TO, SET SCHEMA.
+type AlterObjectVerb = "rename" | "owner" | "set";
+
+type ObjectKind = {
+  objectType: string;
+  // The keywords that select the kind, when they are not `objectType`'s words.
+  words?: readonly string[];
+  shape: ObjectRefShape;
+  // SECURITY LABEL takes the kind.
+  label?: true;
+  // ALTER EXTENSION ADD / DROP takes the kind.
+  member?: true;
+  // The generic ALTER's actions on the kind, for a kind with no ALTER target of
+  // its own; absent where PG has none, a dedicated target owns the ALTER, or
+  // one is to (ROLE, POLICY, FOREIGN TABLE).
+  alter?: readonly AlterObjectVerb[];
+};
+
+const ALTER_ALL: readonly AlterObjectVerb[] = ["rename", "owner", "set"];
+const RENAME_OWNER: readonly AlterObjectVerb[] = ["rename", "owner"];
+const RENAME_SCHEMA: readonly AlterObjectVerb[] = ["rename", "set"];
+
+// Grouped as gram.y groups them; the order is the order an "Expected …" croak
+// lists the lead words in. ROLE, POLICY and FOREIGN TABLE take no generic
+// ALTER: each is left for a dedicated target that will own its whole ALTER.
+const OBJECT_KINDS: readonly ObjectKind[] = [
+  // object_type_any_name
+  { objectType: "table", shape: "qualName", label: true, member: true },
+  { objectType: "sequence", shape: "qualName", label: true, member: true },
+  { objectType: "view", shape: "qualName", label: true, member: true },
+  { objectType: "materialized view", shape: "qualName", label: true, member: true },
+  { objectType: "index", shape: "qualName", label: true, member: true },
+  { objectType: "foreign table", shape: "qualName", label: true, member: true },
+  { objectType: "collation", shape: "qualName", label: true, member: true, alter: ALTER_ALL },
+  { objectType: "conversion", shape: "qualName", label: true, member: true, alter: ALTER_ALL },
+  { objectType: "statistics", shape: "qualName", label: true, member: true, alter: ALTER_ALL },
+  { objectType: "text search parser", shape: "qualName", label: true, member: true, alter: RENAME_SCHEMA },
+  { objectType: "text search dictionary", shape: "qualName", label: true, member: true, alter: ALTER_ALL },
+  { objectType: "text search template", shape: "qualName", label: true, member: true, alter: RENAME_SCHEMA },
+  { objectType: "text search configuration", shape: "qualName", label: true, member: true, alter: ALTER_ALL },
+  { objectType: "column", shape: "qualName", label: true },
+  // object_type_name
+  { objectType: "access method", shape: "name", label: true, member: true },
+  { objectType: "event trigger", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  // ALTER EXTENSION is a target of its own.
+  { objectType: "extension", shape: "name", label: true, member: true },
+  { objectType: "foreign data wrapper", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "language", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  {
+    objectType: "language",
+    words: ["procedural", "language"],
+    shape: "name",
+    label: true,
+    member: true,
+    alter: RENAME_OWNER,
+  },
+  { objectType: "publication", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "schema", shape: "name", label: true, member: true },
+  { objectType: "server", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "database", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "role", shape: "name", label: true, member: true },
+  { objectType: "subscription", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "tablespace", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  // The kinds with a reference shape of their own.
+  { objectType: "type", shape: "qualName", label: true, member: true },
+  { objectType: "domain", shape: "qualName", label: true, member: true },
+  { objectType: "aggregate", shape: "aggregate", label: true, member: true },
+  { objectType: "function", shape: "routine", label: true, member: true },
+  { objectType: "operator", shape: "operator", member: true, alter: ["owner", "set"] },
+  { objectType: "constraint", shape: "constraint" },
+  { objectType: "policy", shape: "onTable" },
+  { objectType: "rule", shape: "onTable", alter: ["rename"] },
+  { objectType: "trigger", shape: "onTable", alter: ["rename"] },
+  { objectType: "procedure", shape: "routine", label: true, member: true, alter: ALTER_ALL },
+  { objectType: "routine", shape: "routine", label: true, member: true, alter: ALTER_ALL },
+  { objectType: "transform", shape: "transform", member: true },
+  { objectType: "operator class", shape: "opClass", member: true, alter: ALTER_ALL },
+  { objectType: "operator family", shape: "opClass", member: true, alter: ALTER_ALL },
+  { objectType: "large object", shape: "largeObject", label: true, alter: ["owner"] },
+  { objectType: "cast", shape: "cast", member: true },
+];
+
+// One node per keyword prefix: `kind` when the words so far spell a kind,
+// `next` keyed by the word that may follow, and the croak over `next`'s keys.
+type ObjectKindTrie = { kind?: ObjectKind; next: Map<string, ObjectKindTrie>; expected: string };
+
+// The trie over the kinds `take` keeps, in OBJECT_KINDS order.
+function objectKindTrie(take: (kind: ObjectKind) => boolean): ObjectKindTrie {
+  const root: ObjectKindTrie = { next: new Map(), expected: "" };
+  for (const kind of OBJECT_KINDS) {
+    if (!take(kind)) continue;
+    let node = root;
+    for (const w of kind.words ?? kind.objectType.split(" ")) {
+      let child = node.next.get(w);
+      if (child === undefined) {
+        child = { next: new Map(), expected: "" };
+        node.next.set(w, child);
+      }
+      node = child;
+    }
+    node.kind = kind;
+  }
+  const setExpected = (node: ObjectKindTrie) => {
+    node.expected = quoteList([...node.next.keys()]);
+    for (const child of node.next.values()) setExpected(child);
+  };
+  setExpected(root);
+  return root;
+}
+
+const COMMENT_OBJECTS = objectKindTrie(() => true);
+const LABEL_OBJECTS = objectKindTrie((k) => k.label === true);
+const MEMBER_OBJECTS = objectKindTrie((k) => k.member === true);
+const ALTER_OBJECTS = objectKindTrie((k) => k.alter !== undefined);
+
+// Whether `tok` can start a name: a quoted word, or an unreserved one.
+const isNameToken = (tok: Token<SqlTokenType> | null) =>
+  tok !== null && (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value)));
+
+// The kind keyword(s), as long a run as the trie spells. Where the words so far
+// already spell a kind, a further kind word is one only when a name follows it,
+// as in PG: `OPERATOR CLASS c USING btree` is an operator class, but
+// `OPERATOR class.+ (int, int)` is an operator in a schema called `class`.
+function parseObjectKind(ctx: ParseContext<SqlTokenType>, trie: ObjectKindTrie): ObjectKind {
+  let node = trie;
+  for (;;) {
+    const tok = ctx.peek();
+    const child = tok?.type === "ident" ? node.next.get(tok.value) : undefined;
+    if (child !== undefined && (node.kind === undefined || isNameToken(ctx.peekAhead(1)))) {
+      ctx.next();
+      node = child;
+    } else if (node.kind !== undefined) {
+      return node.kind;
+    } else {
+      return ctx.croak(`Expected ${node.expected} but found ${describeFound(tok)}`);
+    }
+  }
+}
+
+// An OPERATOR reference: `[schema.]op`, then `(left, right)` where NONE stands
+// for the missing side of a prefix operator. PG has no `(type)` form, and no
+// operator lacks both sides.
+function parseOperatorRef(ctx: ParseContext<SqlTokenType>): Pick<ObjectRef, "name" | "operands"> {
+  const name: string[] = [];
+  while (!ctx.is("op")) {
+    if (!isNameToken(ctx.peek())) ctx.croak(`Expected an operator but found ${describeFound(ctx.peek())}`);
+    name.push(ctx.parse(nameWord));
+    ctx.parse(punc("."));
+  }
+  name.push(ctx.parse(sortOperator)); // any operator but `=>`, as in PG
+  ctx.parse(punc("("));
+  const operand = () => (ctx.eat("ident", "none") !== null ? null : ctx.parse(typeRef));
+  const left = operand();
+  ctx.parse(punc(","));
+  const right = operand();
+  expectClose(ctx);
+  if (left === null && right === null) ctx.croak("An operator takes at least one operand type, not NONE twice");
+  return { name, operands: [left, right] };
+}
+
+// `name ON table`, and for a CONSTRAINT `name ON DOMAIN domain`. DOMAIN is the
+// keyword only when a name follows it; otherwise it is the table's name.
+function parseOnTableRef(
+  ctx: ParseContext<SqlTokenType>,
+  domain: boolean,
+): Pick<ObjectRef, "name" | "table" | "domain"> {
+  const name = [ctx.parse(nameWord)];
+  ctx.parse(kw("on"));
+  if (domain && ctx.is("ident", "domain") && isNameToken(ctx.peekAhead(1))) {
+    ctx.next(); // DOMAIN
+    return { name, domain: ctx.parse(qualName) };
+  }
+  return { name, table: ctx.parse(qualName) };
+}
+
+// How a kind's reference reads once its keyword(s) are consumed, keyed by the
+// kind's `shape`: `name` is PG's `name`, `qualName` its `any_name` (and, here,
+// TYPE's and DOMAIN's `Typename`); the rest are as ObjectRef describes them.
+type ObjectRefShape = keyof typeof OBJECT_REF_SHAPES;
+const OBJECT_REF_SHAPES = {
+  name: (ctx) => ({ name: [ctx.parse(nameWord)] }),
+  qualName: (ctx) => ({ name: ctx.parse(qualName) }),
+  routine: (ctx) => {
+    const { name, signature } = ctx.parse(routineRef);
+    return signature === null ? { name } : { name, signature };
+  },
+  aggregate: (ctx) => ctx.parse(aggregateRef),
+  operator: parseOperatorRef,
+  cast: (ctx) => {
+    ctx.parse(punc("("));
+    const source = ctx.parse(typeRef);
+    ctx.parse(kw("as"));
+    const target = ctx.parse(typeRef);
+    expectClose(ctx);
+    return { source, target };
+  },
+  transform: (ctx) => {
+    ctx.parse(kw("for"));
+    const type = ctx.parse(typeRef);
+    ctx.parse(kw("language"));
+    return { type, language: ctx.parse(nameWord) };
+  },
+  opClass: (ctx) => {
+    const name = ctx.parse(qualName);
+    ctx.parse(kw("using"));
+    return { name, using: ctx.parse(nameWord) };
+  },
+  largeObject: (ctx) => {
+    // PG's NumericOnly: a number, signed or not.
+    const negate = ctx.eat("op", "-") !== null;
+    if (!negate) ctx.eat("op", "+");
+    if (!ctx.is("number")) ctx.croak(`Expected a number but found ${describeFound(ctx.peek())}`);
+    const oid = Number(ctx.next()!.value);
+    return { oid: negate ? -oid : oid };
+  },
+  onTable: (ctx) => parseOnTableRef(ctx, false),
+  constraint: (ctx) => parseOnTableRef(ctx, true),
+} satisfies Record<string, (ctx: ParseContext<SqlTokenType>) => Omit<ObjectRef, "objectType">>;
+
+// `kind reference` over the kinds in `trie`. The kind comes back beside the
+// reference for a caller that checks what the kind allows next.
+function parseObjectRef(ctx: ParseContext<SqlTokenType>, trie: ObjectKindTrie): { kind: ObjectKind; ref: ObjectRef } {
+  const kind = parseObjectKind(ctx, trie);
+  return { kind, ref: { objectType: kind.objectType, ...OBJECT_REF_SHAPES[kind.shape](ctx) } };
+}
+
+// The generic ALTER's actions; each kind takes the subset its `alter` names.
+const ALTER_OBJECT_ACTIONS: Record<
+  AlterObjectVerb,
+  DispatchEntry<AlterRenameTo | AlterOwnerTo | AlterSetSchema, []>
+> = {
+  rename: { parse: parseRenameTo },
+  owner: { parse: parseOwnerTo },
+  set: { parse: parseSetSchemaAction },
+};
+const ALTER_OBJECT_ACTION_MAPS = new Map(
+  OBJECT_KINDS.filter((k) => k.alter !== undefined).map((k) => {
+    const map = Object.fromEntries(k.alter!.map((verb) => [verb, ALTER_OBJECT_ACTIONS[verb]]));
+    return [k, { map, expected: keyList(map) }] as const;
+  }),
+);
+
+// `kind reference action` — ALTER consumed by the caller, whose `start` the
+// node spans from — for a kind with no ALTER target of its own.
+function alterObjectRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  const { kind, ref } = parseObjectRef(ctx, ALTER_OBJECTS);
+  const { map, expected } = ALTER_OBJECT_ACTION_MAPS.get(kind)!;
+  const action = dispatch(map, expected, ctx);
+  return { kind: "alterObject", object: ref, action, span: ctx.spanFrom(start) };
+}
+
+// ALTER EXTENSION's actions. ADD and DROP take any member kind; UPDATE's
+// `TO version` is optional.
+const extensionMember =
+  (kind: "add" | "drop") =>
+  (ctx: ParseContext<SqlTokenType>): AlterExtensionAction => {
+    ctx.next(); // ADD / DROP
+    return { kind, object: parseObjectRef(ctx, MEMBER_OBJECTS).ref };
+  };
+const EXTENSION_ACTIONS: DispatchMap<AlterExtensionAction> = {
+  add: { parse: extensionMember("add") },
+  drop: { parse: extensionMember("drop") },
+  set: { parse: parseSetSchemaAction },
+  update: {
+    parse: (ctx) => {
+      ctx.next(); // UPDATE
+      return ctx.eat("ident", "to") !== null ? { kind: "update", version: parseWordOrString(ctx) } : { kind: "update" };
+    },
+  },
+};
+const EXTENSION_ACTION_EXPECTED = keyList(EXTENSION_ACTIONS);
+
 // The ALTER targets. Dispatch peeks, as PLAIN_CREATE's does: each handler
 // consumes its own lead word, and is handed the position before ALTER so its
 // node spans the whole statement. The croak is hand-written and replaces no
@@ -5867,7 +6201,23 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
       return { kind: "alterSequence", ifExists, name, action, span: ctx.spanFrom(start) };
     },
   },
+  extension: {
+    parse: (ctx, start) => {
+      ctx.next(); // EXTENSION
+      const name = ctx.parse(nameWord);
+      const action = dispatch(EXTENSION_ACTIONS, EXTENSION_ACTION_EXPECTED, ctx);
+      return { kind: "alterExtension", name, action, span: ctx.spanFrom(start) };
+    },
+  },
 };
+// Every other kind the generic ALTER takes leads it here. A dedicated target
+// that takes one of these lead words must hand that word's generic kinds to
+// alterObjectRest itself (`FOREIGN DATA WRAPPER` beside `FOREIGN TABLE`), and
+// then drop the word from this loop, which refuses to shadow it silently.
+for (const word of ALTER_OBJECTS.next.keys()) {
+  if (Object.hasOwn(ALTER_TARGETS, word)) throw new Error(`ALTER ${word} has a dedicated target`);
+  ALTER_TARGETS[word] = { parse: alterObjectRest };
+}
 const ALTER_TARGET_EXPECTED = keyList(ALTER_TARGETS);
 
 const alterStmt = custom<Stmt, SqlTokenType>(
@@ -6056,25 +6406,41 @@ const refreshStmt = custom<Stmt, SqlTokenType>(
   { expected: '"refresh"', first: [{ type: "ident", value: "refresh" }] },
 );
 
-const commentStmt = seq(
-  skip(kw("comment")),
-  skip(kw("on")),
-  field(
-    "objectType",
-    oneOf(kw("table"), kw("column"), kw("index"), kw("type"), kw("schema")).map((n) => n.value),
-  ),
-  field("name", qualName),
-  skip(kw("is")),
-  // The comment body flows a dollar-quoted string (`$tag$…$tag$`, one `string`
-  // token) through the grammar, or NULL to clear it.
-  field(
-    "comment",
-    oneOf(
-      token("string").map((n) => n.value),
-      kw("null").map((): string | null => null),
-    ),
-  ),
-).map(({ objectType, name, comment }, span): Stmt => ({ kind: "comment", objectType, name, comment, span }));
+// A comment's or security label's text: a string — a dollar-quoted one
+// (`$tag$…$tag$`) is one `string` token too — or NULL to clear it.
+const commentText = oneOf(
+  token("string").map((n) => n.value),
+  kw("null").map((): string | null => null),
+);
+
+// `COMMENT ON object IS text`, over every kind of OBJECT_KINDS.
+const commentStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("comment"));
+    ctx.parse(kw("on"));
+    const { ref } = parseObjectRef(ctx, COMMENT_OBJECTS);
+    ctx.parse(kw("is"));
+    return { kind: "comment", ...ref, comment: ctx.parse(commentText), span: ctx.spanFrom(start) };
+  },
+  { expected: '"comment"', first: [{ type: "ident", value: "comment" }] },
+);
+
+// `SECURITY LABEL [FOR provider] ON object IS label`, over the kinds PG labels.
+const securityLabelStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kwseq("security", "label"));
+    const provider = ctx.eat("ident", "for") !== null ? parseWordOrString(ctx) : null;
+    ctx.parse(kw("on"));
+    const { ref } = parseObjectRef(ctx, LABEL_OBJECTS);
+    ctx.parse(kw("is"));
+    const label = ctx.parse(commentText);
+    const head = provider === null ? { kind: "securityLabel" as const } : { kind: "securityLabel" as const, provider };
+    return { ...head, ...ref, label, span: ctx.spanFrom(start) };
+  },
+  { expected: '"security"', first: [{ type: "ident", value: "security" }] },
+);
 
 // --- Phase 9: DCL / TCL / session ---
 //
@@ -8394,7 +8760,7 @@ const copyStmt = custom<Stmt, SqlTokenType>(
 // to grow. Nesting is dispatch- and validation-equivalent to the flat form —
 // oneOf's first() is a flatMap, and the inner groups catch collisions within a
 // family — and the composed `expected` is overridden by describe() anyway.
-const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt, refreshStmt);
+const ddlStmt = oneOf(createStmt, alterStmt, dropStmt, truncateStmt, commentStmt, securityLabelStmt, refreshStmt);
 const utilityStmt = oneOf(
   grantStmt,
   transactionStmt,
