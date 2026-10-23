@@ -6203,12 +6203,11 @@ describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDIN
     expect(parse("t DEFAULT")).toThrow(/Expected "values" but found ";"/);
     // DEFAULT is a whole row item, never an operand.
     expect(parse("t VALUES (DEFAULT + 1)")).toThrow(/Expected "," but found "\+"/);
-    // …and only in INSERT's own bare VALUES rows. A VALUES query rejects it
-    // as PG does; a parenthesised VALUES source and SET's right-hand side are
-    // limits of this grammar, which PG would accept.
+    // …and only in INSERT's own bare VALUES rows (and SET's right-hand side).
+    // A VALUES query rejects it as PG does; a parenthesised VALUES source is a
+    // limit of this grammar, which PG would accept.
     expect(() => sqlLite.parse("SELECT * FROM (VALUES (DEFAULT)) v;")).toThrow(/Expected a name but found "default"/);
     expect(() => sqlLite.parse("INSERT INTO t (VALUES (DEFAULT));")).toThrow(/Expected a name but found "default"/);
-    expect(() => sqlLite.parse("UPDATE t SET a = DEFAULT;")).toThrow(/Expected a name but found "default"/);
     // The alias needs its AS, and AS needs a name.
     expect(parse("t x VALUES (1)")).toThrow(/found "x" \(1:14\)/);
     // (An empty quoted alias is still an alias, not a missing one.)
@@ -7792,6 +7791,164 @@ describe("SQL-lite multi-column UPDATE assignments", () => {
     expect(bad("UPDATE t SET (a, b) = (1, 2) OVERLAPS (3, 4);")).toThrow(/Expected ";" but found "overlaps"/);
     expect(bad("UPDATE t SET (a, b) = (SELECT 1, 2) + 1;")).toThrow(/Expected ";" but found "\+"/);
     expect(bad("UPDATE t SET = 1;")).toThrow(/Expected "\(" or a name but found "="/);
+  });
+});
+
+// --- ONLY targets, WHERE CURRENT OF and SET col = DEFAULT ---
+
+describe("SQL-lite ONLY targets, WHERE CURRENT OF and SET col = DEFAULT", () => {
+  const update = (over: Record<string, unknown>) => ({
+    kind: "update",
+    table: ["t"],
+    alias: null,
+    set: [{ column: "a", value: num(1) }],
+    from: null,
+    where: null,
+    returning: null,
+    ...over,
+  });
+  const del = (over: Record<string, unknown>) => ({
+    kind: "delete",
+    table: ["t"],
+    alias: null,
+    using: null,
+    where: null,
+    returning: null,
+    ...over,
+  });
+  const truncate = (names: string[][], over: Record<string, unknown> = {}) => ({
+    kind: "truncate",
+    names,
+    identity: null,
+    behavior: null,
+    ...over,
+  });
+  const DEFAULT = { kind: "default" };
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("records ONLY on an UPDATE target and drops the * suffix", () => {
+    expect(firstStmt("UPDATE ONLY t SET a = 1;")).toEqual(update({ only: true }));
+    expect(firstStmt("UPDATE ONLY (s.t) AS x SET a = 1;")).toEqual(
+      update({ table: ["s", "t"], only: true, alias: "x" }),
+    );
+    expect(firstStmt("UPDATE t * x SET a = 1;")).toEqual(update({ alias: "x" }));
+    expect(firstStmt("UPDATE t * SET a = 1;")).toEqual(firstStmt("UPDATE t SET a = 1;"));
+  });
+
+  it("records ONLY on a DELETE target and drops the * suffix", () => {
+    expect(firstStmt("DELETE FROM ONLY t;")).toEqual(del({ only: true }));
+    expect(firstStmt("DELETE FROM ONLY (t) x WHERE x.a = 1;")).toEqual(
+      del({ only: true, alias: "x", where: bin("=", name("x", "a"), num(1)) }),
+    );
+    expect(firstStmt("DELETE FROM s.t * AS x;")).toEqual(del({ table: ["s", "t"], alias: "x" }));
+  });
+
+  it("records ONLY per TRUNCATE table, only when some table has it", () => {
+    expect(firstStmt("TRUNCATE ONLY a;")).toEqual(truncate([["a"]], { only: [true] }));
+    expect(firstStmt("TRUNCATE TABLE ONLY a, b *, ONLY (s.c) RESTART IDENTITY CASCADE;")).toEqual(
+      truncate([["a"], ["b"], ["s", "c"]], { only: [true, false, true], identity: "restart", behavior: "cascade" }),
+    );
+    expect(firstStmt("TRUNCATE a *, b;")).toEqual(truncate([["a"], ["b"]]));
+  });
+
+  it("reads WHERE CURRENT OF on UPDATE and DELETE", () => {
+    expect(firstStmt("UPDATE ONLY t AS x SET a = 1 FROM u WHERE CURRENT OF c RETURNING a;")).toEqual(
+      update({
+        only: true,
+        alias: "x",
+        from: [tableFrom(["u"])],
+        currentOf: "c",
+        returning: [col(name("a"))],
+      }),
+    );
+    expect(firstStmt('DELETE FROM t USING u WHERE CURRENT OF "Cur" RETURNING *;')).toEqual(
+      del({ using: [tableFrom(["u"])], currentOf: "Cur", returning: [col(star())] }),
+    );
+  });
+
+  it("omits only and currentOf when absent", () => {
+    for (const src of ["UPDATE t SET a = 1 WHERE a;", "DELETE FROM t WHERE a;"]) {
+      expect(firstStmt(src)).not.toHaveProperty("only");
+      expect(firstStmt(src)).not.toHaveProperty("currentOf");
+    }
+    expect(firstStmt("TRUNCATE a, b;")).not.toHaveProperty("only");
+  });
+
+  it("reports a bad character after WHERE current", () => {
+    expect(() => sqlLite.parse("DELETE FROM t WHERE current é;")).toThrow(/Unexpected character "é"/);
+    expect(sqlLite.diagnose("DELETE FROM t WHERE current é;").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "é" (1:28)',
+    ]);
+  });
+
+  it("takes a bare DEFAULT as a single-column value, in UPDATE, ON CONFLICT and MERGE", () => {
+    expect(firstStmt("UPDATE t SET a = DEFAULT, b = 2, (c, d) = (DEFAULT, 3);").set).toEqual([
+      { column: "a", value: DEFAULT },
+      { column: "b", value: num(2) },
+      { columns: ["c", "d"], value: { kind: "row", items: [DEFAULT, num(3)], implicit: true } },
+    ]);
+    expect(
+      firstStmt("INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = DEFAULT;").onConflict.action.set,
+    ).toEqual([{ column: "a", value: DEFAULT }]);
+    expect(
+      firstStmt("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = DEFAULT, b = s.b;").when[0]
+        .action,
+    ).toEqual({
+      kind: "update",
+      set: [
+        { column: "a", value: DEFAULT },
+        { column: "b", value: name("s", "b") },
+      ],
+    });
+  });
+
+  it("keeps current and of unreserved as names and aliases", () => {
+    expect(firstStmt("UPDATE current SET current = current WHERE current;")).toEqual(
+      update({ table: ["current"], set: [{ column: "current", value: name("current") }], where: name("current") }),
+    );
+    expect(firstStmt("UPDATE t AS current SET of = 1 WHERE current.of = of;")).toEqual(
+      update({
+        alias: "current",
+        set: [{ column: "of", value: num(1) }],
+        where: bin("=", name("current", "of"), name("of")),
+      }),
+    );
+    expect(firstStmt("DELETE FROM of AS current WHERE current OR of;")).toEqual(
+      del({ table: ["of"], alias: "current", where: bin("or", name("current"), name("of")) }),
+    );
+    expect(firstStmt("DELETE FROM t WHERE CURRENT OF of;")).toEqual(del({ currentOf: "of" }));
+    expect(firstStmt("UPDATE t SET a = 1 WHERE CURRENT OF current;")).toEqual(update({ currentOf: "current" }));
+    expect(firstStmt("SELECT current, of FROM current AS of;").columns).toEqual([
+      col(name("current")),
+      col(name("of")),
+    ]);
+  });
+
+  it("rejects the malformed forms", () => {
+    // `*` cannot follow ONLY, and ONLY needs a name.
+    expect(bad("UPDATE ONLY t * SET a = 1;")).toThrow(/Expected "set" but found "\*" \(1:14\)/);
+    expect(bad("DELETE FROM ONLY t *;")).toThrow(/found "\*" \(1:19\)/);
+    expect(bad("UPDATE ONLY SET a = 1;")).toThrow(/Expected a name but found "set" \(1:12\)/);
+    expect(bad("UPDATE ONLY (t) * SET a = 1;")).toThrow(/Expected "set" but found "\*"/);
+    expect(bad("TRUNCATE ONLY a *;")).toThrow(/found "\*" \(1:16\)/);
+    expect(bad("TRUNCATE ONLY (a, b);")).toThrow(/Expected "\)" but found ","/);
+    // Quoted spellings are names, not the keyword pair.
+    expect(bad('DELETE FROM t WHERE "current" OF c;')).toThrow(/Expected ";" but found "of"/);
+    expect(bad('DELETE FROM t WHERE CURRENT "of" c;')).toThrow(/Expected ";" but found "of"/);
+    // CURRENT OF needs one cursor name and ends the WHERE clause.
+    expect(bad("DELETE FROM t WHERE CURRENT OF c.d;")).toThrow(/Expected ";" but found "\." \(1:32\)/);
+    expect(bad("DELETE FROM t WHERE CURRENT OF;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("DELETE FROM t WHERE CURRENT OF c AND x;")).toThrow(/Expected ";" but found "and"/);
+    expect(bad("UPDATE t SET a = 1 WHERE CURRENT OF c FROM u;")).toThrow(/Expected ";" but found "from"/);
+    // ON CONFLICT's WHERE is a plain condition.
+    expect(bad("INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 1 WHERE CURRENT OF c;")).toThrow(
+      /Expected ";" but found "of"/,
+    );
+    // DEFAULT is a whole value, never an operand (PG rejects these in analysis).
+    expect(bad("UPDATE t SET a = DEFAULT + 1;")).toThrow(/Expected ";" but found "\+"/);
+    expect(bad("UPDATE t SET a = 1 WHERE a = DEFAULT;")).toThrow(/Expected a name but found "default"/);
+    // A parenthesised DEFAULT is a limit of this grammar, which PG would accept.
+    expect(bad("UPDATE t SET a = (DEFAULT);")).toThrow(/Expected a name but found "default"/);
   });
 });
 
