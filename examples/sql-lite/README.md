@@ -61,8 +61,8 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 - **DML.** `INSERT` with `DEFAULT VALUES`, `DEFAULT` row items, `OVERRIDING`, `ON CONFLICT (cols) | ON CONSTRAINT … DO NOTHING | DO UPDATE … WHERE`, a target alias, and `RETURNING`. `UPDATE … FROM` with multi-column `(a, b) = (…)` / `= (SELECT …)` assignments. `DELETE … USING`. `MERGE` with every `WHEN [NOT] MATCHED [BY SOURCE | TARGET]` form, plus `RETURNING`. `COPY` to and from a file, `STDIN` / `STDOUT` or a `PROGRAM`, with a parenthesised option list and `WHERE`. `TRUNCATE`.
 - **DDL.**
   - **`CREATE TABLE`:** column and table constraints, identity and stored generated columns, `COLLATE`, foreign-key actions / `MATCH` / `DEFERRABLE`, `EXCLUDE`, `LIKE … INCLUDING`, `INHERITS`, range / list / hash partitioning and `PARTITION OF … FOR VALUES`, `WITH (…)`, `TABLESPACE`, `ON COMMIT`, `TEMP` / `UNLOGGED`, `AS SELECT … WITH [NO] DATA`.
-  - **`ALTER TABLE`:** action lists that add or drop columns and constraints, `ALTER COLUMN` type / default / not-null, renames, `SET SCHEMA`, `OWNER TO`, triggers, `ATTACH` / `DETACH PARTITION`, storage parameters, `REPLICA IDENTITY`, `CLUSTER ON`.
-  - **Other `CREATE` targets:** indexes (with `CONCURRENTLY`, `USING`, opclasses, `INCLUDE`, partial `WHERE`, `WITH`), views and materialized views, sequences, enum / composite / range types, domains, schemas, databases, extensions, tablespaces, functions, procedures, aggregates, triggers, roles and users.
+  - **`ALTER TABLE`:** `[IF EXISTS] ONLY name` (as pg_dump writes it), `ONLY (name)` and the inheritance `*`, action lists that add or drop columns and constraints, `ALTER COLUMN` type / default / not-null, renames, `SET SCHEMA`, `OWNER TO`, triggers, `ATTACH` / `DETACH PARTITION`, storage parameters, `REPLICA IDENTITY`, `CLUSTER ON`.
+  - **Other `CREATE` targets:** indexes (with `CONCURRENTLY`, `ON ONLY`, `USING`, opclasses, `INCLUDE`, partial `WHERE`, `WITH`), views and materialized views, sequences, enum / composite / range types, domains, schemas, databases, extensions, tablespaces, functions, procedures, aggregates, triggers, roles and users.
   - **`DROP`:** all of those except tablespaces.
   - **`ALTER`:** schemas, domains, types, indexes, functions, aggregates, views, materialized views and sequences.
   - Plus `COMMENT ON` and `REFRESH MATERIALIZED VIEW`.
@@ -80,12 +80,12 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 | DML | 77 | 32 | 35 | 6 | 4 |
 | Transactions and session | 70 | 17 | 33 | 0 | 20 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
-| Tables and indexes | 84 | 13 | 40 | 2 | 29 |
+| Tables and indexes | 84 | 14 | 41 | 1 | 28 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **211** | **237** | **18** | **133** |
+| **Total** | **599** | **212** | **238** | **17** | **132** |
 
-So sql-lite accepts 448 of the 599 statements (75%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 450 of the 599 statements (75%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -102,9 +102,9 @@ PG_COVERAGE_REPORT=1 pnpm vitest run examples/sql-lite/pg-coverage.test.ts
 
 | File | Statements | Parse | Rate | COPY blocks | Meta-commands |
 |---|---:|---:|---:|---:|---:|
-| `handwritten-pg17.sql` | 110 | 63 | 57.3% | 4 | 7 |
-| `pagila-schema.sql` | 388 | 208 | 53.6% | 0 | 0 |
-| **Total** | **498** | **271** | **54.4%** | **4** | **7** |
+| `handwritten-pg17.sql` | 110 | 72 | 65.5% | 4 | 7 |
+| `pagila-schema.sql` | 388 | 315 | 81.2% | 0 | 0 |
+| **Total** | **498** | **387** | **77.7%** | **4** | **7** |
 
 To print the table, or to rewrite `pg-dump-corpus.ts` after a grammar change (review the diff: no row may move to `fail`):
 
@@ -140,7 +140,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 **Clauses**
 
 - **`DEFAULT <expr>` followed by `NOT NULL`**, as in `id integer DEFAULT nextval('s'::regclass) NOT NULL`. pg_dump emits this for nearly every table. `DEFAULT` takes a full expression, so the `NOT` is read as the start of `NOT LIKE` / `NOT IN`. (Other constraints after `DEFAULT` work.)
-- **`ONLY`** on `ALTER TABLE`, `UPDATE`, `DELETE`, `TRUNCATE` and `CREATE INDEX … ON ONLY`. pg_dump emits `ALTER TABLE ONLY`. `SELECT … FROM ONLY`, `MERGE INTO ONLY` and `LOCK ONLY` work.
+- **`ONLY`** on `UPDATE`, `DELETE` and `TRUNCATE`. `SELECT … FROM ONLY`, `MERGE INTO ONLY`, `LOCK ONLY`, `ALTER TABLE ONLY` and `CREATE INDEX … ON ONLY` work.
 - **`ALTER TABLE`:**
   - `ADD CONSTRAINT … NOT VALID`
   - `[ENABLE | DISABLE | FORCE | NO FORCE] ROW LEVEL SECURITY`
@@ -211,6 +211,7 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **The zero-length identifier `""`.**
 - **Named parameters** such as `$name`. PostgreSQL only has positional ones (`$1`); sql-lite keeps `$name` for templated SQL.
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
+- **`CREATE INDEX IF NOT EXISTS ON t (…)`** with no index name. PostgreSQL requires a name after `IF NOT EXISTS`.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.
 
