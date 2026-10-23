@@ -6587,6 +6587,135 @@ describe("SQL-lite PREPARE and EXECUTE", () => {
   });
 });
 
+// --- column and domain DEFAULT as a b-expression ---
+
+describe("SQL-lite column and domain DEFAULT as a b-expression", () => {
+  const colConstraints = (type: string, src: string) =>
+    (firstStmt(`CREATE TABLE t (c ${type} ${src});`) as any).items[0].constraints as Record<string, unknown>[];
+  const domainConstraints = (src: string) =>
+    (firstStmt(`CREATE DOMAIN d AS int ${src};`) as any).constraints as Record<string, unknown>[];
+  const bad = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int ${src});`);
+  const NOT_NULL = { kind: "notNull" };
+  const typ = (n: string, over: Record<string, unknown> = {}) => ({ name: n, args: [], array: false, ...over });
+
+  it("ends the default before NOT NULL, as pg_dump writes it", () => {
+    expect(colConstraints("integer", "DEFAULT nextval('public.t_id_seq'::regclass) NOT NULL")).toEqual([
+      {
+        kind: "default",
+        expr: {
+          kind: "call",
+          name: "nextval",
+          args: [{ kind: "cast", expr: str("public.t_id_seq"), type: typ("regclass") }],
+        },
+      },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("int", "DEFAULT 0 NOT NULL")).toEqual([{ kind: "default", expr: num(0) }, NOT_NULL]);
+    expect(colConstraints("int", "DEFAULT -1 NOT NULL")).toEqual([
+      { kind: "default", expr: { kind: "unary", op: "-", operand: num(1) } },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("int[]", "DEFAULT ARRAY[]::integer[] NOT NULL")).toEqual([
+      {
+        kind: "default",
+        expr: { kind: "cast", expr: { kind: "array", elements: [] }, type: typ("integer", { array: true }) },
+      },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("text", "DEFAULT 'a'::text || 'b' NOT NULL")).toEqual([
+      { kind: "default", expr: bin("||", { kind: "cast", expr: str("a"), type: typ("text") }, str("b")) },
+      NOT_NULL,
+    ]);
+    // The span of the DEFAULT constraint stops at its operand.
+    const [stmt] = sqlLite.parse("CREATE TABLE t (c int DEFAULT 0 NOT NULL);") as any[];
+    expect(stmt.items[0].constraints[0].span).toEqual({ start: { row: 1, col: 22 }, end: { row: 1, col: 31 } });
+  });
+
+  it("takes comparisons, IS [NOT] DISTINCT FROM and casts, as PG's b_expr does", () => {
+    expect(colConstraints("boolean", "DEFAULT 1 + 1 = 2 NOT NULL")).toEqual([
+      { kind: "default", expr: bin("=", bin("+", num(1), num(1)), num(2)) },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("boolean", "DEFAULT a IS NOT DISTINCT FROM b NOT NULL")).toEqual([
+      { kind: "default", expr: { kind: "isDistinct", expr: name("a"), from: name("b"), negated: true } },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("boolean", "DEFAULT a IS DISTINCT FROM b = c")).toEqual([
+      {
+        kind: "default",
+        expr: { kind: "isDistinct", expr: name("a"), from: bin("=", name("b"), name("c")), negated: false },
+      },
+    ]);
+    expect(colConstraints("text", "DEFAULT (a + 1)::text CHECK (c <> '')")).toEqual([
+      { kind: "default", expr: { kind: "cast", expr: bin("+", name("a"), num(1)), type: typ("text") } },
+      { kind: "check", expr: bin("<>", name("c"), str("")) },
+    ]);
+  });
+
+  it("takes any expression inside parentheses", () => {
+    expect(colConstraints("text", `DEFAULT ('x' COLLATE "C")`)).toEqual([
+      { kind: "default", expr: { kind: "collate", expr: str("x"), collation: ["C"] } },
+    ]);
+    expect(colConstraints("timestamp", "DEFAULT (now() AT TIME ZONE 'utc') NOT NULL")).toEqual([
+      {
+        kind: "default",
+        expr: { kind: "atTimeZone", expr: { kind: "call", name: "now", args: [] }, zone: str("utc") },
+      },
+      NOT_NULL,
+    ]);
+  });
+
+  it("applies to domains, where a COLLATE after the default is the domain's", () => {
+    expect(domainConstraints("DEFAULT 0 NOT NULL CHECK (VALUE >= 0)")).toEqual([
+      { kind: "default", expr: num(0) },
+      { kind: "notNull", name: null },
+      { kind: "check", name: null, expr: bin(">=", name("value"), num(0)) },
+    ]);
+    expect(domainConstraints(`DEFAULT 'x' COLLATE "C"`)).toEqual([
+      { kind: "default", expr: str("x") },
+      { kind: "collate", collation: ["C"] },
+    ]);
+  });
+
+  it("leaves SET DEFAULT and argument defaults a full expression", () => {
+    // PG's ALTER COLUMN / ALTER DOMAIN SET DEFAULT and a routine argument's
+    // DEFAULT take a_expr, unlike the column and domain constraint.
+    expect(firstStmt("ALTER TABLE t ALTER c SET DEFAULT now() AT TIME ZONE 'utc';").actions[0]).toMatchObject({
+      kind: "setDefault",
+      expr: { kind: "atTimeZone" },
+    });
+    expect(firstStmt("ALTER DOMAIN d SET DEFAULT 5 IS NULL;")).toMatchObject({
+      action: { kind: "setDefault", expr: { kind: "is" } },
+    });
+    expect(
+      firstStmt("CREATE FUNCTION f(a boolean DEFAULT 1 IS NULL) RETURNS int LANGUAGE sql AS 'SELECT 1';").args[0],
+    ).toMatchObject({ defaultValue: { kind: "is" } });
+  });
+
+  it("reads POSITION's first operand as the same b-expression", () => {
+    expect(exprOf("POSITION(a = b IN c)")).toEqual({
+      kind: "position",
+      substring: bin("=", name("a"), name("b")),
+      string: name("c"),
+    });
+  });
+
+  it("rejects what PG's DEFAULT b_expr rejects", () => {
+    expect(bad("DEFAULT 5 IS NULL")).toThrow(/Expected "distinct from" but found "null" \(1:35\)/);
+    expect(() => sqlLite.parse("CREATE DOMAIN d AS int DEFAULT 5 IS NULL;")).toThrow(
+      /Expected "distinct from" but found "null"/,
+    );
+    expect(bad("DEFAULT now() AT TIME ZONE 'utc'")).toThrow(/but found "at" \(1:36\)/);
+    expect(bad("DEFAULT NOT true")).toThrow(/but found "not" \(1:30\)/);
+    expect(bad("DEFAULT a AND b")).toThrow(/but found "and"/);
+    expect(bad("DEFAULT a LIKE 'x'")).toThrow(/but found "like"/);
+    expect(bad("DEFAULT a IN (1)")).toThrow(/but found "in"/);
+    expect(bad("DEFAULT a BETWEEN 1 AND 2")).toThrow(/but found "between"/);
+    expect(bad("DEFAULT a = ANY (b)")).toThrow(/but found "any"/);
+    expect(bad("DEFAULT 1 < 2 < 3")).toThrow(/Operator "<" is non-associative/);
+  });
+});
+
 // --- generated identity and stored columns and column collation ---
 
 describe("SQL-lite generated identity and stored columns and column collation", () => {
@@ -6645,9 +6774,10 @@ describe("SQL-lite generated identity and stored columns and column collation", 
       { kind: "collate", collation: ["app", "german"] },
       { kind: "default", expr: str("a") },
     ]);
-    // After a DEFAULT, the expression's COLLATE postfix takes the clause.
+    // After a DEFAULT too: its operand has no COLLATE, so the clause is the column's.
     expect(colConstraints(`DEFAULT 'a' COLLATE "C"`)).toEqual([
-      { kind: "default", expr: { kind: "collate", expr: str("a"), collation: ["C"] } },
+      { kind: "default", expr: str("a") },
+      { kind: "collate", collation: ["C"] },
     ]);
   });
 
