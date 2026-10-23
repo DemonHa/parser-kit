@@ -31,6 +31,16 @@ const str = (value: string) => ({ kind: "string", value });
 const bin = (op: string, left: unknown, right: unknown) => ({ kind: "binary", op, left, right });
 const star = (table: string[] | null = null) => ({ kind: "star", table });
 const col = (expr: unknown, alias: string | null = null) => ({ expr, alias });
+
+// Matches an "Expected …" message naming each of `keys` among its
+// alternatives, in any order and alongside others, and (when given) followed
+// by `but found <found>`. Keyword dispatch lists grow as statements are added,
+// so these tests pin the alternatives that matter, not the full ordered list.
+const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const expectsKeys = (keys: string[], found?: string) => {
+  const tail = found === undefined ? "" : `[^\\n]*but found ${escapeRe(found)}`;
+  return new RegExp(keys.map((key) => `(?=[^\\n]*Expected [^\\n]*"${escapeRe(key)}"${tail})`).join(""));
+};
 // A fully-defaulted SELECT node; spread overrides in for the fields under test.
 const sel = (over: Record<string, unknown>) => ({
   kind: "select",
@@ -454,7 +464,25 @@ describe("SQL-lite ALTER TABLE (Phase 6 actions)", () => {
 
   it("rejects an unknown ALTER TABLE action", () => {
     expect(() => sqlLite.parse("ALTER TABLE t frobnicate;")).toThrow(
-      /Expected "add", "drop", "alter", "rename", "owner", "replica", "set", "reset", "validate", "enable", "disable", "cluster", "attach" or "detach" but found "frobnicate"/,
+      expectsKeys(
+        [
+          "add",
+          "drop",
+          "alter",
+          "rename",
+          "owner",
+          "replica",
+          "set",
+          "reset",
+          "validate",
+          "enable",
+          "disable",
+          "cluster",
+          "attach",
+          "detach",
+        ],
+        '"frobnicate"',
+      ),
     );
   });
 });
@@ -568,7 +596,10 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
       /Expected "exists" but found "exist"/,
     );
     expect(() => sqlLite.parse("ALTER frobnicate t;")).toThrow(
-      /Expected "table", "schema", "domain", "type", "index", "function", "aggregate", "view", "materialized" or "sequence" but found "frobnicate"/,
+      expectsKeys(
+        ["table", "schema", "domain", "type", "index", "function", "aggregate", "view", "materialized", "sequence"],
+        '"frobnicate"',
+      ),
     );
   });
 });
@@ -748,7 +779,27 @@ describe("SQL-lite DROP object types", () => {
     const fails = (text: string) => () => sqlLite.parse(text);
     expect(fails("DROP TRIGGER t;")).toThrow(/Expected "on" but found ";"/);
     expect(fails("DROP frobnicate x;")).toThrow(
-      /Expected "table", "view", "index", "type", "sequence", "schema", "materialized", "function", "procedure", "aggregate", "trigger", "domain", "extension", "database", "role" or "user" but found "frobnicate"/,
+      expectsKeys(
+        [
+          "table",
+          "view",
+          "index",
+          "type",
+          "sequence",
+          "schema",
+          "materialized",
+          "function",
+          "procedure",
+          "aggregate",
+          "trigger",
+          "domain",
+          "extension",
+          "database",
+          "role",
+          "user",
+        ],
+        '"frobnicate"',
+      ),
     );
     expect(fails("DROP AGGREGATE a;")).toThrow(/Expected "\(" but found ";"/);
     expect(fails("DROP MATERIALIZED t;")).toThrow(/Expected "view" but found "t"/);
@@ -812,7 +863,7 @@ describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
 
   it("rejects OR REPLACE before a non-replaceable object", () => {
     expect(() => sqlLite.parse("CREATE OR REPLACE TABLE t (id int);")).toThrow(
-      /Expected "view", "materialized", "function", "procedure", "aggregate" or "trigger"/,
+      expectsKeys(["view", "materialized", "function", "procedure", "aggregate", "trigger"], '"table"'),
     );
   });
 });
@@ -3848,6 +3899,191 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
   });
 });
 
+// --- numeric literals and parameters ---
+// PG 17's scan.l: trailing-dot numbers, `0o`/`0b` radix forms, `_` only
+// between digits, junk glued to a number or a positional parameter rejected
+// (PG 15+), and the `:=` token. A number whose value a JS number can't hold
+// keeps its text in `raw`.
+
+describe("SQL-lite numeric literals and parameters", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const options = (list: string) => (firstStmt(`CREATE TABLE t (id int) WITH (${list});`) as any).options;
+
+  it("reads trailing-dot numbers as one token", () => {
+    expect(lex("5. 1.e3 1.E-3 .5e1")).toEqual([
+      { type: "number", value: "5." },
+      { type: "number", value: "1.e3" },
+      { type: "number", value: "1.E-3" },
+      { type: "number", value: ".5e1" },
+    ]);
+    expect(firstStmt("SELECT 5., 1.e3;").columns).toEqual([col(num(5)), col(num(1000))]);
+    // `1..` is PG's `{numericfail}`: the integer, with both dots left behind.
+    expect(lex("1..")).toEqual([
+      { type: "number", value: "1" },
+      { type: "punc", value: "." },
+      { type: "punc", value: "." },
+    ]);
+    // A dot after a number still separates two numbers, and starts none on its own.
+    expect(lex("1.5.6 t.5")).toEqual([
+      { type: "number", value: "1.5" },
+      { type: "number", value: ".6" },
+      { type: "ident", value: "t" },
+      { type: "number", value: ".5" },
+    ]);
+  });
+
+  it("reads hex, octal and binary integers, with `_` between digits", () => {
+    expect(firstStmt("SELECT 0o17, 0O17, 0b101, 0B1, 0x_ff, 0X1F, 1_000.000_1, 1_0e1_0;").columns).toEqual(
+      [15, 15, 5, 1, 255, 31, 1000.0001, 1e11].map((value) => col(num(value))),
+    );
+    // A radix integer runs into a following `.5`, as in PG: two numbers.
+    expect(lex("0x1.5")).toEqual([
+      { type: "number", value: "0x1" },
+      { type: "number", value: ".5" },
+    ]);
+    // Octal and binary are integer constants wherever PG wants one.
+    expect(colExpr("current_timestamp(0o3)")).toEqual({
+      kind: "sqlValueFunction",
+      name: "current_timestamp",
+      precision: 3,
+    });
+    expect(colExpr("current_time(0b11)")).toEqual({ kind: "sqlValueFunction", name: "current_time", precision: 3 });
+  });
+
+  it("rejects junk after a number, as PostgreSQL 15+ does", () => {
+    const cases: [string, RegExp][] = [
+      ["123abc", /Trailing junk after numeric literal \(1:7\)/],
+      ["1.5x", /Trailing junk after numeric literal/],
+      ["5.e", /Trailing junk after numeric literal/],
+      ["1e", /Trailing junk after numeric literal/],
+      ["1e+", /Trailing junk after numeric literal/],
+      ["1e5x", /Trailing junk after numeric literal/],
+      ["1e5_", /Trailing junk after numeric literal/],
+      // PG counts every non-ASCII character as an identifier character.
+      ["1é", /Trailing junk after numeric literal/],
+      ["1_", /Trailing junk after numeric literal/],
+      ["1__2", /Trailing junk after numeric literal/],
+      ["1._5", /Trailing junk after numeric literal/],
+      ["00x1", /Trailing junk after numeric literal/],
+      ["0xg", /Trailing junk after numeric literal/],
+      ["0x1g", /Trailing junk after numeric literal/],
+      ["0b102", /Trailing junk after numeric literal/],
+      ["0o8", /Trailing junk after numeric literal/],
+      ["0x_g", /Trailing junk after numeric literal/],
+      ["0x__ff", /Trailing junk after numeric literal/],
+      ["0x1_", /Trailing junk after numeric literal/],
+      ["0x1$", /Trailing junk after numeric literal/],
+      ["0x", /Invalid hexadecimal integer/],
+      ["0x_", /Invalid hexadecimal integer/],
+      ["0o", /Invalid octal integer/],
+      ["0b", /Invalid binary integer/],
+    ];
+    for (const [src, error] of cases) expect(() => sqlLite.parse(`SELECT ${src};`), src).toThrow(error);
+    // The error spans the whole word.
+    const error = (() => {
+      try {
+        sqlLite.parse("SELECT 123abc FROM t;");
+      } catch (caught) {
+        return caught as ParseError;
+      }
+      return undefined;
+    })();
+    expect(error).toBeInstanceOf(ParseError);
+    expect([error!.start, error!.end]).toEqual([
+      { row: 1, col: 7 },
+      { row: 1, col: 13 },
+    ]);
+  });
+
+  it("rejects junk after a positional parameter, keeping `$name`", () => {
+    expect(lex("$1 $12 $foo")).toEqual([
+      { type: "param", value: "1" },
+      { type: "param", value: "12" },
+      { type: "param", value: "foo" },
+    ]);
+    expect(() => sqlLite.parse("SELECT $1abc;")).toThrow(/Trailing junk after parameter \(1:7\)/);
+    // A positional parameter takes no `_` separators.
+    expect(() => sqlLite.parse("SELECT $1_000;")).toThrow(/Trailing junk after parameter/);
+    expect(() => sqlLite.parse("SELECT $1é;")).toThrow(/Trailing junk after parameter/);
+  });
+
+  it("reports junk inside a backtracking position as the lexer error", () => {
+    // INSERT's column list is read under attempt(), which rolls a failed read
+    // back; the lexer's own error must surface rather than a parser one.
+    const cases: [string, RegExp][] = [
+      ["123abc", /Trailing junk after numeric literal \(1:18\)/],
+      ["0x", /Invalid hexadecimal integer \(1:18\)/],
+      ["$1abc", /Trailing junk after parameter \(1:18\)/],
+      ["1e+", /Trailing junk after numeric literal \(1:18\)/],
+    ];
+    for (const [src, error] of cases) {
+      expect(() => sqlLite.parse(`INSERT INTO t (a, ${src}) VALUES (1);`), src).toThrow(error);
+    }
+  });
+
+  it("lexes `:=` as one token, and only when written together", () => {
+    expect(lex("a:=1")).toEqual([
+      { type: "ident", value: "a" },
+      { type: "punc", value: ":=" },
+      { type: "number", value: "1" },
+    ]);
+    expect(lex("a : = 1")).toEqual([
+      { type: "ident", value: "a" },
+      { type: "punc", value: ":" },
+      { type: "op", value: "=" },
+      { type: "number", value: "1" },
+    ]);
+    // No rule takes `:=` yet, and the spaced spelling is no named argument.
+    expect(() => sqlLite.parse("SELECT f(a := 1);")).toThrow(/found ":="/);
+    expect(() => sqlLite.parse("SELECT f(a : = 1);")).toThrow(/found ":"/);
+    // `:` and `::` lex as before.
+    expect(colExpr("a[1:2]")).toMatchObject({ kind: "subscript" });
+    expect(colExpr("a::int")).toMatchObject({ kind: "cast" });
+  });
+
+  it("keeps the text of a number its value can't hold in `raw`", () => {
+    expect(colExpr("9007199254740993")).toEqual({ kind: "number", value: 9007199254740992, raw: "9007199254740993" });
+    expect(colExpr("9_007_199_254_740_993")).toEqual({
+      kind: "number",
+      value: 9007199254740992,
+      raw: "9007199254740993",
+    });
+    expect(colExpr("0xFFFFFFFFFFFFFFFF")).toEqual({
+      kind: "number",
+      value: 18446744073709552000,
+      raw: "0xFFFFFFFFFFFFFFFF",
+    });
+    // The test is on the value: every double from 2^53 up is a whole number.
+    expect(colExpr("1.5e300")).toEqual({ kind: "number", value: 1.5e300, raw: "1.5e300" });
+    expect(colExpr("1e400")).toEqual({ kind: "number", value: Number.POSITIVE_INFINITY, raw: "1e400" });
+    // JSON writes Infinity as null; `raw` survives it.
+    expect(JSON.parse(JSON.stringify(colExpr("1e400")))).toEqual({ kind: "number", value: null, raw: "1e400" });
+    // A sign in an expression is a unary operator, so `raw` is the literal's own.
+    expect(colExpr("-12345678901234567890")).toEqual({
+      kind: "unary",
+      op: "-",
+      operand: { kind: "number", value: 12345678901234567000, raw: "12345678901234567890" },
+    });
+  });
+
+  it("leaves `raw` off every number its value holds exactly", () => {
+    for (const src of ["0", "42", "9007199254740991", "3.14", ".5", "5.", "1e10", "0.1", "0x1F", "1_000"]) {
+      expect(colExpr(src), src).not.toHaveProperty("raw");
+    }
+  });
+
+  it("folds an option value's sign into `raw` and the value alike", () => {
+    expect(options("a = -99999999999999999999, b = +99999999999999999999, c = -1e400, d = -0x10, e = -5")).toEqual([
+      { name: "a", value: { kind: "number", value: -100000000000000000000, raw: "-99999999999999999999" } },
+      { name: "b", value: { kind: "number", value: 100000000000000000000, raw: "+99999999999999999999" } },
+      { name: "c", value: { kind: "number", value: Number.NEGATIVE_INFINITY, raw: "-1e400" } },
+      // The sign applies after decoding: `Number("-0x10")` alone is NaN.
+      { name: "d", value: num(-16) },
+      { name: "e", value: num(-5) },
+    ]);
+  });
+});
+
 // --- keyword dispatch maps ---
 // The CREATE / ALTER / constraint rules derive their "Expected …" strings from
 // keyword-keyed dispatch maps rather than restating them. What follows pins the
@@ -3862,14 +4098,33 @@ describe("SQL-lite keyword dispatch maps", () => {
 
   it("names the keyword-led CREATE targets in the join form", () => {
     expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
-      /Expected "table" or "unique" or "type" or "sequence" or "domain" or "database" or "schema" or "extension" or "tablespace" or "role" or "user" but found "frobnicate"/,
+      expectsKeys(
+        [
+          "table",
+          "unique",
+          "type",
+          "sequence",
+          "domain",
+          "database",
+          "schema",
+          "extension",
+          "tablespace",
+          "role",
+          "user",
+        ],
+        '"frobnicate"',
+      ),
+    );
+    expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
+      /Expected ("[a-z ]+" or )+"[a-z ]+" but found "frobnicate"/,
     );
   });
 
   it("names the table-item alternatives in the join form", () => {
     expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(
-      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or "like" or "exclude" or a name but found "42"/,
+      expectsKeys(["constraint", "primary key", "unique", "check", "foreign key", "like", "exclude"], '"42"'),
     );
+    expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(/Expected ("[a-z ]+" or )+a name but found "42"/);
   });
 
   // A record literal inherits `constructor` and `__proto__`, so a lead word
@@ -5288,7 +5543,7 @@ describe("SQL-lite EXCLUDE table constraints", () => {
       /Expected a name but found "\)"/,
     );
     expect(() => sqlLite.parse("CREATE TABLE t (CONSTRAINT c 42);")).toThrow(
-      /Expected "primary key" or "unique" or "check" or "foreign key" or "exclude" but found "42"/,
+      expectsKeys(["primary key", "unique", "check", "foreign key", "exclude"], '"42"'),
     );
     expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE (a);")).toThrow(/Expected "with" but found "\)"/);
     expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE USING gist (a WITH b);")).toThrow(
@@ -5841,12 +6096,10 @@ describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
   it("rejects an unknown action, a misplaced word and a valued RESET", () => {
     expect(fails("ALTER SCHEMA s SET SCHEMA t;")).toThrow(/Expected "rename" or "owner" but found "set"/);
     expect(fails("ALTER DOMAIN d frobnicate;")).toThrow(
-      /Expected "set", "drop", "add", "rename", "owner" or "validate" but found "frobnicate"/,
+      expectsKeys(["set", "drop", "add", "rename", "owner", "validate"], '"frobnicate"'),
     );
-    expect(fails("ALTER TYPE t frobnicate;")).toThrow(
-      /Expected "add", "rename", "owner" or "set" but found "frobnicate"/,
-    );
-    expect(fails("ALTER INDEX i frobnicate;")).toThrow(/Expected "rename", "set" or "reset" but found "frobnicate"/);
+    expect(fails("ALTER TYPE t frobnicate;")).toThrow(expectsKeys(["add", "rename", "owner", "set"], '"frobnicate"'));
+    expect(fails("ALTER INDEX i frobnicate;")).toThrow(expectsKeys(["rename", "set", "reset"], '"frobnicate"'));
     expect(fails("ALTER DOMAIN d SET frob;")).toThrow(/Expected "default", "not" or "schema" but found "frob"/);
     expect(fails("ALTER DOMAIN d DROP frob;")).toThrow(/Expected "default", "not" or "constraint" but found "frob"/);
     expect(fails("ALTER DOMAIN d ADD UNIQUE (a);")).toThrow(/Expected "check" but found "unique"/);
@@ -6051,7 +6304,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
 
   it("rejects an unknown action, a misplaced word and a combined RENAME or SET SCHEMA", () => {
     expect(fails("ALTER FUNCTION f frobnicate;")).toThrow(
-      /Expected "rename", "owner", "set", "immutable", .*, "cost" or "rows" but found "frobnicate"/,
+      expectsKeys(["rename", "owner", "set", "immutable", "cost", "rows"], '"frobnicate"'),
     );
     expect(fails("ALTER FUNCTION f(int) LANGUAGE sql;")).toThrow(/Expected "rename", .* but found "language"/);
     expect(fails("ALTER FUNCTION f NOT NULL;")).toThrow(/Expected "leakproof" but found "null"/);
@@ -6068,7 +6321,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
       /Expected "rename", "owner" or "set" but found "immutable"/,
     );
     expect(fails("ALTER VIEW v frobnicate;")).toThrow(
-      /Expected "rename", "owner", "set", "reset" or "alter" but found "frobnicate"/,
+      expectsKeys(["rename", "owner", "set", "reset", "alter"], '"frobnicate"'),
     );
     expect(fails("ALTER MATERIALIZED VIEW m ALTER c DROP DEFAULT;")).toThrow(
       /Expected "rename", "owner", "set" or "reset" but found "alter"/,
@@ -6085,7 +6338,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
       /RENAME cannot be combined with other ALTER MATERIALIZED VIEW actions/,
     );
     expect(fails("ALTER SEQUENCE s frobnicate;")).toThrow(
-      /Expected "rename", "owner", "set", "as", .*, "no" or "owned" but found "frobnicate"/,
+      expectsKeys(["rename", "owner", "set", "as", "no", "owned"], '"frobnicate"'),
     );
     expect(fails("ALTER SEQUENCE s NO frob;")).toThrow(/Expected "minvalue", "maxvalue" or "cycle" but found "frob"/);
     expect(fails("ALTER SEQUENCE s SET frob;")).toThrow(/Expected "schema" but found "frob"/);
@@ -6437,12 +6690,12 @@ describe("SQL-lite generated identity and stored columns and column collation", 
   });
 
   it("rejects a malformed GENERATED or COLLATE", () => {
-    expect(bad("GENERATED ALWAYS AS (a)")).toThrow(/Expected "stored" but found "\)"/);
+    expect(bad("GENERATED ALWAYS AS (a)")).toThrow(expectsKeys(["stored"], '")"'));
     expect(bad("GENERATED SOMETIMES AS IDENTITY")).toThrow(
       /Expected "always" or "by default" but found "sometimes" \(1:32\)/,
     );
     // A malformed clause is a plain syntax error first, as in PG.
-    expect(bad("GENERATED BY DEFAULT AS (a)")).toThrow(/Expected "stored" but found "\)"/);
+    expect(bad("GENERATED BY DEFAULT AS (a)")).toThrow(expectsKeys(["stored"], '")"'));
     expect(bad("GENERATED BY DEFAULT AS (a) STORED")).toThrow(
       /for a generated column, GENERATED ALWAYS must be specified \(1:32\)/,
     );
@@ -6641,7 +6894,7 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
     // A schema element is one of the CREATE kinds PG admits there, or GRANT.
     // The croak points at the target word, past CREATE and OR REPLACE.
     expect(bad("CREATE SCHEMA s CREATE frobnicate;")).toThrow(
-      /Expected "table", "unique", "index", "sequence", "view" or "trigger" but found "frobnicate" \(1:23\)/,
+      expectsKeys(["table", "unique", "index", "sequence", "view", "trigger"], '"frobnicate" (1:23)'),
     );
     expect(bad("CREATE SCHEMA s CREATE SCHEMA t CREATE TABLE u (a int);")).toThrow(/or "trigger" but found "schema"/);
     expect(bad("CREATE SCHEMA s CREATE DATABASE d;")).toThrow(/or "trigger" but found "database"/);
@@ -7702,7 +7955,7 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
     );
     // PG's SET WITHOUT OIDS and ENABLE RULE are valid there but not parsed here.
     expect(fails("ALTER TABLE t SET WITHOUT OIDS;")).toThrow(/Expected "cluster" but found "oids"/);
-    expect(fails("ALTER TABLE t ENABLE RULE r;")).toThrow(/Expected "replica", "always" or "trigger" but found "rule"/);
+    expect(fails("ALTER TABLE t ENABLE RULE r;")).toThrow(expectsKeys(["replica", "always", "trigger"], '"rule"'));
     expect(fails("ALTER TABLE t DISABLE TRIGGER;")).toThrow(/Expected "all", "user" or a name but found ";"/);
     expect(fails("ALTER TABLE t ENABLE TRIGGER select;")).toThrow(
       /Expected "all", "user" or a name but found "select"/,
@@ -7711,7 +7964,7 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
     // REPLICA and ALWAYS take a trigger's name only, as in PG.
     expect(fails("ALTER TABLE t ENABLE REPLICA TRIGGER ALL;")).toThrow(/Expected a name but found "all"/);
     expect(fails("ALTER TABLE t ENABLE ALWAYS TRIGGER USER;")).toThrow(/Expected a name but found "user"/);
-    expect(fails("ALTER TABLE t DISABLE REPLICA TRIGGER x;")).toThrow(/Expected "trigger" but found "replica"/);
+    expect(fails("ALTER TABLE t DISABLE REPLICA TRIGGER x;")).toThrow(expectsKeys(["trigger"], '"replica"'));
     expect(fails("ALTER TABLE t DROP CONSTRAINT;")).toThrow(/Expected a name but found ";"/);
     expect(fails("ALTER TABLE t VALIDATE c;")).toThrow(/Expected "constraint" but found "c"/);
     expect(fails("ALTER TABLE t CLUSTER i;")).toThrow(/Expected "on" but found "i"/);

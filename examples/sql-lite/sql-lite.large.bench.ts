@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
 import { sqlLite } from "./index";
+import { splitPsqlScript } from "./psql-split";
 
 // Large-file throughput: how do sql-lite and node-sql-parser compare when fed a
 // single big multi-statement SQL blob (think a schema dump or migration file)?
@@ -80,3 +82,34 @@ for (const { sql } of BLOBS) {
     });
   });
 }
+
+// A real schema dump, sql-lite only: node-sql-parser rejects most of pg_dump's
+// DDL, so there is nothing to compare against. Each statement of the vendored
+// pagila schema is parsed on its own, as `pg-dump-corpus.test.ts` does, and a
+// statement sql-lite doesn't support yet throws and is caught, so this times
+// the whole file's worth of work, failures included. The time moves as more
+// of the dump parses; the pass rate is printed alongside.
+const PAGILA = splitPsqlScript(
+  readFileSync(new URL("./fixtures/pg-dump/pagila-schema.sql", import.meta.url), "utf8"),
+).statements.map((s) => s.sql);
+
+const parses = (sql: string) => {
+  try {
+    sqlLite.parse(sql);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+{
+  const parsed = PAGILA.filter(parses).length;
+  // eslint-disable-next-line no-console
+  console.log(`\n[pg_dump corpus]\n  pagila schema: ${parsed} / ${PAGILA.length} statements parse\n`);
+}
+
+describe(`pg_dump: pagila schema, ${PAGILA.length} statements`, () => {
+  bench("sql-lite", () => {
+    for (const sql of PAGILA) parses(sql);
+  });
+});

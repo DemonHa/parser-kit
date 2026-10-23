@@ -336,7 +336,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ["literal", "sql-lite", "SELECT $$dollar 'quoted'$$, $tag$body $$ inner$tag$;"],
     ["literal", "sql-lite", "SELECT B'1010', X'1F', U&'d\\0061t\\+000061';"],
     ["literal", "both", "SELECT 42, 3.14, .5, 1e10, 1.5E-3, 0x1F, 0o17, 0b101, 1_000_000;"],
-    ["literal", "neither", "SELECT 5., 1.e3;"],
+    ["literal", "sql-lite", "SELECT 5., 1.e3;"],
     ["literal", "both", "SELECT TRUE, FALSE, NULL;"],
     ["literal", "node", "SELECT 'foo'\n'bar';"],
     ["lexical", "both", "SELECT 1; -- trailing comment"],
