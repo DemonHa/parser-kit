@@ -13356,6 +13356,9 @@ describe("SQL-lite special predicates and calls", () => {
     expect(bad("SELECT normalize(x, y) FROM t;")).toThrow(/Expected "nfc", "nfd", "nfkc" or "nfkd" but found "y"/);
     expect(bad("SELECT normalize(x, NFC, NFD) FROM t;")).toThrow(/Expected "\)" but found ","/);
     expect(bad("SELECT normalize() FROM t;")).toThrow(/but found "\)"/);
+    // A col_name_keyword in PG, so no call modifiers either.
+    expect(bad("SELECT normalize(x) OVER () FROM t;")).toThrow(/Expected ";" but found "\("/);
+    expect(bad("SELECT normalize(VARIADIC x) FROM t;")).toThrow(/but found "variadic"/);
     // Quoted or qualified, it is an ordinary function.
     expect(colExpr("\"normalize\"(x, 'NFC')")).toEqual({ kind: "call", name: "normalize", args: [x, str("NFC")] });
     expect(colExpr("pg_catalog.normalize(x, 'NFC')")).toEqual({
@@ -13435,7 +13438,7 @@ describe("SQL-lite special predicates and calls", () => {
       col(name("y"), "document"),
       col(name("z"), "local"),
     ]);
-    expect(bad("SELECT x AT TIME FROM t;")).toThrow(/Expected ";" but found "time"/);
+    expect(bad("SELECT x AT TIME FROM t;")).toThrow(/Expected "zone" but found "from"/);
   });
 
   it("keeps the new keywords unreserved as names and aliases", () => {

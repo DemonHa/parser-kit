@@ -2342,9 +2342,10 @@ function many<T>(rule: Rule<T, SqlTokenType>): Rule<T[], SqlTokenType> {
 const expression: Rule<Expr, SqlTokenType> = lazy(() => expressionRule);
 // A "b-expression" (PG's `b_expr`): the same operator sublanguage minus NOT,
 // AND / OR, IN, LIKE, BETWEEN, ANY / ALL, COLLATE, AT TIME ZONE / LOCAL and the
-// IS tests other than DISTINCT FROM and DOCUMENT. PG uses it where a keyword that one of those forms
-// would swallow marks the operand's end: the `IN` inside `POSITION(sub IN
-// str)`, and the `NOT NULL` or `COLLATE` after a column or domain DEFAULT.
+// IS tests other than DISTINCT FROM and DOCUMENT. PG uses it where a keyword
+// that one of those forms would swallow marks the operand's end: the `IN`
+// inside `POSITION(sub IN str)`, and the `NOT NULL` or `COLLATE` after a column
+// or domain DEFAULT.
 const bExpression: Rule<Expr, SqlTokenType> = lazy(() => bExprRule);
 // The expr↔query cycle: exactly one Rule<Query> annotation, resolved lazily —
 // the same one-boundary rule js-lite's expr/statement cycle follows. Declared
@@ -2710,8 +2711,10 @@ function parseOverlay(ctx: ParseContext<SqlTokenType>, value: Expr, start: Posit
 const NORMAL_FORMS: readonly NormalForm[] = ["nfc", "nfd", "nfkc", "nfkd"];
 
 // NORMALIZE(value [, form]). The form is one of the four keywords, never an
-// expression, so PG takes no other second argument; without one this is the
-// plain call it always was.
+// expression, so PG takes no other second argument. Without one this gives the
+// plain call node it always did, but only for that one-argument form: as PG's
+// col_name_keyword, NORMALIZE takes no OVER, FILTER, DISTINCT, VARIADIC or
+// named argument.
 function parseNormalize(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
   const value = ctx.parse(expression);
   if (ctx.eat("punc", ",") === null) {
@@ -2928,9 +2931,9 @@ const columnRef = custom<Expr, SqlTokenType>(
     }
     if (ctx.is("punc", "(")) {
       ctx.next(); // "("
-      // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW / SUBSTRING /
-      // NORMALIZE)
-      // owns the rest of the call; a plain name falls through to a normal call.
+      // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW /
+      // SUBSTRING / NORMALIZE) owns the rest of the call; a plain name falls
+      // through to a normal call.
       // `Object.hasOwn` for the reason `lookup` gives: `constructor(1)` and
       // `__proto__(1)` would otherwise find an inherited "handler".
       // NORMALIZE is a keyword only when bare: a quoted `"normalize"(x, 'NFC')`
@@ -3989,8 +3992,9 @@ function parseIndirection(ctx: ParseContext<SqlTokenType>, base: Expr, start: Po
 // sit below the unary sign, so `-x COLLATE "C"` is `(-x) COLLATE "C"`, and above
 // `^`. The zone is read at bp 17: it takes a COLLATE but not another AT, so a
 // chain of AT TIME ZONE nests to the left as PG's `%left AT` does. `at` is a
-// bare label in PG, so the postfix declines unless TIME ZONE or LOCAL follows
-// it, and `SELECT x at FROM t` keeps `at` as the alias.
+// bare label in PG, so the postfix declines unless TIME or LOCAL follows
+// it, and `SELECT x at FROM t` keeps `at` as the alias. AT TIME commits to
+// the zone, as in PG, where no alias is followed by TIME.
 const collatePostfix = {
   match: kw("collate"),
   bp: 17,
@@ -4003,8 +4007,7 @@ const collatePostfix = {
 const atTimeZonePostfix = {
   match: kw("at"),
   bp: 16,
-  when: (ctx: ParseContext<SqlTokenType>): boolean =>
-    isWordAhead(ctx, 1, "local") || (isWordAhead(ctx, 1, "time") && isWordAhead(ctx, 2, "zone")),
+  when: (ctx: ParseContext<SqlTokenType>): boolean => isWordAhead(ctx, 1, "local") || isWordAhead(ctx, 1, "time"),
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
     if (isWordAhead(ctx, 1, "local")) {
       ctx.parse(kwseq("at", "local"));
@@ -4271,9 +4274,10 @@ const expressionRule = pratt<Expr, SqlTokenType>({ atom: expressionAtom, ...expr
 // The b-expression, PG's `b_expr`: the tight sublanguage (arithmetic / concat /
 // JSON / cast / subscript), the plain comparisons, `IS [NOT] DISTINCT FROM` and
 // `IS [NOT] DOCUMENT`, with none of NOT, AND / OR, IN, LIKE, BETWEEN, COLLATE,
-// AT TIME ZONE / LOCAL, ANY / ALL or the other IS tests — see `bExpression` above. (OVERLAPS lives in the
-// shared atom, so it is the one predicate that still reaches it.) A
-// parenthesised operand is a full expression again, as in PG.
+// AT TIME ZONE / LOCAL, ANY / ALL or the other IS tests — see `bExpression`
+// above. (OVERLAPS lives in the shared atom, so it is the one predicate that
+// still reaches it.) A parenthesised operand is a full expression again, as in
+// PG.
 const bExprTable: PrattTable = {
   prefix: [unarySignPrefix, genericPrefix],
   infix: [
