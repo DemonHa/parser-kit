@@ -1,6 +1,6 @@
 import { createInputStream, ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
-import { type Stmt, sqlLexer, sqlLite } from "./index";
+import { type Stmt, sqlLexer, sqlLite, sqlParseLexer } from "./index";
 
 // --- helpers ---
 
@@ -14,8 +14,8 @@ const exprOf = (src: string) => {
   return (stmt as any).items[0].constraints[0].expr;
 };
 
-const lex = (text: string) => {
-  const stream = sqlLexer.tokenize(createInputStream(text));
+const lex = (text: string, lexer = sqlLexer) => {
+  const stream = lexer.tokenize(createInputStream(text));
   const out: { type: string; value: string }[] = [];
   let tok = stream.next();
   while (tok !== null) {
@@ -105,6 +105,122 @@ describe("SQL-lite lexer", () => {
       { type: "op", value: "@>" },
       { type: "ident", value: "other" },
     ]);
+  });
+});
+
+// --- comments inside statements ---
+
+describe("SQL-lite comments inside statements", () => {
+  // Each input must parse to exactly the tree of the same text with its
+  // comments removed: the grammar never sees them.
+  const sameAs = (withComments: string, without: string) => expect(parse(withComments)).toEqual(parse(without));
+
+  it("drops comments from the parser's token stream but not from sqlLexer's", () => {
+    const text = "a /* b /* nested */ c */ -- d\n e";
+    expect(lex(text, sqlParseLexer)).toEqual([
+      { type: "ident", value: "a" },
+      { type: "ident", value: "e" },
+    ]);
+    expect(lex(text).map((t) => t.type)).toEqual(["ident", "comment", "comment", "ident"]);
+  });
+
+  it("parses a comment between keywords, inside an expression and before the ;", () => {
+    expect(firstStmt("SELECT /* x */ 1;")).toEqual(sel({ columns: [col(num(1))] }));
+    expect(firstStmt("SELECT a + -- plus\n b FROM t /* c */ ;")).toEqual(
+      sel({ columns: [col(bin("+", name("a"), name("b")))], from: [tableFrom(["t"])] }),
+    );
+    sameAs("SELECT id, -- primary key\n name FROM users;", "SELECT id, name FROM users;");
+    sameAs("SELECT a /* /* nested */ still */ FROM t WHERE /**/ a = 1 -- trailing\n;", "SELECT a FROM t WHERE a = 1;");
+  });
+
+  it("parses comments inside ARRAY[, between a function name and (, and after ::", () => {
+    sameAs("SELECT ARRAY[ /* c */ 1, -- c\n 2 /* c */];", "SELECT ARRAY[1, 2];");
+    sameAs("SELECT count /* c */ (/* c */ *) FROM t;", "SELECT count(*) FROM t;");
+    sameAs("SELECT lower -- c\n (name) FROM t;", "SELECT lower(name) FROM t;");
+    sameAs("SELECT x:: /* c */ int, y -- c\n :: text FROM t;", "SELECT x::int, y::text FROM t;");
+  });
+
+  it("parses comments inside multi-word type names", () => {
+    sameAs(
+      "SELECT x::double /* c */ precision, CAST(y AS timestamp -- c\n with /* c */ time zone) FROM t;",
+      "SELECT x::double precision, CAST(y AS timestamp with time zone) FROM t;",
+    );
+    sameAs("CREATE TABLE t (c character /* c */ varying(10));", "CREATE TABLE t (c character varying(10));");
+  });
+
+  it("parses comments where the grammar looks ahead before committing", () => {
+    sameAs("CREATE TABLE IF /* c */ NOT -- c\n EXISTS t (id int);", "CREATE TABLE IF NOT EXISTS t (id int);");
+    sameAs("CREATE TABLE t (id int NOT /* c */ NULL);", "CREATE TABLE t (id int NOT NULL);");
+    sameAs(
+      "SELECT a FROM t WHERE a IS /* c */ NOT /* c */ DISTINCT FROM b;",
+      "SELECT a FROM t WHERE a IS NOT DISTINCT FROM b;",
+    );
+    sameAs("SELECT a FROM t ORDER BY a /* c */ DESC NULLS -- c\n LAST;", "SELECT a FROM t ORDER BY a DESC NULLS LAST;");
+    sameAs(
+      "SELECT ( /* c */ SELECT 1), ( -- c\n WITH q AS (SELECT 1) SELECT * FROM q);",
+      "SELECT (SELECT 1), (WITH q AS (SELECT 1) SELECT * FROM q);",
+    );
+    sameAs(
+      "SELECT count(*) FILTER /* c */ (WHERE x) OVER /* c */ () FROM t;",
+      "SELECT count(*) FILTER (WHERE x) OVER () FROM t;",
+    );
+    sameAs("ALTER TABLE t /* c */ ADD /* c */ COLUMN c int;", "ALTER TABLE t ADD COLUMN c int;");
+  });
+
+  it("parses comments at the start and end of input, and input that is only comments", () => {
+    sameAs("-- lead\n/* lead */ SELECT 1; -- tail", "SELECT 1;");
+    sameAs("SELECT 1; /* tail */", "SELECT 1;");
+    expect(parse("-- nothing here\n/* or here */")).toEqual([]);
+  });
+
+  it("keeps comment-like text inside strings and still splits -- off an operator", () => {
+    expect(firstStmt("SELECT '/* not */ -- a comment';")).toEqual(
+      sel({ columns: [col(str("/* not */ -- a comment"))] }),
+    );
+    sameAs("SELECT 1-- c\n- 2;", "SELECT 1 - 2;");
+    // The operator scan that starts at `+` must stop at `--`.
+    sameAs("SELECT 1 +-- c\n 2;", "SELECT 1 + 2;");
+  });
+
+  it("ends spans at the last real token, not at a following comment", () => {
+    const [stmt] = sqlLite.parse("SELECT a /* c */ FROM t WHERE b /* tail */;") as any[];
+    expect(stmt.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 31 } });
+    expect(stmt.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 8 } });
+    expect(stmt.where.span).toEqual({ start: { row: 1, col: 30 }, end: { row: 1, col: 31 } });
+    // A list-shaped tail (the action list) ends at its last action too.
+    const [alter] = sqlLite.parse("ALTER TABLE t DROP COLUMN a, DROP COLUMN b /* c */ -- c\n;") as any[];
+    expect(alter.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 42 } });
+    const [lead] = sqlLite.parse("/* lead */ SELECT 1 -- tail\n;") as any[];
+    expect(lead.span).toEqual({ start: { row: 1, col: 11 }, end: { row: 1, col: 19 } });
+  });
+
+  it("points errors at the token after a comment", () => {
+    expect(() => sqlLite.parse("SELECT /* c */ ;")).toThrow(/but found ";" \(1:15\)/);
+    expect(() => sqlLite.parse("SELECT 1 /* c */ 2;")).toThrow(/Expected ";" but found "2"/);
+    expect(() => sqlLite.parse("SELECT 1 -- tail")).toThrow(/Expected ";" but found end of input \(1:16\)/);
+    // An unclosed block comment swallows the rest of the input.
+    expect(() => sqlLite.parse("SELECT /* unclosed 1;")).toThrow(/but found end of input/);
+  });
+
+  it("resumes after a lexer error hit while skipping comments", () => {
+    const stream = sqlParseLexer.tokenize(createInputStream("a /* c */ $ b -- t"));
+    expect(stream.next()?.value).toBe("a");
+    expect(() => stream.peek()).toThrow(/Unexpected character "\$" \(1:10\)/);
+    expect(stream.peek()?.value).toBe("b");
+    expect(stream.next()?.value).toBe("b");
+    expect(stream.eof()).toBe(true);
+    const { ast, errors } = sqlLite.diagnose("SELECT /* a */ $ /* b */ $ ; SELECT 2;");
+    expect(errors.map((e) => e.message)).toEqual([
+      'Unexpected character "$" (1:15)',
+      'Unexpected character "$" (1:25)',
+    ]);
+    expect(stripSpans(ast)).toEqual([sel({ columns: [col(num(2))] })]);
+  });
+
+  it("diagnose() recovers past a bad statement that contains comments", () => {
+    const { ast, errors } = sqlLite.diagnose("SELECT /* c */ FROM; -- next\nSELECT /* ok */ 1;");
+    expect(errors).toHaveLength(1);
+    expect(stripSpans(ast)).toEqual([sel({ columns: [col(num(1))] })]);
   });
 });
 
@@ -1168,8 +1284,7 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
     expect(exprOf("+a")).toEqual(un("+", name("a")));
     // The operator is kept verbatim rather than folded away.
     expect(exprOf("+1")).toEqual(un("+", num(1)));
-    // bp 16, above `*`: `(+a) * b`, not `+(a * b)`. (It is *not* above every
-    // arithmetic tier — `^` at bp 17 is tighter still; see the next test.)
+    // bp 18, above every arithmetic tier: `(+a) * b`, not `+(a * b)`.
     expect(exprOf("+a * b")).toEqual(bin("*", un("+", name("a")), name("b")));
     // A sign on the right-hand side of a binary operator still reaches the prefix.
     expect(exprOf("a * +b")).toEqual(bin("*", name("a"), un("+", name("b"))));
@@ -1177,13 +1292,13 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
     expect(exprOf("-a * b")).toEqual(bin("*", un("-", name("a")), name("b")));
   });
 
-  it("parses exponentiation tighter than the unary sign, left-associatively", () => {
+  it("parses exponentiation looser than the unary sign, left-associatively", () => {
     expect(exprOf("a ^ b")).toEqual(bin("^", name("a"), name("b")));
     expect(exprOf("a ^ b ^ c")).toEqual(bin("^", bin("^", name("a"), name("b")), name("c")));
-    // bp 17 is above the unary sign (16), so the sign wraps the whole power.
-    expect(exprOf("-2 ^ 2")).toEqual(un("-", bin("^", num(2), num(2))));
-    expect(exprOf("+2 ^ 2")).toEqual(un("+", bin("^", num(2), num(2))));
-    // ... and below the bp-18 postfixes. The right operand is what discriminates:
+    // bp 15 is below the unary sign (18), so the sign binds to the base alone.
+    expect(exprOf("-2 ^ 2")).toEqual(bin("^", un("-", num(2)), num(2)));
+    expect(exprOf("+2 ^ 2")).toEqual(bin("^", un("+", num(2)), num(2)));
+    // ... and below the bp-19 postfixes. The right operand is what discriminates:
     // a cast there binds to that operand, not to the power. (`a::int ^ 2` is the
     // same tree at any bp, since the postfix loop runs before the infix scan.)
     expect(exprOf("a ^ b::int")).toEqual(bin("^", name("a"), cast(name("b"), "int")));
@@ -1192,11 +1307,10 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
     expect(exprOf("2 ^ 3 * 4")).toEqual(bin("*", bin("^", num(2), num(3)), num(4)));
   });
 
-  it("nests a signed right operand of ^ under the sign, not the power", () => {
-    // The tail of putting `^` above the unary sign: a prefix parses its operand
-    // at its own bp (16), which is below `^`'s 17, so the sign on the right
-    // swallows the rest of the chain instead of the chain nesting left.
-    expect(exprOf("2 ^ -3 ^ 4")).toEqual(bin("^", num(2), un("-", bin("^", num(3), num(4)))));
+  it("binds a signed right operand of ^ to its own operand only", () => {
+    // A prefix parses its operand at its own bp (18), above `^`'s 15, so the
+    // sign on the right takes `3` alone and the chain still nests left.
+    expect(exprOf("2 ^ -3 ^ 4")).toEqual(bin("^", bin("^", num(2), un("-", num(3))), num(4)));
     // Without a sign the same chain is plain left-associative.
     expect(exprOf("2 ^ 3 ^ 4")).toEqual(bin("^", bin("^", num(2), num(3)), num(4)));
   });
@@ -1264,12 +1378,79 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
       substring: bin("^", name("a"), num(2)),
       string: name("s"),
     });
-    // The prefix group is shared too, so the widened sign reaches it as well.
+    // The prefix group is shared too, so the widened sign reaches it as well,
+    // binding tighter than `^` there too.
     expect(posOf("+a IN s")).toEqual({ kind: "position", substring: un("+", name("a")), string: name("s") });
+    expect(posOf("-a ^ 2 IN s")).toEqual({
+      kind: "position",
+      substring: bin("^", un("-", name("a")), num(2)),
+      string: name("s"),
+    });
   });
 
   it("reports a missing right operand at the token that should have started it", () => {
     expect(() => sqlLite.parse("SELECT a ^ FROM t;")).toThrow(/Expected a name but found "from"/);
+  });
+});
+
+// --- operator precedence among the tight tiers ---
+
+// PostgreSQL's gram.y orders these, loosest first: `^` < AT < COLLATE < unary
+// sign < `[ ]` < `::`, all left-associative except the right-associative sign.
+describe("SQL-lite precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts and casts", () => {
+  const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
+  const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(type) });
+  const at = (expr: unknown, zone: unknown) => ({ kind: "atTimeZone", expr, zone });
+  const coll = (expr: unknown, ...collation: string[]) => ({ kind: "collate", expr, collation });
+  const sub = (base: unknown, index: unknown) => ({ kind: "subscript", base, index });
+
+  it("binds the unary sign tighter than ^, as PostgreSQL does", () => {
+    expect(exprOf("-2 ^ 2")).toEqual(bin("^", un("-", num(2)), num(2)));
+    expect(exprOf("-a ^ -b")).toEqual(bin("^", un("-", name("a")), un("-", name("b"))));
+    expect(exprOf("2 ^ -3 ^ 4")).toEqual(bin("^", bin("^", num(2), un("-", num(3))), num(4)));
+    // Parentheses still give the other reading.
+    expect(exprOf("-(2 ^ 2)")).toEqual(un("-", bin("^", num(2), num(2))));
+  });
+
+  it("binds AT TIME ZONE tighter than ^ and looser than the sign", () => {
+    expect(exprOf("a ^ b AT TIME ZONE 'z'")).toEqual(bin("^", name("a"), at(name("b"), str("z"))));
+    expect(exprOf("a AT TIME ZONE 'z' ^ 2")).toEqual(bin("^", at(name("a"), str("z")), num(2)));
+    expect(exprOf("-a AT TIME ZONE z")).toEqual(at(un("-", name("a")), name("z")));
+    // A sign opening the zone is still the zone's own.
+    expect(exprOf("a AT TIME ZONE -z")).toEqual(at(name("a"), un("-", name("z"))));
+    // The arithmetic tiers below `^` take the conversion as their operand too.
+    expect(exprOf("a + b AT TIME ZONE 'z'")).toEqual(bin("+", name("a"), at(name("b"), str("z"))));
+  });
+
+  it("chains AT TIME ZONE to the left", () => {
+    expect(exprOf("a AT TIME ZONE 'z' AT TIME ZONE 'y'")).toEqual(at(at(name("a"), str("z")), str("y")));
+  });
+
+  it("binds COLLATE tighter than AT TIME ZONE and ^, and looser than the sign", () => {
+    expect(exprOf('-x COLLATE "C"')).toEqual(coll(un("-", name("x")), "C"));
+    expect(exprOf('a ^ b COLLATE "C"')).toEqual(bin("^", name("a"), coll(name("b"), "C")));
+    expect(exprOf('a COLLATE "C" ^ 2')).toEqual(bin("^", coll(name("a"), "C"), num(2)));
+    // A signed right operand of `^` takes the COLLATE before the power does.
+    expect(exprOf('x ^ -a COLLATE "C"')).toEqual(bin("^", name("x"), coll(un("-", name("a")), "C")));
+    // The zone takes a COLLATE; a COLLATE before AT applies to the timestamp.
+    expect(exprOf('a AT TIME ZONE z COLLATE "C"')).toEqual(at(name("a"), coll(name("z"), "C")));
+    expect(exprOf('a COLLATE "C" AT TIME ZONE z')).toEqual(at(coll(name("a"), "C"), name("z")));
+  });
+
+  it("binds casts and subscripts tighter than the sign", () => {
+    expect(exprOf("-x::int")).toEqual(un("-", cast(name("x"), "int")));
+    expect(exprOf("-a[1]")).toEqual(un("-", sub(name("a"), num(1))));
+    expect(exprOf("-a[1] ^ 2")).toEqual(bin("^", un("-", sub(name("a"), num(1))), num(2)));
+    expect(exprOf("a[1]::int")).toEqual(cast(sub(name("a"), num(1)), "int"));
+    expect(exprOf('x::text COLLATE "C"')).toEqual(coll(cast(name("x"), "text"), "C"));
+    expect(exprOf('x COLLATE "C"::text')).toEqual(cast(coll(name("x"), "C"), "text"));
+    expect(exprOf("a AT TIME ZONE z::text")).toEqual(at(name("a"), cast(name("z"), "text")));
+    expect(exprOf("a AT TIME ZONE z[1]")).toEqual(at(name("a"), sub(name("z"), num(1))));
+  });
+
+  it("rejects an AT with no TIME ZONE or no zone after it", () => {
+    expect(() => sqlLite.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected "time"/);
+    expect(() => sqlLite.parse("SELECT a AT TIME ZONE FROM t;")).toThrow(/Expected a name but found "from"/);
   });
 });
 
@@ -2529,6 +2710,25 @@ describe("SQL-lite robustness", () => {
       "alterTable",
       "comment",
     ]);
+  });
+});
+
+// --- lexer errors inside backtracking ---
+
+describe("SQL-lite lexer errors inside backtracking", () => {
+  // The INSERT column list is tried with backtracking. The lexer consumes
+  // `X'G1` before croaking, so a rollback used to resurface as a parser error
+  // on the `)` that followed. sql-lite opts into lexer error propagation.
+  it("reports a bad literal in an attempted branch as the lexer error", () => {
+    expect(() => sqlLite.parse("INSERT INTO t (a, X'G1') VALUES (1);")).toThrow(
+      /^Invalid hexadecimal digit "G" \(1:18\)$/,
+    );
+  });
+
+  it("diagnose() records the lexer error once and resumes at the next statement", () => {
+    const { ast, errors } = sqlLite.diagnose("SELECT 1;\nINSERT INTO t (a, X'G1') VALUES (1);\nSELECT 2;");
+    expect(errors.map((error) => error.message)).toEqual(['Invalid hexadecimal digit "G" (2:18)']);
+    expect((ast as Stmt[]).map((stmt) => stmt.kind)).toEqual(["select", "select"]);
   });
 });
 

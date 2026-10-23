@@ -26,7 +26,7 @@ import {
   skip,
   type Token,
 } from "@parser-kit/core";
-import { type SqlTokenType, sqlLexer } from "./lexer";
+import { type SqlTokenType, sqlParseLexer } from "./lexer";
 
 // SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
@@ -1581,7 +1581,8 @@ const bareStar = token("op", { values: ["*"] }).map((_node, span): Expr => ({ ki
 
 // `(` opens both `(expr)` and `(SELECT …)`; they share the first token, so the
 // atom peeks one token past it — a `select`/`with` there means a subquery. No
-// attempt() cost. (`peekAhead` gives raw tokens, which is what we want here.)
+// attempt() cost. (`peekAhead` doesn't skip trivia, but `sqlParseLexer` has
+// already dropped comments, so `( /* c */ SELECT` is still a subquery.)
 const startsQuery = (ctx: ParseContext<SqlTokenType>): boolean => {
   const after = ctx.peekAhead(1);
   return after !== null && after.type === "ident" && (after.value === "select" || after.value === "with");
@@ -2404,12 +2405,12 @@ const typeRef = custom<ColType, SqlTokenType>(
 );
 
 // --- pratt operator table ---
-// Binding powers follow PG (highest binds tightest): :: cast, ^, unary + -,
-// * / %, + -, other operators (|| @> & | # << >> -> @?), BETWEEN/IN/LIKE,
-// comparisons (nonassoc), IS, NOT, AND, OR — with one deliberate departure
-// among those tiers, at `^`, documented where that group is declared. Keyword operators
-// are plain `ident`-typed matches thanks to folding; multi-word ones (NOT
-// LIKE, BETWEEN … AND) use match-based groups.
+// Binding powers follow PG's gram.y (highest binds tightest): :: cast and
+// [ ] subscript (19), unary + - (18), COLLATE (17), AT TIME ZONE (16), ^ (15),
+// * / % (14), + - (13), other operators (|| @> & | # << >> -> @?) (12),
+// BETWEEN/IN/LIKE (10), comparisons (9, nonassoc), IS (8), NOT (6), AND (4),
+// OR (2). Keyword operators are plain `ident`-typed matches thanks to folding;
+// multi-word ones (NOT LIKE, BETWEEN … AND) use match-based groups.
 const binary = (ops: string[], bp: number, assoc?: "nonassoc") => ({
   ops,
   bp,
@@ -2474,7 +2475,7 @@ const escapeTail = (ctx: ParseContext<SqlTokenType>, h: PrattHelpers<Expr>): Exp
 const unarySignPrefix = {
   ops: ["-", "+"],
   type: "op" as const,
-  bp: 16,
+  bp: 18,
   map: (op: string, operand: Expr, span: Span): Expr => ({ kind: "unary", op, operand, span }),
 };
 
@@ -2482,17 +2483,13 @@ const unarySignPrefix = {
 // everything above the comparison/logical forms. Shared verbatim with the
 // b-expression.
 const arithInfix = [
-  // Exponentiation, left-associative (`a ^ b ^ c` is `(a ^ b) ^ c`) and tighter
-  // than the unary sign, so `-2 ^ 2` reads as `-(2 ^ 2)`. That is where the
-  // table departs from PG, which declares UMINUS *above* `^` and so reads the
-  // same input as `(-2) ^ 2`; the usual reading of `-2 ^ 2` wins here instead.
-  // (Only the sign relationship diverges — the left-associativity above is
-  // PG's own `%left '^'`, not the right-associativity maths would give it.)
-  // The departure has a tail: a sign on the *right* re-enters at the prefix's
-  // own bp 16, which is below 17, so `2 ^ -3 ^ 4` is `2 ^ (-(3 ^ 4))` rather
-  // than left-nesting. bp 17 also sits below the bp-18 postfixes, which is what
-  // keeps `a ^ b::int` casting the right operand alone instead of the power.
-  binary(["^"], 17),
+  // Exponentiation, left-associative as in PG's `%left '^'` (`a ^ b ^ c` is
+  // `(a ^ b) ^ c`, not the right-associativity maths would give it) and looser
+  // than the unary sign, so `-2 ^ 2` is `(-2) ^ 2` and `2 ^ -3 ^ 4` is
+  // `(2 ^ (-3)) ^ 4`. The `::`, `[ ]`, COLLATE and AT TIME ZONE postfixes all
+  // sit above it, so `a ^ b::int` casts the right operand alone and
+  // `a ^ b AT TIME ZONE z` converts it.
+  binary(["^"], 15),
   binary(["*", "/", "%"], 14),
   binary(["+", "-"], 13),
   binary(["||"], 12),
@@ -2512,11 +2509,12 @@ const arithInfix = [
   binary(["->", "->>", "#>", "#>>", "#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@?", "@@"], 12),
 ];
 
-// `::` cast and `[…]` subscript bind tightest (bp 18). Both are shared with the
-// b-expression so `POSITION(a[1]::text IN b)` parses its first operand fully.
+// `::` cast and `[…]` subscript bind tightest (bp 19), above the unary sign:
+// `-x::int` is `-(x::int)`. Both are shared with the b-expression so
+// `POSITION(a[1]::text IN b)` parses its first operand fully.
 const castPostfix = {
   match: punc("::"),
-  bp: 18,
+  bp: 19,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
     ctx.next(); // "::"
     const type = ctx.parse(typeRef);
@@ -2528,7 +2526,7 @@ const castPostfix = {
 // may be omitted (`a[:hi]`, `a[lo:]`). The non-slice form omits the `upper` key.
 const subscriptPostfix = {
   match: punc("["),
-  bp: 18,
+  bp: 19,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
     ctx.next(); // "["
     const hasIndex = !ctx.is("punc", ":") && !ctx.is("punc", "]");
@@ -2546,10 +2544,13 @@ const subscriptPostfix = {
   },
 };
 
-// `x COLLATE collation` and `x AT TIME ZONE zone` — postfixes near the cast tier.
+// `x COLLATE collation` (bp 17) and `x AT TIME ZONE zone` (bp 16) sit below the
+// unary sign, so `-x COLLATE "C"` is `(-x) COLLATE "C"`, and above `^`. The zone
+// is read at bp 17: it takes a COLLATE but not another AT, so a chain of AT TIME
+// ZONE nests to the left as PG's `%left AT` does.
 const collatePostfix = {
   match: kw("collate"),
-  bp: 18,
+  bp: 17,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
     ctx.parse(kw("collate"));
     const collation = ctx.parse(qualName);
@@ -2558,10 +2559,10 @@ const collatePostfix = {
 };
 const atTimeZonePostfix = {
   match: kw("at"),
-  bp: 18,
+  bp: 16,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
     ctx.parse(kwseq("at", "time", "zone"));
-    const zone = h.parseRhs(18);
+    const zone = h.parseRhs(17);
     return { kind: "atTimeZone", expr: left, zone, span: closeSpan(left, ctx.lastEnd()) };
   },
 };
@@ -7870,12 +7871,13 @@ const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt
 // --- grammar ---
 
 export const sqlLite = defineGrammar({
-  lexer: sqlLexer,
+  lexer: sqlParseLexer,
   root: repeat(statement),
-  trivia: { between: [{ type: "comment" }] },
   recovery: { sync: [{ type: "punc", value: ";", consume: true }] },
   // Opt into PG-style farthest-failure reporting: when a discarded backtracking
   // branch (a mistyped IF NOT EXISTS) got deeper than the error that surfaced,
-  // report the deeper one.
-  errorReporting: { preferFarthest: true },
+  // report the deeper one. Lexer errors propagate: a bad literal inside a
+  // backtracking branch (`INSERT INTO t (a, X'G1')`) reports itself rather
+  // than whatever the rolled-back parse trips over next.
+  errorReporting: { preferFarthest: true, propagateLexerErrors: true },
 });

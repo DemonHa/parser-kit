@@ -117,13 +117,32 @@ export interface ContextConfig<TT extends string = string> {
   errors?: ParseError[];
   /** Substitute the farthest croak for shallower errors as they are recorded. */
   preferFarthest?: boolean;
+  /** Tag errors thrown by the token stream (fromLexer) and let them escape tryParse. */
+  propagateLexerErrors?: boolean;
 }
 
 export function createParseContext<TT extends string>(
   stream: TokenStream<TT>,
   config: ContextConfig<TT> = {},
 ): ParseContext<TT> {
-  const { labels, trivia = [], sync = [], errors, preferFarthest = false } = config;
+  const { labels, trivia = [], sync = [], errors, preferFarthest = false, propagateLexerErrors = false } = config;
+
+  // Every token pull goes through these. With propagateLexerErrors a lexer
+  // croak is stamped fromLexer on its way out; otherwise errors pass through
+  // untouched, so the default path is unchanged.
+  const pullFrom = (pull: () => Token<TT> | null) =>
+    propagateLexerErrors
+      ? (): Token<TT> | null => {
+          try {
+            return pull();
+          } catch (error) {
+            if (error instanceof ParseError) error.fromLexer = true;
+            throw error;
+          }
+        }
+      : pull;
+  const streamPeek = pullFrom(() => stream.peek());
+  const streamNext = pullFrom(() => stream.next());
 
   // Ring buffer of tokens already pulled off the stream. Only grows while a
   // tryParse snapshot is active; compacted back to empty once none is.
@@ -145,14 +164,14 @@ export function createParseContext<TT extends string>(
   const peek = (): Token<TT> | null => {
     const buffered = buffer[bufferPos];
     if (buffered !== undefined) return buffered;
-    return stream.peek();
+    return streamPeek();
   };
 
   const peekAhead = (n: number): Token<TT> | null => {
     // Fill the ring buffer ahead of the cursor, independent of snapshots;
     // next() drains it back down and resets it once fully replayed.
     while (buffer.length - bufferPos <= n) {
-      const token = stream.next();
+      const token = streamNext();
       if (token === null) break;
       buffer.push(token);
     }
@@ -168,7 +187,7 @@ export function createParseContext<TT extends string>(
         bufferPos = 0;
       }
     } else {
-      token = stream.next() ?? undefined;
+      token = streamNext() ?? undefined;
       if (token !== undefined && snapshots.length > 0) {
         buffer.push(token);
         bufferPos++;
@@ -246,7 +265,10 @@ export function createParseContext<TT extends string>(
         return value;
       } catch (error) {
         const snapshot = snapshots.pop()!;
-        if (error instanceof ParseError) {
+        // A lexer error is not a failed alternative: the stream has already
+        // consumed the offending characters, so rolling back would only let
+        // another branch misreport them. Opted-in grammars rethrow it.
+        if (error instanceof ParseError && !error.fromLexer) {
           bufferPos = snapshot.pos;
           last = snapshot.last;
           count = snapshot.count;
@@ -358,8 +380,9 @@ export function makeRule<T, TT extends string = string>(impl: RuleImpl<T, TT>): 
             return rule.parse(ctx);
           } catch (error) {
             // A failure on the very first token gets the new label; failures
-            // deeper inside the rule keep their more precise message.
-            if (error instanceof ParseError && ctx.consumed() === before) {
+            // deeper inside the rule keep their more precise message, and so
+            // do propagated lexer errors.
+            if (error instanceof ParseError && !error.fromLexer && ctx.consumed() === before) {
               croakExpected(ctx, display);
             }
             throw error;

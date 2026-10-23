@@ -10,6 +10,15 @@ export class ParseError extends Error {
    */
   consumed?: number;
 
+  /**
+   * True when the token stream (the lexer) threw this error rather than a
+   * rule. Only stamped when the grammar opts in with
+   * `errorReporting.propagateLexerErrors`; tryParse() and describe() then let
+   * it through instead of treating it as a failed alternative. Declared
+   * only, so errors that never get the stamp keep their old own keys.
+   */
+  declare fromLexer?: boolean;
+
   constructor(
     public msg: string,
     public start: Position,

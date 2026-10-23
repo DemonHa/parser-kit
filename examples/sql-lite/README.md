@@ -6,7 +6,7 @@ A PostgreSQL-flavoured SQL grammar built with [`@parser-kit/core`](../../package
 - **The kit's integration test.** Its 400+ unit tests, plus byte-exact AST and diagnostic goldens, are what catch a "generic" core change that quietly breaks a real grammar.
 - **A benchmark.** It is measured against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) (PostgreSQL mode), the most widely used JavaScript SQL parser.
 
-Despite the name, it covers most of the SQL applications send to PostgreSQL, though gaps remain, most notably comments inside a statement and some pg_dump-style DDL (see [PostgreSQL coverage](#postgresql-coverage)).
+Despite the name, it covers most of the SQL applications send to PostgreSQL, though gaps remain, most notably some pg_dump-style DDL (see [PostgreSQL coverage](#postgresql-coverage)).
 
 ## Usage
 
@@ -17,7 +17,7 @@ const ast = sqlLite.parse("SELECT id, count(DISTINCT tag) FROM posts WHERE creat
 // → Stmt[]: one node per statement, every node carrying a { start, end } span
 ```
 
-The root is a list of statements, and **every statement needs its terminating `;`**. Unquoted identifiers fold to lower case, quoted ones keep their case, and keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. The node types are exported from `grammar.ts` (`Stmt`, `Query`, `Expr`, …).
+The root is a list of statements, and **every statement needs its terminating `;`**. Unquoted identifiers fold to lower case, quoted ones keep their case, and keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is (except around a `U&'…'` literal's `UESCAPE` clause; see [Not yet supported](#not-yet-supported)); they are not kept in the AST. The node types are exported from `grammar.ts` (`Stmt`, `Query`, `Expr`, …).
 
 `parse` throws a `ParseError` at the first problem:
 
@@ -38,7 +38,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 | File | What it is |
 |---|---|
-| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, PostgreSQL numbers (`1e5`, `.5`, `0xff`, `1_000`), `$1` parameters, comments, and the operator reader |
+| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, PostgreSQL numbers (`1e5`, `.5`, `0xff`, `1_000`), `$1` parameters, comments, and the operator reader. `sqlLexer` emits `comment` tokens; `sqlParseLexer`, which the grammar uses, drops them |
 | `grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, and one rule per statement |
 | `index.ts` | Re-exports both |
 | `sql-lite.test.ts` | Unit tests, one `describe` per feature |
@@ -74,16 +74,16 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 |---|---:|---:|---:|---:|---:|
 | Queries | 93 | 59 | 32 | 1 | 1 |
 | Expressions | 87 | 47 | 21 | 4 | 15 |
-| Types and lexical | 34 | 16 | 11 | 4 | 3 |
+| Types and lexical | 34 | 18 | 11 | 2 | 3 |
 | DML | 77 | 32 | 35 | 6 | 4 |
 | Transactions and session | 70 | 17 | 33 | 0 | 20 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **209** | **236** | **20** | **134** |
+| **Total** | **599** | **211** | **236** | **18** | **134** |
 
-So sql-lite accepts 445 of the 599 statements (74%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 447 of the 599 statements (75%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -97,9 +97,9 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 
 **Lexical**
 
-- **Comments inside a statement.** Comments are only trivia *between* statements: `SELECT id, -- primary key` followed by a line break fails, as does `SELECT /* note */ 1;`. This is the most common real-world failure.
 - String constants continued across a line break (`'foo'` newline `'bar'`).
 - Numbers with a trailing dot (`5.`, `1.e3`).
+- A comment between a `U&'…'` literal and its `UESCAPE` clause, or inside that clause (`U&'…' /* c */ UESCAPE '!'`, `U&'…' UESCAPE /* c */ '!'`).
 - `U&"…"` Unicode-escaped identifiers. These parse, but into the wrong tree (see below).
 
 **Statements**
@@ -169,7 +169,6 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 
 These statements parse without error, but the tree they produce is wrong:
 
-- **`-2 ^ 2` parses as `-(2 ^ 2)`.** In PostgreSQL, unary minus binds tighter than `^`, so the value is 4, not -4.
 - **`WITH TIES` is dropped.** `FETCH FIRST 3 ROWS WITH TIES` yields the same `limit` as `FETCH FIRST 3 ROWS ONLY`.
 - **`SELECT a ISNULL FROM t` reads `isnull` as a column alias.** PostgreSQL reads it as the null test.
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
