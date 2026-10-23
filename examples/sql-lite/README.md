@@ -58,11 +58,11 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 - **Queries.** `SELECT` with `DISTINCT [ON]`, every join type (`NATURAL`, `USING [AS alias]`, `LATERAL`, parenthesised and right-nested joins), subqueries and derived tables, `ONLY` and the inheritance `*`, alias column lists, column definition lists for record-returning functions, `TABLESAMPLE … REPEATABLE`, `ROWS FROM (…)` and `WITH ORDINALITY`. Also: `GROUP BY [DISTINCT | ALL]` with `ROLLUP` / `CUBE` / `GROUPING SETS`, `HAVING`, `WINDOW`, `ORDER BY … USING` and `NULLS FIRST/LAST`, `LIMIT` / `OFFSET` / `FETCH FIRST … ROWS ONLY | WITH TIES`, every locking clause (`FOR [NO KEY] UPDATE`, `FOR [KEY] SHARE`, `OF`, `NOWAIT`, `SKIP LOCKED`), `UNION` / `INTERSECT` / `EXCEPT [ALL]`, standalone `VALUES`, `SELECT INTO`. CTEs can be `RECURSIVE`, `[NOT] MATERIALIZED`, use `SEARCH` and `CYCLE`, and be data-modifying.
 - **Expressions.** The full operator precedence table: arithmetic, bitwise, `||`, comparison, `LIKE` / `ILIKE` / `SIMILAR TO` with `ESCAPE`, regex `~` operators, `IS [NOT] DISTINCT FROM`, `IS [NOT] NULL / TRUE / UNKNOWN`, `IS JSON [OBJECT | ARRAY | SCALAR] [WITH UNIQUE KEYS]`, `BETWEEN [SYMMETRIC]`, `IN`, `ANY` / `SOME` / `ALL`, `EXISTS`, `OVERLAPS`, `AT TIME ZONE`, `COLLATE`. JSON and jsonpath operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`, `?&`, `@?`, `@@`, `#-`), `::` casts and `CAST`, `CASE`, `ROW(…)`, `ARRAY[…]`, subscripts and slices. Special-syntax functions: `EXTRACT`, `POSITION`, `SUBSTRING … FROM … FOR`, `TRIM`, `OVERLAY`, the niladic `CURRENT_DATE` / `CURRENT_TIMESTAMP(p)` / `LOCALTIME` / `CURRENT_USER` family. Aggregate modifiers: `DISTINCT`, `ORDER BY` inside the call, `FILTER (WHERE …)`, `WITHIN GROUP`, `=>` named arguments, `OVER` with `ROWS` / `RANGE` / `GROUPS` frames and `EXCLUDE`.
 - **Types and literals.** Multi-word types (`double precision`, `character varying(n)`, `timestamp(p) with time zone`, `bit varying`, `interval day to second`), array types, schema-qualified types, typed literals (`DATE '…'`, `TIMESTAMP '…'`, `INTERVAL '…' HOUR TO MINUTE`), dollar-quoted strings, bit / hex / Unicode-escape strings with `UESCAPE`.
-- **DML.** `INSERT` with `DEFAULT VALUES`, `DEFAULT` row items, `OVERRIDING`, `ON CONFLICT (cols) | ON CONSTRAINT … DO NOTHING | DO UPDATE … WHERE`, a target alias, and `RETURNING`. `UPDATE … FROM` with multi-column `(a, b) = (…)` / `= (SELECT …)` assignments. `DELETE … USING`. `MERGE` with every `WHEN [NOT] MATCHED [BY SOURCE | TARGET]` form, plus `RETURNING`. `COPY` to and from a file, `STDIN` / `STDOUT` or a `PROGRAM`, with a parenthesised option list and `WHERE`. `TRUNCATE`.
+- **DML.** `INSERT` with `DEFAULT VALUES`, `DEFAULT` row items, `OVERRIDING`, `ON CONFLICT (cols) | ON CONSTRAINT … DO NOTHING | DO UPDATE … WHERE`, a target alias, and `RETURNING`. `UPDATE … FROM` with multi-column `(a, b) = (…)` / `= (SELECT …)` assignments. `SET col = DEFAULT` (also in `ON CONFLICT DO UPDATE` and `MERGE … UPDATE SET`). `DELETE … USING`. `UPDATE` / `DELETE` with `WHERE CURRENT OF cursor`. `MERGE` with every `WHEN [NOT] MATCHED [BY SOURCE | TARGET]` form, plus `RETURNING`. `COPY` to and from a file, `STDIN` / `STDOUT` or a `PROGRAM`, with a parenthesised option list and `WHERE`. `TRUNCATE` with `RESTART | CONTINUE IDENTITY` and `CASCADE | RESTRICT`. `UPDATE`, `DELETE` and `TRUNCATE` take `ONLY` / `name *` targets.
 - **DDL.**
   - **`CREATE TABLE`:** column and table constraints, identity and stored generated columns, `COLLATE`, foreign-key actions / `MATCH` / `DEFERRABLE`, `EXCLUDE`, `LIKE … INCLUDING`, `INHERITS`, range / list / hash partitioning and `PARTITION OF … FOR VALUES`, `WITH (…)`, `TABLESPACE`, `ON COMMIT`, `TEMP` / `UNLOGGED`, `AS SELECT … WITH [NO] DATA`.
-  - **`ALTER TABLE`:** `[IF EXISTS] ONLY name` (as pg_dump writes it), `ONLY (name)` and the inheritance `*`, action lists that add or drop columns and constraints, `ALTER COLUMN` type / default / not-null, renames, `SET SCHEMA`, `OWNER TO`, triggers, `ATTACH` / `DETACH PARTITION`, storage parameters, `REPLICA IDENTITY`, `CLUSTER ON`.
-  - **Other `CREATE` targets:** indexes (with `CONCURRENTLY`, `ON ONLY`, `USING`, opclasses, `INCLUDE`, partial `WHERE`, `WITH`), views and materialized views, sequences, enum / composite / range types, domains, schemas, databases, extensions, tablespaces, functions, procedures, aggregates, triggers, roles and users.
+  - **`ALTER TABLE`:** action lists that add or drop columns and constraints, `ALTER COLUMN` type / default / not-null, renames, `SET SCHEMA`, `OWNER TO`, triggers, `ATTACH` / `DETACH PARTITION`, storage parameters, `REPLICA IDENTITY`, `CLUSTER ON`.
+  - **Other `CREATE` targets:** indexes (with `CONCURRENTLY`, `USING`, opclasses, `INCLUDE`, partial `WHERE`, `WITH`), views and materialized views, sequences, enum / composite / range types, domains, schemas, databases, extensions, tablespaces, functions, procedures, aggregates, triggers, roles and users.
   - **`DROP`:** all of those except tablespaces.
   - **`ALTER`:** schemas, domains, types, indexes, functions, aggregates, views, materialized views and sequences.
   - Plus `COMMENT ON` and `REFRESH MATERIALIZED VIEW`.
@@ -77,15 +77,15 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 | Queries | 93 | 59 | 32 | 1 | 1 |
 | Expressions | 87 | 47 | 21 | 4 | 15 |
 | Types and lexical | 34 | 18 | 12 | 2 | 2 |
-| DML | 77 | 32 | 35 | 6 | 4 |
+| DML | 77 | 37 | 37 | 1 | 2 |
 | Transactions and session | 70 | 17 | 33 | 0 | 20 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
-| Tables and indexes | 84 | 14 | 41 | 1 | 28 |
+| Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **212** | **238** | **17** | **132** |
+| **Total** | **599** | **216** | **239** | **13** | **131** |
 
-So sql-lite accepts 450 of the 599 statements (75%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 455 of the 599 statements (76%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -102,9 +102,9 @@ PG_COVERAGE_REPORT=1 pnpm vitest run examples/sql-lite/pg-coverage.test.ts
 
 | File | Statements | Parse | Rate | COPY blocks | Meta-commands |
 |---|---:|---:|---:|---:|---:|
-| `handwritten-pg17.sql` | 110 | 72 | 65.5% | 4 | 7 |
-| `pagila-schema.sql` | 388 | 315 | 81.2% | 0 | 0 |
-| **Total** | **498** | **387** | **77.7%** | **4** | **7** |
+| `handwritten-pg17.sql` | 110 | 63 | 57.3% | 4 | 7 |
+| `pagila-schema.sql` | 388 | 208 | 53.6% | 0 | 0 |
+| **Total** | **498** | **271** | **54.4%** | **4** | **7** |
 
 To print the table, or to rewrite `pg-dump-corpus.ts` after a grammar change (review the diff: no row may move to `fail`):
 
@@ -140,7 +140,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 **Clauses**
 
 - **`DEFAULT <expr>` followed by `NOT NULL`**, as in `id integer DEFAULT nextval('s'::regclass) NOT NULL`. pg_dump emits this for nearly every table. `DEFAULT` takes a full expression, so the `NOT` is read as the start of `NOT LIKE` / `NOT IN`. (Other constraints after `DEFAULT` work.)
-- **`ONLY`** on `UPDATE`, `DELETE` and `TRUNCATE`. `SELECT … FROM ONLY`, `MERGE INTO ONLY`, `LOCK ONLY`, `ALTER TABLE ONLY` and `CREATE INDEX … ON ONLY` work.
+- **`ONLY`** on `ALTER TABLE` and `CREATE INDEX … ON ONLY`. pg_dump emits `ALTER TABLE ONLY`. `SELECT … FROM ONLY`, `UPDATE ONLY`, `DELETE FROM ONLY`, `TRUNCATE ONLY`, `MERGE INTO ONLY` and `LOCK ONLY` work.
 - **`ALTER TABLE`:**
   - `ADD CONSTRAINT … NOT VALID`
   - `[ENABLE | DISABLE | FORCE | NO FORCE] ROW LEVEL SECURITY`
@@ -160,8 +160,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - **Other `CREATE TABLE` options:** `COMPRESSION` / `STORAGE` on a column, typed tables (`OF type`), `USING heap`, `WITHOUT OIDS`, `CREATE TABLE … AS TABLE` / `AS EXECUTE`.
 - `TABLESPACE` on `CREATE INDEX` and `CREATE MATERIALIZED VIEW` (`CREATE TABLE … TABLESPACE` works).
 - **`ON CONFLICT` targets that aren't plain columns:** expressions, a partial-index `WHERE`, or `COLLATE`.
-- **`UPDATE` targets:** `SET col = DEFAULT` (the multi-column form accepts `DEFAULT`), and subscript or field targets (`SET arr[1] = …`).
-- `WHERE CURRENT OF cursor` on `UPDATE` and `DELETE`.
+- **`UPDATE` targets:** subscript or field targets (`SET arr[1] = …`), and a parenthesised `SET col = (DEFAULT)`.
 - Legacy `COPY` options without parentheses (`COPY t FROM STDIN CSV HEADER`).
 - `GRANT` / `REVOKE … ON FUNCTION f(argtypes)`. It works without the argument list. Also missing: `GRANTED BY`, and the PostgreSQL 16 `WITH INHERIT / SET` role options.
 - **Routine bodies and triggers:** SQL-standard function bodies (`RETURN expr`, `BEGIN ATOMIC … END`), trigger `REFERENCING OLD / NEW TABLE`, `CREATE CONSTRAINT TRIGGER`.
@@ -211,7 +210,6 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **The zero-length identifier `""`.**
 - **Named parameters** such as `$name`. PostgreSQL only has positional ones (`$1`); sql-lite keeps `$name` for templated SQL.
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
-- **`CREATE INDEX IF NOT EXISTS ON t (…)`** with no index name. PostgreSQL requires a name after `IF NOT EXISTS`.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.
 

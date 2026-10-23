@@ -878,8 +878,8 @@ export type LockMode =
 // LOCK [TABLE] [ONLY] name [*] [, …] [IN mode MODE] [NOWAIT]. ONLY is per table;
 // a trailing `*` spells the default (descendants included) and is not recorded.
 // `mode` is null when IN … MODE is omitted (PG then takes ACCESS EXCLUSIVE).
-// MERGE, ALTER TABLE and CREATE INDEX … ON targets are read by the same rule
-// (relationExpr).
+// MERGE, UPDATE, DELETE, TRUNCATE, ALTER TABLE and CREATE INDEX … ON targets
+// are read by the same rule (relationExpr).
 export type LockTarget = { name: string[]; only: boolean };
 export type Lock = {
   kind: "lock";
@@ -1075,10 +1075,14 @@ export type Stmt =
       force?: true;
       span: Span;
     }
-  // `TRUNCATE [TABLE] name[, …] [RESTART|CONTINUE IDENTITY] [CASCADE|RESTRICT]`.
+  // `TRUNCATE [TABLE] {[ONLY] name [*] | ONLY (name)}[, …]
+  // [RESTART|CONTINUE IDENTITY] [CASCADE|RESTRICT]`. `only` runs parallel to
+  // `names` (true where that table is ONLY) and is present only when some table
+  // is; a trailing `*` spells the default and is not recorded.
   | {
       kind: "truncate";
       names: string[][];
+      only?: boolean[];
       identity: "restart" | "continue" | null;
       behavior: "cascade" | "restrict" | null;
       span: Span;
@@ -1296,12 +1300,14 @@ export type Cte = {
   cycle?: CteCycle;
 };
 
-// One item of a SET list, shared by UPDATE and ON CONFLICT DO UPDATE: either
-// `column = value`, or PG's multi-column `(a, b) = source`. The multi-column
-// source is a row constructor (`(1, 2)` / `ROW(1, 2)`, whose top-level items
-// may be a bare DEFAULT) or a `(SELECT …)` subquery — the only sources PG accepts.
+// One item of a SET list, shared by UPDATE, ON CONFLICT DO UPDATE and MERGE's
+// UPDATE SET: either `column = value`, or PG's multi-column `(a, b) = source`.
+// The multi-column source is a row constructor (`(1, 2)` / `ROW(1, 2)`, whose
+// top-level items may be a bare DEFAULT) or a `(SELECT …)` subquery — the only
+// sources PG accepts.
+// A single column's value may be a bare DEFAULT too (`SET a = DEFAULT`).
 export type Assignment =
-  | { column: string; value: Expr }
+  | { column: string; value: Expr | DefaultValue }
   | { columns: string[]; value: AssignmentRow | Extract<Expr, { kind: "row" | "subquery" }> };
 
 // The row-constructor source of a multi-column assignment: RowExpr's shape, but
@@ -1317,9 +1323,10 @@ export type OnConflict = {
   action: { kind: "nothing" } | { kind: "update"; set: Assignment[]; where: Expr | null };
 };
 
-// A bare DEFAULT standing for a column's default in an INSERT VALUES row. It
-// is a row item, not an expression. PG's a_expr also admits DEFAULT (e.g.
-// `UPDATE t SET a = DEFAULT`), but this grammar accepts it only here so far.
+// A bare DEFAULT standing for a column's default: an INSERT VALUES row item, or
+// the value of a SET assignment (`SET a = DEFAULT`, `SET (a, b) = (1, DEFAULT)`).
+// It is not an expression: PG's a_expr admits DEFAULT only to reject it in parse
+// analysis everywhere else, and this grammar accepts it only in those places.
 export type DefaultValue = { kind: "default"; span: Span };
 
 // Which value wins for an identity column: `OVERRIDING {SYSTEM | USER} VALUE`.
@@ -1346,25 +1353,35 @@ export type Insert = {
   span: Span;
 };
 
+// `UPDATE target …` / `DELETE FROM target …`, where a target is `[ONLY] name
+// [*]` or `ONLY (name)` (relationExpr). `only` is present only when written; a
+// trailing `*` spells the default and is not recorded. `currentOf` names the
+// cursor of `WHERE CURRENT OF cursor` and is present only for that form
+// (`where` is then null).
 export type Update = {
   kind: "update";
   table: string[];
+  only?: true;
   alias: string | null;
   set: Assignment[];
   from: FromItem[] | null;
   where: Expr | null;
+  currentOf?: string;
   returning: SelectItem[] | null;
   with_?: Cte[];
   recursive?: boolean;
   span: Span;
 };
 
+// See Update for `only` and `currentOf`.
 export type Delete = {
   kind: "delete";
   table: string[];
+  only?: true;
   alias: string | null;
   using: FromItem[] | null;
   where: Expr | null;
+  currentOf?: string;
   returning: SelectItem[] | null;
   with_?: Cte[];
   recursive?: boolean;
@@ -5699,10 +5716,28 @@ const dropStmt = custom<Stmt, SqlTokenType>(
   { expected: '"drop"', first: [{ type: "ident", value: "drop" }] },
 );
 
+// PG's relation_expr, a LOCK, MERGE, UPDATE, DELETE, TRUNCATE, ALTER TABLE or
+// CREATE INDEX target — `[ONLY] name [*]` or `ONLY (name)`.
+// `only` and `table` are reserved, so neither can begin a name.
+const relationExpr = custom<LockTarget, SqlTokenType>(
+  (ctx) => {
+    const only = ctx.eat("ident", "only") !== null;
+    if (only && ctx.eat("punc", "(") !== null) {
+      const name = ctx.parse(qualName);
+      expectClose(ctx);
+      return { name, only };
+    }
+    const name = ctx.parse(qualName);
+    if (!only) ctx.eat("op", "*");
+    return { name, only };
+  },
+  { expected: '"only" or a name', first: [{ type: "ident", value: "only" }, ...nameWord.first()] },
+);
+
 const truncateStmt = seq(
   skip(kw("truncate")),
   skip(optional(kw("table"))), // optional TABLE noise word
-  field("names", sepBy(qualName, P(","))),
+  field("tables", sepBy(relationExpr, P(","))),
   field(
     "identity",
     optional(
@@ -5712,7 +5747,16 @@ const truncateStmt = seq(
     ),
   ),
   field("behavior", dropBehavior),
-).map(({ names, identity, behavior }, span): Stmt => ({ kind: "truncate", names, identity, behavior, span }));
+).map(
+  ({ tables, identity, behavior }, span): Stmt => ({
+    kind: "truncate",
+    names: tables.map((t) => t.name),
+    ...(tables.some((t) => t.only) && { only: tables.map((t) => t.only) }),
+    identity,
+    behavior,
+    span,
+  }),
+);
 
 // `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`. Every word
 // is matched by value and stays a name elsewhere. CONCURRENTLY is taken whenever
@@ -6120,26 +6164,17 @@ const asAlias = custom<string | null, SqlTokenType>(
   { expected: "an alias", first: [{ type: "ident" }, { type: "qident" }] },
 );
 
-// PG's relation_expr, a LOCK, MERGE, ALTER TABLE or CREATE INDEX target —
-// `[ONLY] name [*]` or `ONLY (name)`.
-// `only` and `table` are reserved, so neither can begin a name.
-const relationExpr = custom<LockTarget, SqlTokenType>(
-  (ctx) => {
-    const only = ctx.eat("ident", "only") !== null;
-    if (only && ctx.eat("punc", "(") !== null) {
-      const name = ctx.parse(qualName);
-      expectClose(ctx);
-      return { name, only };
-    }
-    const name = ctx.parse(qualName);
-    if (!only) ctx.eat("op", "*");
-    return { name, only };
-  },
-  { expected: '"only" or a name', first: [{ type: "ident", value: "only" }, ...nameWord.first()] },
+// One item of an INSERT VALUES row or an assigned value: an expression or a
+// bare DEFAULT. A local rule rather than `exprList`, whose other consumers must
+// not take DEFAULT. `default` is reserved, so the keyword branch never shadows
+// an expression.
+const insertValue = oneOf(
+  kw("default").map((_, span): DefaultValue => ({ kind: "default", span })),
+  expression,
 );
 
 const eq = token("op", { values: ["="] });
-const singleAssignment = seq(field("column", nameWord), skip(eq), field("value", expression)).map(
+const singleAssignment = seq(field("column", nameWord), skip(eq), field("value", insertValue)).map(
   ({ column, value }): Assignment => ({ column, value }),
 );
 // `(a, b, …) = source`. The row items are read locally (not via `expression`)
@@ -6207,6 +6242,31 @@ const assignment = oneOf(multiAssignment, singleAssignment);
 const setAssignments = seq(skip(kw("set")), field("items", sepBy(assignment, P(",")))).map((s) => s.items);
 
 const whereClause = seq(skip(kw("where")), field("e", expression)).map((s) => s.e);
+
+// PG's where_or_current_clause, for UPDATE and DELETE: `WHERE condition` or
+// `WHERE CURRENT OF cursor`. `current` and `of` are matched by value and only
+// as a pair, so `WHERE current` still reads a column named current.
+type WhereOrCurrent = { where: Expr } | { currentOf: string };
+const whereOrCurrent = custom<WhereOrCurrent, SqlTokenType>(
+  (ctx) => {
+    ctx.parse(kw("where"));
+    if (ctx.is("ident", "current")) {
+      const after = peekOrReport(ctx, 1);
+      if (after !== null && after.type === "ident" && after.value === "of") {
+        ctx.next(); // "current"
+        ctx.next(); // "of"
+        return { currentOf: ctx.parse(nameWord) };
+      }
+    }
+    return { where: ctx.parse(expression) };
+  },
+  { expected: '"where"', first: [{ type: "ident", value: "where" }] },
+);
+// The `where` / `currentOf` fields an optional where_or_current_clause adds.
+function whereFields(clause: WhereOrCurrent | null): { where: Expr | null; currentOf?: string } {
+  if (clause === null) return { where: null };
+  return "currentOf" in clause ? { where: null, currentOf: clause.currentOf } : { where: clause.where };
+}
 
 // One grouping element inside ROLLUP/CUBE/GROUPING SETS: a parenthesised column
 // group `( a, b )` (possibly the empty `()`) or a bare expression (→ `[expr]`).
@@ -7141,13 +7201,6 @@ const queryRule = custom<Query, SqlTokenType>(
 
 // --- INSERT / UPDATE / DELETE ---
 
-// One item of an INSERT VALUES row: an expression or a bare DEFAULT. A local
-// row rule rather than `exprList`, whose other consumers must not take DEFAULT.
-// `default` is reserved, so the keyword branch never shadows an expression.
-const insertValue = oneOf(
-  kw("default").map((_, span): DefaultValue => ({ kind: "default", span })),
-  expression,
-);
 const insertValuesRow = delimited(P("("), P(")"), P(","), insertValue, { interleaved: true });
 const valuesSource = seq(skip(kw("values")), field("rows", sepBy(insertValuesRow, P(",")))).map(({ rows }) => ({
   kind: "values" as const,
@@ -7271,20 +7324,21 @@ const insertStmt = seq(
 
 const updateStmt = seq(
   skip(kw("update")),
-  field("table", qualName),
+  field("target", relationExpr),
   field("alias", asAlias),
   field("set", setAssignments),
   field("from", optional(seq(skip(kw("from")), field("f", fromClause)).map((s) => s.f))),
-  field("where", optional(whereClause)),
+  field("where", optional(whereOrCurrent)),
   field("returning", optional(returningClause)),
 ).map(
-  ({ table, alias, set, from, where, returning }, span): Update => ({
+  ({ target, alias, set, from, where, returning }, span): Update => ({
     kind: "update",
-    table,
+    table: target.name,
+    ...(target.only && { only: true as const }),
     alias,
     set,
     from: from ?? null,
-    where: where ?? null,
+    ...whereFields(where),
     returning: returning ?? null,
     span,
   }),
@@ -7293,18 +7347,19 @@ const updateStmt = seq(
 const deleteStmt = seq(
   skip(kw("delete")),
   skip(kw("from")),
-  field("table", qualName),
+  field("target", relationExpr),
   field("alias", asAlias),
   field("using", optional(seq(skip(kw("using")), field("f", fromClause)).map((s) => s.f))),
-  field("where", optional(whereClause)),
+  field("where", optional(whereOrCurrent)),
   field("returning", optional(returningClause)),
 ).map(
-  ({ table, alias, using, where, returning }, span): Delete => ({
+  ({ target, alias, using, where, returning }, span): Delete => ({
     kind: "delete",
-    table,
+    table: target.name,
+    ...(target.only && { only: true as const }),
     alias,
     using: using ?? null,
-    where: where ?? null,
+    ...whereFields(where),
     returning: returning ?? null,
     span,
   }),
