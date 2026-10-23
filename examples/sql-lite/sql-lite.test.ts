@@ -1,6 +1,14 @@
 import { createInputStream, ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
-import { type Stmt, sqlLexer, sqlLite, sqlParseLexer } from "./index";
+import {
+  type Stmt,
+  sqlLexer,
+  sqlLite,
+  sqlLiteScript,
+  sqlParseLexer,
+  sqlScriptLexer,
+  sqlScriptParseLexer,
+} from "./index";
 
 // --- helpers ---
 
@@ -1663,8 +1671,9 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
     expect(exprOf("a >> -1")).toEqual(bin(">>", name("a"), un("-", num(1))));
     // Spaced, the sign is its own token and the power parses.
     expect(exprOf("2 ^ -2")).toEqual(bin("^", num(2), un("-", num(2))));
-    // Unspaced, `^-` lexes as one operator that no group claims.
-    expect(() => sqlLite.parse("SELECT 2^-2 FROM t;")).toThrow(/but found "\^-"/);
+    // Unspaced, `^-` lexes as one operator, as in PG, where it is the generic
+    // operator `^-` (which no catalog defines, so PG fails only at analysis).
+    expect(exprOf("2^-2")).toEqual(bin("^-", num(2), num(2)));
     // `++` is trimmed to a single `+`, so a doubled sign reaches the prefix.
     expect(exprOf("a ++ b")).toEqual(bin("+", name("a"), un("+", name("b"))));
   });
@@ -1757,6 +1766,331 @@ describe("SQL-lite precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts 
   it("rejects an AT with no TIME ZONE or no zone after it", () => {
     expect(() => sqlLite.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected "time"/);
     expect(() => sqlLite.parse("SELECT a AT TIME ZONE FROM t;")).toThrow(/Expected a name but found "from"/);
+  });
+});
+
+// --- generic operators, OPERATOR(…), quantified operators, ISNULL / NOTNULL ---
+
+// PG's scanner reads any run of operator characters as one operator, and its
+// grammar gives every operator outside the named tiers one precedence, `Op`.
+describe("SQL-lite generic operators", () => {
+  const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+
+  it("parses any operator outside the fixed table as a binary node", () => {
+    for (const op of ["&&", "<->", "-|-", "^@", "~~", "!~~", "~~*", "!~~*", "<<|", "&<", "@@@", "<^", "?#"]) {
+      expect(exprOf(`a ${op} b`)).toEqual(bin(op, name("a"), name("b")));
+    }
+    // The `~~` pg_dump writes for LIKE in CHECK constraints and views.
+    expect(exprOf("(email ~~ '%@gmail.com'::text)")).toEqual(
+      bin("~~", name("email"), { kind: "cast", expr: str("%@gmail.com"), type: ct("text") }),
+    );
+  });
+
+  it("keeps every fixed-table operator in its own group", () => {
+    const fixed = ["^", "*", "/", "%", "+", "-", "||", "@>", "&", "|", "#", "<<", ">>", "->", "->>", "#>", "#>>"];
+    const more = ["#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@?", "@@", "<", ">", "<=", ">=", "=", "<>"];
+    for (const op of [...fixed, ...more, "!="]) {
+      expect(exprOf(`a ${op} b`)).toEqual(bin(op, name("a"), name("b")));
+    }
+    // Each still binds at its own bp, not the catch-all's: the comparisons
+    // below a generic operator, the arithmetic above it.
+    expect(exprOf("a <-> b = c")).toEqual(bin("=", bin("<->", name("a"), name("b")), name("c")));
+    expect(exprOf("a = b <-> c")).toEqual(bin("=", name("a"), bin("<->", name("b"), name("c"))));
+    expect(exprOf("a <-> b + c")).toEqual(bin("<->", name("a"), bin("+", name("b"), name("c"))));
+    expect(exprOf("a * b <-> c")).toEqual(bin("<->", bin("*", name("a"), name("b")), name("c")));
+    expect(exprOf("a ^ b && c")).toEqual(bin("&&", bin("^", name("a"), name("b")), name("c")));
+  });
+
+  it("shares the bp-12 tier left-associatively and ranks it above LIKE, IS and AND", () => {
+    expect(exprOf("a || b <-> c")).toEqual(bin("<->", bin("||", name("a"), name("b")), name("c")));
+    expect(exprOf("a <-> b || c")).toEqual(bin("||", bin("<->", name("a"), name("b")), name("c")));
+    expect(exprOf("a ~~ b ~~ c")).toEqual(bin("~~", bin("~~", name("a"), name("b")), name("c")));
+    expect(exprOf("a LIKE b <-> c")).toMatchObject({ kind: "like", pattern: bin("<->", name("b"), name("c")) });
+    expect(exprOf("a && b IS NULL")).toEqual({ kind: "is", expr: bin("&&", name("a"), name("b")), negated: false });
+    expect(exprOf("a ~~ b AND c")).toEqual(bin("and", bin("~~", name("a"), name("b")), name("c")));
+    expect(exprOf("NOT a ~~ b")).toEqual(un("not", bin("~~", name("a"), name("b"))));
+    expect(exprOf("-a ~~ b")).toEqual(bin("~~", un("-", name("a")), name("b")));
+    expect(exprOf("a BETWEEN b AND c && d")).toMatchObject({ kind: "between", hi: bin("&&", name("c"), name("d")) });
+  });
+
+  it("stops before the clause words and operators that follow an expression", () => {
+    const order = (firstStmt("SELECT x FROM t ORDER BY a <-> b USING <;") as any).orderBy;
+    expect(order).toEqual([{ expr: bin("<->", name("a"), name("b")), dir: null, using: "<", nulls: null }]);
+    const exclude = (firstStmt("CREATE TABLE t (c int, EXCLUDE USING gist ((c <-> d) WITH &&));") as any).items[1];
+    expect(exclude.elements).toEqual([{ expr: bin("<->", name("c"), name("d")), operator: "&&" }]);
+  });
+
+  it("reaches the b-expression, so a column DEFAULT takes a generic operator", () => {
+    const cols = (firstStmt("CREATE TABLE t (a int DEFAULT 1 <-> 2 NOT NULL, b int DEFAULT @ -1);") as any).items;
+    expect(cols[0].constraints).toEqual([{ kind: "default", expr: bin("<->", num(1), num(2)) }, { kind: "notNull" }]);
+    expect(cols[1].constraints).toEqual([{ kind: "default", expr: un("@", un("-", num(1))) }]);
+    // POSITION's first operand is a b-expression too.
+    expect(colExpr("position(a <-> b IN c)")).toEqual({
+      kind: "position",
+      substring: bin("<->", name("a"), name("b")),
+      string: name("c"),
+    });
+  });
+
+  it("leaves `=>` to named arguments", () => {
+    expect(colExpr("f(a => 1)")).toEqual({
+      kind: "call",
+      name: "f",
+      args: [{ kind: "namedArg", name: "a", value: num(1) }],
+    });
+    expect(() => sqlLite.parse("SELECT a => 1 FROM t;")).toThrow(/Expected ";" but found "=>" \(1:9\)/);
+    expect(() => sqlLite.parse("SELECT a => ANY (b) FROM t;")).toThrow(/Expected ";" but found "=>"/);
+  });
+
+  it("parses PostgreSQL's built-in prefix operators", () => {
+    for (const op of ["~", "@", "|/", "||/", "!!", "@-@", "@@", "#", "?-", "?|"]) {
+      expect(exprOf(`${op} a`)).toEqual(un(op, name("a")));
+    }
+    expect(exprOf("|/ 25 + ||/ 27")).toEqual(un("|/", bin("+", num(25), un("||/", num(27)))));
+    // The prefix binds at `Op`: its operand runs through `+` and tighter, and
+    // stops at another bp-12 operator, which then takes the prefix as its left.
+    expect(exprOf("@ a + b")).toEqual(un("@", bin("+", name("a"), name("b"))));
+    expect(exprOf("@ a <-> b")).toEqual(bin("<->", un("@", name("a")), name("b")));
+    expect(exprOf("~ a::int")).toEqual(un("~", { kind: "cast", expr: name("a"), type: ct("int") }));
+    expect(exprOf("a = ~ b")).toEqual(bin("=", name("a"), un("~", name("b"))));
+  });
+
+  it("rejects an operator with no operand", () => {
+    expect(() => sqlLite.parse("SELECT a <-> FROM t;")).toThrow(/Expected a name but found "from" \(1:13\)/);
+    expect(() => sqlLite.parse("SELECT @ FROM t;")).toThrow(/Expected a name but found "from" \(1:9\)/);
+    // `!` is no prefix operator, so it cannot open an expression.
+    expect(() => sqlLite.parse("SELECT ! a FROM t;")).toThrow(/but found "!" \(1:7\)/);
+  });
+
+  it("lexes an unspaced trailing sign into the operator when PG does", () => {
+    expect(exprOf("2^-2")).toEqual(bin("^-", num(2), num(2)));
+    expect(exprOf("a@-b")).toEqual(bin("@-", name("a"), name("b")));
+    // Without a "strong" character the sign is trimmed off and stays a prefix.
+    expect(exprOf("a<->-b")).toEqual(bin("<->", name("a"), un("-", name("b"))));
+  });
+
+  // PG's explicit `OPERATOR(schema.op)` spelling, which always binds at `Op`.
+  describe("OPERATOR(…)", () => {
+    const opBin = (op: string, opSchema: string[], left: unknown, right: unknown) => ({
+      ...bin(op, left, right),
+      opSchema,
+    });
+
+    it("parses it infix, with or without a schema", () => {
+      expect(exprOf("a OPERATOR(pg_catalog.+) b")).toEqual(opBin("+", ["pg_catalog"], name("a"), name("b")));
+      expect(exprOf("a OPERATOR(+) b")).toEqual(opBin("+", [], name("a"), name("b")));
+      expect(exprOf('a operator("S".x.~~) b')).toEqual(opBin("~~", ["S", "x"], name("a"), name("b")));
+      // At `Op`, whatever the operator: `*` no longer outranks `+`, and `=`
+      // outranks a following comparison.
+      expect(exprOf("a OPERATOR(pg_catalog.*) b + c")).toEqual(
+        opBin("*", ["pg_catalog"], name("a"), bin("+", name("b"), name("c"))),
+      );
+      expect(exprOf("a OPERATOR(pg_catalog.=) b = c")).toEqual(
+        bin("=", opBin("=", ["pg_catalog"], name("a"), name("b")), name("c")),
+      );
+      expect(exprOf("a + b OPERATOR(pg_catalog.~~) c")).toEqual(
+        opBin("~~", ["pg_catalog"], bin("+", name("a"), name("b")), name("c")),
+      );
+    });
+
+    it("parses it prefix, binding at `Op`", () => {
+      const opUn = (op: string, operand: unknown) => ({ ...un(op, operand), opSchema: ["pg_catalog"] });
+      expect(exprOf("OPERATOR(pg_catalog.-) a + b")).toEqual(opUn("-", bin("+", name("a"), name("b"))));
+      expect(exprOf("OPERATOR(pg_catalog.@) a <-> b")).toEqual(bin("<->", opUn("@", name("a")), name("b")));
+      expect(exprOf("x AND OPERATOR(pg_catalog.-) a")).toEqual(bin("and", name("x"), opUn("-", name("a"))));
+      expect(exprOf('OPERATOR(pg_catalog.-) a COLLATE "C"')).toEqual(
+        opUn("-", { kind: "collate", expr: name("a"), collation: ["C"] }),
+      );
+      // A NOT in the operand runs on through the comparisons, as NOT's does.
+      expect(exprOf("OPERATOR(pg_catalog.-) NOT a = b AND c")).toEqual(
+        bin("and", opUn("-", un("not", bin("=", name("a"), name("b")))), name("c")),
+      );
+      expect(exprOf("OPERATOR(pg_catalog.-) - NOT a = b")).toEqual(
+        opUn("-", un("-", un("not", bin("=", name("a"), name("b"))))),
+      );
+      expect(exprOf("OPERATOR(pg_catalog.-) a * NOT b")).toEqual(opUn("-", bin("*", name("a"), un("not", name("b")))));
+      expect(exprOf("OPERATOR(pg_catalog.-) NOT EXISTS (SELECT 1)")).toMatchObject({
+        op: "-",
+        operand: { kind: "exists", negated: true },
+      });
+      // In a b-expression as well.
+      const def = (firstStmt("CREATE TABLE t (a int DEFAULT OPERATOR(pg_catalog.-) 1);") as any).items[0];
+      expect(def.constraints).toEqual([{ kind: "default", expr: opUn("-", num(1)) }]);
+    });
+
+    it("rejects an incomplete spelling", () => {
+      // Only a complete `( [name .]… op )` is the operator; anything else
+      // leaves `operator` an alias, with the `(` stranded after it.
+      expect(() => sqlLite.parse("SELECT a OPERATOR(pg_catalog.+ b FROM t;")).toThrow(
+        /Expected ";" but found "\(" \(1:17\)/,
+      );
+      expect(() => sqlLite.parse("SELECT a OPERATOR(=>) b FROM t;")).toThrow(/Expected ";" but found "\("/);
+      expect(() => sqlLite.parse("SELECT a OPERATOR(select.+) b FROM t;")).toThrow(/Expected ";" but found "\("/);
+      expect(() => sqlLite.parse("SELECT a OPERATOR(pg_catalog.+) FROM t;")).toThrow(
+        /Expected a name but found "from" \(1:32\)/,
+      );
+    });
+
+    it("keeps operator unreserved as names and aliases", () => {
+      expect((firstStmt("SELECT operator, a operator, b AS operator FROM operator;") as any).columns).toEqual([
+        col(name("operator")),
+        col(name("a"), "operator"),
+        col(name("b"), "operator"),
+      ]);
+      expect((firstStmt("SELECT a FROM t operator;") as any).from).toEqual([
+        { kind: "table", name: ["t"], alias: "operator" },
+      ]);
+      expect((firstStmt("CREATE TABLE operator (operator int);") as any).items).toEqual([
+        { kind: "column", name: "operator", dataType: ct("int"), constraints: [] },
+      ]);
+      // A call named `operator` stays a call unless its argument is exactly an
+      // operator reference — leniently in a select list, where PG rejects it,
+      // and as PG reads it in an index, exclusion or partition element.
+      const call = (args: unknown[]) => ({ kind: "call", name: "operator", args });
+      expect(colExpr("operator(1)")).toEqual(call([num(1)]));
+      expect(colExpr("operator(-1)")).toEqual(call([un("-", num(1))]));
+      expect(colExpr("operator(a.b)")).toEqual(call([name("a", "b")]));
+      expect(colExpr("s.operator(1)")).toEqual({ kind: "call", name: "s.operator", args: [num(1)] });
+      expect((firstStmt("CREATE INDEX ON t (operator(a));") as any).columns[0].expr).toEqual(call([name("a")]));
+      expect((firstStmt("CREATE TABLE t (a int) PARTITION BY RANGE (operator(a));") as any).partitionBy).toMatchObject({
+        keys: [{ expr: call([name("a")]) }],
+      });
+      // `( * )` is an operator reference, so `operator(*)` opens a prefix — in an
+      // index element too, where PG would read it as a call.
+      expect(() => sqlLite.parse("SELECT operator(*) FROM t;")).toThrow(/Expected a name but found "from"/);
+      expect(() => sqlLite.parse("CREATE INDEX ON t (operator(*));")).toThrow(/but found "\)" \(1:30\)/);
+    });
+  });
+});
+
+// `a_expr subquery_Op sub_type (…)`: ANY / SOME / ALL after any operator.
+describe("SQL-lite quantified operators", () => {
+  const anyAll = (op: string, quantifier: string, left: unknown, right: unknown, extra = {}) => ({
+    kind: "anyAll",
+    op,
+    quantifier,
+    left,
+    right,
+    ...extra,
+  });
+
+  it("quantifies LIKE and ILIKE, negated or not", () => {
+    expect(exprOf("p LIKE ANY (a)")).toEqual(anyAll("like", "any", name("p"), name("a")));
+    expect(exprOf("p ILIKE ALL (a)")).toEqual(anyAll("ilike", "all", name("p"), name("a")));
+    expect(exprOf("p NOT LIKE SOME (a)")).toEqual(anyAll("not like", "some", name("p"), name("a")));
+    expect(exprOf("p NOT ILIKE ANY (a)")).toEqual(anyAll("not ilike", "any", name("p"), name("a")));
+    const where = (firstStmt("SELECT * FROM f WHERE path LIKE ANY (ARRAY['%.csv', '%.tsv']);") as any).where;
+    expect(where).toEqual(
+      anyAll("like", "any", name("path"), { kind: "array", elements: [str("%.csv"), str("%.tsv")] }),
+    );
+  });
+
+  it("quantifies arithmetic, fixed-table and generic operators at their own precedence", () => {
+    expect(exprOf("x ~ ANY (a)")).toEqual(anyAll("~", "any", name("x"), name("a")));
+    expect(exprOf("x || ALL (a)")).toEqual(anyAll("||", "all", name("x"), name("a")));
+    expect(exprOf("x + ANY (a)")).toEqual(anyAll("+", "any", name("x"), name("a")));
+    expect(exprOf("x ^ SOME (a)")).toEqual(anyAll("^", "some", name("x"), name("a")));
+    expect(exprOf("x <-> ANY (a)")).toEqual(anyAll("<->", "any", name("x"), name("a")));
+    expect(exprOf("x OPERATOR(pg_catalog.~~) ALL (a)")).toEqual(
+      anyAll("~~", "all", name("x"), name("a"), { opSchema: ["pg_catalog"] }),
+    );
+    // The operator's own bp decides how much of the left it takes.
+    expect(exprOf("a * b + ANY (c)")).toEqual(anyAll("+", "any", bin("*", name("a"), name("b")), name("c")));
+    expect(exprOf("a || b + ANY (c)")).toEqual(bin("||", name("a"), anyAll("+", "any", name("b"), name("c"))));
+    expect(exprOf("a + b || ANY (c)")).toEqual(anyAll("||", "any", bin("+", name("a"), name("b")), name("c")));
+    expect(exprOf("a = b || ANY (c)")).toEqual(bin("=", name("a"), anyAll("||", "any", name("b"), name("c"))));
+    // A subquery operand, as for a comparison.
+    expect(exprOf("x ~~ ANY (SELECT p FROM u)")).toEqual(
+      anyAll("~~", "any", name("x"), {
+        kind: "subquery",
+        query: sel({ columns: [col(name("p"))], from: [{ kind: "table", name: ["u"], alias: null }] }),
+      }),
+    );
+  });
+
+  it("lets a quantified comparison be compared again", () => {
+    // The quantified form ends in its `)`, so PG reads on: `(x = ANY (a)) = y`.
+    expect(exprOf("x = ANY (a) = y")).toEqual(bin("=", anyAll("=", "any", name("x"), name("a")), name("y")));
+    expect(exprOf("x LIKE ANY (a) LIKE 'b'")).toMatchObject({
+      kind: "like",
+      expr: anyAll("like", "any", name("x"), name("a")),
+      pattern: str("b"),
+    });
+    expect(exprOf("x = ANY (a) <> ALL (b)")).toEqual(
+      anyAll("<>", "all", anyAll("=", "any", name("x"), name("a")), name("b")),
+    );
+    // A plain comparison still does not chain.
+    expect(() => sqlLite.parse("SELECT x = y = z FROM t;")).toThrow(/Operator "=" is non-associative \(1:13\)/);
+    expect(() => sqlLite.parse("SELECT x = ANY (a) = y = z FROM t;")).toThrow(
+      /Operator "=" is non-associative \(1:23\)/,
+    );
+    expect(() => sqlLite.parse("SELECT x < y >= ANY (a) FROM t;")).toThrow(/Operator ">=" is non-associative/);
+  });
+
+  it("rejects a quantifier without a parenthesised operand, or with ESCAPE", () => {
+    expect(() => sqlLite.parse("SELECT x LIKE ANY (a, b) FROM t;")).toThrow(/Expected "\)" but found "," \(1:20\)/);
+    expect(() => sqlLite.parse("SELECT x ~ ANY y FROM t;")).toThrow(/Expected "\(" but found "y" \(1:15\)/);
+    // SIMILAR TO has no quantified form in PG.
+    expect(() => sqlLite.parse("SELECT x SIMILAR TO ANY (a) FROM t;")).toThrow(/Expected a name but found "any"/);
+    // PG's quantified LIKE takes no ESCAPE clause.
+    expect(() => sqlLite.parse("SELECT * FROM t WHERE x LIKE ANY (a) ESCAPE '!';")).toThrow(
+      /Expected ";" but found "escape"/,
+    );
+    // The b-expression has no quantified form, as in PG.
+    expect(() => sqlLite.parse("CREATE TABLE t (a int DEFAULT 1 + ANY (b));")).toThrow(
+      /Expected a name but found "any"/,
+    );
+    expect(() => sqlLite.parse("CREATE TABLE t (a int DEFAULT 1 OPERATOR(+) ANY (b));")).toThrow(
+      /Expected a name but found "any" \(1:44\)/,
+    );
+  });
+});
+
+// PG's postfix ISNULL / NOTNULL, spellings of IS [NOT] NULL.
+describe("SQL-lite ISNULL and NOTNULL", () => {
+  const isNull = (expr: unknown, negated = false) => ({ kind: "is", expr, negated });
+
+  it("parses both in WHERE and in the select list", () => {
+    const stmt = firstStmt("SELECT a ISNULL, b NOTNULL, c isnull x FROM t WHERE a ISNULL OR b NOTNULL;") as any;
+    expect(stmt.columns).toEqual([col(isNull(name("a"))), col(isNull(name("b"), true)), col(isNull(name("c")), "x")]);
+    expect(stmt.where).toEqual(bin("or", isNull(name("a")), isNull(name("b"), true)));
+    // Identical to the IS spelling.
+    expect(exprOf("a NOTNULL")).toEqual(exprOf("a IS NOT NULL"));
+  });
+
+  it("binds at IS's precedence", () => {
+    expect(exprOf("a + b ISNULL")).toEqual(isNull(bin("+", name("a"), name("b"))));
+    expect(exprOf("a = b NOTNULL")).toEqual(isNull(bin("=", name("a"), name("b")), true));
+    expect(exprOf("NOT a ISNULL")).toEqual({ kind: "unary", op: "not", operand: isNull(name("a")) });
+    expect(exprOf("a ISNULL AND b")).toEqual(bin("and", isNull(name("a")), name("b")));
+    expect(exprOf("a ISNULL::int")).toEqual({ kind: "cast", expr: isNull(name("a")), type: ct("int") });
+  });
+
+  it("rejects them where PG's grammar does", () => {
+    // A b-expression has no NULL test, so a DEFAULT stops before it.
+    expect(() => sqlLite.parse("CREATE TABLE t (a int DEFAULT 1 ISNULL);")).toThrow(
+      /Expected "," but found "isnull" \(1:32\)/,
+    );
+    // Both are AS_LABEL keywords in PG: a bare alias never. (PG refuses them as
+    // a table alias even after AS, which this grammar does not check.)
+    expect(() => sqlLite.parse("SELECT * FROM t isnull;")).toThrow(/Expected ";" but found "isnull" \(1:16\)/);
+    expect(() => sqlLite.parse("SELECT * FROM t notnull;")).toThrow(/Expected ";" but found "notnull"/);
+  });
+
+  it("keeps isnull and notnull unreserved as names, and as aliases after AS", () => {
+    expect((firstStmt("CREATE TABLE isnull (isnull int, notnull int);") as any).items).toEqual([
+      { kind: "column", name: "isnull", dataType: ct("int"), constraints: [] },
+      { kind: "column", name: "notnull", dataType: ct("int"), constraints: [] },
+    ]);
+    const stmt = firstStmt("SELECT t.isnull, isnull(a), b AS isnull, c AS notnull FROM t AS notnull;") as any;
+    expect(stmt.columns).toEqual([
+      col(name("t", "isnull")),
+      col({ kind: "call", name: "isnull", args: [name("a")] }),
+      col(name("b"), "isnull"),
+      col(name("c"), "notnull"),
+    ]);
+    expect(stmt.from).toEqual([{ kind: "table", name: ["t"], alias: "notnull" }]);
   });
 });
 
@@ -1906,7 +2240,7 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
     expect((firstStmt("SELECT x IS JSON keys FROM t;") as any).columns).toEqual([col(isJson(), "keys")]);
   });
 
-  it("keeps overlaps and the IS JSON words unreserved as names and aliases", () => {
+  it("keeps overlaps and the IS JSON words unreserved as names, and overlaps an AS-only alias", () => {
     // Every word these rules match by value that was not already reserved.
     // (`symmetric`, `asymmetric`, `with`, `array` and `unique` were reserved
     // long before; `json` only means anything straight after IS.)
@@ -1917,18 +2251,23 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
       { kind: "column", name: "overlaps", dataType: ct("int"), constraints: [] },
       { kind: "column", name: "json", dataType: ct("jsonb"), constraints: [] },
     ]);
-    // …and as aliases — including straight after a row, where `overlaps` is
-    // claimed only when a row follows it (a `(`, or ROW and then a `(`).
-    expect((firstStmt("SELECT a overlaps FROM t;") as any).columns).toEqual([col(name("a"), "overlaps")]);
-    expect((firstStmt("SELECT (a, b) overlaps FROM t;") as any).columns).toEqual([
+    // …and as aliases. `overlaps` is an AS_LABEL keyword in PG, so it is an
+    // alias only after AS — including straight after a row, where it is
+    // claimed as the operator only when a row follows it (a `(`, or ROW and
+    // then a `(`). Bare, PG rejects it, and so does this grammar.
+    expect((firstStmt("SELECT a AS overlaps FROM t;") as any).columns).toEqual([col(name("a"), "overlaps")]);
+    expect((firstStmt("SELECT (a, b) AS overlaps FROM t;") as any).columns).toEqual([
       col(row(name("a"), name("b")), "overlaps"),
     ]);
-    expect((firstStmt("SELECT ROW(a, b) overlaps, c AS json FROM t;") as any).columns).toEqual([
+    expect((firstStmt("SELECT ROW(a, b) AS overlaps, c AS json FROM t;") as any).columns).toEqual([
       col(explicitRow(name("a"), name("b")), "overlaps"),
       col(name("c"), "json"),
     ]);
-    // `overlaps row` without a `(` after it is an alias followed by a stray word.
-    expect(() => sqlLite.parse("SELECT (a, b) overlaps row FROM t;")).toThrow(/Expected ";" but found "row"/);
+    expect((firstStmt("SELECT c json FROM t;") as any).columns).toEqual([col(name("c"), "json")]);
+    expect(() => sqlLite.parse("SELECT a overlaps FROM t;")).toThrow(/Expected ";" but found "overlaps" \(1:9\)/);
+    expect(() => sqlLite.parse("SELECT (a, b) overlaps FROM t;")).toThrow(/Expected ";" but found "overlaps"/);
+    expect(() => sqlLite.parse("SELECT (a, b) overlaps row FROM t;")).toThrow(/Expected ";" but found "overlaps"/);
+    expect(() => sqlLite.parse("SELECT * FROM t overlaps;")).toThrow(/Expected ";" but found "overlaps"/);
   });
 
   it("takes the item-type word after IS JSON unconditionally, as PG does", () => {
@@ -1957,9 +2296,9 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
       /Expected 2 items on the right of OVERLAPS but found 0/,
     );
     // A row OVERLAPS row predicate does not chain: the second `overlaps` has no
-    // row before it, so it reads as an alias, and the row after it is stranded.
+    // row before it, and as an AS_LABEL keyword it cannot be a bare alias.
     expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (c, d) OVERLAPS (e, f) FROM t;")).toThrow(
-      /Expected ";" but found "\(" \(1:39\)/,
+      /Expected ";" but found "overlaps" \(1:30\)/,
     );
     // A subquery is not a period.
     expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (SELECT 1) FROM t;")).toThrow(/but found "select"/);
@@ -5682,8 +6021,12 @@ describe("SQL-lite numeric literals and parameters", () => {
       { type: "op", value: "=" },
       { type: "number", value: "1" },
     ]);
-    // No rule takes `:=` yet, and the spaced spelling is no named argument.
-    expect(() => sqlLite.parse("SELECT f(a := 1);")).toThrow(/found ":="/);
+    // `:=` names an argument, and the spaced spelling is no named argument.
+    expect(colExpr("f(a := 1)")).toEqual({
+      kind: "call",
+      name: "f",
+      args: [{ kind: "namedArg", name: "a", value: num(1) }],
+    });
     expect(() => sqlLite.parse("SELECT f(a : = 1);")).toThrow(/found ":"/);
     // `:` and `::` lex as before.
     expect(colExpr("a[1:2]")).toMatchObject({ kind: "subscript" });
@@ -10798,6 +11141,328 @@ describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
   });
 });
 
+// --- ALTER ROLE, USER, DATABASE and TABLESPACE ---
+
+describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
+  const flag = (flagName: string, value = true) => ({ kind: "flag", name: flagName, value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const role = (over: Record<string, unknown>) => ({ kind: "alterRole", user: false, name: "r", ...over });
+  const db = (action: unknown) => ({ kind: "alterDatabase", name: "d", action });
+  const generic = (objectType: string, objectName: string, action: unknown) => ({
+    kind: "alterObject",
+    object: { objectType, name: [objectName] },
+    action,
+  });
+
+  it("parses ALTER ROLE and ALTER USER options, as pg_dumpall writes them", () => {
+    expect(
+      firstStmt(
+        "ALTER ROLE app_owner WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS " +
+          "CONNECTION LIMIT -1 ENCRYPTED PASSWORD 'SCRAM-SHA-256$4096:x' VALID UNTIL 'infinity';",
+      ),
+    ).toEqual(
+      role({
+        name: "app_owner",
+        action: {
+          kind: "options",
+          options: [
+            flag("superuser", false),
+            flag("inherit"),
+            flag("createrole", false),
+            flag("createdb", false),
+            flag("login"),
+            flag("replication", false),
+            flag("bypassrls", false),
+            { kind: "connectionLimit", limit: -1 },
+            { kind: "password", encrypted: true, password: "SCRAM-SHA-256$4096:x" },
+            { kind: "validUntil", timestamp: "infinity" },
+          ],
+        },
+      }),
+    );
+    expect(firstStmt("ALTER USER CURRENT_USER PASSWORD NULL;")).toEqual(
+      role({
+        user: true,
+        name: "current_user",
+        action: { kind: "options", options: [{ kind: "password", encrypted: false, password: null }] },
+      }),
+    );
+    expect(firstStmt("ALTER ROLE SESSION_USER WITH SUPERUSER;")).toEqual(
+      role({ name: "session_user", action: { kind: "options", options: [flag("superuser")] } }),
+    );
+    // PG lets the option run be empty, with or without WITH.
+    expect(firstStmt("ALTER ROLE r;")).toEqual(role({ action: { kind: "options", options: [] } }));
+    expect(firstStmt('ALTER USER "Bob" WITH;')).toEqual(
+      role({ user: true, name: "Bob", action: { kind: "options", options: [] } }),
+    );
+  });
+
+  it("parses ALTER ROLE and ALTER USER RENAME TO", () => {
+    expect(firstStmt("ALTER ROLE r RENAME TO s;")).toEqual(role({ action: { kind: "rename", to: "s" } }));
+    expect(firstStmt('ALTER USER "current_user" RENAME TO u;')).toEqual(
+      role({ user: true, name: "current_user", action: { kind: "rename", to: "u" } }),
+    );
+  });
+
+  it("parses ALTER ROLE [IN DATABASE] SET and RESET, for a role or ALL", () => {
+    expect(firstStmt("ALTER ROLE r SET search_path TO 'app', 'public';")).toEqual(
+      role({ action: { kind: "set", name: "search_path", values: [str("app"), str("public")] } }),
+    );
+    expect(firstStmt("ALTER ROLE r SET statement_timeout = '5s';")).toEqual(
+      role({ action: { kind: "set", name: "statement_timeout", values: [str("5s")] } }),
+    );
+    expect(firstStmt("ALTER USER CURRENT_ROLE IN DATABASE appdb SET work_mem FROM CURRENT;")).toEqual(
+      role({
+        user: true,
+        name: "current_role",
+        database: "appdb",
+        action: { kind: "set", name: "work_mem", values: "fromCurrent" },
+      }),
+    );
+    expect(firstStmt("ALTER ROLE ALL SET jit = off;")).toEqual(
+      role({ name: null, action: { kind: "set", name: "jit", values: [name("off")] } }),
+    );
+    expect(firstStmt("ALTER ROLE r SET TIME ZONE 'UTC';")).toEqual(
+      role({ action: { kind: "set", name: "time zone", values: [str("UTC")] } }),
+    );
+    expect(firstStmt("ALTER ROLE r SET x.y TO DEFAULT;")).toEqual(
+      role({ action: { kind: "set", name: "x.y", values: "default" } }),
+    );
+    expect(firstStmt("ALTER ROLE r IN DATABASE appdb RESET ALL;")).toEqual(
+      role({ database: "appdb", action: { kind: "reset", name: "all" } }),
+    );
+    expect(firstStmt("ALTER USER ALL IN DATABASE appdb RESET search_path;")).toEqual(
+      role({ user: true, name: null, database: "appdb", action: { kind: "reset", name: "search_path" } }),
+    );
+    expect(firstStmt("ALTER ROLE r RESET TIME ZONE;")).toEqual(role({ action: { kind: "reset", name: "time zone" } }));
+    expect(firstStmt("ALTER ROLE r SET x = 1;")).not.toHaveProperty("database");
+  });
+
+  it("parses every ALTER DATABASE form", () => {
+    expect(firstStmt("ALTER DATABASE d WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 5 IS_TEMPLATE true;")).toEqual(
+      db({
+        kind: "options",
+        options: [
+          { name: "allow_connections", value: { kind: "bool", value: false } },
+          { name: "connection limit", value: num(5) },
+          { name: "is_template", value: { kind: "bool", value: true } },
+        ],
+      }),
+    );
+    expect(firstStmt("ALTER DATABASE d CONNECTION LIMIT = -1;")).toEqual(
+      db({ kind: "options", options: [{ name: "connection limit", value: num(-1) }] }),
+    );
+    expect(firstStmt("ALTER DATABASE d;")).toEqual(db({ kind: "options", options: [] }));
+    expect(firstStmt("ALTER DATABASE d SET TABLESPACE fast;")).toEqual(
+      db({ kind: "setTablespace", tablespace: "fast" }),
+    );
+    expect(firstStmt("ALTER DATABASE d REFRESH COLLATION VERSION;")).toEqual(db({ kind: "refreshCollationVersion" }));
+    expect(firstStmt("ALTER DATABASE d SET search_path TO app, public;")).toEqual(
+      db({ kind: "set", name: "search_path", values: [name("app"), name("public")] }),
+    );
+    expect(firstStmt("ALTER DATABASE d SET search_path FROM CURRENT;")).toEqual(
+      db({ kind: "set", name: "search_path", values: "fromCurrent" }),
+    );
+    expect(firstStmt("ALTER DATABASE d RESET ALL;")).toEqual(db({ kind: "reset", name: "all" }));
+    expect(firstStmt("ALTER DATABASE d RESET search_path;")).toEqual(db({ kind: "reset", name: "search_path" }));
+    // A parameter called `tablespace` is set as any other is.
+    expect(firstStmt("ALTER DATABASE d SET tablespace TO x;")).toEqual(
+      db({ kind: "set", name: "tablespace", values: [name("x")] }),
+    );
+    // …as is one called `tablespace` written with `=`, and so is a quoted SET.
+    expect(firstStmt("ALTER DATABASE d SET TABLESPACE = x;")).toEqual(
+      db({ kind: "set", name: "tablespace", values: [name("x")] }),
+    );
+    expect(firstStmt("ALTER DATABASE d WITH TABLESPACE x;")).toEqual(
+      db({ kind: "options", options: [{ name: "tablespace", value: name("x") }] }),
+    );
+    expect(firstStmt('CREATE DATABASE d "set" = 1;').options).toEqual([{ name: "set", value: num(1) }]);
+    // OWNER is a database option too; it leads OWNER TO only before TO.
+    expect(firstStmt("ALTER DATABASE d OWNER = bob;")).toEqual(
+      db({ kind: "options", options: [{ name: "owner", value: name("bob") }] }),
+    );
+  });
+
+  it("keeps RENAME TO and OWNER TO on DATABASE and TABLESPACE the generic alterObject node", () => {
+    expect(firstStmt("ALTER DATABASE d RENAME TO e;")).toEqual(generic("database", "d", { kind: "rename", to: "e" }));
+    expect(firstStmt("ALTER DATABASE appdb OWNER TO CURRENT_ROLE;")).toEqual(
+      generic("database", "appdb", { kind: "ownerTo", owner: "current_role" }),
+    );
+    expect(firstStmt("ALTER TABLESPACE t RENAME TO u;")).toEqual(
+      generic("tablespace", "t", { kind: "rename", to: "u" }),
+    );
+    expect(firstStmt("ALTER TABLESPACE t OWNER TO app_owner;")).toEqual(
+      generic("tablespace", "t", { kind: "ownerTo", owner: "app_owner" }),
+    );
+  });
+
+  it("parses ALTER TABLESPACE SET and RESET, and DROP TABLESPACE", () => {
+    expect(firstStmt("ALTER TABLESPACE t SET (random_page_cost = 1.1, seq_page_cost = 2);")).toEqual({
+      kind: "alterTablespace",
+      name: "t",
+      action: {
+        kind: "setOptions",
+        options: [
+          { name: "random_page_cost", value: num(1.1) },
+          { name: "seq_page_cost", value: num(2) },
+        ],
+      },
+    });
+    expect(firstStmt("ALTER TABLESPACE t RESET (random_page_cost);")).toEqual({
+      kind: "alterTablespace",
+      name: "t",
+      action: { kind: "resetOptions", options: [{ name: "random_page_cost", value: null }] },
+    });
+    const drop = (ifExists: boolean) => ({
+      kind: "drop",
+      objectType: "tablespace",
+      concurrently: false,
+      ifExists,
+      names: [["t"]],
+      behavior: null,
+    });
+    expect(firstStmt("DROP TABLESPACE t;")).toEqual(drop(false));
+    expect(firstStmt("DROP TABLESPACE IF EXISTS t;")).toEqual(drop(true));
+  });
+
+  it("still parses COMMENT ON and SECURITY LABEL ON DATABASE and TABLESPACE", () => {
+    expect(firstStmt("COMMENT ON DATABASE d IS 'x';")).toEqual({
+      kind: "comment",
+      objectType: "database",
+      name: ["d"],
+      comment: "x",
+    });
+    expect(firstStmt("COMMENT ON TABLESPACE t IS NULL;")).toEqual({
+      kind: "comment",
+      objectType: "tablespace",
+      name: ["t"],
+      comment: null,
+    });
+    expect(firstStmt("SECURITY LABEL ON TABLESPACE t IS 'l';")).toEqual({
+      kind: "securityLabel",
+      objectType: "tablespace",
+      name: ["t"],
+      label: "l",
+    });
+  });
+
+  it("spans each statement from ALTER or DROP", () => {
+    for (const src of [
+      "ALTER ROLE r WITH LOGIN;",
+      "ALTER USER ALL IN DATABASE d RESET ALL;",
+      "ALTER DATABASE d REFRESH COLLATION VERSION;",
+      "ALTER DATABASE d OWNER TO r;",
+      "ALTER TABLESPACE t RESET (x);",
+      "DROP TABLESPACE t;",
+    ]) {
+      const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+      expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: src.length - 1 } });
+    }
+  });
+
+  it("keeps the new words unreserved as names and aliases", () => {
+    const words = [
+      "role",
+      "database",
+      "tablespace",
+      "rename",
+      "owner",
+      "reset",
+      "refresh",
+      "collation",
+      "version",
+      "connection",
+      "allow_connections",
+      "is_template",
+      "template",
+      "password",
+      "encrypted",
+      "valid",
+      "until",
+      "admin",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM role;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    const cols = words.map((word) => `${word} text`).join(", ");
+    expect(firstStmt(`CREATE TABLE tablespace (${cols});`).items.map((i: any) => i.name)).toEqual(words);
+    expect(firstStmt("SELECT 1 AS refresh, 2 version FROM database AS collation;")).toMatchObject({
+      columns: [{ alias: "refresh" }, { alias: "version" }],
+      from: [{ name: ["database"], alias: "collation" }],
+    });
+    // …and as the names these statements alter.
+    expect(firstStmt("ALTER ROLE rename RENAME TO password;")).toEqual(
+      role({ name: "rename", action: { kind: "rename", to: "password" } }),
+    );
+    expect(firstStmt("ALTER ROLE role IN DATABASE database SET reset = 1;")).toEqual(
+      role({ name: "role", database: "database", action: { kind: "set", name: "reset", values: [num(1)] } }),
+    );
+    expect(firstStmt("ALTER DATABASE refresh SET TABLESPACE version;")).toEqual({
+      kind: "alterDatabase",
+      name: "refresh",
+      action: { kind: "setTablespace", tablespace: "version" },
+    });
+    expect(firstStmt("ALTER TABLESPACE reset SET (reset = 1);")).toMatchObject({
+      kind: "alterTablespace",
+      name: "reset",
+    });
+    expect(firstStmt("DROP TABLESPACE tablespace;")).toMatchObject({ names: [["tablespace"]] });
+  });
+
+  it("rejects malformed ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
+    expect(bad("ALTER ROLE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("ALTER USER user;")).toThrow(/Expected a name but found "user"/);
+    expect(bad("ALTER ROLE r frobnicate;")).toThrow(/Expected ";" but found "frobnicate"/);
+    // ALTER takes none of CREATE ROLE's membership options.
+    expect(bad("ALTER ROLE r IN ROLE a;")).toThrow(/Expected "database" but found "role"/);
+    expect(bad("ALTER ROLE r WITH ROLE a;")).toThrow(/Expected ";" but found "role"/);
+    expect(bad("ALTER ROLE r ADMIN a;")).toThrow(/Expected ";" but found "admin"/);
+    expect(bad("ALTER ROLE r ENCRYPTED PASSWORD NULL;")).toThrow(/found "null"/);
+    expect(bad("ALTER ROLE r CONNECTION LIMIT many;")).toThrow(/Expected an integer but found "many"/);
+    // ALL and IN DATABASE take only SET and RESET.
+    expect(bad("ALTER ROLE ALL WITH LOGIN;")).toThrow(/Expected "in", "set" or "reset" but found "with"/);
+    expect(bad("ALTER ROLE ALL RENAME TO x;")).toThrow(/Expected "in", "set" or "reset" but found "rename"/);
+    expect(bad("ALTER ROLE r IN DATABASE d LOGIN;")).toThrow(/Expected "set" or "reset" but found "login"/);
+    expect(bad("ALTER ROLE r IN d SET x = 1;")).toThrow(/Expected "database" but found "d"/);
+    // RENAME names a role, never a pseudo-role.
+    expect(bad("ALTER ROLE CURRENT_USER RENAME TO x;")).toThrow(
+      /CURRENT_USER cannot be used as a role name here \(1:11\)/,
+    );
+    expect(bad("ALTER ROLE r RENAME TO session_user;")).toThrow(/Expected a name but found "session_user"/);
+    expect(bad("ALTER ROLE r RENAME x;")).toThrow(/Expected "to" but found "x"/);
+    expect(bad("ALTER ROLE public RENAME TO x;")).toThrow(/Role name "public" is reserved \(1:11\)/);
+    expect(bad("ALTER USER r RENAME TO none;")).toThrow(/Role name "none" is reserved \(1:23\)/);
+    expect(bad('ALTER ROLE "public" RENAME TO x;')).toThrow(/Role name "public" is reserved \(1:12\)/);
+    expect(bad('ALTER ROLE r RENAME TO "none";')).toThrow(/Role name "none" is reserved \(1:24\)/);
+    expect(firstStmt('ALTER ROLE "PUBLIC" RENAME TO x;')).toMatchObject({ name: "PUBLIC" });
+    // SET takes a parameter value, never an expression.
+    expect(bad("ALTER ROLE r SET x = 1 + 2;")).toThrow(/Expected ";" but found "\+"/);
+    expect(bad("ALTER ROLE r SET x;")).toThrow(/Expected "to" or "=" but found ";"/);
+    expect(bad("ALTER ROLE r RESET;")).toThrow(/found ";"/);
+    expect(bad("ALTER DATABASE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("ALTER DATABASE d REFRESH COLLATION;")).toThrow(/Expected "version" but found ";"/);
+    expect(bad("ALTER DATABASE d SET TABLESPACE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("ALTER DATABASE d OWNER TO;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("ALTER DATABASE d WITH is_template;")).toThrow(/Expected an option value but found ";"/);
+    expect(bad("ALTER DATABASE a.b RENAME TO c;")).toThrow(/Expected ";" but found "\."/);
+    // The other actions' words name no option, and OWNER TO only leads.
+    expect(bad("ALTER DATABASE d WITH RESET x;")).toThrow(/Expected ";" but found "reset"/);
+    expect(bad("ALTER DATABASE d IS_TEMPLATE true REFRESH COLLATION VERSION;")).toThrow(
+      /Expected ";" but found "refresh"/,
+    );
+    expect(bad("ALTER DATABASE d WITH OWNER TO r;")).toThrow(/Expected an option value but found "to"/);
+    expect(bad("CREATE DATABASE d OWNER TO;")).toThrow(/Expected an option value but found "to"/);
+    expect(bad("CREATE DATABASE d SET = 1;")).toThrow(/Expected ";" but found "set"/);
+    expect(bad("ALTER DATABASE d SET TABLESPACE x.y;")).toThrow(/Expected ";" but found "\."/);
+    expect(bad("ALTER TABLESPACE t;")).toThrow(/Expected "rename", "owner", "set" or "reset" but found ";"/);
+    expect(bad("ALTER TABLESPACE t SET random_page_cost = 1;")).toThrow(/Expected "\(" but found "random_page_cost"/);
+    expect(bad("ALTER TABLESPACE t RESET (x = 1);")).toThrow(/RESET must not include values for parameters/);
+    expect(bad("ALTER TABLESPACE t OWNER r;")).toThrow(/Expected "to" but found "r"/);
+    expect(bad("DROP TABLESPACE a, b;")).toThrow(/Expected ";" but found ","/);
+    expect(bad("DROP TABLESPACE t CASCADE;")).toThrow(/Expected ";" but found "cascade"/);
+  });
+});
+
 // --- LOCK and CALL ---
 
 describe("SQL-lite LOCK and CALL", () => {
@@ -11482,16 +12147,19 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
 
   it("rejects a malformed action and the standalone ones beside another", () => {
     expect(fails("ALTER TABLE t SET frob;")).toThrow(
-      /Expected "\(", "schema", "tablespace" or "without" but found "frob" \(1:18\)/,
+      /Expected "\(", "schema", "tablespace", "logged", "unlogged", "access" or "without" but found "frob" \(1:18\)/,
     );
-    // PG's SET WITHOUT OIDS and ENABLE RULE are valid there but not parsed here.
-    expect(fails("ALTER TABLE t SET WITHOUT OIDS;")).toThrow(/Expected "cluster" but found "oids"/);
-    expect(fails("ALTER TABLE t ENABLE RULE r;")).toThrow(expectsKeys(["replica", "always", "trigger"], '"rule"'));
+    expect(fails("ALTER TABLE t SET WITHOUT frob;")).toThrow(/Expected "cluster" or "oids" but found "frob"/);
+    expect(fails("ALTER TABLE t ENABLE frob;")).toThrow(
+      expectsKeys(["replica", "always", "trigger", "rule", "row"], '"frob"'),
+    );
     expect(fails("ALTER TABLE t DISABLE TRIGGER;")).toThrow(/Expected "all", "user" or a name but found ";"/);
     expect(fails("ALTER TABLE t ENABLE TRIGGER select;")).toThrow(
       /Expected "all", "user" or a name but found "select"/,
     );
-    expect(fails("ALTER TABLE t ENABLE REPLICA IDENTITY;")).toThrow(/Expected "trigger" but found "identity"/);
+    expect(fails("ALTER TABLE t ENABLE REPLICA IDENTITY;")).toThrow(
+      /Expected "trigger" or "rule" but found "identity"/,
+    );
     // REPLICA and ALWAYS take a trigger's name only, as in PG.
     expect(fails("ALTER TABLE t ENABLE REPLICA TRIGGER ALL;")).toThrow(/Expected a name but found "all"/);
     expect(fails("ALTER TABLE t ENABLE ALWAYS TRIGGER USER;")).toThrow(/Expected a name but found "user"/);
@@ -11512,6 +12180,465 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
     expect(fails("ALTER TABLE t DETACH PARTITION p, DETACH PARTITION q;")).toThrow(
       /DETACH PARTITION cannot be combined with other ALTER TABLE actions \(1:14\)/,
     );
+  });
+});
+
+// --- ALTER TABLE column actions: identity, type, storage and statistics ---
+
+describe("SQL-lite ALTER TABLE column actions", () => {
+  const alter = (text: string) => firstStmt(text) as any;
+  const action = (src: string) => {
+    const { actions } = alter(`ALTER TABLE t ${src};`);
+    expect(actions).toHaveLength(1);
+    return actions[0];
+  };
+  const fails = (text: string) => () => sqlLite.parse(text);
+
+  it("parses ADD GENERATED … AS IDENTITY, with pg_dump's SEQUENCE NAME", () => {
+    expect(action("ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY")).toEqual({
+      kind: "addIdentity",
+      column: "id",
+      generated: "always",
+    });
+    expect(
+      action(
+        "ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (SEQUENCE NAME s.t_id_seq START WITH 1 " +
+          "INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1)",
+      ),
+    ).toEqual({
+      kind: "addIdentity",
+      column: "id",
+      generated: "by default",
+      options: [
+        { kind: "sequenceName", name: ["s", "t_id_seq"] },
+        { kind: "start", value: num(1) },
+        { kind: "increment", value: num(1) },
+        { kind: "minValue", value: null },
+        { kind: "maxValue", value: null },
+        { kind: "cache", value: num(1) },
+      ],
+    });
+    // A column's own identity clause takes SEQUENCE NAME too.
+    expect(firstStmt("CREATE TABLE t (id int GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME q));").items[0]).toEqual({
+      kind: "column",
+      name: "id",
+      dataType: ct("int"),
+      constraints: [{ kind: "identity", generated: "always", options: [{ kind: "sequenceName", name: ["q"] }] }],
+    });
+  });
+
+  it("parses an identity column's SET and RESTART run, and DROP IDENTITY", () => {
+    expect(action("ALTER COLUMN id SET GENERATED BY DEFAULT RESTART WITH 1000 SET INCREMENT BY 2")).toEqual({
+      kind: "alterIdentity",
+      column: "id",
+      options: [
+        { kind: "generated", generated: "by default" },
+        { kind: "restart", value: num(1000) },
+        { kind: "increment", value: num(2) },
+      ],
+    });
+    expect(action("ALTER id RESTART")).toEqual({
+      kind: "alterIdentity",
+      column: "id",
+      options: [{ kind: "restart", value: null }],
+    });
+    expect(action("ALTER id SET NO CYCLE SET MAXVALUE 9 RESTART 3").options).toEqual([
+      { kind: "cycle", value: false },
+      { kind: "maxValue", value: num(9) },
+      { kind: "restart", value: num(3) },
+    ]);
+    expect(action("ALTER id DROP IDENTITY")).toEqual({ kind: "dropIdentity", column: "id" });
+    expect(action("ALTER COLUMN id DROP IDENTITY IF EXISTS")).toEqual({
+      kind: "dropIdentity",
+      column: "id",
+      ifExists: true,
+    });
+    // The run ends at a comma, like any action.
+    expect(alter("ALTER TABLE t ALTER a RESTART, ALTER b SET GENERATED ALWAYS;").actions).toEqual([
+      { kind: "alterIdentity", column: "a", options: [{ kind: "restart", value: null }] },
+      { kind: "alterIdentity", column: "b", options: [{ kind: "generated", generated: "always" }] },
+    ]);
+  });
+
+  it("parses TYPE … COLLATE … USING and SET EXPRESSION / DROP EXPRESSION", () => {
+    expect(action("ALTER COLUMN email TYPE varchar(320) USING lower(email)")).toEqual({
+      kind: "setDataType",
+      column: "email",
+      dataType: ct("varchar", { args: [320] }),
+      using: { kind: "call", name: "lower", args: [name("email")] },
+    });
+    expect(action('ALTER c SET DATA TYPE text COLLATE "C"')).toEqual({
+      kind: "setDataType",
+      column: "c",
+      dataType: ct("text"),
+      collate: ["C"],
+    });
+    expect(action("ALTER c SET EXPRESSION AS (a + 1)")).toEqual({
+      kind: "setExpression",
+      column: "c",
+      expr: bin("+", name("a"), num(1)),
+    });
+    expect(action("ALTER COLUMN c DROP EXPRESSION")).toEqual({ kind: "dropExpression", column: "c" });
+    expect(action("ALTER c DROP EXPRESSION IF EXISTS")).toEqual({
+      kind: "dropExpression",
+      column: "c",
+      ifExists: true,
+    });
+  });
+
+  it("parses SET STATISTICS, STORAGE, COMPRESSION and per-column options", () => {
+    expect(action("ALTER COLUMN c SET STATISTICS 500")).toEqual({ kind: "setStatistics", column: "c", value: 500 });
+    expect(action("ALTER c SET STATISTICS -1").value).toBe(-1);
+    expect(action("ALTER c SET STATISTICS DEFAULT").value).toBeNull();
+    for (const mode of ["plain", "external", "extended", "main"]) {
+      expect(action(`ALTER c SET STORAGE ${mode.toUpperCase()}`)).toEqual({
+        kind: "setStorage",
+        column: "c",
+        storage: mode,
+      });
+    }
+    expect(action("ALTER c SET STORAGE DEFAULT").storage).toBeNull();
+    expect(action('ALTER c SET STORAGE "MAIN"').storage).toBe("main");
+    expect(action('ALTER c SET STORAGE "Default"').storage).toBeNull();
+    expect(action("ALTER c SET COMPRESSION lz4")).toEqual({ kind: "setCompression", column: "c", method: "lz4" });
+    expect(action("ALTER c SET COMPRESSION DEFAULT").method).toBeNull();
+    expect(action('ALTER c SET COMPRESSION "default"').method).toBeNull();
+    expect(action('ALTER c SET COMPRESSION "DEFAULT"').method).toBe("DEFAULT");
+    expect(action("ALTER c SET (n_distinct = -1)")).toEqual({
+      kind: "setColumnOptions",
+      column: "c",
+      options: [{ name: "n_distinct", value: num(-1) }],
+    });
+    expect(action("ALTER c RESET (n_distinct)")).toEqual({
+      kind: "resetColumnOptions",
+      column: "c",
+      options: [{ name: "n_distinct", value: null }],
+    });
+  });
+
+  it("parses DROP COLUMN with IF EXISTS and a drop behavior", () => {
+    expect(action("DROP COLUMN IF EXISTS legacy CASCADE")).toEqual({
+      kind: "dropColumn",
+      name: "legacy",
+      ifExists: true,
+      behavior: "cascade",
+    });
+    expect(action("DROP legacy RESTRICT")).toEqual({ kind: "dropColumn", name: "legacy", behavior: "restrict" });
+    // `if` is still a column name when no EXISTS follows it.
+    expect(action("DROP if")).toEqual({ kind: "dropColumn", name: "if" });
+  });
+
+  it("rejects what PG rejects", () => {
+    expect(fails("ALTER TABLE t ALTER id SET RESTART 5;")).toThrow(
+      /sequence option "restart" not supported here \(1:27\)/,
+    );
+    expect(fails("ALTER TABLE t ALTER id SET OWNED BY NONE;")).toThrow(/sequence option "owned_by" not supported here/);
+    expect(fails("ALTER TABLE t ALTER id SET AS bigint;")).toThrow(/sequence option "as" not supported here/);
+    expect(fails("ALTER TABLE t ALTER id SET SEQUENCE NAME q;")).toThrow(
+      /sequence option "sequence_name" not supported here/,
+    );
+    // SET takes one option; a second needs its own SET.
+    expect(fails("ALTER TABLE t ALTER id SET INCREMENT 2 START 1;")).toThrow(/Expected ";" but found "start"/);
+    expect(fails("ALTER TABLE t ALTER c SET GENERATED ALWAYS SET DEFAULT 1;")).toThrow(
+      /Expected "generated" or a sequence option but found "default" \(1:47\)/,
+    );
+    expect(fails("ALTER TABLE t ALTER c RESTART SET NOT NULL;")).toThrow(
+      /Expected "generated" or a sequence option but found "not"/,
+    );
+    expect(fails("ALTER TABLE t ALTER id SET NO frob;")).toThrow(
+      /Expected "minvalue", "maxvalue" or "cycle" but found "frob"/,
+    );
+    expect(fails("ALTER TABLE t ALTER id ADD GENERATED AS IDENTITY;")).toThrow(
+      /Expected "always" or "by default" but found "as"/,
+    );
+    expect(fails("ALTER TABLE t ALTER id ADD GENERATED ALWAYS AS IDENTITY ();")).toThrow(
+      /Expected a sequence option but found "\)"/,
+    );
+    // SEQUENCE NAME names an identity column's sequence only.
+    expect(fails("CREATE SEQUENCE s SEQUENCE NAME q;")).toThrow(/Expected ";" but found "sequence"/);
+    expect(fails("ALTER SEQUENCE s SEQUENCE NAME q;")).toThrow(/but found "sequence"/);
+    expect(fails("ALTER TABLE t ALTER c SET STORAGE frob;")).toThrow(/invalid storage type "frob" \(1:34\)/);
+    expect(fails('ALTER TABLE t ALTER c SET STORAGE "MAINX";')).toThrow(/invalid storage type "MAINX"/);
+    expect(fails("ALTER TABLE t ALTER c SET STATISTICS x;")).toThrow(/Expected an integer but found "x"/);
+    expect(fails("ALTER TABLE t ALTER c SET frob;")).toThrow(
+      /Expected "\(", "default", "not", "data", "expression", "statistics", "storage", "compression", "generated" or a sequence option but found "frob" \(1:26\)/,
+    );
+    expect(fails("ALTER TABLE t ALTER c frob;")).toThrow(
+      expectsKeys(["type", "set", "reset", "drop", "add", "restart"], '"frob"'),
+    );
+    expect(fails("ALTER TABLE t ALTER c DROP frob;")).toThrow(
+      /Expected "default", "not", "expression" or "identity" but found "frob"/,
+    );
+    expect(fails("ALTER TABLE t ALTER c DROP IDENTITY IF;")).toThrow(/Expected "exists" but found ";"/);
+    expect(fails("ALTER TABLE t ALTER c SET EXPRESSION (a);")).toThrow(/Expected "as" but found "\("/);
+    expect(fails("ALTER TABLE t ALTER c TYPE int USING;")).toThrow(/but found ";"/);
+    expect(fails("ALTER TABLE t ALTER c RESET (a = 1);")).toThrow(/RESET must not include values for parameters/);
+  });
+
+  it("keeps the column-action words unreserved as names and aliases", () => {
+    const words = [
+      "statistics",
+      "storage",
+      "compression",
+      "identity",
+      "expression",
+      "generated",
+      "restart",
+      "plain",
+      "external",
+      "extended",
+      "main",
+      "data",
+      "sequence",
+    ];
+    const columns = words.map((w) => `${w} int`).join(", ");
+    expect(firstStmt(`CREATE TABLE t (${columns});`).items.map((i: any) => i.name)).toEqual(words);
+    expect(firstStmt(`SELECT 1 AS ${words.join(", 1 AS ")} FROM t;`).columns.map((c: any) => c.alias)).toEqual(words);
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM storage;`).from).toEqual([
+      { kind: "table", name: ["storage"], alias: null },
+    ]);
+    // …and as the columns these actions name.
+    const altered = alter(`ALTER TABLE t ${words.map((w) => `ALTER ${w} SET STATISTICS 1`).join(", ")};`).actions;
+    expect(altered.map((a: any) => a.column)).toEqual(words);
+    expect(action("ALTER storage SET STORAGE plain")).toEqual({
+      kind: "setStorage",
+      column: "storage",
+      storage: "plain",
+    });
+    expect(action("ALTER restart RESTART")).toMatchObject({ kind: "alterIdentity", column: "restart" });
+    expect(action("ALTER identity DROP IDENTITY")).toEqual({ kind: "dropIdentity", column: "identity" });
+    expect(action("ALTER c SET COMPRESSION compression").method).toBe("compression");
+  });
+});
+
+// --- ALTER TABLE table-level actions: RLS, rules, inheritance, persistence ---
+
+describe("SQL-lite ALTER TABLE table-level actions", () => {
+  const alter = (text: string) => firstStmt(text) as any;
+  const action = (src: string) => {
+    const { actions } = alter(`ALTER TABLE t ${src};`);
+    expect(actions).toHaveLength(1);
+    return actions[0];
+  };
+  const fails = (text: string) => () => sqlLite.parse(text);
+
+  it("parses the four row-level security switches", () => {
+    expect(alter("ALTER TABLE app.orders ENABLE ROW LEVEL SECURITY;")).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["app", "orders"],
+      actions: [{ kind: "rowSecurity", action: "enable" }],
+    });
+    expect(action("DISABLE ROW LEVEL SECURITY")).toEqual({ kind: "rowSecurity", action: "disable" });
+    expect(action("FORCE ROW LEVEL SECURITY")).toEqual({ kind: "rowSecurity", action: "force" });
+    expect(action("NO FORCE ROW LEVEL SECURITY")).toEqual({ kind: "rowSecurity", action: "noForce" });
+  });
+
+  it("parses ENABLE / DISABLE RULE", () => {
+    expect(action("ENABLE RULE r")).toEqual({ kind: "enableRule", rule: "r" });
+    expect(action("ENABLE REPLICA RULE r")).toEqual({ kind: "enableRule", mode: "replica", rule: "r" });
+    expect(action("ENABLE ALWAYS RULE r")).toEqual({ kind: "enableRule", mode: "always", rule: "r" });
+    expect(action("DISABLE RULE r")).toEqual({ kind: "disableRule", rule: "r" });
+  });
+
+  it("parses [NO] INHERIT, OF and NOT OF", () => {
+    expect(action("INHERIT base_users")).toEqual({ kind: "inherit", parent: ["base_users"] });
+    expect(action("NO INHERIT s.base")).toEqual({ kind: "noInherit", parent: ["s", "base"] });
+    expect(action("OF s.person")).toEqual({ kind: "of", type: ["s", "person"] });
+    expect(action("NOT OF")).toEqual({ kind: "notOf" });
+  });
+
+  it("parses SET LOGGED / UNLOGGED, SET ACCESS METHOD and SET WITHOUT OIDS", () => {
+    expect(action("SET LOGGED")).toEqual({ kind: "setLogged" });
+    expect(action("SET UNLOGGED")).toEqual({ kind: "setUnlogged" });
+    expect(action("SET ACCESS METHOD heap2")).toEqual({ kind: "setAccessMethod", method: "heap2" });
+    expect(action("SET ACCESS METHOD DEFAULT")).toEqual({ kind: "setAccessMethod", method: null });
+    expect(action("SET WITHOUT OIDS")).toEqual({ kind: "setWithoutOids" });
+  });
+
+  it("parses ALTER CONSTRAINT's deferral attributes", () => {
+    expect(action("ALTER CONSTRAINT orders_user_fk DEFERRABLE INITIALLY DEFERRED")).toEqual({
+      kind: "alterConstraint",
+      name: "orders_user_fk",
+      attrs: { deferrable: true, initially: "deferred" },
+    });
+    expect(action("ALTER CONSTRAINT k NOT DEFERRABLE")).toEqual({
+      kind: "alterConstraint",
+      name: "k",
+      attrs: { deferrable: false },
+    });
+    expect(action("ALTER CONSTRAINT k")).toEqual({ kind: "alterConstraint", name: "k", attrs: {} });
+  });
+
+  it("composes the new actions in one list", () => {
+    const { actions } = alter(
+      "ALTER TABLE t ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY, DISABLE RULE r, INHERIT p, " +
+        "NOT OF, SET UNLOGGED, ALTER CONSTRAINT k DEFERRABLE, VALIDATE CONSTRAINT k, ALTER c SET STATISTICS 5, " +
+        "DROP COLUMN IF EXISTS d;",
+    );
+    expect(actions.map((a: any) => a.kind)).toEqual([
+      "rowSecurity",
+      "rowSecurity",
+      "disableRule",
+      "inherit",
+      "notOf",
+      "setUnlogged",
+      "alterConstraint",
+      "validateConstraint",
+      "setStatistics",
+      "dropColumn",
+    ]);
+  });
+
+  it("rejects malformed table-level actions", () => {
+    expect(fails("ALTER TABLE t ENABLE ROW SECURITY;")).toThrow(/Expected "level" but found "security"/);
+    expect(fails("ALTER TABLE t FORCE TRIGGER x;")).toThrow(/Expected "row level security" but found "trigger"/);
+    expect(fails("ALTER TABLE t NO frob;")).toThrow(/Expected "force" or "inherit" but found "frob"/);
+    expect(fails("ALTER TABLE t NOT NULL;")).toThrow(/Expected "of" but found "null"/);
+    expect(fails("ALTER TABLE t DISABLE ALWAYS RULE r;")).toThrow(
+      /Expected "trigger", "rule" or "row" but found "always"/,
+    );
+    expect(fails("ALTER TABLE t ENABLE RULE;")).toThrow(/Expected a name but found ";"/);
+    expect(fails("ALTER TABLE t SET ACCESS heap;")).toThrow(/Expected "method" but found "heap"/);
+    // PG reads only the deferral attributes on ALTER CONSTRAINT.
+    expect(fails("ALTER TABLE t ALTER CONSTRAINT k NOT VALID;")).toThrow(
+      /ALTER CONSTRAINT statement constraints cannot be marked NOT VALID \(1:33\)/,
+    );
+    expect(fails("ALTER TABLE t ALTER CONSTRAINT k NO INHERIT;")).toThrow(
+      /ALTER CONSTRAINT statement constraints cannot be marked NO INHERIT/,
+    );
+    expect(fails("ALTER TABLE t ALTER CONSTRAINT k NOT DEFERRABLE INITIALLY DEFERRED;")).toThrow(
+      /constraint declared INITIALLY DEFERRED must be DEFERRABLE/,
+    );
+  });
+
+  it("keeps the table-level action words unreserved as names and aliases", () => {
+    const words = [
+      "row",
+      "level",
+      "security",
+      "force",
+      "rule",
+      "inherit",
+      "logged",
+      "unlogged",
+      "access",
+      "method",
+      "oids",
+      "of",
+      "no",
+    ];
+    const columns = words.map((w) => `${w} int`).join(", ");
+    expect(firstStmt(`CREATE TABLE t (${columns});`).items.map((i: any) => i.name)).toEqual(words);
+    expect(firstStmt(`SELECT 1 AS ${words.join(", 1 AS ")} FROM t;`).columns.map((c: any) => c.alias)).toEqual(words);
+    // …as the columns ADD and DROP take, and as the names the actions take.
+    const added = alter(`ALTER TABLE t ${words.map((w) => `ADD ${w} int`).join(", ")};`).actions;
+    expect(added.map((a: any) => a.column.name)).toEqual(words);
+    const dropped = alter(`ALTER TABLE t ${words.map((w) => `DROP ${w}`).join(", ")};`).actions;
+    expect(dropped.map((a: any) => a.name)).toEqual(words);
+    expect(action("ENABLE RULE rule")).toEqual({ kind: "enableRule", rule: "rule" });
+    expect(action("INHERIT inherit")).toEqual({ kind: "inherit", parent: ["inherit"] });
+    expect(action("SET ACCESS METHOD method")).toEqual({ kind: "setAccessMethod", method: "method" });
+    expect(alter("ALTER TABLE security FORCE ROW LEVEL SECURITY;").name).toEqual(["security"]);
+  });
+});
+
+// --- ALTER INDEX / MATERIALIZED VIEW additions and ALL IN TABLESPACE ---
+
+describe("SQL-lite ALTER INDEX ATTACH PARTITION, ALL IN TABLESPACE and matview SET TABLESPACE", () => {
+  const stmt = (text: string) => firstStmt(text) as any;
+  const fails = (text: string) => () => sqlLite.parse(text);
+
+  it("parses ALTER INDEX … ATTACH PARTITION and ALTER [COLUMN] n SET STATISTICS", () => {
+    expect(stmt("ALTER INDEX app.events_idx ATTACH PARTITION app.events_2025_idx;")).toEqual({
+      kind: "alterIndex",
+      ifExists: false,
+      name: ["app", "events_idx"],
+      actions: [{ kind: "attachPartition", partition: ["app", "events_2025_idx"] }],
+    });
+    expect(stmt("ALTER INDEX i ALTER COLUMN 2 SET STATISTICS 100, ALTER 1 SET STATISTICS DEFAULT;").actions).toEqual([
+      { kind: "setStatistics", column: 2, value: 100 },
+      { kind: "setStatistics", column: 1, value: null },
+    ]);
+  });
+
+  it("parses ALL IN TABLESPACE for tables, indexes and materialized views", () => {
+    expect(stmt("ALTER TABLE ALL IN TABLESPACE old_space OWNED BY app SET TABLESPACE new_space;")).toEqual({
+      kind: "alterAllInTablespace",
+      objectType: "table",
+      tablespace: "old_space",
+      ownedBy: ["app"],
+      newTablespace: "new_space",
+    });
+    expect(stmt("ALTER INDEX ALL IN TABLESPACE a OWNED BY r, CURRENT_USER SET TABLESPACE b NOWAIT;")).toEqual({
+      kind: "alterAllInTablespace",
+      objectType: "index",
+      tablespace: "a",
+      ownedBy: ["r", "current_user"],
+      newTablespace: "b",
+      nowait: true,
+    });
+    expect(stmt("ALTER MATERIALIZED VIEW ALL IN TABLESPACE a SET TABLESPACE b;")).toEqual({
+      kind: "alterAllInTablespace",
+      objectType: "materialized view",
+      tablespace: "a",
+      newTablespace: "b",
+    });
+  });
+
+  it("parses ALTER MATERIALIZED VIEW … SET TABLESPACE", () => {
+    expect(stmt("ALTER MATERIALIZED VIEW order_stats SET TABLESPACE fastspace;")).toEqual({
+      kind: "alterView",
+      materialized: true,
+      ifExists: false,
+      name: ["order_stats"],
+      actions: [{ kind: "setTablespace", tablespace: "fastspace" }],
+    });
+  });
+
+  it("spans the whole statement", () => {
+    const [node] = sqlLite.parse("ALTER TABLE ALL IN TABLESPACE a SET TABLESPACE b;") as Record<string, any>[];
+    expect(node!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 48 } });
+  });
+
+  it("rejects malformed forms, and ATTACH PARTITION beside another action", () => {
+    expect(fails("ALTER INDEX i ATTACH PARTITION j, RENAME TO k;")).toThrow(
+      /ATTACH PARTITION cannot be combined with other ALTER INDEX actions \(1:14\)/,
+    );
+    expect(fails("ALTER INDEX i ALTER COLUMN c SET STATISTICS 1;")).toThrow(/Expected a column number but found "c"/);
+    expect(fails("ALTER INDEX i ALTER 1 SET STATISTICS 2, ATTACH PARTITION j;")).toThrow(
+      /ATTACH PARTITION cannot be combined with other ALTER INDEX actions/,
+    );
+    expect(fails("ALTER INDEX i ATTACH j;")).toThrow(/Expected "partition" but found "j"/);
+    expect(fails("ALTER INDEX IF EXISTS i ATTACH PARTITION j;")).toThrow(
+      /ALTER INDEX IF EXISTS cannot ATTACH PARTITION \(1:24\)/,
+    );
+    expect(fails("ALTER TABLE ALL IN TABLESPACE a SET TABLESPACE;")).toThrow(/Expected a name but found ";"/);
+    expect(fails("ALTER TABLE ALL IN TABLESPACE a RENAME TO b;")).toThrow(
+      /Expected "set tablespace" but found "rename"/,
+    );
+    expect(fails("ALTER TABLE ALL IN SCHEMA a SET TABLESPACE b;")).toThrow(/Expected "tablespace" but found "schema"/);
+    // SET TABLESPACE is a materialized view's, not a plain view's.
+    expect(fails("ALTER VIEW v SET TABLESPACE x;")).toThrow(/Expected "\(" or "schema" but found "tablespace"/);
+    expect(fails("ALTER MATERIALIZED VIEW v SET frob;")).toThrow(
+      /Expected "\(", "schema" or "tablespace" but found "frob"/,
+    );
+  });
+
+  it("keeps the new words unreserved as names and aliases", () => {
+    const words = ["attach", "partition", "nowait", "owned", "tablespace", "statistics"];
+    const columns = words.map((w) => `${w} int`).join(", ");
+    expect(firstStmt(`CREATE TABLE t (${columns});`).items.map((i: any) => i.name)).toEqual(words);
+    expect(firstStmt(`SELECT 1 AS ${words.join(", 1 AS ")} FROM t;`).columns.map((c: any) => c.alias)).toEqual(words);
+    expect(stmt("ALTER INDEX attach ATTACH PARTITION partition;")).toMatchObject({
+      name: ["attach"],
+      actions: [{ partition: ["partition"] }],
+    });
+    expect(stmt("ALTER TABLE ALL IN TABLESPACE tablespace OWNED BY owned SET TABLESPACE nowait;")).toMatchObject({
+      tablespace: "tablespace",
+      ownedBy: ["owned"],
+      newTablespace: "nowait",
+    });
   });
 });
 
@@ -12176,5 +13303,897 @@ describe("SQL-lite MERGE", () => {
     expect(bad("COPY (MERGE INTO t USING s WHEN MATCHED THEN DELETE) TO STDOUT;")).toThrow(
       /Expected "on" but found "when" \(1:27\)/,
     );
+  });
+});
+
+// --- composite and array access, and call-argument forms ---
+
+describe("SQL-lite composite and array access, and call-argument forms", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const fieldOf = (expr: unknown, field: string | null) => ({ kind: "fieldSelect", expr, field });
+  const sub = (base: unknown, index: unknown) => ({ kind: "subscript", base, index });
+  const call = (fnName: string, args: unknown[] = [], mods: Record<string, unknown> = {}) => ({
+    kind: "call",
+    name: fnName,
+    args,
+    ...mods,
+  });
+  const arr = (...elements: unknown[]) => ({ kind: "array", elements });
+  const row = (...elements: unknown[]) => ({ kind: "array", elements, implicit: true });
+  const named = (argName: string, value: unknown) => ({ kind: "namedArg", name: argName, value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const select1 = sel({ columns: [col(num(1))] });
+
+  it("selects a field, or every field, of a parenthesised expression", () => {
+    expect(colExpr("(t.composite_col).field")).toEqual(fieldOf(name("t", "composite_col"), "field"));
+    expect(colExpr("(compute_row()).*")).toEqual(fieldOf(call("compute_row"), null));
+    expect(colExpr("(t.c).a.b")).toEqual(fieldOf(fieldOf(name("t", "c"), "a"), "b"));
+    expect(colExpr('(r)."Mixed"')).toEqual(fieldOf(name("r"), "Mixed"));
+    // PG's ColLabel would take a reserved word here; like a dotted name's
+    // parts, this grammar wants it quoted.
+    expect(colExpr('(r)."from"')).toEqual(fieldOf(name("r"), "from"));
+    expect(bad("SELECT (r).from FROM t;")).toThrow(/Expected a name but found "from"/);
+  });
+
+  it("selects a field of a subquery and of a call", () => {
+    expect(colExpr("(SELECT 1).f")).toEqual(fieldOf({ kind: "subquery", query: select1 }, "f"));
+    expect(colExpr("(SELECT 1).*")).toEqual(fieldOf({ kind: "subquery", query: select1 }, null));
+    expect(colExpr("(s.f(1, 2)).x")).toEqual(fieldOf(call("s.f", [num(1), num(2)]), "x"));
+  });
+
+  it("mixes subscripts and field selections in any order", () => {
+    expect(colExpr("(arr)[1]")).toEqual(sub(name("arr"), num(1)));
+    expect(colExpr("(arr)[1].f")).toEqual(fieldOf(sub(name("arr"), num(1)), "f"));
+    expect(colExpr("(r).f[2]")).toEqual(sub(fieldOf(name("r"), "f"), num(2)));
+    expect(colExpr("(r).a[1][2].b.*")).toEqual(
+      fieldOf(fieldOf(sub(sub(fieldOf(name("r"), "a"), num(1)), num(2)), "b"), null),
+    );
+    // A column reference takes the same chain once a subscript opens it.
+    expect(colExpr("a[1].f")).toEqual(fieldOf(sub(name("a"), num(1)), "f"));
+    expect(colExpr("t.a[1].f.*")).toEqual(fieldOf(fieldOf(sub(name("t", "a"), num(1)), "f"), null));
+    expect(colExpr("(SELECT a)[1:2]")).toEqual({
+      kind: "subscript",
+      base: { kind: "subquery", query: sel({ columns: [col(name("a"))] }) },
+      index: num(1),
+      upper: num(2),
+    });
+  });
+
+  it("binds the chain tighter than any operator", () => {
+    expect(colExpr("-(r).f")).toEqual({ kind: "unary", op: "-", operand: fieldOf(name("r"), "f") });
+    expect(colExpr("(r).f::int")).toEqual({ kind: "cast", expr: fieldOf(name("r"), "f"), type: ct("int") });
+    expect(colExpr("(r).f + (s).g")).toEqual(bin("+", fieldOf(name("r"), "f"), fieldOf(name("s"), "g")));
+    expect(exprOf("(r).f > 0")).toEqual(bin(">", fieldOf(name("r"), "f"), num(0)));
+    expect(firstStmt("SELECT (r).f AS x FROM t;").columns).toEqual([col(fieldOf(name("r"), "f"), "x")]);
+  });
+
+  it("spans a field selection from its opening parenthesis", () => {
+    const [stmt] = sqlLite.parse("SELECT (r).f[1].g FROM t;") as any[];
+    const g = stmt.columns[0].expr;
+    expect(g.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 17 } });
+    // The subscript keeps the span the postfix gives it, from its base.
+    expect(g.expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 15 } });
+    expect(g.expr.base.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 12 } });
+    const [chained] = sqlLite.parse("SELECT a[1].f FROM t;") as any[];
+    expect(chained.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 13 } });
+  });
+
+  it("takes no indirection where PG takes none", () => {
+    // A row constructor, and a field after a bare `.` of nothing.
+    expect(bad("SELECT (a, b).f FROM t;")).toThrow(/Expected ";" but found "\."/);
+    expect(bad("SELECT (r). FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(bad("SELECT (r).1 FROM t;")).toThrow(/Expected ";" but found "\.1"/);
+  });
+
+  it("builds an array from a subquery", () => {
+    expect(colExpr("ARRAY(SELECT 1)")).toEqual({ kind: "arraySubquery", query: select1 });
+    expect(colExpr("ARRAY(SELECT id FROM users ORDER BY id)").query).toMatchObject({ kind: "select" });
+    expect(bad("SELECT ARRAY() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT ARRAY(1) FROM t;")).toThrow(/but found "1"/);
+    expect(bad("SELECT ARRAY x FROM t;")).toThrow(/Expected "\[" but found "x"/);
+  });
+
+  it("reads bare inner rows of a multidimensional array", () => {
+    expect(colExpr("ARRAY[[1, 2], [3, 4]]")).toEqual(arr(row(num(1), num(2)), row(num(3), num(4))));
+    expect(colExpr("ARRAY[[[1]], [[]]]")).toEqual(arr(row(row(num(1))), row(row())));
+    expect(colExpr("ARRAY[[]]")).toEqual(arr(row()));
+    // Only the inner rows carry `implicit`.
+    expect(Object.keys(colExpr("ARRAY[[1]]"))).toEqual(["kind", "elements"]);
+    // An ARRAY-spelled inner array stays an ordinary element.
+    expect(colExpr("ARRAY[ARRAY[1], ARRAY[2]]")).toEqual(arr(arr(num(1)), arr(num(2))));
+    // Rows and expressions don't mix.
+    expect(bad("SELECT ARRAY[[1], 2] FROM t;")).toThrow(/Expected "\[" but found "2"/);
+    expect(bad("SELECT ARRAY[1, [2]] FROM t;")).toThrow(/but found "\["/);
+    expect(bad("SELECT ARRAY[[1],] FROM t;")).toThrow(/Expected "\[" but found "\]"/);
+    expect(bad("SELECT ARRAY[[1] FROM t;")).toThrow(/Expected "\]" but found "from"/);
+  });
+
+  it("spans an inner row over its brackets", () => {
+    const [stmt] = sqlLite.parse("SELECT ARRAY[[1], [2, 3]];") as any[];
+    const outer = stmt.columns[0].expr;
+    expect(outer.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 25 } });
+    expect(outer.elements[1].span).toEqual({ start: { row: 1, col: 18 }, end: { row: 1, col: 24 } });
+  });
+
+  it("names an argument with := as with =>", () => {
+    expect(colExpr("make_interval(days := 10)")).toEqual(call("make_interval", [named("days", num(10))]));
+    expect(colExpr('f(1, "B" := 2, c => 3)')).toEqual(call("f", [num(1), named("B", num(2)), named("c", num(3))]));
+    expect(firstStmt("CALL p(a := 1);")).toEqual({ kind: "callProcedure", name: ["p"], args: [named("a", num(1))] });
+    expect(bad("SELECT f(a : = 1) FROM t;")).toThrow(/Expected "\)" but found ":"/);
+    expect(bad("SELECT f(a :=) FROM t;")).toThrow(/but found "\)"/);
+  });
+
+  it("passes a last argument as VARIADIC", () => {
+    expect(colExpr("concat_ws(',', VARIADIC ARRAY['a', 'b'])")).toEqual(
+      call("concat_ws", [str(","), arr(str("a"), str("b"))], { variadic: true }),
+    );
+    expect(colExpr("f(VARIADIC arr)")).toEqual(call("f", [name("arr")], { variadic: true }));
+    expect(colExpr("f(VARIADIC a := arr)")).toEqual(call("f", [named("a", name("arr"))], { variadic: true }));
+    expect(colExpr("array_agg(VARIADIC a ORDER BY b)")).toEqual(
+      call("array_agg", [name("a")], { variadic: true, orderBy: [{ expr: name("b"), dir: null, nulls: null }] }),
+    );
+    expect(firstStmt("SELECT * FROM f(1, VARIADIC a);").from[0].call).toEqual(
+      call("f", [num(1), name("a")], { variadic: true }),
+    );
+    expect(firstStmt("CALL p(VARIADIC a);")).toEqual({
+      kind: "callProcedure",
+      name: ["p"],
+      args: [name("a")],
+      variadic: true,
+    });
+    // Omitted when absent, on all three.
+    expect(Object.keys(colExpr("f(a)"))).toEqual(["kind", "name", "args"]);
+    expect(Object.keys(firstStmt("SELECT * FROM f(a);").from[0].call)).toEqual(["kind", "name", "args"]);
+    expect(Object.keys(firstStmt("CALL p(a);"))).toEqual(["kind", "name", "args"]);
+  });
+
+  it("rejects a VARIADIC argument that is not last, or not an expression", () => {
+    expect(bad("SELECT f(VARIADIC a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT * FROM f(VARIADIC a, b);")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("CALL p(VARIADIC a, b);")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT f(VARIADIC *) FROM t;")).toThrow(/but found "\*"/);
+    expect(bad("SELECT f(VARIADIC) FROM t;")).toThrow(/but found "\)"/);
+    // PG's grammar takes VARIADIC after neither DISTINCT nor ALL.
+    expect(bad("SELECT f(DISTINCT VARIADIC a) FROM t;")).toThrow(/Expected a name but found "variadic"/);
+    expect(bad("SELECT f(ALL a, VARIADIC b) FROM t;")).toThrow(/Expected a name but found "variadic"/);
+    // Nor is a VARIADIC typmod a typed literal's.
+    expect(bad("SELECT varchar(VARIADIC 3) 'x' FROM t;")).toThrow(/Expected ";" but found "x"/);
+  });
+
+  it("records ALL ahead of an aggregate's arguments", () => {
+    expect(colExpr("count(ALL x)")).toEqual(call("count", [name("x")], { all: true }));
+    expect(colExpr("string_agg(ALL a, ',' ORDER BY a)")).toEqual(
+      call("string_agg", [name("a"), str(",")], { all: true, orderBy: [{ expr: name("a"), dir: null, nulls: null }] }),
+    );
+    // DISTINCT and ALL each want an argument after them.
+    expect(bad("SELECT count(ALL) FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT count(DISTINCT) FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT count(ALL DISTINCT x) FROM t;")).toThrow(/but found "distinct"/);
+    // Nor does either take a bare `*`, which stands only on its own.
+    expect(bad("SELECT count(ALL *) FROM t;")).toThrow(/but found "\*"/);
+    expect(bad("SELECT count(DISTINCT *) FROM t;")).toThrow(/but found "\*"/);
+    // A FROM call and CALL read neither (see parseCallArgs).
+    expect(bad("SELECT * FROM f(ALL x);")).toThrow(/but found "all"/);
+    expect(bad("CALL p(DISTINCT x);")).toThrow(/but found "distinct"/);
+  });
+
+  it("keeps the OVERLAY keyword form to plain first arguments", () => {
+    expect(bad("SELECT overlay(VARIADIC a PLACING b FROM 1) FROM t;")).toThrow(/Expected "\)" but found "placing"/);
+    expect(bad("SELECT overlay(ALL a PLACING b FROM 1) FROM t;")).toThrow(/Expected "\)" but found "placing"/);
+    expect(colExpr("overlay(a PLACING b FROM 1)")).toMatchObject({ kind: "overlay" });
+  });
+});
+
+// --- long-tail objects: definition lists, casts, collations, operators, … ---
+
+describe("SQL-lite long-tail objects with definition lists", () => {
+  const ty = (typeName: string, array = false) => ({ name: typeName, args: [], array });
+  const arg = (typeName: string) => ({ mode: null, name: null, type: ty(typeName), defaultValue: null });
+  const typeArg = (typeName: string) => ({ kind: "type", type: ty(typeName) });
+  const fails = (text: string) => () => sqlLite.parse(text);
+
+  it("reads every kind of definition value", () => {
+    expect(
+      firstStmt(
+        "CREATE TYPE s.c (INPUT = c_in, LIKE = pg_catalog.int4, ELEMENT = float4[], DEFAULT = -1.5, " +
+          "INTERNALLENGTH = 99999999999999999999, DELIMITER = ',', CATEGORY = NULL, PASSEDBYVALUE, " +
+          'STORAGE = NONE, "Align" = double precision, SEND = +2);',
+      ),
+    ).toEqual({
+      kind: "createType",
+      form: "base",
+      name: ["s", "c"],
+      definition: [
+        { name: "input", value: typeArg("c_in") },
+        { name: "like", value: typeArg("pg_catalog.int4") },
+        { name: "element", value: { kind: "type", type: ty("float4", true) } },
+        { name: "default", value: { kind: "number", value: -1.5 } },
+        {
+          name: "internallength",
+          value: { kind: "number", value: 1e20, raw: "99999999999999999999" },
+        },
+        { name: "delimiter", value: { kind: "string", value: "," } },
+        { name: "category", value: { kind: "keyword", value: "null" } },
+        { name: "passedbyvalue" },
+        { name: "storage", value: { kind: "none" } },
+        { name: "Align", value: typeArg("double precision") },
+        { name: "send", value: { kind: "number", value: 2 } },
+      ],
+    });
+  });
+
+  it("parses CREATE OPERATOR with operator-valued definitions", () => {
+    expect(
+      firstStmt(
+        "CREATE OPERATOR s.=== (LEFTARG = box, RIGHTARG = box, FUNCTION = box_eq, COMMUTATOR = ===, " +
+          "NEGATOR = OPERATOR(pg_catalog.<>), HASHES);",
+      ),
+    ).toEqual({
+      kind: "createOperator",
+      name: ["s", "==="],
+      definition: [
+        { name: "leftarg", value: typeArg("box") },
+        { name: "rightarg", value: typeArg("box") },
+        { name: "function", value: typeArg("box_eq") },
+        { name: "commutator", value: { kind: "operator", name: ["==="] } },
+        { name: "negator", value: { kind: "operator", name: ["pg_catalog", "<>"] } },
+        { name: "hashes" },
+      ],
+    });
+    // A prefix operator, and an operator in a schema called `class`.
+    expect(firstStmt("CREATE OPERATOR - (RIGHTARG = int);")).toMatchObject({ kind: "createOperator", name: ["-"] });
+    expect(firstStmt("CREATE OPERATOR class.+ (LEFTARG = int, RIGHTARG = int);")).toMatchObject({
+      kind: "createOperator",
+      name: ["class", "+"],
+    });
+  });
+
+  it("parses CREATE TYPE base and shell forms beside the AS forms", () => {
+    expect(firstStmt("CREATE TYPE box3d;")).toEqual({ kind: "createType", form: "shell", name: ["box3d"] });
+    expect(firstStmt("CREATE TYPE s.box3d")).toEqual({ kind: "createType", form: "shell", name: ["s", "box3d"] });
+    expect(firstStmt("CREATE TYPE t (INPUT = t_in, OUTPUT = t_out);")).toEqual({
+      kind: "createType",
+      form: "base",
+      name: ["t"],
+      definition: [
+        { name: "input", value: typeArg("t_in") },
+        { name: "output", value: typeArg("t_out") },
+      ],
+    });
+    expect(firstStmt("CREATE TYPE mood AS ENUM ('sad');")).toEqual({
+      kind: "createType",
+      form: "enum",
+      name: ["mood"],
+      values: ["sad"],
+    });
+    expect(firstStmt("CREATE TYPE p AS (x int);")).toMatchObject({ form: "composite" });
+    expect(firstStmt("CREATE TYPE r AS RANGE (SUBTYPE = int4);")).toMatchObject({ form: "range" });
+    expect(parse("CREATE TYPE a; CREATE TYPE b AS ENUM ();").map((s) => s.form)).toEqual(["shell", "enum"]);
+  });
+
+  it("parses CREATE CAST in each of its forms", () => {
+    expect(firstStmt("CREATE CAST (bigint AS int4) WITH FUNCTION s.int4(bigint) AS ASSIGNMENT;")).toEqual({
+      kind: "createCast",
+      source: ty("bigint"),
+      target: ty("int4"),
+      method: "function",
+      function: { name: ["s", "int4"], signature: { star: false, args: [arg("bigint")] } },
+      context: "assignment",
+    });
+    expect(firstStmt("CREATE CAST (a AS b) WITH FUNCTION f;")).toEqual({
+      kind: "createCast",
+      source: ty("a"),
+      target: ty("b"),
+      method: "function",
+      function: { name: ["f"] },
+    });
+    expect(firstStmt("CREATE CAST (a AS b) WITHOUT FUNCTION AS IMPLICIT;")).toEqual({
+      kind: "createCast",
+      source: ty("a"),
+      target: ty("b"),
+      method: "withoutFunction",
+      context: "implicit",
+    });
+    expect(firstStmt("CREATE CAST (int[] AS text) WITH INOUT;")).toEqual({
+      kind: "createCast",
+      source: ty("int", true),
+      target: ty("text"),
+      method: "inout",
+    });
+  });
+
+  it("parses CREATE COLLATION, CONVERSION and ACCESS METHOD", () => {
+    expect(firstStmt("CREATE COLLATION german (provider = icu, locale = 'de-DE');")).toEqual({
+      kind: "createCollation",
+      ifNotExists: false,
+      name: ["german"],
+      definition: [
+        { name: "provider", value: typeArg("icu") },
+        { name: "locale", value: { kind: "string", value: "de-DE" } },
+      ],
+    });
+    expect(firstStmt('CREATE COLLATION IF NOT EXISTS s.c FROM "C";')).toEqual({
+      kind: "createCollation",
+      ifNotExists: true,
+      name: ["s", "c"],
+      from: ["C"],
+    });
+    expect(firstStmt("CREATE CONVERSION s.myconv FOR 'UTF8' TO 'LATIN1' FROM myfunc;")).toEqual({
+      kind: "createConversion",
+      name: ["s", "myconv"],
+      source: "UTF8",
+      target: "LATIN1",
+      function: ["myfunc"],
+    });
+    expect(firstStmt("CREATE DEFAULT CONVERSION c FOR 'UTF8' TO 'LATIN1' FROM s.f;")).toEqual({
+      kind: "createConversion",
+      default: true,
+      name: ["c"],
+      source: "UTF8",
+      target: "LATIN1",
+      function: ["s", "f"],
+    });
+    expect(firstStmt("CREATE ACCESS METHOD heap2 TYPE TABLE HANDLER heap_tableam_handler;")).toEqual({
+      kind: "createAccessMethod",
+      name: "heap2",
+      type: "table",
+      handler: ["heap_tableam_handler"],
+    });
+    expect(firstStmt("CREATE ACCESS METHOD b TYPE INDEX HANDLER s.h;")).toMatchObject({
+      type: "index",
+      handler: ["s", "h"],
+    });
+  });
+
+  it("parses CREATE STATISTICS with and without a name and kinds", () => {
+    expect(firstStmt("CREATE STATISTICS s1 (dependencies, ndistinct) ON a, b FROM t;")).toEqual({
+      kind: "createStatistics",
+      ifNotExists: false,
+      name: ["s1"],
+      kinds: ["dependencies", "ndistinct"],
+      on: [name("a"), name("b")],
+      from: [["t"]],
+    });
+    expect(firstStmt("CREATE STATISTICS ON (a + b), lower(c) FROM s.t;")).toEqual({
+      kind: "createStatistics",
+      ifNotExists: false,
+      on: [bin("+", name("a"), name("b")), { kind: "call", name: "lower", args: [name("c")] }],
+      from: [["s", "t"]],
+    });
+    // The special-syntax calls are function calls too; `::` is not.
+    expect(
+      firstStmt("CREATE STATISTICS s ON CAST(a AS int), extract(year FROM d), current_date FROM t;").on.map(
+        (e: any) => e.kind,
+      ),
+    ).toEqual(["cast", "extract", "sqlValueFunction"]);
+    expect(firstStmt("CREATE STATISTICS IF NOT EXISTS s.st ON a, b FROM t;")).toMatchObject({
+      ifNotExists: true,
+      name: ["s", "st"],
+    });
+  });
+
+  it("parses CREATE EVENT TRIGGER with and without WHEN", () => {
+    expect(
+      firstStmt(
+        "CREATE EVENT TRIGGER no_ddl ON ddl_command_start WHEN TAG IN ('DROP TABLE', 'ALTER TABLE') AND tag IN ('x') EXECUTE FUNCTION s.abort_ddl();",
+      ),
+    ).toEqual({
+      kind: "createEventTrigger",
+      name: "no_ddl",
+      event: "ddl_command_start",
+      when: [
+        { variable: "tag", values: ["DROP TABLE", "ALTER TABLE"] },
+        { variable: "tag", values: ["x"] },
+      ],
+      execute: { routine: "function", name: ["s", "abort_ddl"] },
+    });
+    expect(firstStmt("CREATE EVENT TRIGGER e ON sql_drop EXECUTE PROCEDURE p();")).toEqual({
+      kind: "createEventTrigger",
+      name: "e",
+      event: "sql_drop",
+      execute: { routine: "procedure", name: ["p"] },
+    });
+  });
+
+  it("parses CREATE LANGUAGE with its prefixes and handlers", () => {
+    expect(firstStmt("CREATE LANGUAGE plperl;")).toEqual({ kind: "createLanguage", orReplace: false, name: "plperl" });
+    expect(firstStmt("CREATE OR REPLACE TRUSTED PROCEDURAL LANGUAGE plx HANDLER s.h INLINE i VALIDATOR v;")).toEqual({
+      kind: "createLanguage",
+      orReplace: true,
+      trusted: true,
+      procedural: true,
+      name: "plx",
+      handler: ["s", "h"],
+      inline: ["i"],
+      validator: ["v"],
+    });
+    expect(firstStmt("CREATE PROCEDURAL LANGUAGE plx HANDLER h NO VALIDATOR;")).toEqual({
+      kind: "createLanguage",
+      orReplace: false,
+      procedural: true,
+      name: "plx",
+      handler: ["h"],
+      validator: null,
+    });
+    expect(firstStmt("CREATE TRUSTED LANGUAGE plx;")).toEqual({
+      kind: "createLanguage",
+      orReplace: false,
+      trusted: true,
+      name: "plx",
+    });
+  });
+
+  it("parses CREATE TEXT SEARCH for each of its four kinds", () => {
+    expect(firstStmt("CREATE TEXT SEARCH CONFIGURATION s.my_cfg (COPY = english);")).toEqual({
+      kind: "createTextSearch",
+      objectType: "configuration",
+      name: ["s", "my_cfg"],
+      definition: [{ name: "copy", value: typeArg("english") }],
+    });
+    expect(
+      firstStmt("CREATE TEXT SEARCH DICTIONARY d (TEMPLATE = simple, STOPWORDS = english, ACCEPT = false);"),
+    ).toMatchObject({
+      objectType: "dictionary",
+      definition: [
+        { name: "template" },
+        { name: "stopwords" },
+        { name: "accept", value: { kind: "keyword", value: "false" } },
+      ],
+    });
+    expect(firstStmt("CREATE TEXT SEARCH PARSER p (START = s, GETTOKEN = g, END = e, LEXTYPES = l);")).toMatchObject({
+      objectType: "parser",
+    });
+    expect(firstStmt("CREATE TEXT SEARCH TEMPLATE t (LEXIZE = l);")).toMatchObject({ objectType: "template" });
+  });
+
+  it("parses CREATE OPERATOR CLASS and FAMILY", () => {
+    expect(
+      firstStmt(
+        "CREATE OPERATOR CLASS my_ops FOR TYPE int4 USING btree AS OPERATOR 1 <, FUNCTION 1 btint4cmp(int4, int4);",
+      ),
+    ).toEqual({
+      kind: "createOperatorClass",
+      name: ["my_ops"],
+      type: ty("int4"),
+      using: "btree",
+      items: [
+        { kind: "operator", strategy: 1, operator: ["<"] },
+        {
+          kind: "function",
+          support: 1,
+          name: ["btint4cmp"],
+          signature: { star: false, args: [arg("int4"), arg("int4")] },
+        },
+      ],
+    });
+    expect(
+      firstStmt(
+        "CREATE OPERATOR CLASS s.gist_ops DEFAULT FOR TYPE point USING gist FAMILY s.f AS " +
+          "OPERATOR 15 pg_catalog.<-> (point, point) FOR ORDER BY float_ops, OPERATOR 3 && FOR SEARCH, " +
+          "FUNCTION 1 (point, point) f, STORAGE box;",
+      ),
+    ).toEqual({
+      kind: "createOperatorClass",
+      name: ["s", "gist_ops"],
+      default: true,
+      type: ty("point"),
+      using: "gist",
+      family: ["s", "f"],
+      items: [
+        {
+          kind: "operator",
+          strategy: 15,
+          operator: ["pg_catalog", "<->"],
+          operands: [ty("point"), ty("point")],
+          purpose: { kind: "orderBy", family: ["float_ops"] },
+        },
+        { kind: "operator", strategy: 3, operator: ["&&"], purpose: { kind: "search" } },
+        { kind: "function", support: 1, types: [ty("point"), ty("point")], name: ["f"] },
+        { kind: "storage", type: ty("box") },
+      ],
+    });
+    expect(firstStmt("CREATE OPERATOR FAMILY s.f USING btree;")).toEqual({
+      kind: "createOperatorFamily",
+      name: ["s", "f"],
+      using: "btree",
+    });
+  });
+
+  it("parses the matching DROP forms", () => {
+    const drop = (fields: Record<string, unknown>) => ({
+      kind: "drop",
+      concurrently: false,
+      ifExists: false,
+      behavior: null,
+      ...fields,
+    });
+    expect(firstStmt("DROP CAST IF EXISTS (a AS b) CASCADE;")).toEqual(
+      drop({ objectType: "cast", ifExists: true, names: [], behavior: "cascade", source: ty("a"), target: ty("b") }),
+    );
+    expect(firstStmt("DROP OPERATOR IF EXISTS ^ (int, int), s.~ (NONE, bit);")).toEqual(
+      drop({
+        objectType: "operator",
+        ifExists: true,
+        names: [["^"], ["s", "~"]],
+        operands: [
+          [ty("int"), ty("int")],
+          [null, ty("bit")],
+        ],
+      }),
+    );
+    expect(firstStmt("DROP OPERATOR CLASS IF EXISTS c USING btree;")).toEqual(
+      drop({ objectType: "operator class", ifExists: true, names: [["c"]], using: "btree" }),
+    );
+    expect(firstStmt("DROP OPERATOR FAMILY s.f USING gin RESTRICT;")).toEqual(
+      drop({ objectType: "operator family", names: [["s", "f"]], using: "gin", behavior: "restrict" }),
+    );
+    expect(firstStmt("DROP TEXT SEARCH DICTIONARY d1, s.d2;")).toEqual(
+      drop({ objectType: "text search dictionary", names: [["d1"], ["s", "d2"]] }),
+    );
+    expect(firstStmt("DROP PROCEDURAL LANGUAGE IF EXISTS plx;")).toEqual(
+      drop({ objectType: "language", ifExists: true, names: [["plx"]] }),
+    );
+    const kinds: [string, string, string[]][] = [
+      ["COLLATION s.c", "collation", ["s", "c"]],
+      ["CONVERSION s.c", "conversion", ["s", "c"]],
+      ["STATISTICS s.st", "statistics", ["s", "st"]],
+      ["EVENT TRIGGER e", "event trigger", ["e"]],
+      ["LANGUAGE l", "language", ["l"]],
+      ["ACCESS METHOD a", "access method", ["a"]],
+      ["TEXT SEARCH PARSER p", "text search parser", ["p"]],
+      ["TEXT SEARCH TEMPLATE p", "text search template", ["p"]],
+      ["TEXT SEARCH CONFIGURATION p", "text search configuration", ["p"]],
+      ["TYPE box3d", "type", ["box3d"]],
+    ];
+    for (const [sql, objectType, objectName] of kinds) {
+      expect(firstStmt(`DROP ${sql} CASCADE;`)).toEqual(drop({ objectType, names: [objectName], behavior: "cascade" }));
+    }
+  });
+
+  it("rejects malformed definitions and statements", () => {
+    expect(fails("CREATE COLLATION c;")).toThrow(/Expected "\(" or "from" but found ";"/);
+    expect(fails("CREATE COLLATION c ();")).toThrow(/Expected an option name but found "\)"/);
+    expect(fails("CREATE COLLATION c (locale = );")).toThrow(
+      /Expected a name, a number, a string or an operator but found "\)"/,
+    );
+    expect(fails("CREATE COLLATION c (locale 'x');")).toThrow(/Expected "\)" but found "x"/);
+    expect(fails("CREATE TYPE t foo;")).toThrow(/Expected "as" but found "foo"/);
+    expect(fails("CREATE OPERATOR => (LEFTARG = int);")).toThrow(/Expected an operator but found "=>"/);
+    expect(fails("CREATE OPERATOR + ;")).toThrow(/Expected "\(" but found ";"/);
+    expect(fails("CREATE CAST (a AS b);")).toThrow(/Expected "with" or "without" but found ";"/);
+    expect(fails("CREATE CAST (a, b) WITH INOUT;")).toThrow(/Expected "as" but found ","/);
+    expect(fails("CREATE CAST (a AS b) WITH f;")).toThrow(/Expected "function" or "inout" but found "f"/);
+    expect(fails("CREATE CAST (a AS b) WITH INOUT AS frob;")).toThrow(/Expected "assignment" or "implicit"/);
+    expect(fails("CREATE CONVERSION c FOR utf8 TO 'x' FROM f;")).toThrow(/Expected a string but found "utf8"/);
+    expect(fails("CREATE DEFAULT x;")).toThrow(/Expected "conversion" but found "x"/);
+    expect(fails("CREATE STATISTICS s ON x, a + b FROM t;")).toThrow(/must be parenthesised \(1:26\)/);
+    expect(fails("CREATE STATISTICS s ON t.a FROM t;")).toThrow(/must be parenthesised/);
+    expect(fails("CREATE STATISTICS s ON a::int FROM t;")).toThrow(/must be parenthesised/);
+    expect(fails("CREATE STATISTICS s ON CAST(a AS int)::text FROM t;")).toThrow(/must be parenthesised/);
+    expect(fails("CREATE STATISTICS IF NOT EXISTS ON a FROM t;")).toThrow(/Expected a name but found "on"/);
+    expect(fails("CREATE STATISTICS s ON a;")).toThrow(/Expected "from" but found ";"/);
+    expect(fails("CREATE EVENT TRIGGER e ON x EXECUTE FUNCTION f(1);")).toThrow(/Expected "\)" but found "1"/);
+    expect(fails("CREATE EVENT TRIGGER e ON x WHEN tag IN (1) EXECUTE FUNCTION f();")).toThrow(
+      /Expected a string but found "1"/,
+    );
+    expect(fails("CREATE EVENT TRIGGER e ON x EXECUTE f();")).toThrow(/Expected "function" or "procedure"/);
+    expect(fails("CREATE TRUSTED x;")).toThrow(/Expected "procedural" or "language" but found "x"/);
+    expect(fails("CREATE PROCEDURAL x;")).toThrow(/Expected "language" but found "x"/);
+    expect(fails("CREATE LANGUAGE l HANDLER h NO frob;")).toThrow(/Expected "validator" but found "frob"/);
+    expect(fails("CREATE OR REPLACE ACCESS METHOD a TYPE TABLE HANDLER h;")).toThrow(
+      expectsKeys(["view", "language", "trusted", "procedural"], '"access"'),
+    );
+    expect(fails("CREATE ACCESS METHOD a TYPE view HANDLER h;")).toThrow(
+      /Expected "table" or "index" but found "view"/,
+    );
+    expect(fails("CREATE TEXT SEARCH frob x (a = b);")).toThrow(
+      /Expected "parser", "dictionary", "template" or "configuration" but found "frob"/,
+    );
+    expect(fails("CREATE TEXT SEARCH PARSER p;")).toThrow(/Expected "\(" but found ";"/);
+    const opclass = (items: string) => fails(`CREATE OPERATOR CLASS c FOR TYPE int USING btree AS ${items};`);
+    expect(opclass("OPERATOR x <")).toThrow(/Expected an integer but found "x"/);
+    expect(opclass("OPERATOR 1.5 <")).toThrow(/Expected an integer but found "1.5"/);
+    expect(opclass("FROB 1")).toThrow(/Expected "operator", "function" or "storage" but found "frob"/);
+    expect(opclass("OPERATOR 1 < (int)")).toThrow(/Expected "," but found "\)"/);
+    expect(opclass("OPERATOR 1 < FOR frob")).toThrow(/Expected "search" or "order" but found "frob"/);
+    expect(fails("CREATE OPERATOR CLASS c FOR TYPE int USING btree OPERATOR 1 <;")).toThrow(
+      /Expected "as" but found "operator"/,
+    );
+    expect(fails("CREATE OPERATOR FAMILY f;")).toThrow(/Expected "using" but found ";"/);
+    expect(fails("DROP CAST (a, b);")).toThrow(/Expected "as" but found ","/);
+    expect(fails("DROP OPERATOR +;")).toThrow(/Expected "\(" but found ";"/);
+    expect(fails("DROP OPERATOR + (NONE, NONE);")).toThrow(/not NONE twice/);
+    expect(fails("DROP OPERATOR CLASS c;")).toThrow(/Expected "using" but found ";"/);
+    // CAST, OPERATOR CLASS and OPERATOR FAMILY drop one object at a time.
+    expect(fails("DROP CAST (a AS b), (c AS d);")).toThrow(/Expected ";" but found ","/);
+    expect(fails("DROP OPERATOR CLASS c USING btree, d USING btree;")).toThrow(/Expected ";" but found ","/);
+    expect(fails("DROP TEXT SEARCH x y;")).toThrow(/Expected "parser", "dictionary", "template" or "configuration"/);
+    expect(fails("DROP EVENT e;")).toThrow(/Expected "trigger" but found "e"/);
+    expect(fails("DROP frobnicate x;")).toThrow(
+      expectsKeys(["cast", "collation", "operator", "text", "event", "access", "procedural"], '"frobnicate"'),
+    );
+  });
+
+  it("keeps the new words unreserved as names and aliases", () => {
+    const words = [
+      "collation conversion statistics event trigger language trusted procedural handler inline validator",
+      "access method text search parser dictionary template configuration operator class family storage",
+      "without inout implicit assignment tag none dependencies ndistinct provider locale",
+    ]
+      .join(" ")
+      .split(" ");
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS handler, 2 storage FROM statistics AS collation;")).toMatchObject({
+      columns: [{ alias: "handler" }, { alias: "storage" }],
+      from: [{ name: ["statistics"], alias: "collation" }],
+    });
+    expect(firstStmt("CREATE TABLE operator (class int, family text, inout int, validator int);")).toMatchObject({
+      name: ["operator"],
+    });
+    // …and as the names of the objects being created.
+    expect(firstStmt('CREATE COLLATION collation FROM "C";')).toMatchObject({ name: ["collation"] });
+    expect(firstStmt("CREATE STATISTICS statistics ON storage FROM text;")).toMatchObject({
+      name: ["statistics"],
+      on: [name("storage")],
+      from: [["text"]],
+    });
+    expect(firstStmt("CREATE LANGUAGE language HANDLER handler INLINE inline VALIDATOR validator;")).toMatchObject({
+      name: "language",
+      handler: ["handler"],
+      inline: ["inline"],
+      validator: ["validator"],
+    });
+    expect(firstStmt("CREATE OPERATOR CLASS class FOR TYPE storage USING family AS STORAGE storage;")).toMatchObject({
+      name: ["class"],
+      type: ty("storage"),
+      using: "family",
+    });
+    expect(firstStmt("CREATE OPERATOR FAMILY family USING method;")).toMatchObject({ name: ["family"] });
+    expect(firstStmt("CREATE TYPE type;")).toEqual({ kind: "createType", form: "shell", name: ["type"] });
+    expect(firstStmt("DROP OPERATOR family.+ (int, int);")).toMatchObject({
+      objectType: "operator",
+      names: [["family", "+"]],
+    });
+  });
+});
+
+// --- psql scripts: sqlLiteScript ---
+
+describe("SQL-lite psql scripts", () => {
+  const script = (text: string) => stripSpans(sqlLiteScript.parse(text)) as Record<string, any>[];
+  const bad = (src: string) => () => sqlLiteScript.parse(src);
+  const meta = (command: string, args = "") => ({ kind: "psqlMeta", command, args });
+  const copyIn = (table: string, data?: string) => ({
+    kind: "copy",
+    table: [table],
+    columns: null,
+    query: null,
+    direction: "from",
+    location: { kind: "stdin" },
+    options: null,
+    where: null,
+    ...(data === undefined ? {} : { data }),
+  });
+  const one = firstStmt("SELECT 1;");
+  const two = firstStmt("SELECT 2;");
+
+  it("attaches the rows after COPY … FROM STDIN as data, verbatim", () => {
+    const rows = "1\tit's; -- not a comment\n2\t\\N\n\n";
+    expect(script(`COPY t FROM stdin;\n${rows}\\.\nSELECT 1;`)).toEqual([copyIn("t", rows), one]);
+    expect(script('COPY t FROM STDIN (FORMAT csv);\na,"b;c"\n\\.\n')).toEqual([
+      { ...copyIn("t", 'a,"b;c"\n'), options: [{ name: "format", value: { kind: "name", parts: ["csv"] } }] },
+    ]);
+    // The pre-9.0 spelling, the BINARY prefix included, takes its rows too.
+    expect(
+      script("COPY BINARY t FROM stdin;\nxx\n\\.\nCOPY t FROM stdin WITH CSV HEADER NULL AS '';\na,b\n\\.\n"),
+    ).toEqual([
+      {
+        ...copyIn("t", "xx\n"),
+        options: [{ name: "format", value: { kind: "name", parts: ["binary"] } }],
+        legacy: true,
+      },
+      {
+        ...copyIn("t", "a,b\n"),
+        options: [
+          { name: "format", value: { kind: "name", parts: ["csv"] } },
+          { name: "header", value: null },
+          { name: "null", value: { kind: "string", value: "" } },
+        ],
+        legacy: true,
+      },
+    ]);
+    // A row is data even when it looks like a terminator or a meta-command.
+    expect(script("COPY t FROM stdin;\n \\.\n\\.x\n\\connect db\n\\.")).toEqual([
+      copyIn("t", " \\.\n\\.x\n\\connect db\n"),
+    ]);
+  });
+
+  it("gives an empty block empty data, and reads CRLF line ends", () => {
+    expect(script("COPY t FROM stdin;\n\\.\nSELECT 1;")).toEqual([copyIn("t", ""), one]);
+    expect(script("COPY t FROM stdin;\r\n1\r\n\\.\r\nSELECT 1;\r\n")).toEqual([copyIn("t", "1\r\n"), one]);
+    // Whitespace or a comment may follow the COPY's `;` on its line.
+    expect(script("COPY t FROM stdin;  -- rows follow\n1\n\\.")).toEqual([copyIn("t", "1\n")]);
+  });
+
+  it("reads the rows once, whatever lookahead the COPY's parse does", () => {
+    const sql = "COPY t (a, b) FROM stdin WITH (FORMAT csv, HEADER) WHERE a IN (SELECT x FROM u) AND (b, a) > (1, 2);";
+    expect(script(`${sql}\na,b\n1,2\n\\.\n${sql}\n\\.\nSELECT 1;`)).toEqual([
+      { ...firstStmt(sql), data: "a,b\n1,2\n" },
+      { ...firstStmt(sql), data: "" },
+      one,
+    ]);
+  });
+
+  it("keeps spans true across the data block", () => {
+    const dataSpan = (text: string) => {
+      const tokens = sqlScriptParseLexer.tokenize(createInputStream(text));
+      for (let token = tokens.next(); token !== null; token = tokens.next()) {
+        if (token.type === "copydata") return token.position;
+      }
+      return null;
+    };
+    // From the first row through the `\.`, a CRLF line's `\r` aside.
+    for (const eol of ["\n", "\r\n"]) {
+      expect(dataSpan(`COPY t FROM stdin;${eol}1${eol}\\.${eol}x`)).toEqual({
+        start: { row: 2, col: 0 },
+        end: { row: 3, col: 2 },
+      });
+    }
+    expect(sqlLiteScript.diagnose("COPY t FROM stdin; ab cd   \n1\n\\.").errors[0]!.end).toEqual({ row: 1, col: 24 });
+    expect(() => sqlLiteScript.parse("COPY t FROM stdin; x \r\n1\n\\.")).toThrow(
+      expect.objectContaining({ end: { row: 1, col: 20 } }),
+    );
+    expect((sqlLiteScript.parse("\\x\r\nSELECT 1;")[0] as any).span).toEqual({
+      start: { row: 1, col: 0 },
+      end: { row: 1, col: 2 },
+    });
+    const [copy, select] = sqlLiteScript.parse("COPY t FROM stdin;\n1\n2\n\\.\nSELECT 1;") as any[];
+    expect(copy.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 17 } });
+    expect(select.span).toEqual({ start: { row: 5, col: 0 }, end: { row: 5, col: 8 } });
+    expect(bad("COPY t FROM stdin;\n1\n\\.\nSELECT 1 +;")).toThrow(/\(4:10\)/);
+  });
+
+  it("reads data only after a COPY from STDIN", () => {
+    const toStdout = { ...copyIn("t"), direction: "to", location: { kind: "stdout" } };
+    expect(script("COPY t TO stdout;\n\\.\n")).toEqual([toStdout, meta(".")]);
+    expect(script("SELECT * FROM stdin;\nSELECT 1;")).toEqual([firstStmt("SELECT * FROM stdin;"), one]);
+    expect(script("COPY t (stdin) FROM 'f';\nSELECT 1;")).toEqual([
+      { ...copyIn("t"), columns: ["stdin"], location: { kind: "file", path: "f" } },
+      one,
+    ]);
+    expect(script("COPY (SELECT 'from stdin') TO STDOUT;\nSELECT 1;")).toHaveLength(2);
+    expect(script("COPY t FROM 'f' WHERE a IS DISTINCT FROM stdin;\nSELECT 1;")).toHaveLength(2);
+    // Rows are read for a statement the grammar rejects, a qualified name included.
+    expect(sqlLiteScript.diagnose("COPY s.from FROM stdin;\n1\n\\.\nSELECT 1;").ast).toHaveLength(1);
+    // A COPY with no `;` ends the input, so it has no rows to read. Without
+    // rows, `data` is absent, not undefined.
+    expect(script("COPY t FROM stdin")).toStrictEqual([copyIn("t")]);
+    expect("data" in parse("COPY t FROM stdin;\nSELECT 1;")[0]!).toBe(false);
+  });
+
+  it("keeps copy and stdin unreserved as names", () => {
+    expect(script("COPY stdin FROM stdin;\n1\n\\.")).toEqual([copyIn("stdin", "1\n")]);
+    // Rows are taken even when a table named `from` is rejected, after an
+    // earlier COPY that ended on a qualified name's dot too.
+    for (const sql of ["COPY from FROM stdin;", "COPY from.t FROM stdin;", "COPY s.;\nCOPY from FROM stdin;"]) {
+      expect(stripSpans(sqlLiteScript.diagnose(`${sql}\n\\connect x\n\\.\nSELECT 1;`).ast)).toEqual([one]);
+    }
+    expect(script("SELECT copy, stdin FROM copy;\nSELECT 1;")).toEqual([
+      firstStmt("SELECT copy, stdin FROM copy;"),
+      one,
+    ]);
+  });
+
+  it("rejects an unterminated block and text after the COPY's semicolon", () => {
+    expect(bad("COPY t FROM stdin;\n1\n2")).toThrow(/COPY data is not terminated by a "\\\." line \(2:0\)/);
+    expect(bad("COPY t FROM stdin;")).toThrow(/COPY data is not terminated/);
+    expect(bad("COPY t FROM stdin; SELECT 1;\n\\.")).toThrow(/Unexpected text after COPY … FROM STDIN \(1:19\)/);
+    expect(bad("COPY t FROM stdin; /* c */\n1\n\\.")).toThrow(/Unexpected text after COPY … FROM STDIN \(1:19\)/);
+    expect(bad("COPY t FROM stdin; -\n1\n\\.")).toThrow(/Unexpected text after COPY … FROM STDIN \(1:19\)/);
+    // With no terminator either, the rows swallowed the rest of the input: that is the error.
+    expect(bad("COPY t FROM stdin; x\nSELECT 2;")).toThrow(/COPY data is not terminated/);
+  });
+
+  it("parses meta-command lines at the start, middle and end", () => {
+    expect(
+      script("\\restrict abc\nSELECT 1;\n\\connect -reuse-previous=on \"dbname='app'\"\nSELECT 2;\n\\unrestrict abc\n"),
+    ).toEqual([
+      meta("restrict", "abc"),
+      one,
+      meta("connect", "-reuse-previous=on \"dbname='app'\""),
+      two,
+      meta("unrestrict", "abc"),
+    ]);
+    // After a `;` on the same line, and with no statement at all.
+    expect(script("SELECT 1; \\gset  \n")).toEqual([one, meta("gset")]);
+    expect(script("\\set ON_ERROR_STOP on\r\n\\.")).toEqual([meta("set", "ON_ERROR_STOP on"), meta(".")]);
+  });
+
+  it("ends a command name at whitespace or a backslash, as psql does", () => {
+    expect(script("\\dt+ s.*")).toEqual([meta("dt+", "s.*")]);
+    expect(script("\\x\\y")).toEqual([meta("x", "\\y")]);
+    expect(script("\\\\")).toEqual([meta("\\")]);
+    expect(script("\\! ls -l")).toEqual([meta("!", "ls -l")]);
+    expect(bad("\\")).toThrow(/Invalid psql meta-command "\\" \(1:0\)/);
+    expect(bad("SELECT 1;\n\\ x")).toThrow(/Invalid psql meta-command "\\" \(2:0\)/);
+  });
+
+  it("parses statements as sqlLite does, spans included", () => {
+    const text = "CREATE TABLE t (a int);\n-- c\nINSERT INTO t VALUES (1) /* c */ ;\nSELECT 1";
+    expect(sqlLiteScript.parse(text)).toEqual(sqlLite.parse(text));
+  });
+
+  it("still rejects a backslash inside a statement", () => {
+    expect(bad("SELECT 1 \\x;")).toThrow(/Unexpected character "\\" \(1:9\)/);
+    expect(bad("SELECT 1 \\x")).toThrow(/Unexpected character "\\"/);
+    // On a line of its own it is a meta-command, which cuts the statement short.
+    expect(bad("SELECT\n\\x\n1;")).toThrow(/but found "\\x" \(2:0\)/);
+    expect(bad("SELECT 1\n\\connect db")).toThrow(/Expected ";" but found "\\connect db" \(2:0\)/);
+  });
+
+  it("leaves sqlLite and sqlLexer strict", () => {
+    expect(() => sqlLite.parse("\\connect db")).toThrow(/Unexpected character "\\"/);
+    expect(() => sqlLite.parse("COPY t FROM stdin;\n1\n\\.")).toThrow(/Expected a statement but found "1" \(2:0\)/);
+    expect(() => lex("\\x")).toThrow(/Unexpected character "\\"/);
+    expect(lex("\\x", sqlScriptLexer)).toEqual([{ type: "psqlmeta", value: "\\x" }]);
+  });
+
+  it("recovers at the next statement, at a meta-command line and past COPY rows", () => {
+    const { ast, errors } = sqlLiteScript.diagnose(
+      [
+        "SELECT FROM WHERE;",
+        "\\connect db",
+        "SELECT (1",
+        "\\connect other",
+        "COPY t FROM stdin WITH junk;",
+        "1;SELECT 1;",
+        "\\.",
+        "bogus",
+        "\\unrestrict k",
+        "SELECT 2;",
+      ].join("\n"),
+    );
+    expect(stripSpans(ast)).toEqual([meta("connect", "db"), meta("connect", "other"), meta("unrestrict", "k"), two]);
+    expect(errors.map((error) => error.message)).toEqual([
+      'Expected a name but found "where" (1:12)',
+      'Expected ")" but found "\\connect other" (4:0)',
+      'Expected "(" or a COPY option but found "junk" (5:23)',
+      'Expected a statement or a psql meta-command but found "bogus" (8:0)',
+    ]);
+  });
+
+  it("reports a backslash with no command name without losing the statement before it", () => {
+    // `f(a)`'s parse looks one token past its `;`, at the bad line.
+    const { ast, errors } = sqlLiteScript.diagnose("SELECT f(a);\n\\ x\n\\connect db\nSELECT 2;");
+    expect(stripSpans(ast)).toEqual([firstStmt("SELECT f(a);"), meta("connect", "db"), two]);
+    expect(errors.map((error) => error.message)).toEqual(['Invalid psql meta-command "\\" (2:0)']);
+  });
+
+  it("keeps a meta-command line that follows a lexer error", () => {
+    const leads: [string, number][] = [
+      ["SELECT 1;\n\\ x", 1],
+      ["SELECT B'102'", 1],
+      // The bad COPY and the text after its `;`.
+      ["COPY t FROM stdin WITH junk; x\n1\n\\.", 2],
+    ];
+    for (const [lead, count] of leads) {
+      const { ast, errors } = sqlLiteScript.diagnose(`${lead}\n\\connect db\nSELECT 2;`);
+      expect(stripSpans(ast).slice(-2)).toEqual([meta("connect", "db"), two]);
+      expect(errors).toHaveLength(count);
+    }
+  });
+
+  it("keeps a COPY whose parse looked ahead into a bad data block", () => {
+    const { ast, errors } = sqlLiteScript.diagnose("COPY t FROM stdin WHERE f(a); x\n1\n\\.\nSELECT 1;");
+    expect(stripSpans(ast)).toEqual([{ ...firstStmt("COPY t FROM stdin WHERE f(a);"), data: "1\n" }, one]);
+    expect(errors.map((error) => error.message)).toEqual(["Unexpected text after COPY … FROM STDIN (1:30)"]);
+  });
+
+  it("reports an error in the data block and keeps the COPY and its rows", () => {
+    const { ast, errors } = sqlLiteScript.diagnose("COPY t FROM stdin; x\n1\n\\.\nSELECT 1;");
+    expect(stripSpans(ast)).toEqual([copyIn("t", "1\n"), one]);
+    expect(errors.map((error) => error.message)).toEqual(["Unexpected text after COPY … FROM STDIN (1:19)"]);
   });
 });

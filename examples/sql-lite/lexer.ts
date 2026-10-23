@@ -1,4 +1,15 @@
-import { defineLexer, type InputStream, type Lexer, type Position, type Reader, readers } from "@parser-kit/core";
+import {
+  defineLexer,
+  type InputStream,
+  type Lexer,
+  type LexerDef,
+  ParseError,
+  type Position,
+  type Reader,
+  readers,
+  type Token,
+  type TokenStream,
+} from "@parser-kit/core";
 
 // SQL-lite is the PostgreSQL-flavoured counterpart to js-lite: it exercises the
 // reader and keyword machinery DBML doesn't touch. Identifiers fold their ASCII
@@ -18,7 +29,11 @@ export type SqlTokenType =
   | "op"
   | "punc"
   | "comment"
-  | "param";
+  | "param"
+  // Script mode only (`sqlScriptParseLexer`): a psql meta-command line, and the
+  // inline data block of a `COPY … FROM STDIN`.
+  | "psqlmeta"
+  | "copydata";
 
 // --- Quoted literals ---
 // PG reads every quoted form in its scanner (scan.l), and so does this file:
@@ -800,7 +815,7 @@ const identifierReader: Reader<SqlTokenType> = readers.custom("ident", {
   },
 });
 
-export const sqlLexer = defineLexer({
+const SQL_LEXER = {
   punctuation: {
     // No character here overlaps the operator reader's `chars`, so `::` reads as
     // one cast token right next to a `||` or `@>` operator with no precedence
@@ -850,7 +865,31 @@ export const sqlLexer = defineLexer({
   trivia: ["comment"],
   // SQL is newline-insensitive: newlines are ordinary whitespace.
   whitespace: WHITESPACE,
-});
+} satisfies LexerDef<SqlTokenType>;
+
+export const sqlLexer = defineLexer<SqlTokenType>(SQL_LEXER);
+
+// `tokens` with its `comment` tokens skipped; both parse lexers read through it.
+const withoutComments = (tokens: TokenStream<SqlTokenType>): TokenStream<SqlTokenType> => {
+  const peek = () => {
+    let token = tokens.peek();
+    while (token !== null && token.type === "comment") {
+      tokens.next();
+      token = tokens.peek();
+    }
+    return token;
+  };
+  return {
+    next: () => {
+      peek();
+      return tokens.next();
+    },
+    peek,
+    eof: () => peek() === null,
+    croak: tokens.croak,
+    position: tokens.position,
+  };
+};
 
 // What the grammar parses: `sqlLexer`'s tokens with every `comment` dropped, so
 // a comment is legal anywhere whitespace is (`SELECT /* x */ 1`, `count -- n
@@ -862,20 +901,209 @@ export const sqlLexer = defineLexer({
 // for anyone tokenizing SQL directly (highlighters, formatters).
 export const sqlParseLexer: Lexer<SqlTokenType> = {
   labels: sqlLexer.labels,
+  tokenize: (input) => withoutComments(sqlLexer.tokenize(input)),
+};
+
+// --- psql scripts ---
+// What a `.sql` file run with `psql -f` holds beyond server SQL: meta-command
+// lines (`\connect db`, `\restrict key`, `\set ON_ERROR_STOP on`), and after a
+// `COPY … FROM STDIN;` the rows psql sends as the COPY's input, up to a line
+// that is exactly `\.`. pg_dump writes both. Neither is SQL, so only the script
+// lexers below read them (the rows: `sqlScriptParseLexer` alone); `sqlLexer`
+// still rejects every backslash outside a literal, as the server does.
+//
+// A statement ends at every `;`, as it does for `sqlLite`, so a routine body
+// (`BEGIN ATOMIC … END`, which psql keeps whole) is cut at its first `;` until
+// the grammar parses one: the routine fails and recovery may take the rest of
+// its body as statements of their own. The rows of a `\copy … from stdin`
+// meta-command are not read either; they lex as SQL.
+
+// A backslash is a meta-command where psql would run one on its own: between
+// statements (at the start of input, after a `;` or after another meta-command
+// line) or as the first token on its line (comments aside). The second keeps a meta-command
+// inside an unfinished statement a single token, so the grammar can report the
+// statement and recovery can resume at the line. Anywhere else, mid-line in a
+// statement, the backslash stays an unexpected character. Comments are trivia,
+// so they don't count as the token before it.
+const atMetaBoundary = (stream: InputStream, last: Token | null): boolean =>
+  last === null ||
+  (last.type === "punc" && last.value === ";") ||
+  last.type === "psqlmeta" ||
+  last.position.end.row < stream.position().row;
+
+// The whole line, backslash included, as the token's value. psql reads a
+// meta-command's arguments to the end of its line (its own lexer, not SQL's),
+// so nothing on the rest of the line is SQL. A backslash with no command name
+// after it is still a token: the grammar reports it, since a lexer error here
+// could surface during a lookahead past the `;` before it and take that
+// statement down with it.
+const psqlMetaReader: Reader<SqlTokenType> = {
+  type: "psqlmeta",
+  display: "a psql meta-command",
+  startsWith: (char, stream, ctx) => char === "\\" && atMetaBoundary(stream, ctx.lastToken),
+  read: (stream) => {
+    let text = "";
+    while (stream.peek() !== "" && stream.peek() !== "\n") text += stream.next();
+    if (!text.endsWith("\r")) return { value: text };
+    // A CRLF line: the span ends before the `\r`, as the value does.
+    const end = stream.position();
+    return { value: text.slice(0, -1), end: { row: end.row, col: end.col - 1 } };
+  },
+};
+
+// `sqlLexer` plus meta-command lines. COPY rows are read only by
+// `sqlScriptParseLexer`, which wraps this one; tokenized here, they lex as SQL.
+export const sqlScriptLexer = defineLexer<SqlTokenType>({
+  ...SQL_LEXER,
+  readers: [...SQL_LEXER.readers, psqlMetaReader],
+});
+
+// What was wrong with a `copydata` token's block, if anything. The lexer hands
+// the error to the grammar on the token rather than throwing it: the parser
+// may pull the token as lookahead while still inside the COPY (a call in its
+// WHERE peeks past the `;`), and a throw there would lose the statement.
+const copyDataErrors = new WeakMap<Token<SqlTokenType>, ParseError>();
+export const copyDataError = (token: Token<SqlTokenType>): ParseError | undefined => copyDataErrors.get(token);
+
+// Read a COPY's inline data with the stream just past the `;` that ends its
+// statement. The data starts on the next line — only whitespace or a `--`
+// comment may follow the `;` — and runs to a line that is exactly `\.` (a
+// trailing `\r` allowed). The token's value is the rows verbatim, newlines
+// included and the terminator line excluded; its span runs from the first row
+// through the `\.`. A missing terminator is an error rather than the rest of
+// the file taken as data silently. Other text after the `;` is one too, which
+// is stricter than psql (it runs that text once the COPY is done); pg_dump
+// never writes any. Either way the block is read, so the rows are never
+// lexed as SQL.
+const readCopyData = (stream: InputStream): Token<SqlTokenType> => {
+  let error: ParseError | null = null;
+  while (isSpace(stream.peek()) && stream.peek() !== "\n") stream.next();
+  if (stream.peek() === "-") {
+    stream.snapshot();
+    stream.next();
+    const comment = stream.peek() === "-";
+    stream.reload();
+    if (comment) while (stream.peek() !== "" && stream.peek() !== "\n") stream.next();
+  }
+  if (stream.peek() !== "" && stream.peek() !== "\n") {
+    const start = stream.position();
+    // The span ends at the text's last non-space character.
+    let end = start;
+    while (stream.peek() !== "" && stream.peek() !== "\n") {
+      if (isSpace(stream.next())) continue;
+      end = stream.position();
+    }
+    error = new ParseError("Unexpected text after COPY … FROM STDIN", start, end);
+  }
+  if (stream.peek() === "\n") stream.next();
+  const start = stream.position();
+  let value = "";
+  const finish = (end: Position) => {
+    const token: Token<SqlTokenType> = { type: "copydata", value, position: { start, end } };
+    if (error !== null) copyDataErrors.set(token, error);
+    return token;
+  };
+  for (;;) {
+    if (stream.eof()) {
+      // The rows took the rest of the input: that outweighs the text above.
+      error = new ParseError('COPY data is not terminated by a "\\." line', start, stream.position());
+      break;
+    }
+    let line = "";
+    while (stream.peek() !== "" && stream.peek() !== "\n") line += stream.next();
+    if (line === "\\.") break;
+    if (line === "\\.\r") {
+      // Like a meta-command's, the span ends before a CRLF line's `\r`.
+      const end = stream.position();
+      return finish({ row: end.row, col: end.col - 1 });
+    }
+    value += line;
+    if (stream.peek() === "\n") value += stream.next();
+  }
+  return finish(stream.position());
+};
+
+// The script counterpart of `sqlParseLexer`: `sqlScriptLexer`'s tokens with
+// comments dropped, plus one `copydata` token after the `;` of every
+// `COPY … FROM STDIN`. Whether a statement is one is read off its tokens as
+// they are lexed — led by `copy`, with `stdin` as the word after its first
+// `from` or `to` outside parentheses. (psql itself waits for the server to
+// accept the COPY.) Deciding in the lexer takes the rows even when the
+// grammar rejects the statement, so recovery doesn't lex them as SQL — unless
+// the statement is too broken to show its location (`COPY FROM stdin`, an
+// unclosed parenthesis before it), where psql runs them as SQL as well. The
+// token after a `;` is only lexed once the parser asks for it, so the stream
+// is just past the `;` when the data is read; positions after the block come
+// from the same stream, so spans stay true.
+export const sqlScriptParseLexer: Lexer<SqlTokenType> = {
+  labels: { ...sqlScriptLexer.labels, copydata: "COPY data" },
   tokenize: (input) => {
-    const tokens = sqlLexer.tokenize(input);
-    const peek = () => {
-      let token = tokens.peek();
-      while (token !== null && token.type === "comment") {
-        tokens.next();
-        token = tokens.peek();
+    const tokens = withoutComments(sqlScriptLexer.tokenize(input));
+    let current: Token<SqlTokenType> | null | undefined;
+    // The statement being lexed: whether it leads with `copy`, its parenthesis
+    // depth, the previous top-level word, whether its location is decided and
+    // whether that is STDIN.
+    let leading = true;
+    let isCopy = false;
+    let depth = 0;
+    let previous = "";
+    let afterDot = false;
+    let located = false;
+    let copyIn = false;
+    let dataPending = false;
+
+    const endStatement = () => {
+      leading = true;
+      isCopy = afterDot = located = copyIn = false;
+      depth = 0;
+      previous = "";
+    };
+    const track = (token: Token<SqlTokenType>) => {
+      if (token.type === "psqlmeta") return endStatement();
+      if (token.type === "punc" && token.value === ";") {
+        dataPending = copyIn;
+        return endStatement();
       }
+      if (leading) {
+        leading = false;
+        isCopy = token.type === "ident" && token.value === "copy";
+      }
+      if (!isCopy || located) return;
+      if (token.type === "punc" && token.value === "(") depth++;
+      else if (token.type === "punc" && token.value === ")") depth = Math.max(0, depth - 1);
+      else if (depth === 0) {
+        // Names are no keywords: the table right after `copy` (`COPY from …`)
+        // and a qualified name's parts (`s.from`, `from.t`).
+        const named = previous === "copy" || afterDot;
+        afterDot = token.type === "punc" && token.value === ".";
+        const word = token.type === "ident" && !named ? token.value : "";
+        // Only the first location counts: `WHERE a IS DISTINCT FROM stdin`
+        // names a column.
+        if ((previous === "from" || previous === "to") && !afterDot) {
+          located = true;
+          copyIn = previous === "from" && word === "stdin";
+        }
+        previous = word;
+      }
+    };
+    const produce = () => {
+      if (dataPending) {
+        dataPending = false;
+        return readCopyData(input);
+      }
+      const token = tokens.next();
+      if (token !== null) track(token);
       return token;
+    };
+    const peek = () => {
+      if (current === undefined) current = produce();
+      return current;
     };
     return {
       next: () => {
-        peek();
-        return tokens.next();
+        const token = peek();
+        current = undefined;
+        return token;
       },
       peek,
       eof: () => peek() === null,
