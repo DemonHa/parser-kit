@@ -15170,7 +15170,7 @@ describe("SQL-lite XML functions", () => {
     expect(bad("SELECT * FROM xmltable('/r' PASSING d COLUMNS a int) WITH ORDINALITY;")).toThrow(/but found "with"/);
     // Not an expression, and XMLNAMESPACES not a call, in PG either.
     expect(bad("SELECT xmltable('/r' PASSING d COLUMNS a int) FROM t;")).toThrow(
-      /XMLTABLE is allowed only as a FROM item/,
+      /XMLTABLE is allowed only as a FROM item of its own/,
     );
     expect(bad("SELECT xmlnamespaces('u' AS a) FROM t;")).toThrow(
       /XMLNAMESPACES is allowed only as the first argument of XMLTABLE/,
@@ -15200,7 +15200,7 @@ describe("SQL-lite XML functions", () => {
     });
     expect(bad("SELECT * FROM xmlattributes(1);")).toThrow(/XMLATTRIBUTES is allowed only as the second argument/);
     expect(bad("SELECT * FROM ROWS FROM (xmltable('/r' PASSING d COLUMNS a int));")).toThrow(
-      /XMLTABLE is allowed only as a FROM item/,
+      /XMLTABLE is allowed only as a FROM item of its own/,
     );
     // And, as func_expr_windowless, unparenthesised partition and statistics keys.
     expect(firstStmt("CREATE TABLE p (a xml) PARTITION BY LIST (xmlelement(name a));").partitionBy).toMatchObject({
@@ -15208,6 +15208,9 @@ describe("SQL-lite XML functions", () => {
     });
     expect(firstStmt("CREATE STATISTICS s ON xmlexists('a' PASSING b), c FROM t;")).toMatchObject({
       kind: "createStatistics",
+    });
+    expect(firstStmt("INSERT INTO t VALUES (1) ON CONFLICT (xmlelement(name a)) DO NOTHING;")).toMatchObject({
+      onConflict: { inference: { elements: [{ expr: { kind: "xmlElement", name: "a" } }] } },
     });
   });
 

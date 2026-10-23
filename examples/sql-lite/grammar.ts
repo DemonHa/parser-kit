@@ -2118,8 +2118,8 @@ export type FromItem =
   | { kind: "subquery"; query: Query; alias: string | null; columns?: string[]; lateral?: boolean }
   // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
   // is the underlying `call` expression node, or the node of an XML function's
-  // keyword form (`xmlElement`, …), which PG takes here too. `ordinality` is present (and
-  // true) only for `WITH ORDINALITY`, as on a `rowsFrom` item.
+  // keyword form (`xmlElement`, …), which PG takes here too. `ordinality` is
+  // present (and true) only for `WITH ORDINALITY`, as on a `rowsFrom` item.
   // `columnDefinitions` is present only for a column definition list
   // (`f() AS x (a int)`, `f() AS (a int)`), which takes the place of `columns`.
   | {
@@ -2132,7 +2132,8 @@ export type FromItem =
       ordinality?: boolean;
     }
   // `ROWS FROM (f(…), g(…))` — several table functions zipped side by side,
-  // optionally LATERAL. `calls` are the underlying `call` expression nodes.
+  // optionally LATERAL. `calls` are the underlying `call` expression nodes,
+  // or XML keyword-form nodes, as on a `function` item.
   // `callColumnDefinitions` is present only when some call carries its own
   // `AS (col type, …)` list; it runs parallel to `calls`, with null for a call
   // without one. `columnDefinitions` is a list after the whole item, as on a
@@ -3143,7 +3144,7 @@ const XML_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Positio
   xmlexists: parseXmlExists,
   xmlattributes: misplacedXmlCall("XMLATTRIBUTES", "as the second argument of XMLELEMENT"),
   xmlnamespaces: misplacedXmlCall("XMLNAMESPACES", "as the first argument of XMLTABLE"),
-  xmltable: misplacedXmlCall("XMLTABLE", "as a FROM item"),
+  xmltable: misplacedXmlCall("XMLTABLE", "as a FROM item of its own"),
 };
 
 // One XMLNAMESPACES entry: `uri AS prefix` or `DEFAULT uri`, each a b_expr.
@@ -5756,9 +5757,9 @@ function partitionStrategy(ctx: ParseContext<SqlTokenType>): PartitionSpec["stra
 
 // The expression forms PG's `part_elem` takes unparenthesised: a column (its
 // ColId, so one part) or a function call, the special-syntax ones (EXTRACT,
-// CURRENT_DATE, the XML functions, …) included, as PG's func_expr_windowless includes them. CAST
-// is one of those too, but its node is a `::` cast's as well, so
-// isBareFuncExpr tells the two apart by the lead word instead.
+// CURRENT_DATE, the XML functions, …) included, as PG's func_expr_windowless
+// includes them. CAST is one of those too, but its node is a `::` cast's as
+// well, so isBareFuncExpr tells the two apart by the lead word instead.
 const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "name",
   "call",
