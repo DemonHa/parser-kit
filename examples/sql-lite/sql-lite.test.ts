@@ -9769,6 +9769,306 @@ describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
   });
 });
 
+// --- ALTER ROLE, USER, DATABASE and TABLESPACE ---
+
+describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
+  const flag = (flagName: string, value = true) => ({ kind: "flag", name: flagName, value });
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const role = (over: Record<string, unknown>) => ({ kind: "alterRole", user: false, name: "r", ...over });
+  const db = (action: unknown) => ({ kind: "alterDatabase", name: "d", action });
+  const generic = (objectType: string, objectName: string, action: unknown) => ({
+    kind: "alterObject",
+    object: { objectType, name: [objectName] },
+    action,
+  });
+
+  it("parses ALTER ROLE and ALTER USER options, as pg_dumpall writes them", () => {
+    expect(
+      firstStmt(
+        "ALTER ROLE app_owner WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS " +
+          "CONNECTION LIMIT -1 ENCRYPTED PASSWORD 'SCRAM-SHA-256$4096:x' VALID UNTIL 'infinity';",
+      ),
+    ).toEqual(
+      role({
+        name: "app_owner",
+        action: {
+          kind: "options",
+          options: [
+            flag("superuser", false),
+            flag("inherit"),
+            flag("createrole", false),
+            flag("createdb", false),
+            flag("login"),
+            flag("replication", false),
+            flag("bypassrls", false),
+            { kind: "connectionLimit", limit: -1 },
+            { kind: "password", encrypted: true, password: "SCRAM-SHA-256$4096:x" },
+            { kind: "validUntil", timestamp: "infinity" },
+          ],
+        },
+      }),
+    );
+    expect(firstStmt("ALTER USER CURRENT_USER PASSWORD NULL;")).toEqual(
+      role({
+        user: true,
+        name: "current_user",
+        action: { kind: "options", options: [{ kind: "password", encrypted: false, password: null }] },
+      }),
+    );
+    expect(firstStmt("ALTER ROLE SESSION_USER WITH SUPERUSER;")).toEqual(
+      role({ name: "session_user", action: { kind: "options", options: [flag("superuser")] } }),
+    );
+    // PG lets the option run be empty, with or without WITH.
+    expect(firstStmt("ALTER ROLE r;")).toEqual(role({ action: { kind: "options", options: [] } }));
+    expect(firstStmt('ALTER USER "Bob" WITH;')).toEqual(
+      role({ user: true, name: "Bob", action: { kind: "options", options: [] } }),
+    );
+  });
+
+  it("parses ALTER ROLE and ALTER USER RENAME TO", () => {
+    expect(firstStmt("ALTER ROLE r RENAME TO s;")).toEqual(role({ action: { kind: "rename", to: "s" } }));
+    expect(firstStmt('ALTER USER "current_user" RENAME TO u;')).toEqual(
+      role({ user: true, name: "current_user", action: { kind: "rename", to: "u" } }),
+    );
+  });
+
+  it("parses ALTER ROLE [IN DATABASE] SET and RESET, for a role or ALL", () => {
+    expect(firstStmt("ALTER ROLE r SET search_path TO 'app', 'public';")).toEqual(
+      role({ action: { kind: "set", name: "search_path", values: [str("app"), str("public")] } }),
+    );
+    expect(firstStmt("ALTER ROLE r SET statement_timeout = '5s';")).toEqual(
+      role({ action: { kind: "set", name: "statement_timeout", values: [str("5s")] } }),
+    );
+    expect(firstStmt("ALTER USER CURRENT_ROLE IN DATABASE appdb SET work_mem FROM CURRENT;")).toEqual(
+      role({
+        user: true,
+        name: "current_role",
+        database: "appdb",
+        action: { kind: "set", name: "work_mem", values: "fromCurrent" },
+      }),
+    );
+    expect(firstStmt("ALTER ROLE ALL SET jit = off;")).toEqual(
+      role({ name: null, action: { kind: "set", name: "jit", values: [name("off")] } }),
+    );
+    expect(firstStmt("ALTER ROLE r SET TIME ZONE 'UTC';")).toEqual(
+      role({ action: { kind: "set", name: "time zone", values: [str("UTC")] } }),
+    );
+    expect(firstStmt("ALTER ROLE r SET x.y TO DEFAULT;")).toEqual(
+      role({ action: { kind: "set", name: "x.y", values: "default" } }),
+    );
+    expect(firstStmt("ALTER ROLE r IN DATABASE appdb RESET ALL;")).toEqual(
+      role({ database: "appdb", action: { kind: "reset", name: "all" } }),
+    );
+    expect(firstStmt("ALTER USER ALL IN DATABASE appdb RESET search_path;")).toEqual(
+      role({ user: true, name: null, database: "appdb", action: { kind: "reset", name: "search_path" } }),
+    );
+    expect(firstStmt("ALTER ROLE r RESET TIME ZONE;")).toEqual(role({ action: { kind: "reset", name: "time zone" } }));
+    expect(firstStmt("ALTER ROLE r SET x = 1;")).not.toHaveProperty("database");
+  });
+
+  it("parses every ALTER DATABASE form", () => {
+    expect(firstStmt("ALTER DATABASE d WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 5 IS_TEMPLATE true;")).toEqual(
+      db({
+        kind: "options",
+        options: [
+          { name: "allow_connections", value: { kind: "bool", value: false } },
+          { name: "connection limit", value: num(5) },
+          { name: "is_template", value: { kind: "bool", value: true } },
+        ],
+      }),
+    );
+    expect(firstStmt("ALTER DATABASE d CONNECTION LIMIT = -1;")).toEqual(
+      db({ kind: "options", options: [{ name: "connection limit", value: num(-1) }] }),
+    );
+    expect(firstStmt("ALTER DATABASE d;")).toEqual(db({ kind: "options", options: [] }));
+    expect(firstStmt("ALTER DATABASE d SET TABLESPACE fast;")).toEqual(
+      db({ kind: "setTablespace", tablespace: "fast" }),
+    );
+    expect(firstStmt("ALTER DATABASE d REFRESH COLLATION VERSION;")).toEqual(db({ kind: "refreshCollationVersion" }));
+    expect(firstStmt("ALTER DATABASE d SET search_path TO app, public;")).toEqual(
+      db({ kind: "set", name: "search_path", values: [name("app"), name("public")] }),
+    );
+    expect(firstStmt("ALTER DATABASE d SET search_path FROM CURRENT;")).toEqual(
+      db({ kind: "set", name: "search_path", values: "fromCurrent" }),
+    );
+    expect(firstStmt("ALTER DATABASE d RESET ALL;")).toEqual(db({ kind: "reset", name: "all" }));
+    expect(firstStmt("ALTER DATABASE d RESET search_path;")).toEqual(db({ kind: "reset", name: "search_path" }));
+    // A parameter called `tablespace` is set as any other is.
+    expect(firstStmt("ALTER DATABASE d SET tablespace TO x;")).toEqual(
+      db({ kind: "set", name: "tablespace", values: [name("x")] }),
+    );
+    // OWNER is a database option too; it leads OWNER TO only before TO.
+    expect(firstStmt("ALTER DATABASE d OWNER = bob;")).toEqual(
+      db({ kind: "options", options: [{ name: "owner", value: name("bob") }] }),
+    );
+  });
+
+  it("keeps RENAME TO and OWNER TO on DATABASE and TABLESPACE the generic alterObject node", () => {
+    expect(firstStmt("ALTER DATABASE d RENAME TO e;")).toEqual(generic("database", "d", { kind: "rename", to: "e" }));
+    expect(firstStmt("ALTER DATABASE appdb OWNER TO CURRENT_ROLE;")).toEqual(
+      generic("database", "appdb", { kind: "ownerTo", owner: "current_role" }),
+    );
+    expect(firstStmt("ALTER TABLESPACE t RENAME TO u;")).toEqual(
+      generic("tablespace", "t", { kind: "rename", to: "u" }),
+    );
+    expect(firstStmt("ALTER TABLESPACE t OWNER TO app_owner;")).toEqual(
+      generic("tablespace", "t", { kind: "ownerTo", owner: "app_owner" }),
+    );
+  });
+
+  it("parses ALTER TABLESPACE SET and RESET, and DROP TABLESPACE", () => {
+    expect(firstStmt("ALTER TABLESPACE t SET (random_page_cost = 1.1, seq_page_cost = 2);")).toEqual({
+      kind: "alterTablespace",
+      name: "t",
+      action: {
+        kind: "setOptions",
+        options: [
+          { name: "random_page_cost", value: num(1.1) },
+          { name: "seq_page_cost", value: num(2) },
+        ],
+      },
+    });
+    expect(firstStmt("ALTER TABLESPACE t RESET (random_page_cost);")).toEqual({
+      kind: "alterTablespace",
+      name: "t",
+      action: { kind: "resetOptions", options: [{ name: "random_page_cost", value: null }] },
+    });
+    const drop = (ifExists: boolean) => ({
+      kind: "drop",
+      objectType: "tablespace",
+      concurrently: false,
+      ifExists,
+      names: [["t"]],
+      behavior: null,
+    });
+    expect(firstStmt("DROP TABLESPACE t;")).toEqual(drop(false));
+    expect(firstStmt("DROP TABLESPACE IF EXISTS t;")).toEqual(drop(true));
+  });
+
+  it("still parses COMMENT ON and SECURITY LABEL ON DATABASE and TABLESPACE", () => {
+    expect(firstStmt("COMMENT ON DATABASE d IS 'x';")).toEqual({
+      kind: "comment",
+      objectType: "database",
+      name: ["d"],
+      comment: "x",
+    });
+    expect(firstStmt("COMMENT ON TABLESPACE t IS NULL;")).toEqual({
+      kind: "comment",
+      objectType: "tablespace",
+      name: ["t"],
+      comment: null,
+    });
+    expect(firstStmt("SECURITY LABEL ON TABLESPACE t IS 'l';")).toEqual({
+      kind: "securityLabel",
+      objectType: "tablespace",
+      name: ["t"],
+      label: "l",
+    });
+  });
+
+  it("spans each statement from ALTER or DROP", () => {
+    for (const src of [
+      "ALTER ROLE r WITH LOGIN;",
+      "ALTER USER ALL IN DATABASE d RESET ALL;",
+      "ALTER DATABASE d REFRESH COLLATION VERSION;",
+      "ALTER DATABASE d OWNER TO r;",
+      "ALTER TABLESPACE t RESET (x);",
+      "DROP TABLESPACE t;",
+    ]) {
+      const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+      expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: src.length - 1 } });
+    }
+  });
+
+  it("keeps the new words unreserved as names and aliases", () => {
+    const words = [
+      "role",
+      "database",
+      "tablespace",
+      "rename",
+      "owner",
+      "reset",
+      "refresh",
+      "collation",
+      "version",
+      "connection",
+      "allow_connections",
+      "is_template",
+      "template",
+      "password",
+      "encrypted",
+      "valid",
+      "until",
+      "admin",
+    ];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM role;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    const cols = words.map((word) => `${word} text`).join(", ");
+    expect(firstStmt(`CREATE TABLE tablespace (${cols});`).items.map((i: any) => i.name)).toEqual(words);
+    expect(firstStmt("SELECT 1 AS refresh, 2 version FROM database AS collation;")).toMatchObject({
+      columns: [{ alias: "refresh" }, { alias: "version" }],
+      from: [{ name: ["database"], alias: "collation" }],
+    });
+    // …and as the names these statements alter.
+    expect(firstStmt("ALTER ROLE rename RENAME TO password;")).toEqual(
+      role({ name: "rename", action: { kind: "rename", to: "password" } }),
+    );
+    expect(firstStmt("ALTER ROLE role IN DATABASE database SET reset = 1;")).toEqual(
+      role({ name: "role", database: "database", action: { kind: "set", name: "reset", values: [num(1)] } }),
+    );
+    expect(firstStmt("ALTER DATABASE refresh SET TABLESPACE version;")).toEqual({
+      kind: "alterDatabase",
+      name: "refresh",
+      action: { kind: "setTablespace", tablespace: "version" },
+    });
+    expect(firstStmt("ALTER TABLESPACE reset SET (reset = 1);")).toMatchObject({
+      kind: "alterTablespace",
+      name: "reset",
+    });
+    expect(firstStmt("DROP TABLESPACE tablespace;")).toMatchObject({ names: [["tablespace"]] });
+  });
+
+  it("rejects malformed ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
+    expect(bad("ALTER ROLE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("ALTER USER user;")).toThrow(/Expected a name but found "user"/);
+    expect(bad("ALTER ROLE r frobnicate;")).toThrow(/Expected ";" but found "frobnicate"/);
+    // ALTER takes none of CREATE ROLE's membership options.
+    expect(bad("ALTER ROLE r IN ROLE a;")).toThrow(/Expected "database" but found "role"/);
+    expect(bad("ALTER ROLE r WITH ROLE a;")).toThrow(/Expected ";" but found "role"/);
+    expect(bad("ALTER ROLE r ADMIN a;")).toThrow(/Expected ";" but found "admin"/);
+    expect(bad("ALTER ROLE r ENCRYPTED PASSWORD NULL;")).toThrow(/found "null"/);
+    expect(bad("ALTER ROLE r CONNECTION LIMIT many;")).toThrow(/Expected an integer but found "many"/);
+    // ALL and IN DATABASE take only SET and RESET.
+    expect(bad("ALTER ROLE ALL WITH LOGIN;")).toThrow(/Expected "in", "set" or "reset" but found "with"/);
+    expect(bad("ALTER ROLE ALL RENAME TO x;")).toThrow(/Expected "in", "set" or "reset" but found "rename"/);
+    expect(bad("ALTER ROLE r IN DATABASE d LOGIN;")).toThrow(/Expected "set" or "reset" but found "login"/);
+    expect(bad("ALTER ROLE r IN d SET x = 1;")).toThrow(/Expected "database" but found "d"/);
+    // RENAME names a role, never a pseudo-role.
+    expect(bad("ALTER ROLE CURRENT_USER RENAME TO x;")).toThrow(
+      /CURRENT_USER cannot be used as a role name here \(1:11\)/,
+    );
+    expect(bad("ALTER ROLE r RENAME TO session_user;")).toThrow(/Expected a name but found "session_user"/);
+    expect(bad("ALTER ROLE r RENAME x;")).toThrow(/Expected "to" but found "x"/);
+    // SET takes a parameter value, never an expression.
+    expect(bad("ALTER ROLE r SET x = 1 + 2;")).toThrow(/Expected ";" but found "\+"/);
+    expect(bad("ALTER ROLE r SET x;")).toThrow(/Expected "to" or "=" but found ";"/);
+    expect(bad("ALTER ROLE r RESET;")).toThrow(/found ";"/);
+    expect(bad("ALTER DATABASE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("ALTER DATABASE d REFRESH COLLATION;")).toThrow(/Expected "version" but found ";"/);
+    expect(bad("ALTER DATABASE d SET TABLESPACE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("ALTER DATABASE d OWNER TO;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("ALTER DATABASE d WITH is_template;")).toThrow(/Expected an option value but found ";"/);
+    expect(bad("ALTER DATABASE a.b RENAME TO c;")).toThrow(/Expected ";" but found "\."/);
+    expect(bad("ALTER TABLESPACE t;")).toThrow(/Expected "rename", "owner", "set" or "reset" but found ";"/);
+    expect(bad("ALTER TABLESPACE t SET random_page_cost = 1;")).toThrow(/Expected "\(" but found "random_page_cost"/);
+    expect(bad("ALTER TABLESPACE t RESET (x = 1);")).toThrow(/RESET must not include values for parameters/);
+    expect(bad("ALTER TABLESPACE t OWNER r;")).toThrow(/Expected "to" but found "r"/);
+    expect(bad("DROP TABLESPACE a, b;")).toThrow(/Expected ";" but found ","/);
+    expect(bad("DROP TABLESPACE t CASCADE;")).toThrow(/Expected ";" but found "cascade"/);
+  });
+});
+
 // --- LOCK and CALL ---
 
 describe("SQL-lite LOCK and CALL", () => {
