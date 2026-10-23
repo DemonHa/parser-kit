@@ -2303,9 +2303,9 @@ describe("SQL-lite FROM-item column-alias lists and ONLY", () => {
     // TABLESAMPLE, never after it.
     expect(() => sqlLite.parse("SELECT * FROM (SELECT 1) (a);")).toThrow(/but found "\("/);
     expect(() => sqlLite.parse("SELECT * FROM t TABLESAMPLE system (1) x (a);")).toThrow(/but found "x"/);
-    // A function's typed column-definition list is out of scope: it is not a
-    // name list, so the type word is where it stops.
-    expect(() => sqlLite.parse("SELECT * FROM f() AS g (n int);")).toThrow(/Expected "\)" but found "int"/);
+    // Only a function takes a typed column-definition list; on a table the
+    // list is a name list, so the type word is where it stops.
+    expect(() => sqlLite.parse("SELECT * FROM t AS g (n int);")).toThrow(/Expected "\)" but found "int"/);
     // ONLY takes a table name — not a subquery, a function or nothing at all —
     // and cannot follow LATERAL.
     expect(() => sqlLite.parse("SELECT * FROM ONLY;")).toThrow(/Expected a name but found ";"/);
@@ -5213,6 +5213,228 @@ describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
     expect(() => sqlLite.parse("SELECT * FROM ROWS FROM ();")).toThrow(/Expected a name but found "\)"/);
     expect(() => sqlLite.parse("SELECT * FROM ROWS FROM (f);")).toThrow(/Expected "\(" but found "\)"/);
     expect(() => sqlLite.parse("SELECT * FROM t WITH ORDINALITY;")).toThrow(/Expected ";" but found "with"/);
+  });
+});
+
+// --- NATURAL joins, join qualifiers and FROM-item extras ---
+
+describe("SQL-lite NATURAL joins, join qualifiers and FROM-item extras", () => {
+  const from = (src: string) => (firstStmt(src) as any).from;
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+  const bool = (value: boolean) => ({ kind: "bool", value });
+  const join = (left: unknown, right: unknown, extra: Record<string, unknown> = {}) => ({
+    kind: "join",
+    joinType: "inner",
+    left,
+    right,
+    on: bool(true),
+    using: null,
+    ...extra,
+  });
+  const [a, b, c, d] = ["a", "b", "c", "d"].map((t) => tableFrom([t]));
+  const def = (colName: string, type: string, over: Record<string, unknown> = {}) => ({
+    name: colName,
+    type: ct(type),
+    ...over,
+  });
+
+  it("records NATURAL on the join node", () => {
+    expect(from("SELECT * FROM a NATURAL JOIN b;")).toEqual([join(a, b, { natural: true, on: null })]);
+    expect(from("SELECT * FROM a NATURAL LEFT OUTER JOIN b;")).toEqual([
+      join(a, b, { joinType: "left", natural: true, on: null }),
+    ]);
+    expect(from("SELECT * FROM a NATURAL FULL JOIN b NATURAL INNER JOIN c;")).toEqual([
+      join(join(a, b, { joinType: "full", natural: true, on: null }), c, { natural: true, on: null }),
+    ]);
+    // A qualified join carries no `natural` key.
+    expect(from("SELECT * FROM a JOIN b ON true;")).toEqual([join(a, b)]);
+  });
+
+  it("nests a join met before the qualifier on the right, as PG does", () => {
+    // The inner join takes the first qualifier, the outer one the next.
+    expect(from("SELECT * FROM a JOIN b JOIN c ON true ON false;")).toEqual([join(a, join(b, c), { on: bool(false) })]);
+    expect(from("SELECT * FROM a LEFT JOIN b JOIN c USING (x) JOIN d ON true ON false;")).toEqual([
+      join(a, join(join(b, c, { on: null, using: ["x"] }), d), { joinType: "left", on: bool(false) }),
+    ]);
+    // A CROSS or NATURAL join needs no qualifier, so it completes on the
+    // right of a pending join, and folds to the left otherwise.
+    expect(from("SELECT * FROM a JOIN b CROSS JOIN c ON true;")).toEqual([
+      join(a, join(b, c, { joinType: "cross", on: null })),
+    ]);
+    expect(from("SELECT * FROM a JOIN b NATURAL JOIN c USING (x);")).toEqual([
+      join(a, join(b, c, { natural: true, on: null }), { on: null, using: ["x"] }),
+    ]);
+    expect(from("SELECT * FROM a CROSS JOIN b JOIN c ON true;")).toEqual([
+      join(join(a, b, { joinType: "cross", on: null }), c),
+    ]);
+    expect(from("SELECT * FROM a JOIN b ON true JOIN c ON false;")).toEqual([join(join(a, b), c, { on: bool(false) })]);
+  });
+
+  it("parses USING (…) AS alias", () => {
+    expect(from("SELECT * FROM a JOIN b USING (id) AS j;")).toEqual([
+      join(a, b, { on: null, using: ["id"], usingAlias: "j" }),
+    ]);
+    expect(from('SELECT * FROM a LEFT JOIN b USING (x, y) AS "J" JOIN c ON true, d;')).toEqual([
+      join(join(a, b, { joinType: "left", on: null, using: ["x", "y"], usingAlias: "J" }), c),
+      d,
+    ]);
+    // The alias also names the USING of a join nested on the right.
+    expect(from("SELECT * FROM a JOIN b JOIN c USING (x) AS j ON true;")).toEqual([
+      join(a, join(b, c, { on: null, using: ["x"], usingAlias: "j" })),
+    ]);
+  });
+
+  it("parses the inheritance star after a table name", () => {
+    // `t *` means what a bare `t` means, so it records nothing.
+    expect(from("SELECT * FROM parent_table * WHERE x > 1;")).toEqual([tableFrom(["parent_table"])]);
+    expect(from("SELECT * FROM s.t * AS x (a) TABLESAMPLE system (1);")).toEqual([
+      {
+        ...tableFrom(["s", "t"], "x"),
+        columns: ["a"],
+        tablesample: { method: "system", args: [num(1)], repeatable: null },
+      },
+    ]);
+    expect(from("SELECT * FROM a * JOIN b * ON true;")).toEqual([join(a, b)]);
+  });
+
+  it("parses column definition lists on table functions", () => {
+    const rec = call("json_to_record", [str("{}")]);
+    expect(from("SELECT * FROM json_to_record('{}') AS x(a int, b text);")).toEqual([
+      { kind: "function", call: rec, alias: "x", columnDefinitions: [def("a", "int"), def("b", "text")] },
+    ]);
+    // The alias is optional after AS, and so is the AS before an alias.
+    expect(from("SELECT * FROM json_to_record('{}') AS (a int);")).toEqual([
+      { kind: "function", call: rec, alias: null, columnDefinitions: [def("a", "int")] },
+    ]);
+    expect(from('SELECT * FROM f() x (a numeric(10, 2)[], "B" double precision COLLATE "C", c s.t);')).toEqual([
+      {
+        kind: "function",
+        call: call("f"),
+        alias: "x",
+        columnDefinitions: [
+          def("a", "numeric", { type: ct("numeric", { args: [10, 2], array: true }) }),
+          def("B", "double precision", { collate: ["C"] }),
+          def("c", "s.t"),
+        ],
+      },
+    ]);
+    expect(from("SELECT * FROM t, LATERAL f(t.a) WITH ORDINALITY AS (a int, n bigint);")[1]).toEqual({
+      kind: "function",
+      call: call("f", [name("t", "a")]),
+      alias: null,
+      columnDefinitions: [def("a", "int"), def("n", "bigint")],
+      lateral: true,
+      ordinality: true,
+    });
+    // A list of bare names is still an alias column list.
+    expect(from("SELECT * FROM f() AS x (a, b);")).toEqual([
+      { kind: "function", call: call("f"), alias: "x", columns: ["a", "b"] },
+    ]);
+  });
+
+  it("parses column definition lists in ROWS FROM", () => {
+    expect(from("SELECT * FROM ROWS FROM (f() AS (a int), g(1)) AS r (x, y);")).toEqual([
+      {
+        kind: "rowsFrom",
+        calls: [call("f"), call("g", [num(1)])],
+        callColumnDefinitions: [[def("a", "int")], null],
+        alias: "r",
+        columns: ["x", "y"],
+      },
+    ]);
+    expect(from("SELECT * FROM ROWS FROM (f(), g() AS (a int));")[0].callColumnDefinitions).toEqual([
+      null,
+      [def("a", "int")],
+    ]);
+    // A list after the whole item is the function item's func_alias_clause.
+    expect(from("SELECT * FROM ROWS FROM (f()) AS r (a text);")).toEqual([
+      { kind: "rowsFrom", calls: [call("f")], alias: "r", columnDefinitions: [def("a", "text")] },
+    ]);
+  });
+
+  it("keeps unreserved words usable as column definition and alias column names", () => {
+    expect(from("SELECT * FROM f() AS x (ordinality int, rows text);")[0].columnDefinitions).toEqual([
+      def("ordinality", "int"),
+      def("rows", "text"),
+    ]);
+    expect(from("SELECT * FROM f() AS rows (ordinality, rows);")).toEqual([
+      { kind: "function", call: call("f"), alias: "rows", columns: ["ordinality", "rows"] },
+    ]);
+  });
+
+  it("applies the join rules wherever a FROM item is read", () => {
+    const merge = firstStmt(
+      "MERGE INTO t USING s JOIN u JOIN v ON true ON false ON t.id = s.id WHEN MATCHED THEN DELETE;",
+    );
+    expect(merge.source).toEqual(join(tableFrom(["s"]), join(tableFrom(["u"]), tableFrom(["v"])), { on: bool(false) }));
+    // MERGE's own ON is not a join qualifier.
+    expect(() => sqlLite.parse("MERGE INTO t USING s JOIN u ON true WHEN MATCHED THEN DELETE;")).toThrow(
+      /Expected "on" but found "when"/,
+    );
+    expect(() => sqlLite.parse("SELECT * FROM (a JOIN b);")).toThrow(/Expected "on" or "using" but found "\)"/);
+    expect(() => sqlLite.parse("UPDATE t SET x = 1 FROM a JOIN b WHERE true;")).toThrow(
+      /Expected "on" or "using" but found "where"/,
+    );
+    expect(() => sqlLite.parse("DELETE FROM t USING a JOIN b;")).toThrow(/Expected "on" or "using" but found ";"/);
+  });
+
+  it("rejects a join without a qualifier and NATURAL CROSS JOIN", () => {
+    expect(() => sqlLite.parse("SELECT * FROM a JOIN b;")).toThrow(/Expected "on" or "using" but found ";"/);
+    expect(() => sqlLite.parse("SELECT * FROM a LEFT JOIN b WHERE true;")).toThrow(
+      /Expected "on" or "using" but found "where"/,
+    );
+    expect(() => sqlLite.parse("SELECT * FROM a, b FULL JOIN c, d;")).toThrow(/Expected "on" or "using" but found ","/);
+    // The only ON goes to the inner join, leaving the outer one without one.
+    expect(() => sqlLite.parse("SELECT * FROM a JOIN b JOIN c ON true;")).toThrow(
+      /Expected "on" or "using" but found ";"/,
+    );
+    expect(() => sqlLite.parse("SELECT * FROM a NATURAL CROSS JOIN b;")).toThrow(
+      /Expected "join", "inner", "left", "right" or "full" but found "cross"/,
+    );
+    // CROSS and NATURAL joins take no qualifier.
+    expect(() => sqlLite.parse("SELECT * FROM a CROSS JOIN b ON true;")).toThrow(/Expected ";" but found "on"/);
+    expect(() => sqlLite.parse("SELECT * FROM a NATURAL JOIN b USING (x);")).toThrow(/Expected ";" but found "using"/);
+    expect(() => sqlLite.parse("SELECT * FROM a JOIN b ON true ON false;")).toThrow(/Expected ";" but found "on"/);
+  });
+
+  it("rejects malformed USING aliases, stars and column definition lists", () => {
+    // PG's join_using_alias requires the AS.
+    expect(() => sqlLite.parse("SELECT * FROM a JOIN b USING (id) j;")).toThrow(/Expected ";" but found "j"/);
+    expect(() => sqlLite.parse("SELECT * FROM a JOIN b USING (id) AS;")).toThrow(/Expected an alias but found ";"/);
+    // The star follows a plain name only: not ONLY, and not twice.
+    expect(() => sqlLite.parse("SELECT * FROM ONLY t *;")).toThrow(/Expected ";" but found "\*"/);
+    expect(() => sqlLite.parse("SELECT * FROM t * *;")).toThrow(/Expected ";" but found "\*"/);
+    // A definition list names at least one column, each with a type, and
+    // mixes with no bare names.
+    expect(() => sqlLite.parse("SELECT * FROM f() AS ();")).toThrow(/Expected a name but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM f() AS (a);")).toThrow(/Expected a name but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM f() AS x (a int, b);")).toThrow(/Expected a name but found "\)"/);
+    expect(() => sqlLite.parse("SELECT * FROM f() AS x (a, b int);")).toThrow(/Expected "\)" but found "int"/);
+    // Inside ROWS FROM, a call takes only the alias-less `AS (…)` spelling.
+    expect(() => sqlLite.parse("SELECT * FROM ROWS FROM (f() AS x (a int));")).toThrow(/Expected "\(" but found "x"/);
+    // Subqueries take no definition list, and functions no TABLESAMPLE.
+    expect(() => sqlLite.parse("SELECT * FROM (SELECT 1) AS x (a int);")).toThrow(/Expected "\)" but found "int"/);
+    expect(() => sqlLite.parse("SELECT * FROM f() x (a int) TABLESAMPLE system (1);")).toThrow(
+      /Expected ";" but found "tablesample"/,
+    );
+  });
+
+  it("reports a lex error met by the column definition lookahead", () => {
+    expect(() => sqlLite.parse("SELECT * FROM f() x (a é);")).toThrow(/Unexpected character "é"/);
+    const { ast, errors } = sqlLite.diagnose("SELECT * FROM f() x (a é);\nSELECT 1;");
+    expect(errors.map((e) => e.message)).toEqual(['Unexpected character "é" (1:23)']);
+    expect(ast).toHaveLength(2);
+    // The other two lookahead points report it too: past a bare AS, where the
+    // alias is then missing, and on the first name inside the parenthesis.
+    expect(() => sqlLite.parse("SELECT * FROM f() AS é;")).toThrow(/Unexpected character "é"/);
+    expect(sqlLite.diagnose("SELECT * FROM f() AS é;").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "é" (1:21)',
+      'Expected an alias but found ";" (1:22)',
+    ]);
+    expect(() => sqlLite.parse("SELECT * FROM f() x (é int);")).toThrow(/Unexpected character "é"/);
+    expect(sqlLite.diagnose("SELECT * FROM f() x (é int);").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "é" (1:21)',
+    ]);
   });
 });
 
