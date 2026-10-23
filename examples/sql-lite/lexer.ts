@@ -20,7 +20,7 @@ export type SqlTokenType =
   | "param";
 
 // --- Quoted literals ---
-// PG decides every quoted form in its scanner (scan.l), and so does this file:
+// PG reads every quoted form in its scanner (scan.l), and so does this file:
 // sql-lite owns its `'…'`, `E'…'`, `"…"`, `B'…'`, `X'…'` and `U&` readers rather
 // than borrowing core's `readers.string`, which is lenient where PG is not —
 // it lets an unterminated literal run to the end of input, and knows only the
@@ -151,10 +151,9 @@ const readIdentifierBody = (stream: InputStream, tokenStart: Position) => {
   return body;
 };
 
-// `B'1011'` / `X'ff'` — PG's bit-string constants. A digit outside the base is
-// rejected here because PG rejects it in its scanner too: no later stage can
-// make anything of `B'12'`, and the alternative is a bit string that silently
-// isn't one.
+// `B'1011'` / `X'ff'` — PG's bit-string constants. PG checks the digits later,
+// in `bit_in`; checking here rejects `B'12'` just the same and points at the
+// literal, and the alternative is a bit string that silently isn't one.
 const bitStringReader = (opts: {
   type: SqlTokenType;
   startsWith: string;
@@ -244,7 +243,8 @@ const decodeEscapes = (stream: InputStream, segments: readonly string[], start: 
     try {
       value += utf8.decode(new Uint8Array(bytes));
     } catch {
-      fail('Invalid byte sequence for encoding "UTF8"');
+      const hex = bytes.map((byte) => `0x${byte.toString(16).padStart(2, "0")}`).join(" ");
+      fail(`Invalid byte sequence for encoding "UTF8": ${hex}`);
     }
     bytes = [];
   };
@@ -424,10 +424,10 @@ const decodeUnicodeEscapes = (stream: InputStream, raw: string, escapeChar: stri
   return value;
 };
 
-// `U&'\0041' [UESCAPE 'c']` and `U&"d\0061t" [UESCAPE 'c']`. PG decodes these in
-// its scanner and so does this reader: the string form yields an ordinary
-// `string` token and the identifier form an ordinary `qident`, so either is
-// usable everywhere its plain spelling is — enum labels, `COMMENT ON … IS`,
+// `U&'\0041' [UESCAPE 'c']` and `U&"d\0061t" [UESCAPE 'c']`. PG decodes these just
+// after scanning (its parser reads the tail); this reader does it in the
+// lexer. The string form yields an ordinary `string` token and the identifier
+// form an ordinary `qident`, so either is usable everywhere its plain spelling is — enum labels, `COMMENT ON … IS`,
 // DEFAULTs, any name — with no grammar surface at all. The UESCAPE tail belongs
 // to the reader because it chooses the escape character, so nothing can be
 // decoded until we know whether it is there. No `display`: labels are

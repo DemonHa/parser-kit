@@ -3443,7 +3443,7 @@ describe("SQL-lite quoted literals", () => {
     // A byte run that isn't UTF-8 is rejected, as PG's encoding check does:
     // a lone lead byte, a lone continuation byte, a run cut short by a
     // character, and `\777` (whose low byte is 0xFF).
-    expect(fails("SELECT E'\\xC3';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
+    expect(fails("SELECT E'\\xC3';")).toThrow(/Invalid byte sequence for encoding "UTF8": 0xc3 \(/);
     expect(fails("SELECT E'\\251';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
     expect(fails("SELECT E'\\xC3A';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
     expect(fails("SELECT E'\\777';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
@@ -3480,6 +3480,11 @@ describe("SQL-lite quoted literals", () => {
     expect(colExpr("E'a\\t'\n'\\x41'")).toEqual(str("a\tA"));
     expect(colExpr("B'10'\n'01'")).toEqual({ kind: "bitString", value: "1001", hex: false });
     expect(colExpr("U&'\\0041'\n'\\0042'")).toEqual(str("AB"));
+    // A byte run may span the constants, and so may a U& escape (PG joins
+    // those before decoding); form feed and vertical tab count as whitespace.
+    expect(colExpr("E'\\303'\n'\\251'")).toEqual(str("é"));
+    expect(colExpr("U&'\\00'\n'41'")).toEqual(str("A"));
+    expect(colExpr("'a' \f\n\v'b'")).toEqual(str("ab"));
     // The span runs from the first body to the end of the last.
     const token = sqlLexer.tokenize(createInputStream("'ab'\n'cd'")).next()!;
     expect(token.position).toEqual({ start: { row: 1, col: 1 }, end: { row: 2, col: 3 } });
@@ -3544,6 +3549,14 @@ describe("SQL-lite quoted literals", () => {
     ]);
     expect((firstStmt("SELECT e FROM e;") as any).columns).toEqual([col(name("e"))]);
     expect((firstStmt("SELECT 1 e FROM t e;") as any).columns).toEqual([col(num(1), "e")]);
+  });
+
+  it("diagnose() resumes after a literal error, keeping later statements", () => {
+    for (const bad of ["SELECT E'\\xC3';", 'SELECT "" FROM t;', "SELECT U&'x' UESCAPE '!!';", "SELECT B'12';"]) {
+      const { ast, errors } = sqlLite.diagnose(`${bad}\nSELECT 1;`);
+      expect(errors).toHaveLength(1);
+      expect(stripSpans(ast).at(-1)).toMatchObject({ kind: "select", columns: [col(num(1))] });
+    }
   });
 
   it("surfaces the lexer's own error from inside a backtracking position", () => {
