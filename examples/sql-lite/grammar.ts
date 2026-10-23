@@ -276,31 +276,56 @@ export type NamedWindow = { name: string; spec: WindowSpec };
 // alone still means deferrable, as INITIALLY DEFERRED implies it.
 export type ConstraintAttrs = { deferrable?: boolean; initially?: "deferred" | "immediate" };
 
+// The table-level attributes PG reads alongside DEFERRABLE / INITIALLY: `NOT
+// VALID` (CHECK and foreign keys) and `NO INHERIT` (CHECK only). Each is
+// present only when written.
+export type TableConstraintAttrs = ConstraintAttrs & { notValid?: true; noInherit?: true };
+
+// `NULLS [NOT] DISTINCT` on a UNIQUE constraint or index, as written; omitted
+// when absent (PG's default, NULLS DISTINCT).
+export type NullsTreatment = "distinct" | "not distinct";
+
+// The index parameters of a PRIMARY KEY, UNIQUE or EXCLUDE constraint: `INCLUDE
+// (cols)` (table level only), `WITH (storage parameters)` and `USING INDEX
+// TABLESPACE name`. Each is omitted when absent.
+export type IndexParams = {
+  include?: string[];
+  options?: Omit<RelationOption, "namespace">[];
+  indexTablespace?: string;
+};
+
 export type RefAction = "no action" | "restrict" | "cascade" | "set null" | "set default";
 
 // What follows `REFERENCES t [(cols)]`. `onDelete` predates the rest, so it is
-// always present (null when absent); `match` and `onUpdate` are omitted when
-// absent.
+// always present (null when absent); `match`, `onUpdate` and `onDeleteColumns`
+// (the column list of `ON DELETE SET NULL | SET DEFAULT (cols)`) are omitted
+// when absent.
 export type ForeignKeyTail = {
   match?: "full" | "partial" | "simple";
   onDelete: RefAction | null;
+  onDeleteColumns?: string[];
   onUpdate?: RefAction;
 };
 
-export type ColConstraint =
+// A column constraint that `CONSTRAINT name` may lead; `name` is present only
+// when it does.
+export type ColConstraintElem = (
   | { kind: "notNull"; span: Span }
   | { kind: "nullable"; span: Span }
   | { kind: "default"; expr: Expr; span: Span }
-  | ({ kind: "primaryKey"; span: Span } & ConstraintAttrs)
-  | ({ kind: "unique"; span: Span } & ConstraintAttrs)
+  | ({ kind: "primaryKey"; span: Span } & Omit<IndexParams, "include"> & ConstraintAttrs)
+  | ({ kind: "unique"; nulls?: NullsTreatment; span: Span } & Omit<IndexParams, "include"> & ConstraintAttrs)
   | ({ kind: "references"; table: string[]; columns: string[] | null; span: Span } & ForeignKeyTail & ConstraintAttrs)
-  | { kind: "check"; expr: Expr; span: Span }
+  | { kind: "check"; expr: Expr; noInherit?: true; span: Span }
   // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(sequence options)]`;
   // `options` is present only when the parenthesised list is.
   | { kind: "identity"; generated: "always" | "by default"; options?: SequenceOption[]; span: Span }
-  // `GENERATED ALWAYS AS (expr) STORED` — a stored generated column.
-  | { kind: "generated"; expr: Expr; span: Span }
-  | { kind: "collate"; collation: string[]; span: Span };
+  // `GENERATED ALWAYS AS (expr) STORED | VIRTUAL`; `virtual` is present only
+  // for VIRTUAL (PG 18).
+  | { kind: "generated"; expr: Expr; virtual?: true; span: Span }
+) & { name?: string };
+
+export type ColConstraint = ColConstraintElem | { kind: "collate"; collation: string[]; span: Span };
 
 export type ColumnDef = {
   kind: "column";
@@ -311,9 +336,21 @@ export type ColumnDef = {
 };
 
 export type TableConstraint =
-  | ({ kind: "primaryKey"; name: string | null; columns: string[]; span: Span } & ConstraintAttrs)
-  | ({ kind: "unique"; name: string | null; columns: string[]; span: Span } & ConstraintAttrs)
-  | { kind: "check"; name: string | null; expr: Expr; span: Span }
+  | ({ kind: "primaryKey"; name: string | null; columns: string[]; span: Span } & IndexParams & ConstraintAttrs)
+  | ({ kind: "unique"; name: string | null; nulls?: NullsTreatment; columns: string[]; span: Span } & IndexParams &
+      ConstraintAttrs)
+  // A CHECK can never be deferred, so of the deferral attributes only their
+  // defaults (NOT DEFERRABLE, INITIALLY IMMEDIATE) can appear.
+  | {
+      kind: "check";
+      name: string | null;
+      expr: Expr;
+      deferrable?: false;
+      initially?: "immediate";
+      notValid?: true;
+      noInherit?: true;
+      span: Span;
+    }
   | ({
       kind: "foreignKey";
       name: string | null;
@@ -322,25 +359,26 @@ export type TableConstraint =
       refColumns: string[] | null;
       span: Span;
     } & ForeignKeyTail &
-      ConstraintAttrs)
+      Omit<TableConstraintAttrs, "noInherit">)
   | ExcludeConstraint;
 
 // One `element WITH operator` pair of an EXCLUDE constraint. `operator` is the
 // operator's text (`=`, `&&`).
 export type ExclusionElement = { expr: Expr; operator: string; span: Span };
 
-// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WHERE
-// (pred)]`. `using` is null when PG's default (btree) applies, as on
-// createIndex; `include` and `where` are omitted when absent.
+// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WITH
+// (params)] [USING INDEX TABLESPACE name] [WHERE (pred)]`. `using` is null when
+// PG's default (btree) applies, as on createIndex; the index parameters and
+// `where` are omitted when absent.
 export type ExcludeConstraint = {
   kind: "exclude";
   name: string | null;
   using: string | null;
   elements: ExclusionElement[];
-  include?: string[];
   where?: Expr;
   span: Span;
-} & ConstraintAttrs;
+} & IndexParams &
+  ConstraintAttrs;
 
 // One `{INCLUDING | EXCLUDING} property` option of a `LIKE source` table item.
 export type LikeOption = {
@@ -1084,8 +1122,9 @@ export type Stmt =
       modifiers?: string[];
       span: Span;
     }
-  // `options` (WITH (…)) and `only` (ON ONLY t) are present only when written;
-  // the older `include` and `where` keys stay null when absent.
+  // `options` (WITH (…)), `only` (ON ONLY t), `nulls` (NULLS [NOT] DISTINCT) and
+  // `tablespace` are present only when written; the older `include` and `where`
+  // keys stay null when absent.
   | {
       kind: "createIndex";
       unique: boolean;
@@ -1097,7 +1136,9 @@ export type Stmt =
       using: string | null;
       columns: IndexColumn[];
       include: string[] | null;
+      nulls?: NullsTreatment;
       options?: RelationOption[];
+      tablespace?: string;
       where: Expr | null;
       span: Span;
     }
@@ -3149,48 +3190,85 @@ const matchType = oneOf(kw("full"), kw("partial"), kw("simple"));
 // `on` with no rollback, so whichever came first would croak on the other's
 // verb. A repeated verb croaks naming the one still open, as PG rejects it too;
 // once both are filled the loop stops, and a third ON is left to the caller.
+//
+// SET NULL and SET DEFAULT may name the columns they set, `(cols)`; nothing
+// else can follow them with a `(`. PG's grammar reads the list after either
+// verb and then rejects it on ON UPDATE, so this does too.
 function parseForeignKeyTail(ctx: ParseContext<SqlTokenType>): ForeignKeyTail {
   const match =
     ctx.eat("ident", "match") !== null ? (ctx.parse(matchType).value as "full" | "partial" | "simple") : null;
   let onDelete: RefAction | null = null;
+  let onDeleteColumns: string[] | null = null;
   let onUpdate: RefAction | null = null;
   while ((onDelete === null || onUpdate === null) && ctx.is("ident", "on")) {
+    const start = ctx.position();
     ctx.next(); // ON
     if (onDelete === null && ctx.eat("ident", "delete") !== null) {
       onDelete = dispatch(REF_ACTIONS, REF_ACTION_EXPECTED, ctx);
+      if (isSetAction(onDelete) && ctx.is("punc", "(")) onDeleteColumns = parseColumnNames(ctx);
     } else if (onUpdate === null && ctx.eat("ident", "update") !== null) {
       onUpdate = dispatch(REF_ACTIONS, REF_ACTION_EXPECTED, ctx);
+      if (isSetAction(onUpdate) && ctx.is("punc", "(")) {
+        parseColumnNames(ctx);
+        return ctx.croak(
+          `a column list with ${onUpdate.toUpperCase()} is only supported for ON DELETE actions`,
+          start,
+          ctx.lastEnd(),
+        );
+      }
     } else {
       const open = [...(onDelete === null ? ["delete"] : []), ...(onUpdate === null ? ["update"] : [])];
       return ctx.croak(`Expected ${quoteList(open)} but found ${describeFound(ctx.peek())}`);
     }
   }
-  return { ...(match && { match }), onDelete, ...(onUpdate && { onUpdate }) };
+  return {
+    ...(match && { match }),
+    onDelete,
+    ...(onDeleteColumns && { onDeleteColumns }),
+    ...(onUpdate && { onUpdate }),
+  };
 }
+
+const isSetAction = (action: RefAction) => action === "set null" || action === "set default";
 
 const initiallyWhen = oneOf(kw("deferred"), kw("immediate"));
 
-// True when the cursor sits on `NOT DEFERRABLE`. Lexing is lazy, so the peek
-// past `not` is taken only on a `not`: peeking on every token would raise the
-// lex error of a token two on from inside the constraint handler, and
-// diagnose() would drop the constraint — and the column — over a character the
-// column never reaches. After a `not` in a column constraint there is nothing
-// to save: NOT NULL would raise the same error on the same token. (At table
-// level the tail meets a bad token inside the constraint rather than between
-// items, so diagnose() keeps the table around it.)
-function atNotDeferrable(ctx: ParseContext<SqlTokenType>): boolean {
+// True when the cursor sits on `NOT <word>` — `NOT DEFERRABLE`, or at table
+// level `NOT VALID`. Lexing is lazy, so the peek past `not` is taken only on a
+// `not`: peeking on every token would raise the lex error of a token two on
+// from inside the constraint handler, and diagnose() would drop the constraint
+// — and the column — over a character the column never reaches. After a `not`
+// in a column constraint there is nothing to save: NOT NULL would raise the
+// same error on the same token. (At table level the tail meets a bad token
+// inside the constraint rather than between items, so diagnose() keeps the
+// table around it.)
+function atNot(ctx: ParseContext<SqlTokenType>, word: string): boolean {
   if (!ctx.is("ident", "not")) return false;
   const next = ctx.peekAhead(1);
-  return next !== null && next.type === "ident" && next.value === "deferrable";
+  return next !== null && next.type === "ident" && next.value === word;
 }
 
-// `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. Only
-// UNIQUE, PRIMARY KEY, foreign keys and EXCLUDE read this tail, so PG's "misplaced
-// DEFERRABLE clause" (`a int NOT NULL DEFERRABLE`) never parses.
+// The constraint a table-level attribute list belongs to, spelled as PG's
+// "%s constraints cannot be marked …" messages name it.
+type ConstraintType = "PRIMARY KEY" | "UNIQUE" | "EXCLUDE" | "FOREIGN KEY" | "CHECK";
+
+// `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. At
+// column level only UNIQUE, PRIMARY KEY and REFERENCES read this tail, so PG's
+// "misplaced DEFERRABLE clause" (`a int NOT NULL DEFERRABLE`) never parses.
+//
+// At table level every constraint reads PG's whole `ConstraintAttributeSpec`,
+// which adds `NOT VALID` and `NO INHERIT`, and then judges it by the
+// constraint's `type` as PG's processCASbits does: CHECK takes NOT VALID and NO
+// INHERIT but nothing that makes it deferrable (NOT DEFERRABLE and INITIALLY
+// IMMEDIATE are its defaults, so those pass); a foreign key takes NOT VALID;
+// the index-backed ones take neither. NOT VALID and NO INHERIT may repeat, as
+// in PG. That judgement comes after the whole list is read, so a contradiction
+// within it is reported first, as in PG. Unlike PG, which points at the start
+// of the list, the error sits on the clause refused.
 //
 // `not` is shared with a following column constraint's NOT NULL, so it is taken
-// here only when `deferrable` comes next; a bare `ctx.eat("not")` would steal
-// `a int UNIQUE NOT NULL`.
+// here only when `deferrable` (or, at table level, `valid`) comes next; a bare
+// `ctx.eat("not")` would steal `a int UNIQUE NOT NULL`.
 //
 // A second clause of either kind is still read, rather than falling out of the
 // loop to be misread as the start of the next constraint, and is then judged as
@@ -3201,12 +3279,42 @@ function atNotDeferrable(ctx: ParseContext<SqlTokenType>): boolean {
 // through and reports only a contradiction. Both levels reject a constraint that
 // can never be deferred starting out deferred; the column check looks for a
 // repeat first, the table check for that case first, and so do these.
-function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column" | "table"): ConstraintAttrs {
+function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column"): ConstraintAttrs;
+// A CHECK's attributes, which the CHECK judgement below keeps from deferring.
+function parseConstraintAttrs(
+  ctx: ParseContext<SqlTokenType>,
+  level: "table",
+  type: "CHECK",
+): Omit<Extract<TableConstraint, { kind: "check" }>, "kind" | "name" | "expr" | "span">;
+function parseConstraintAttrs(
+  ctx: ParseContext<SqlTokenType>,
+  level: "table",
+  type: ConstraintType,
+): TableConstraintAttrs;
+function parseConstraintAttrs(
+  ctx: ParseContext<SqlTokenType>,
+  level: "column" | "table",
+  type?: ConstraintType,
+): TableConstraintAttrs {
   let deferrable: boolean | null = null;
   let initially: "deferred" | "immediate" | null = null;
+  // Where each clause the constraint type may refuse was first written.
+  let deferredAt: [Position, Position] | null = null;
+  let notValidAt: [Position, Position] | null = null;
+  let noInheritAt: [Position, Position] | null = null;
   while (true) {
     const start = ctx.position();
-    const negated = atNotDeferrable(ctx);
+    if (level === "table" && atNot(ctx, "valid")) {
+      ctx.parse(kwseq("not", "valid"));
+      notValidAt ??= [start, ctx.lastEnd()];
+      continue;
+    }
+    if (level === "table" && ctx.is("ident", "no")) {
+      ctx.parse(kwseq("no", "inherit"));
+      noInheritAt ??= [start, ctx.lastEnd()];
+      continue;
+    }
+    const negated = atNot(ctx, "deferrable");
     let repeated: string;
     let conflicting: boolean;
     if (negated || ctx.is("ident", "deferrable")) {
@@ -3214,11 +3322,13 @@ function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column" |
       repeated = "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed";
       conflicting = deferrable !== null && (level === "column" || deferrable === negated);
       deferrable = !negated;
+      if (!negated) deferredAt ??= [start, ctx.lastEnd()];
     } else if (ctx.eat("ident", "initially") !== null) {
       const when = ctx.parse(initiallyWhen).value as "deferred" | "immediate";
       repeated = "multiple INITIALLY IMMEDIATE/DEFERRED clauses not allowed";
       conflicting = initially !== null && (level === "column" || initially !== when);
       initially = when;
+      if (when === "deferred") deferredAt ??= [start, ctx.lastEnd()];
     } else {
       break;
     }
@@ -3230,10 +3340,79 @@ function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column" |
       return ctx.croak("constraint declared INITIALLY DEFERRED must be DEFERRABLE", start, ctx.lastEnd());
     }
   }
-  return { ...(deferrable !== null && { deferrable }), ...(initially && { initially }) };
+  if (deferredAt !== null && type === "CHECK") {
+    return ctx.croak(`${type} constraints cannot be marked DEFERRABLE`, ...deferredAt);
+  }
+  if (notValidAt !== null && type !== "CHECK" && type !== "FOREIGN KEY") {
+    return ctx.croak(`${type} constraints cannot be marked NOT VALID`, ...notValidAt);
+  }
+  if (noInheritAt !== null && type !== "CHECK") {
+    return ctx.croak(`${type} constraints cannot be marked NO INHERIT`, ...noInheritAt);
+  }
+  return {
+    ...(deferrable !== null && { deferrable }),
+    ...(initially && { initially }),
+    ...(notValidAt && { notValid: true }),
+    ...(noInheritAt && { noInherit: true }),
+  };
 }
 
-const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
+// `NULLS [NOT] DISTINCT`, after UNIQUE or after an index's column list and
+// INCLUDE. Nothing else may start with `nulls` in either place, so the word
+// commits.
+const nullsTreatment = seq(skip(kw("nulls")), field("not", optional(kw("not"))), skip(kw("distinct"))).map(
+  (s): NullsTreatment => (s.not !== null ? "not distinct" : "distinct"),
+);
+
+const parseNullsTreatment = (ctx: ParseContext<SqlTokenType>): NullsTreatment | null =>
+  ctx.is("ident", "nulls") ? ctx.parse(nullsTreatment) : null;
+
+// A parenthesised list of at least one column, as PG's columnList: unlike
+// the shared `columnList`, an empty `()` is a syntax error. INCLUDE and the
+// ON DELETE SET NULL / SET DEFAULT list read it.
+const nonEmptyColumnNames = sepBy(nameWord, P(","));
+
+function parseColumnNames(ctx: ParseContext<SqlTokenType>): string[] {
+  ctx.parse(punc("("));
+  const columns = ctx.parse(nonEmptyColumnNames);
+  expectClose(ctx);
+  return columns;
+}
+
+// The index parameters of PRIMARY KEY, UNIQUE and EXCLUDE, in PG's fixed order
+// (see IndexParams). INCLUDE exists only at table level. None of the lead
+// words takes a name away: `with` and `using` are reserved, and after a
+// constraint nothing else may follow with `include`.
+function parseIndexParams(ctx: ParseContext<SqlTokenType>, level: "column" | "table"): IndexParams {
+  const include = level === "table" && ctx.eat("ident", "include") !== null ? parseColumnNames(ctx) : null;
+  const options = ctx.eat("ident", "with") !== null ? ctx.parse(relationOptions) : null;
+  // PG reads these as a plain definition list, not reloptions, so an option
+  // has no `namespace.` prefix here, though relationOptions, which other lists
+  // share, accepts one. Its other leniencies (a missing `=`, list values) stay.
+  const namespaced = options?.find((option) => option.namespace !== undefined);
+  if (namespaced !== undefined) {
+    return ctx.croak(
+      `a constraint's index parameters take no namespace, but found "${namespaced.namespace}.${namespaced.name}"`,
+      namespaced.span.start,
+      namespaced.span.end,
+    );
+  }
+  let indexTablespace: string | null = null;
+  if (ctx.is("ident", "using")) {
+    ctx.parse(kwseq("using", "index", "tablespace"));
+    indexTablespace = ctx.parse(nameWord);
+  }
+  return {
+    ...(include && { include }),
+    ...(options && { options }),
+    ...(indexTablespace !== null && { indexTablespace }),
+  };
+}
+
+const generatedKind = oneOf(kw("stored"), kw("virtual"));
+
+// The column constraints `CONSTRAINT name` may lead — every one but COLLATE.
+const COLUMN_CONSTRAINT_ELEMS: DispatchMap<ColConstraintElem> = {
   not: {
     expected: '"not null"',
     parse: (ctx) => {
@@ -3261,16 +3440,19 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kwseq("primary", "key"));
+      const params = parseIndexParams(ctx, "column");
       const attrs = parseConstraintAttrs(ctx, "column");
-      return { kind: "primaryKey", ...attrs, span: ctx.spanFrom(start) };
+      return { kind: "primaryKey", ...params, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   unique: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("unique"));
+      const nulls = parseNullsTreatment(ctx);
+      const params = parseIndexParams(ctx, "column");
       const attrs = parseConstraintAttrs(ctx, "column");
-      return { kind: "unique", ...attrs, span: ctx.spanFrom(start) };
+      return { kind: "unique", ...(nulls && { nulls }), ...params, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   references: {
@@ -3284,20 +3466,27 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
       return { kind: "references", table, columns, ...tail, ...attrs, span: ctx.spanFrom(start) };
     },
   },
+  // `CHECK (expr) [NO INHERIT]`. A column-level CHECK takes no other
+  // attribute: NOT VALID exists only at table level, and NOT NULL takes no NO
+  // INHERIT before PG 18.
   check: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("check"));
-      return { kind: "check", expr: ctx.parse(parenExpr), span: ctx.spanFrom(start) };
+      const expr = ctx.parse(parenExpr);
+      const noInherit = ctx.is("ident", "no");
+      if (noInherit) ctx.parse(kwseq("no", "inherit"));
+      return { kind: "check", expr, ...(noInherit && { noInherit: true as const }), span: ctx.spanFrom(start) };
     },
   },
   // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(options)]` or `GENERATED
-  // ALWAYS AS (expr) STORED`. The handler owns all of its lookahead, so one key
-  // covers both forms. As in PG, BY DEFAULT is only for identity columns, and
-  // STORED is required (PG 18's VIRTUAL and bare form are not parsed); PG's
-  // identity-only `SEQUENCE NAME` option is not parsed yet. GENERATED, ALWAYS,
-  // IDENTITY and STORED stay unreserved: they are matched only here, in a
-  // column's constraint list.
+  // ALWAYS AS (expr) {STORED | VIRTUAL}`. The handler owns all of its
+  // lookahead, so one key covers both forms. As in PG, BY DEFAULT is only for
+  // identity columns. VIRTUAL is PG 18's, taken because schemas (pagila's
+  // among them) write it; PG 18's bare form (no STORED or VIRTUAL) is still
+  // rejected, as PG 17 does. PG's identity-only `SEQUENCE NAME` option is not
+  // parsed yet. GENERATED, ALWAYS, IDENTITY, STORED and VIRTUAL stay
+  // unreserved: they are matched only here, in a column's constraint list.
   generated: {
     parse: (ctx) => {
       const start = ctx.position();
@@ -3326,14 +3515,20 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
         return ctx.croak(`Expected ${quoteList(["identity", "("])} but found ${describeFound(ctx.peek())}`);
       }
       const expr = ctx.parse(parenExpr);
-      ctx.parse(kw("stored"));
+      const virtual = ctx.parse(generatedKind).value === "virtual";
       // Judged once the clause is whole and pinned to the BY DEFAULT, as PG does.
       if (generated !== "always") {
         return ctx.croak("for a generated column, GENERATED ALWAYS must be specified", whenStart, whenEnd);
       }
-      return { kind: "generated", expr, span: ctx.spanFrom(start) };
+      return { kind: "generated", expr, ...(virtual && { virtual: true as const }), span: ctx.spanFrom(start) };
     },
   },
+};
+
+const COLUMN_CONSTRAINT_ELEM_EXPECTED = joinExpected(COLUMN_CONSTRAINT_ELEMS);
+
+const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
+  ...COLUMN_CONSTRAINT_ELEMS,
   // Column-level `COLLATE name`. `collate` is reserved, so it cannot be a type
   // word and, straight after the type, it can only be this. A DEFAULT's operand
   // is a b-expression, which has no COLLATE, so `DEFAULT 'a' COLLATE "C"`
@@ -3344,6 +3539,18 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
       const start = ctx.position();
       ctx.parse(kw("collate"));
       return { kind: "collate", collation: ctx.parse(qualName), span: ctx.spanFrom(start) };
+    },
+  },
+  // `CONSTRAINT name` then any constraint but COLLATE. `constraint` is
+  // reserved, so it takes no name away; after a column's type it can only lead
+  // this. The span runs from CONSTRAINT.
+  constraint: {
+    parse: (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw("constraint"));
+      const name = ctx.parse(nameWord);
+      const elem = dispatch(COLUMN_CONSTRAINT_ELEMS, COLUMN_CONSTRAINT_ELEM_EXPECTED, ctx);
+      return { ...elem, name, span: ctx.spanFrom(start) };
     },
   },
 };
@@ -3365,24 +3572,37 @@ const TABLE_CONSTRAINTS: DispatchMap<TableConstraint> = {
       const start = ctx.position();
       ctx.parse(kwseq("primary", "key"));
       const columns = ctx.parse(columnList);
-      const attrs = parseConstraintAttrs(ctx, "table");
-      return { kind: "primaryKey", name: null, columns, ...attrs, span: ctx.spanFrom(start) };
+      const params = parseIndexParams(ctx, "table");
+      const attrs = parseConstraintAttrs(ctx, "table", "PRIMARY KEY");
+      return { kind: "primaryKey", name: null, columns, ...params, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   unique: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("unique"));
+      const nulls = parseNullsTreatment(ctx);
       const columns = ctx.parse(columnList);
-      const attrs = parseConstraintAttrs(ctx, "table");
-      return { kind: "unique", name: null, columns, ...attrs, span: ctx.spanFrom(start) };
+      const params = parseIndexParams(ctx, "table");
+      const attrs = parseConstraintAttrs(ctx, "table", "UNIQUE");
+      return {
+        kind: "unique",
+        name: null,
+        ...(nulls && { nulls }),
+        columns,
+        ...params,
+        ...attrs,
+        span: ctx.spanFrom(start),
+      };
     },
   },
   check: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("check"));
-      return { kind: "check", name: null, expr: ctx.parse(parenExpr), span: ctx.spanFrom(start) };
+      const expr = ctx.parse(parenExpr);
+      const attrs = parseConstraintAttrs(ctx, "table", "CHECK");
+      return { kind: "check", name: null, expr, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   foreign: {
@@ -3395,7 +3615,7 @@ const TABLE_CONSTRAINTS: DispatchMap<TableConstraint> = {
       const refTable = ctx.parse(qualName);
       const refColumns = ctx.parse(optColumnList);
       const tail = parseForeignKeyTail(ctx);
-      const attrs = parseConstraintAttrs(ctx, "table");
+      const attrs = parseConstraintAttrs(ctx, "table", "FOREIGN KEY");
       return {
         kind: "foreignKey",
         name: null,
@@ -3430,10 +3650,8 @@ const exclusionElement = seq(
   ),
 ).map(({ expr, operator }, span): ExclusionElement => ({ expr, operator, span }));
 
-// At least one entry, as in PG: an empty `EXCLUDE ()` or `INCLUDE ()` is a
-// syntax error.
+// At least one entry, as in PG: an empty `EXCLUDE ()` is a syntax error.
 const exclusionElements = sepBy(exclusionElement, P(","));
-const includeColumns = sepBy(nameWord, P(","));
 
 // True when the cursor sits on `EXCLUDE USING` or `EXCLUDE (` — neither of
 // which can begin a column definition, as `using` is reserved and `(` cannot
@@ -3449,12 +3667,10 @@ function atExcludeConstraint(ctx: ParseContext<SqlTokenType>): boolean {
   );
 }
 
-// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WHERE
-// (pred)]` plus the DEFERRABLE/INITIALLY tail. Kept out of TABLE_CONSTRAINTS on
+// `EXCLUDE [USING method] (element WITH operator, …)`, the index parameters,
+// `[WHERE (pred)]` and the attribute tail. Kept out of TABLE_CONSTRAINTS on
 // purpose: `exclude` is unreserved, and a key there would join tableItem's
 // value-specific first set and take the word away from columns (see tableItem).
-// PG's index parameters (`WITH (…)`, `USING INDEX TABLESPACE`) are not parsed
-// yet.
 const excludeBody = custom<ExcludeConstraint, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -3463,20 +3679,15 @@ const excludeBody = custom<ExcludeConstraint, SqlTokenType>(
     ctx.parse(punc("("));
     const elements = ctx.parse(exclusionElements);
     expectClose(ctx);
-    let include: string[] | null = null;
-    if (ctx.eat("ident", "include") !== null) {
-      ctx.parse(punc("("));
-      include = ctx.parse(includeColumns);
-      expectClose(ctx);
-    }
+    const params = parseIndexParams(ctx, "table");
     const where = ctx.eat("ident", "where") !== null ? ctx.parse(parenExpr) : null;
-    const attrs = parseConstraintAttrs(ctx, "table");
+    const attrs = parseConstraintAttrs(ctx, "table", "EXCLUDE");
     return {
       kind: "exclude",
       name: null,
       using,
       elements,
-      ...(include && { include }),
+      ...params,
       ...(where && { where }),
       ...attrs,
       span: ctx.spanFrom(start),
@@ -3598,7 +3809,8 @@ function parseWithData(ctx: ParseContext<SqlTokenType>): boolean | null {
 // wants the `=`; one shape for every list is the trade. The same goes for the
 // `toast.` namespace, which only reloptions take, and for COPY's `*` and list
 // values. (RESET's values-free form is PG's to police too: its grammar takes the
-// same list and rejects a value only in analysis.)
+// same list and rejects a value only in analysis.) A constraint's index
+// parameters refuse the namespace afterwards (see parseIndexParams).
 //
 // Option names are PG's ColLabel, so a reserved word is a name here too
 // (`EXPLAIN (ANALYZE)`, COPY's `NULL '…'`). A word value may also be reserved
@@ -4124,12 +4336,19 @@ const createIndexRest = seq(
   field("columns", indexColumns),
   // `INCLUDE (col, …)` covering columns — plain names, kept null when absent.
   field("include", optional(seq(skip(kw("include")), field("cols", columnList)).map((s) => s.cols))),
+  field("nulls", optional(nullsTreatment)),
   // `WITH (storage_parameter = value, …)`, omitted when absent. `with` is
   // reserved, so it cannot be the start of anything else here.
   field("options", optional(seq(skip(kw("with")), field("o", relationOptions)).map((s) => s.o))),
+  // `TABLESPACE name`; no table clause can follow an index's column list, so
+  // the word commits.
+  field("tablespace", optional(seq(skip(kw("tablespace")), field("t", nameWord)).map((s) => s.t))),
   field("where", optional(seq(skip(kw("where")), field("e", expression)).map((s) => s.e))),
 ).map(
-  ({ unique, concurrently, ifNotExists, name, table, using, columns, include, options, where }, span): Stmt => ({
+  (
+    { unique, concurrently, ifNotExists, name, table, using, columns, include, nulls, options, tablespace, where },
+    span,
+  ): Stmt => ({
     kind: "createIndex",
     unique,
     concurrently,
@@ -4140,7 +4359,9 @@ const createIndexRest = seq(
     using,
     columns,
     include,
+    ...(nulls !== null && { nulls }),
     ...(options !== null && { options }),
+    ...(tablespace !== null && { tablespace }),
     where,
     span,
   }),

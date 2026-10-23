@@ -180,7 +180,7 @@ export const PG_DUMP_EXPECTATIONS: Record<string, DumpRow[]> = {
     ["ok", 418, "ALTER TABLE public.category OWNER TO postgres;"],
     ["ok", 424, "CREATE SEQUENCE public.film_film_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE …"],
     ["ok", 432, "ALTER TABLE public.film_film_id_seq OWNER TO postgres;"],
-    ["fail", 438, "CREATE TABLE public.film ( film_id integer DEFAULT nextval('public.film_film_id_…"],
+    ["ok", 438, "CREATE TABLE public.film ( film_id integer DEFAULT nextval('public.film_film_id_…"],
     ["ok", 457, "ALTER TABLE public.film OWNER TO postgres;"],
     ["ok", 463, "CREATE TABLE public.film_actor ( actor_id integer NOT NULL, film_id integer NOT …"],
     ["ok", 470, "ALTER TABLE public.film_actor OWNER TO postgres;"],
