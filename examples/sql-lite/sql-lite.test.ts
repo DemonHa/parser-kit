@@ -13740,9 +13740,13 @@ describe("SQL-lite CREATE TABLE AS TABLE and AS EXECUTE", () => {
       modifiers: ["temp"],
     });
     // EXPLAIN takes the EXECUTE form too, as PG's ExplainableStmt does.
-    expect(firstStmt("EXPLAIN CREATE TABLE x AS EXECUTE p;").statement).toMatchObject({
+    expect(firstStmt("EXPLAIN CREATE TABLE x AS EXECUTE p;").statement).toEqual({
       kind: "createTableAs",
-      query: { kind: "execute", name: "p" },
+      ifNotExists: false,
+      name: ["x"],
+      columns: null,
+      query: { kind: "execute", name: "p", args: null },
+      withData: null,
     });
   });
 
@@ -13755,9 +13759,13 @@ describe("SQL-lite CREATE TABLE AS TABLE and AS EXECUTE", () => {
   });
 
   it("keeps execute unreserved as a table name", () => {
-    expect(firstStmt("CREATE TABLE execute AS EXECUTE execute;")).toMatchObject({
+    expect(firstStmt("CREATE TABLE execute AS EXECUTE execute;")).toEqual({
+      kind: "createTableAs",
+      ifNotExists: false,
       name: ["execute"],
-      query: { kind: "execute", name: "execute" },
+      columns: null,
+      query: { kind: "execute", name: "execute", args: null },
+      withData: null,
     });
   });
 });
@@ -13883,6 +13891,11 @@ describe("SQL-lite CREATE CONSTRAINT TRIGGER", () => {
     );
     expect(
       parseFails("CREATE OR REPLACE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
+    ).toThrow(/CREATE OR REPLACE CONSTRAINT TRIGGER is not supported/);
+    expect(
+      parseFails(
+        "CREATE SCHEMA s CREATE OR REPLACE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();",
+      ),
     ).toThrow(/CREATE OR REPLACE CONSTRAINT TRIGGER is not supported/);
     // FROM and the deferral attributes belong to constraint triggers only.
     expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t FROM x FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
@@ -14031,7 +14044,11 @@ describe("SQL-lite TEMP and RECURSIVE views", () => {
     expect(parseFails("CREATE RECURSIVE VIEW v (n) AS SELECT 1 WITH CHECK OPTION;")).toThrow(
       /WITH CHECK OPTION not supported on recursive views/,
     );
-    for (const src of ["CREATE UNLOGGED VIEW v AS SELECT 1;", "CREATE OR REPLACE UNLOGGED VIEW v AS SELECT 1;"]) {
+    for (const src of [
+      "CREATE UNLOGGED VIEW v AS SELECT 1;",
+      "CREATE OR REPLACE UNLOGGED VIEW v AS SELECT 1;",
+      "CREATE UNLOGGED RECURSIVE VIEW v (n) AS SELECT 1;",
+    ]) {
       expect(parseFails(src)).toThrow(/views cannot be unlogged because they do not have storage/);
     }
     expect(parseFails("CREATE TEMP MATERIALIZED VIEW mv AS SELECT 1;")).toThrow(
@@ -14093,6 +14110,9 @@ describe("SQL-lite UNLOGGED materialized views and their storage clauses", () =>
       /Expected "as" but found "with"/,
     );
     expect(parseFails("CREATE VIEW v TABLESPACE ts AS SELECT 1;")).toThrow(/Expected "as" but found "tablespace"/);
+    expect(parseFails("CREATE OR REPLACE UNLOGGED MATERIALIZED VIEW v AS SELECT 1;")).toThrow(
+      /Expected "recursive" or "view" but found "materialized"/,
+    );
     expect(parseFails("CREATE VIEW v USING heap AS SELECT 1;")).toThrow(/Expected "as" but found "using"/);
     expect(parseFails("CREATE MATERIALIZED VIEW mv AS EXECUTE p;")).toThrow(/but found "execute"/);
     // In a schema element it is refused at MATERIALIZED, as an unprefixed one is.
@@ -14101,9 +14121,33 @@ describe("SQL-lite UNLOGGED materialized views and their storage clauses", () =>
     );
   });
 
+  it("spans from CREATE, and is explainable", () => {
+    expect(
+      (sqlLite.parse("CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;")[0] as Record<string, any>).span.start,
+    ).toEqual({ row: 1, col: 0 });
+    expect(firstStmt("EXPLAIN CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;").statement).toEqual({
+      kind: "createView",
+      materialized: true,
+      orReplace: false,
+      ifNotExists: false,
+      name: ["mv"],
+      columns: null,
+      query: selectOne,
+      withData: null,
+      modifiers: ["unlogged"],
+    });
+  });
+
   it("keeps tablespace unreserved", () => {
-    expect(firstStmt("CREATE MATERIALIZED VIEW mv (tablespace) TABLESPACE tablespace AS SELECT 1;")).toMatchObject({
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv (tablespace) TABLESPACE tablespace AS SELECT 1;")).toEqual({
+      kind: "createView",
+      materialized: true,
+      orReplace: false,
+      ifNotExists: false,
+      name: ["mv"],
       columns: ["tablespace"],
+      query: selectOne,
+      withData: null,
       tablespace: "tablespace",
     });
   });

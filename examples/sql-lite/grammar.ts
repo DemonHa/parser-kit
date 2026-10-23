@@ -5746,8 +5746,9 @@ function createDatabaseRest(ctx: ParseContext<SqlTokenType>): Stmt {
 // INDEX / SEQUENCE / [TEMP] [RECURSIVE] VIEW / [CONSTRAINT] TRIGGER, only
 // views and plain triggers after OR REPLACE. CREATE and OR REPLACE are
 // consumed here so that a wrong target croaks at the target word itself, and
-// the entry is then entered straight from createStmt's two maps, with the same
-// two starts createStmt gives it. A nested CREATE SCHEMA can therefore never
+// the entry is then entered as createStmt enters it: through
+// createUnmappedTarget first, then straight from createStmt's two maps, with
+// the same starts createStmt gives each. A nested CREATE SCHEMA can therefore never
 // swallow the elements after it. CREATE TABLE AS and a role GRANT share their
 // lead words with an admitted form, so only the finished node tells them apart.
 const SCHEMA_ELEMENT_TARGETS = ["table", "unique", "index", "sequence", "view", "trigger"];
@@ -5776,11 +5777,21 @@ function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
     ctx.next(); // UNLOGGED
     return ctx.croak(`Expected "table" but found ${describeFound(ctx.peek())}`);
   }
-  const special = createUnmappedTarget(ctx, start, orReplace);
-  if (special?.kind === "createTableAs") {
-    return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", special.span.start, special.span.end);
+  const element =
+    createUnmappedTarget(ctx, start, orReplace) ?? parseMappedSchemaElement(ctx, start, tailStart, orReplace);
+  if (element.kind === "createTableAs") {
+    return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", element.span.start, element.span.end);
   }
-  if (special !== null) return special;
+  return element;
+}
+
+// A schema element led by a word one of createStmt's two maps holds.
+function parseMappedSchemaElement(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  tailStart: Position,
+  orReplace: boolean,
+): Stmt {
   const allowed = orReplace ? SCHEMA_REPLACEABLE_TARGETS : SCHEMA_ELEMENT_TARGETS;
   const tok = ctx.peek();
   if (tok === null || tok.type !== "ident" || !allowed.includes(tok.value)) {
@@ -5793,11 +5804,7 @@ function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
     ctx.next(); // the target's lead word, as createStmt consumes it
     return REPLACEABLE_CREATE[tok.value]!.parse(ctx, start, orReplace);
   }
-  const element = PLAIN_CREATE[tok.value]!.parse(ctx, tailStart);
-  if (element.kind === "createTableAs") {
-    return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", element.span.start, element.span.end);
-  }
-  return element;
+  return PLAIN_CREATE[tok.value]!.parse(ctx, tailStart);
 }
 
 function createSchemaRest(ctx: ParseContext<SqlTokenType>): Stmt {
@@ -6789,7 +6796,8 @@ const REPLACEABLE_CREATE: DispatchMap<Stmt, [Position, boolean]> = {
 // PLAIN_CREATE is reached through an `oneOf`-shaped message, REPLACEABLE_CREATE
 // through a hand-written croak — hence the two derivations (see joinExpected).
 const PLAIN_CREATE_EXPECTED = joinExpected(PLAIN_CREATE);
-// The words createUnmappedTarget takes after OR REPLACE are listed too.
+// The words that can lead an accepted target after OR REPLACE through
+// createUnmappedTarget are listed too.
 const REPLACEABLE_CREATE_EXPECTED = quoteList([...Object.keys(REPLACEABLE_CREATE), "recursive", ...TEMP_LEAD_WORDS]);
 
 // PLAIN_CREATE is only consulted once the lead word has missed
@@ -6800,6 +6808,13 @@ const REPLACEABLE_CREATE_EXPECTED = quoteList([...Object.keys(REPLACEABLE_CREATE
 for (const key of Object.keys(PLAIN_CREATE)) {
   if (Object.hasOwn(REPLACEABLE_CREATE, key)) {
     throw new Error(`CREATE target "${key}" is in both dispatch maps - the PLAIN_CREATE entry is unreachable`);
+  }
+}
+// createUnmappedTarget runs ahead of both maps, so a key that is one of its
+// lead words would be unreachable the same way.
+for (const word of [...TEMP_LEAD_WORDS, "unlogged", "recursive", "constraint"]) {
+  if (Object.hasOwn(PLAIN_CREATE, word) || Object.hasOwn(REPLACEABLE_CREATE, word)) {
+    throw new Error(`CREATE target "${word}" leads createUnmappedTarget - its dispatch entry is unreachable`);
   }
 }
 
