@@ -1,18 +1,19 @@
 import { defineLexer, type InputStream, type Lexer, type Position, type Reader, readers } from "@parser-kit/core";
 
 // SQL-lite is the PostgreSQL-flavoured counterpart to js-lite: it exercises the
-// reader and keyword machinery DBML doesn't touch. Identifiers fold to
-// lowercase (so grammar-side keyword matching is exact-value matching and
-// unreserved words stay usable as names), quoted identifiers are case-preserved,
-// and the operator reader coexists with the punctuation trie by partitioning the
-// character space — `::`/`:`/`,`/`(`/`)`/`[`/`]`/`;`/`.` stay trie-lexed while
-// `||`/`@>`/`<=`/… are read as operators.
+// reader and keyword machinery DBML doesn't touch. Identifiers fold their ASCII
+// letters to lowercase, as PG's do (so grammar-side keyword matching is
+// exact-value matching and unreserved words stay usable as names), quoted
+// identifiers are case-preserved, and the operator reader coexists with the
+// punctuation trie by partitioning the character space — `::`/`:`/`,`/`(`/`)`/
+// `[`/`]`/`;`/`.` stay trie-lexed while `||`/`@>`/`<=`/… are read as operators.
 export type SqlTokenType =
   | "ident"
   | "qident"
   | "string"
   | "bitstring"
   | "hexstring"
+  | "nstring"
   | "number"
   | "op"
   | "punc"
@@ -552,8 +553,9 @@ const blockCommentReader: Reader<SqlTokenType> = readers.custom("comment", {
 // --- numbers and parameters, as PG 17's scan.l reads them ---
 // PG's identifier classes: what may start an identifier, and what may continue
 // one. Every byte from 0x80 up is an identifier character there, which is why
-// the junk check below fires on any non-ASCII character too.
-// Both run after every number, so they compare characters too.
+// the junk check below fires on any non-ASCII character too. The identifier
+// reader runs them on every character of every name, so they compare
+// characters rather than run a RegExp.
 const isIdentStart = (char: string) =>
   (char >= "a" && char <= "z") || (char >= "A" && char <= "Z") || char === "_" || char >= "\u0080";
 const isIdentCont = (char: string) => isIdentStart(char) || isDecDigit(char) || char === "$";
@@ -704,15 +706,52 @@ const paramReader: Reader<SqlTokenType> = readers.custom("param", {
   },
 });
 
-export const sqlLexer = defineLexer({
-  identifier: {
-    type: "ident",
-    start: /[A-Za-z_]/,
-    part: /[A-Za-z0-9_$]/,
-    display: "an identifier",
-    // PG folds unquoted identifiers to lowercase; the raw text stays in the span.
-    fold: "lower",
+// `N'…'` — PG's national character string. Its scanner reads it as an internal
+// NCHAR keyword followed by an ordinary `'…'`, which the grammar takes as a
+// `bpchar`-typed literal; here it is one token of its own type, so the grammar
+// can build that node and a bare `n` (`name`, `nulls`) stays an identifier. The
+// body is a standard string, continuation included. Its span starts at the
+// `N` — unlike the other strings' — because the node it becomes covers the
+// prefix as its type. No `display`: it is accepted only where an expression
+// is, and that position already reads "a string".
+const nationalStringReader: Reader<SqlTokenType> = readers.custom("nstring", {
+  startsWith: "Nn",
+  read: (stream) => {
+    const tokenStart = stream.position();
+    stream.snapshot();
+    stream.next(); // `N`
+    if (stream.peek() !== "'") {
+      stream.reload();
+      return null;
+    }
+    const { value, end } = readQuotedBody(stream, STRING, tokenStart);
+    return { value, start: tokenStart, end };
   },
+});
+
+// Unquoted identifiers, with PG's character classes: any character from U+0080
+// up may start or continue one (scan.l's `ident_start`/`ident_cont` take every
+// byte 0x80–0xFF, so every non-ASCII character in UTF-8). The fold is ASCII-only,
+// as PG's `downcase_identifier` is under a multibyte encoding: `CAFÉ` is `cafÉ`.
+// That rules out core's `fold: "lower"`, which is a full Unicode `toLowerCase`
+// and would make `CAFÉ` and `"cafÉ"` different names. Keywords are all ASCII, so
+// value matching in the grammar is unaffected. The raw text stays in the span.
+// Must follow every letter-prefixed literal reader, each of which declines to
+// it when no quote follows the prefix.
+const NON_ASCII = /[^\0-\x7f]/;
+const ASCII_UPPER = /[A-Z]+/g;
+const identifierReader: Reader<SqlTokenType> = readers.custom("ident", {
+  startsWith: isIdentStart,
+  display: "an identifier",
+  read: (stream) => {
+    let word = "";
+    while (isIdentCont(stream.peek())) word += stream.next();
+    // The all-ASCII word, by far the common one, folds in one native call.
+    return NON_ASCII.test(word) ? word.replace(ASCII_UPPER, (letter) => letter.toLowerCase()) : word.toLowerCase();
+  },
+});
+
+export const sqlLexer = defineLexer({
   punctuation: {
     // No character here overlaps the operator reader's `chars`, so `::` reads as
     // one cast token right next to a `||` or `@>` operator with no precedence
@@ -748,6 +787,8 @@ export const sqlLexer = defineLexer({
       invalid: "Invalid hexadecimal digit",
     }),
     unicodeStringReader,
+    nationalStringReader,
+    identifierReader,
     quotedIdentifierReader,
     readers.dollarString("string"),
     paramReader,

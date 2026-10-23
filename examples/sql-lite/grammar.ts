@@ -1680,6 +1680,32 @@ const numberNode = (text: string, span: Span, sign = ""): Extract<Expr, { kind: 
 };
 const numberLit = token("number").map((node, span): Expr => numberNode(node.value, span));
 const stringLit = token("string").map((node, span): Expr => ({ kind: "string", value: node.value, span }));
+// The expression atom's string constant: a plain `'…'` (any of the forms that
+// lex to a `string` token) or `N'abc'`, PG's national character string. The
+// national form is a `bpchar`-typed literal, which is what PG's grammar makes of
+// the NCHAR its scanner emits before the string; the lexer reads it as one
+// token spanning the `N` too, so the type's span is that one character. It is
+// accepted in expressions only, as in PG — where a bare string constant is
+// required (`COMMENT ON … IS`, option values) it is not one. One rule rather
+// than a `oneOf` of two: this sits on the path of every string in every
+// expression, and the nested dispatch measurably slowed string-heavy input.
+// Its `expected` is the plain string's, so no "Expected …" message gains an
+// entry for the national form.
+const stringConstant = custom<Expr, SqlTokenType>(
+  (ctx) => {
+    const tok = ctx.next()!;
+    const span = { ...tok.position };
+    if (tok.type === "string") return { kind: "string", value: tok.value, span };
+    const prefix = { start: span.start, end: { row: span.start.row, col: span.start.col + 1 } };
+    return {
+      kind: "typedLiteral",
+      type: { name: "bpchar", args: [], array: false, span: prefix },
+      value: tok.value,
+      span,
+    };
+  },
+  { expected: "a string", first: [{ type: "string" }, { type: "nstring" }] },
+);
 // `B'1011'` and `X'ff'` lex as token types of their own, which is what lets the
 // node record the spelling without re-reading the source. Any literal that
 // closed has had its digits checked by the lexer, leaving these plain maps; one
@@ -2273,7 +2299,7 @@ const sqlValueFunction = custom<Expr, SqlTokenType>(
 
 const atom = oneOf(
   numberLit,
-  stringLit,
+  stringConstant,
   bitStringLit,
   hexStringLit,
   boolLit,
@@ -2376,10 +2402,10 @@ const ARGS_BEFORE_TAIL: ReadonlySet<string> = new Set(["timestamp", "time"]);
 // as no token at all. Lexing is lazy, so a peek past the cursor can raise the
 // *next* token's lex error. Two things have to happen to it. Input that does not
 // lex cannot complete a lookahead pattern, so the candidate fails rather than
-// the whole rule — otherwise `diagnose("CREATE TABLE t (c timestamp with é);")`
+// the whole rule — otherwise `diagnose("CREATE TABLE t (c timestamp with \\);")`
 // reports the bad character and loses the column-definition error. But filling
 // the lookahead buffer consumes the offending character, so simply discarding
-// the error would drop it for good, and `c interval day é` would parse clean.
+// the error would drop it for good, and `c interval day \` would parse clean.
 // Hence report() — which records it in diagnose() and returns false under
 // strict parse(), where there is no collector and rethrowing is the only honest
 // answer.
@@ -2436,7 +2462,7 @@ const TYPED_LITERAL_LEADS: ReadonlySet<string> = new Set(["date", "time", "times
 // read two past its `)`), so a lex error there surfaces exactly as it always
 // did. Everything further out is lookahead the old parse need not have done,
 // and goes through peekOrReport — under diagnose() the syntax error that
-// follows (`SELECT time with time zone é;` still reports `with`) is kept.
+// follows (`SELECT time with time zone \;` still reports `with`) is kept.
 function startsTypedLiteral(ctx: ParseContext<SqlTokenType>): boolean {
   const lead = ctx.peek();
   if (lead === null || lead.type !== "ident" || !TYPED_LITERAL_LEADS.has(lead.value)) return false;

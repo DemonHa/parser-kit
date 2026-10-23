@@ -349,6 +349,8 @@ export const PG_BATTERY: BatteryRow[] = [
     ["lexical", "both", "select ID, Name from USERS where Id=1;"],
     ["lexical", "both", "SELECT data->>'k'||'x' FROM t;"],
     ["lexical", "both", "SELECT a::int+1 FROM t;"],
+    ["lexical", "sql-lite", "SELECT café, Größe AS Ünïcode FROM tàble;"],
+    ["literal", "sql-lite", "SELECT N'national', n'char';"],
   ]),
   ...section("DML", [
     ["insert", "both", "INSERT INTO users (name, email) VALUES ('alice', 'a@x.com');"],
