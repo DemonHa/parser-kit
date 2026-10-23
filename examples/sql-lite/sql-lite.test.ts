@@ -4757,6 +4757,8 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
   it("accepts N'…' only where an expression goes, as PG does", () => {
     expect(() => sqlLite.parse("COMMENT ON TABLE t IS N'x';")).toThrow(/Expected a string or "null" but found "x"/);
     expect(() => sqlLite.parse("SELECT * FROM f() AS N'x';")).toThrow(/Expected an alias but found "x"/);
+    // Nor does it follow a type word as a typed literal's string.
+    expect(() => sqlLite.parse("SELECT date N'2024-01-01';")).toThrow(/Expected ";" but found "2024-01-01"/);
   });
 
   it("croaks on an unterminated N'…', also inside a backtracking position", () => {

@@ -213,7 +213,9 @@ export type Expr =
   // `DATE '2024-01-01'`, `TIMESTAMP(3) WITH TIME ZONE '…'` — a string literal
   // prefixed by the type it is read as. `type` is the full typeRef node, so the
   // multi-word spellings and the hoisted precision come out exactly as they do
-  // in a cast. INTERVAL keeps its own node: its field spec trails the literal.
+  // in a cast. `N'…'` is one too, typed `bpchar` (PG's unconstrained NCHAR)
+  // and spanning the `N`. INTERVAL keeps its own node: its field spec trails
+  // the literal.
   | { kind: "typedLiteral"; type: ColType; value: string; span: Span }
   // `OVERLAY(value PLACING placing FROM from [FOR for_])`. The comma spelling,
   // `overlay(a, b, 1)`, stays an ordinary call node.

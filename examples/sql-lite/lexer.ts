@@ -741,6 +741,8 @@ const paramReader: Reader<SqlTokenType> = readers.custom("param", {
       while (isDecDigit(stream.peek())) name += stream.next();
       rejectJunk(stream, tokenStart, "Trailing junk after parameter");
     } else if (isIdentStart(stream.peek())) {
+      // No `$` reaches here past the name — the dollar-string reader would have
+      // claimed `$name$` — but the test keeps the two readers' names alike.
       while (isIdentCont(stream.peek()) && stream.peek() !== "$") name += stream.next();
     }
     // A bare `$` (no digits/name) isn't a parameter — restore and fall through

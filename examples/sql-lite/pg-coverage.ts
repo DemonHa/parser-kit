@@ -339,6 +339,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ["literal", "sql-lite", "SELECT 5., 1.e3;"],
     ["literal", "both", "SELECT TRUE, FALSE, NULL;"],
     ["literal", "both", "SELECT 'foo'\n'bar';"],
+    ["literal", "sql-lite", "SELECT N'national', n'char';"],
     ["lexical", "both", "SELECT 1; -- trailing comment"],
     ["lexical", "both", "/* block /* nested */ comment */ SELECT 1;"],
     ["lexical", "both", "SELECT /* inline */ 1;"],
@@ -350,7 +351,6 @@ export const PG_BATTERY: BatteryRow[] = [
     ["lexical", "both", "SELECT data->>'k'||'x' FROM t;"],
     ["lexical", "both", "SELECT a::int+1 FROM t;"],
     ["lexical", "sql-lite", "SELECT café, Größe AS Ünïcode FROM tàble;"],
-    ["literal", "sql-lite", "SELECT N'national', n'char';"],
   ]),
   ...section("DML", [
     ["insert", "both", "INSERT INTO users (name, email) VALUES ('alice', 'a@x.com');"],

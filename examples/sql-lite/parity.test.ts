@@ -331,9 +331,9 @@ const MULTI_LINE = [
 // since the prefix is case-insensitive by default and a dispatch keyed on the
 // literal prefix character would silently disable the lowercase form; doubled
 // quotes; dollar quoting; non-ASCII *inside* string and quoted-identifier
-// bodies, which pins column counting across a multi-byte run (a non-ASCII
-// character can never *start* a token in this grammar, so that path is in
-// MALFORMED below); the operator / punctuation-trie partition; and the three
+// bodies, which pins column counting across a multi-byte run (the non-ASCII
+// token-start path is in MALFORMED below, where an identifier `é` precedes a
+// bad character); the operator / punctuation-trie partition; and the three
 // letter-prefixed literal forms, whose prefixes are case-insensitive for the
 // same reason the E-string's is, and whose bodies are decoded (unicode) or
 // validated (bit / hex) before the parser ever sees them.
