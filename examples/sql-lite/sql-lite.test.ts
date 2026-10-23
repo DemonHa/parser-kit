@@ -14986,6 +14986,10 @@ describe("SQL-lite SQL/JSON functions", () => {
       entries: [{ key: str("a") }, { key: { kind: "cast", expr: name("k") } }],
     });
     expect(bad("SELECT JSON_OBJECT(CAST(k AS int)::text VALUE 1) FROM t;")).toThrow(/but found "value"/);
+    expect(bad("SELECT JSON_OBJECT(NOT EXISTS (SELECT 1) VALUE 1) FROM t;")).toThrow(/but found "value"/);
+    expect(colExpr("JSON_OBJECT(EXISTS (SELECT 1) VALUE 1, (NOT EXISTS (SELECT 1)) VALUE 2)")).toMatchObject({
+      entries: [{ key: { kind: "exists", negated: false } }, { key: { kind: "exists", negated: true } }],
+    });
   });
 
   it("parses JSON_ARRAY's value and query forms", () => {

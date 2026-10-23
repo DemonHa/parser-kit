@@ -3083,7 +3083,8 @@ function parseJsonConstructorTail(
 // expression. The operator forms' nodes are these; a parenthesised one is
 // told apart by the `)` read after its span ends. A `cast` node is a `::`
 // only when its operand starts where it does: `CAST(k AS text)` is a
-// function call to PG, and a c_expr (see isBareFuncExpr).
+// function call to PG, and a c_expr (see isBareFuncExpr). NOT folds into an
+// `exists` node, which is then a NOT expression, not a c_expr.
 const JSON_OPERATOR_KEYS: ReadonlySet<Expr["kind"]> = new Set<Expr["kind"]>([
   "unary",
   "binary",
@@ -3113,7 +3114,7 @@ function finishJsonKeyValue(ctx: ParseContext<SqlTokenType>, key: Expr): JsonKey
   const end = ctx.lastEnd();
   if (
     ctx.is("ident", "value") &&
-    JSON_OPERATOR_KEYS.has(key.kind) &&
+    (JSON_OPERATOR_KEYS.has(key.kind) || (key.kind === "exists" && key.negated)) &&
     (key.kind !== "cast" || samePosition(key.expr.span.start, key.span.start)) &&
     samePosition(end, key.span.end)
   ) {
@@ -3125,7 +3126,8 @@ function finishJsonKeyValue(ctx: ParseContext<SqlTokenType>, key: Expr): JsonKey
 
 // What an ON EMPTY or ON ERROR clause does, or null when the cursor is on no
 // behaviour word. `true`, `false`, `null` and `default` are reserved, and the
-// rest only ever reach here after a complete argument.
+// rest are read only where no name can stand: after a complete argument, a
+// JSON_TABLE column's clauses, or the `)` that closes its COLUMNS.
 const JSON_BEHAVIOR_WORDS = ["error", "null", "true", "false", "unknown", "empty", "default"];
 function parseJsonBehavior(ctx: ParseContext<SqlTokenType>): JsonBehavior | null {
   const word = ctx.eat("ident", JSON_BEHAVIOR_WORDS);
@@ -3219,8 +3221,8 @@ const takeJsonObject: JsonCallHandler = (ctx, start, call) => {
 };
 
 // JSON_ARRAY(value [FORMAT JSON], … [clauses]), JSON_ARRAY(RETURNING type) and
-// JSON_ARRAY(query [FORMAT JSON] [RETURNING type]) (see startsFormatJson). The query is PG's
-// select_no_parens, and only one that opens on a query word is read as one
+// JSON_ARRAY(query [FORMAT JSON] [RETURNING type]) (see startsFormatJson). The
+// query is PG's select_no_parens, and only one that opens on a query word is read as one
 // here: `JSON_ARRAY((SELECT 1))` is a one-element array of a scalar subquery,
 // as in PG, but so is the `(SELECT 1)` of `JSON_ARRAY((SELECT 1) UNION …)`,
 // which PG reads as a query and this grammar rejects.
@@ -3244,7 +3246,8 @@ const takeJsonArray: JsonCallHandler = (ctx, start, call) => {
     if (!ctx.is("ident", "returning")) return null;
     return { kind: "jsonArray", elements: [], ...parseJsonConstructorTail(ctx, false), span: ctx.spanFrom(start) };
   }
-  if (call.orderBy.length > 0 || !isPlainCallArgs(call) || !ctx.is("ident", JSON_ARRAY_CLAUSE_WORDS)) return null;
+  // The clause check first: the plain-arguments one walks every argument so far.
+  if (call.orderBy.length > 0 || !ctx.is("ident", JSON_ARRAY_CLAUSE_WORDS) || !isPlainCallArgs(call)) return null;
   // Every argument but the last ended on a comma, so only the last can carry a FORMAT.
   const elements = call.args.map(
     (expr, i): JsonValueExpr => (i === call.args.length - 1 ? finishJsonValue(ctx, expr) : { expr }),
@@ -3298,7 +3301,7 @@ const JSON_PATH_CALL_WORDS: Record<JsonPathKind, readonly string[]> = {
 const takeJsonPathCall =
   (kind: JsonPathKind): JsonCallHandler =>
   (ctx, start, call) => {
-    if (call === null || call.orderBy.length > 0 || !isPlainCallArgs(call)) return null;
+    if (call === null || call.args.length > 2 || call.orderBy.length > 0 || !isPlainCallArgs(call)) return null;
     let context: JsonValueExpr;
     let path: Expr;
     if (call.args.length === 1 && ctx.is("ident", "format")) {
@@ -3448,7 +3451,7 @@ function parseJsonTableCall(
   const { args, variadic, taken } = parseCallArgs<JsonTable>(ctx, {
     aggregate: false,
     takeOver: (call) => {
-      if (!isPlainCallArgs(call)) return null;
+      if (call.args.length > 2 || !isPlainCallArgs(call)) return null;
       let context: JsonValueExpr;
       let path: Expr;
       if (call.args.length === 1 && ctx.is("ident", "format")) {
