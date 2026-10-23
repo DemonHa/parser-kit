@@ -1200,6 +1200,10 @@ export type SetOpKind = "union" | "unionAll" | "intersect" | "intersectAll" | "e
 export type ValuesQuery = {
   kind: "values";
   rows: Expr[][];
+  // A leading WITH (`WITH c AS (…) VALUES …`); present only when one attaches,
+  // as on Insert.
+  with_?: Cte[];
+  recursive?: boolean;
   orderBy: OrderItem[] | null;
   limit: Expr | null;
   // `FETCH … WITH TIES`; present (and true) only when written.
@@ -1219,6 +1223,11 @@ export type SetOperation = {
   op: SetOpKind;
   left: Query;
   right: Query;
+  // A WITH written over a set operation whose leftmost arm already has one of
+  // its own — `WITH a … (WITH b … SELECT 1) UNION SELECT 2`; any other WITH
+  // over a set operation goes on its leftmost arm. Present only then.
+  with_?: Cte[];
+  recursive?: boolean;
   orderBy?: OrderItem[];
   limit?: Expr;
   withTies?: true;
@@ -1227,7 +1236,28 @@ export type SetOperation = {
   span: Span;
 };
 
-export type Query = SelectStmt | ValuesQuery | SetOperation;
+// `TABLE name` — PG's shorthand for `SELECT * FROM name`, a query in its own
+// right wherever a SELECT may stand: a statement, a set-op arm, a subquery, a
+// CTE body or an INSERT source. The name is a `relation_expr`, so it may carry
+// ONLY (`only`, present only when written) or the inheritance star, which
+// spells the default and records nothing. `with_` / `recursive` are present
+// only when a WITH prefix attaches, and each tail field only when written, as
+// on SetOperation.
+export type TableQuery = {
+  kind: "tableCmd";
+  name: string[];
+  only?: true;
+  with_?: Cte[];
+  recursive?: boolean;
+  orderBy?: OrderItem[];
+  limit?: Expr;
+  withTies?: true;
+  offset?: Expr;
+  locking?: LockingClause[];
+  span: Span;
+};
+
+export type Query = SelectStmt | ValuesQuery | TableQuery | SetOperation;
 
 // `FOR UPDATE|SHARE|NO KEY UPDATE|KEY SHARE [OF t, …] [NOWAIT|SKIP LOCKED]` — a
 // row-locking clause. A SELECT may carry several (each locks its listed tables).
@@ -1249,6 +1279,8 @@ export type SelectStmt = {
   recursive: boolean;
   // `false` = no DISTINCT, `true` = DISTINCT, `Expr[]` = DISTINCT ON (…).
   distinct: boolean | Expr[];
+  // Empty for PG's empty target list (`SELECT;`, `SELECT FROM t`), which only
+  // a SELECT without DISTINCT may have.
   columns: SelectItem[];
   // Present only when a SELECT INTO clause is written. PG's grammar admits the
   // clause on any `simple_select` — a set-op arm, a subquery, a CTE body — and
@@ -1739,12 +1771,20 @@ const exprList = delimited(P("("), P(")"), P(","), expression, { interleaved: tr
 const bareStar = token("op", { values: ["*"] }).map((_node, span): Expr => ({ kind: "star", table: null, span }));
 
 // `(` opens both `(expr)` and `(SELECT …)`; they share the first token, so the
-// atom peeks one token past it — a `select`/`with` there means a subquery. No
-// attempt() cost. (`peekAhead` doesn't skip trivia, but `sqlParseLexer` has
-// already dropped comments, so `( /* c */ SELECT` is still a subquery.)
+// atom peeks past it — a query word there (select/with/values/table, all
+// reserved, so never a column) means a subquery. No attempt() cost.
+// (`peekAhead` doesn't skip trivia, but `sqlParseLexer` has already dropped
+// comments, so `( /* c */ SELECT` is still a subquery.) A run of `(` before the
+// word holds a query only when a set operation or trailing query clause
+// continues one of the inner groups — `((SELECT 1) UNION (SELECT 2))`; anything
+// else is a parenthesised expression around a subquery, `((SELECT 1))` and
+// `((SELECT 1) + 1)` alike, read as before (see parenRunIsQuery).
 const startsQuery = (ctx: ParseContext<SqlTokenType>): boolean => {
-  const after = ctx.peekAhead(1);
-  return after !== null && after.type === "ident" && (after.value === "select" || after.value === "with");
+  let depth = 1;
+  while (isPuncToken(ctx.peekAhead(depth), "(")) depth++;
+  const word = ctx.peekAhead(depth);
+  if (word?.type !== "ident" || !QUERY_WORDS.has(word.value)) return false;
+  return depth === 1 || parenRunIsQuery(ctx, depth, true);
 };
 const isSubqueryParen = (ctx: ParseContext<SqlTokenType>): boolean => ctx.is("punc", "(") && startsQuery(ctx);
 const parenQuery = seq(skip(punc("(")), field("q", query), skip(punc(")"))).map((s) => s.q);
@@ -7378,7 +7418,7 @@ function insertQueryTail(ctx: ParseContext<SqlTokenType>, node: Query, tail: Que
     const { orderBy: _o, limit: _l, withTies: _w, offset: _f, locking: _k, span: _s, ...head } = node;
     out = { ...head, orderBy, limit, ...(withTies && { withTies: true }), offset, locking, span };
   } else if (node.kind === "values") {
-    const { kind, rows } = node;
+    const { kind, rows, with_, recursive } = node;
     out = {
       kind,
       rows,
@@ -7388,9 +7428,24 @@ function insertQueryTail(ctx: ParseContext<SqlTokenType>, node: Query, tail: Que
       offset,
       ...(locking !== null && { locking }),
       span,
+      ...(with_ !== undefined && { with_, recursive }),
+    };
+  } else if (node.kind === "tableCmd") {
+    const { kind, name, only, with_, recursive } = node;
+    out = {
+      kind,
+      name,
+      ...(only && { only }),
+      ...(orderBy !== null && { orderBy }),
+      ...(limit !== null && { limit }),
+      ...(withTies && { withTies: true }),
+      ...(offset !== null && { offset }),
+      ...(locking !== null && { locking }),
+      span,
+      ...(with_ !== undefined && { with_, recursive }),
     };
   } else {
-    const { kind, op, left, right } = node;
+    const { kind, op, left, right, with_, recursive } = node;
     out = {
       kind,
       op,
@@ -7402,9 +7457,11 @@ function insertQueryTail(ctx: ParseContext<SqlTokenType>, node: Query, tail: Que
       ...(offset !== null && { offset }),
       ...(locking !== null && { locking }),
       span,
+      ...(with_ !== undefined && { with_, recursive }),
     };
   }
   if (limitWritten || tail.limit !== null) writtenLimit.add(out);
+  if (withOwners.has(node)) withOwners.add(out);
   return out;
 }
 
@@ -7613,7 +7670,8 @@ function parseParenSubquery(ctx: ParseContext<SqlTokenType>, lateral: boolean): 
   return { kind: "subquery", query: q, alias, ...(columns !== null && { columns }), ...(lateral && { lateral: true }) };
 }
 
-const QUERY_WORDS: ReadonlySet<string> = new Set(["select", "with", "values"]);
+// The reserved words a query can open with.
+const QUERY_WORDS: ReadonlySet<string> = new Set(["select", "with", "values", "table"]);
 // The reserved words a FROM item can open with.
 const FROM_LEAD_WORDS: ReadonlySet<string> = new Set(["lateral", "only"]);
 // The words that continue a parenthesised query in PG — set-ops and the
@@ -7634,8 +7692,11 @@ const isPuncToken = (tok: Token<SqlTokenType> | null, value: string): boolean =>
 
 // Whether a run of `depth` `(` ahead of a query word opens a query (see
 // parenFromItem). A level whose `)` never arrives before the statement's `;`
-// reads as a query, keeping the query reading's error.
-function parenRunIsQuery(ctx: ParseContext<SqlTokenType>, depth: number): boolean {
+// reads as a query, keeping the query reading's error. With `continued`, a
+// query also needs some inner group followed by a set-op word or a trailing
+// query clause rather than by `)` alone, and an unclosed level ends the scan
+// with that verdict (see startsQuery).
+function parenRunIsQuery(ctx: ParseContext<SqlTokenType>, depth: number, continued = false): boolean {
   const closeAt: number[] = [];
   const open: number[] = [];
   for (let i = 0, tok = ctx.peekAhead(0); tok !== null; tok = ctx.peekAhead(++i)) {
@@ -7648,22 +7709,22 @@ function parenRunIsQuery(ctx: ParseContext<SqlTokenType>, depth: number): boolea
       if (at === 0) break;
     }
   }
-  if (closeAt[0] === undefined) return true;
+  if (closeAt[0] === undefined && !continued) return true;
+  let sawTail = false;
   for (let level = depth - 1; level >= 1; level--) {
     const close = closeAt[level];
-    if (close === undefined) return true;
+    if (close === undefined) return !continued || sawTail;
     const after = ctx.peekAhead(close + 1);
-    if (after !== null && !isPuncToken(after, ")") && !(after.type === "ident" && QUERY_TAIL_WORDS.has(after.value))) {
-      return false;
-    }
+    if (after?.type === "ident" && QUERY_TAIL_WORDS.has(after.value)) sawTail = true;
+    else if (after !== null && !isPuncToken(after, ")")) return false;
   }
-  return true;
+  return !continued || sawTail;
 }
 
 // A `(` in FROM opens either a subquery or a parenthesised join, and a run of
 // them can stack either way: `((SELECT 1) UNION (SELECT 2)) x` is a subquery,
 // `((SELECT 1) s JOIN t ON …)` a join. So the dispatch scans past the run: with
-// no query word (select/with/values, all reserved) after it, only a join can
+// no query word (select/with/values/table, all reserved) after it, only a join can
 // follow. With one, the innermost group is a query, and each enclosing group is
 // one too only while the group it holds is a query followed by `)`, a set-op
 // word or a trailing query clause — anything else there follows a FROM item,
@@ -7882,14 +7943,48 @@ const intoClause = custom<SelectInto, SqlTokenType>(
   { expected: '"into"', first: [{ type: "ident", value: "into" }] },
 );
 
+// PG's `opt_target_list`: after SELECT [ALL] the list may be empty —
+// `SELECT;`, `SELECT FROM t`, `SELECT 1 UNION SELECT` — while DISTINCT takes a
+// non-empty `target_list`. The list is empty when the token after the
+// quantifier ends the query or opens a clause that follows the list; all of
+// those words are reserved, so none of them starts a select item.
+const TARGET_LIST_FOLLOW_WORDS: ReadonlySet<string> = new Set([
+  "into",
+  "from",
+  "where",
+  "group",
+  "having",
+  "window",
+  ...QUERY_TAIL_WORDS,
+  // What may follow a whole query: INSERT's ON CONFLICT and RETURNING, and the
+  // WITH [NO] DATA / WITH CHECK OPTION after CREATE … AS.
+  "on",
+  "returning",
+  "with",
+]);
+const selectItems = sepBy(selectItem, P(","));
+const selectHead = custom<{ distinct: boolean | Expr[]; columns: SelectItem[] }, SqlTokenType>(
+  (ctx) => {
+    const distinct = ctx.parse(distinctClause);
+    const next = ctx.peek();
+    const empty =
+      distinct === false &&
+      (next === null ||
+        isPuncToken(next, ";") ||
+        isPuncToken(next, ")") ||
+        (next.type === "ident" && TARGET_LIST_FOLLOW_WORDS.has(next.value)));
+    return { distinct, columns: empty ? [] : ctx.parse(selectItems) };
+  },
+  { expected: selectItems.expected(), first: [...distinctClause.first(), ...selectItems.first()] },
+);
+
 // PG's `simple_select` SELECT: everything up to the WINDOW clause. The ORDER BY
 // / LIMIT / OFFSET / FETCH / locking tail is a query-level clause — read once
 // after the set operations (see setOpQuery) — so that a set-op arm never takes
 // it. The tail fields start out empty and are filled in by insertQueryTail.
 const selectCore = seq(
   skip(kw("select")),
-  field("distinct", distinctClause),
-  field("columns", sepBy(selectItem, P(","))),
+  field("head", selectHead),
   field("into", optional(intoClause)),
   field("from", optional(seq(skip(kw("from")), field("f", fromClause)).map((s) => s.f))),
   field("where", optional(whereClause)),
@@ -7897,7 +7992,7 @@ const selectCore = seq(
   field("having", optional(havingClause)),
   field("window", optional(windowClause)),
 ).map(
-  ({ distinct, columns, into, from, where, groupBy, having, window: windowDefs }, span): SelectStmt => ({
+  ({ head: { distinct, columns }, into, from, where, groupBy, having, window: windowDefs }, span): SelectStmt => ({
     kind: "select",
     with_: null,
     recursive: false,
@@ -7920,7 +8015,8 @@ const selectCore = seq(
 
 // A CTE body is a full query or a data-modifying statement. Dispatch on the
 // leading keyword (INSERT/UPDATE/DELETE/MERGE take their dedicated rules);
-// anything else — SELECT / VALUES / `(` / a nested WITH — is an ordinary query.
+// anything else — SELECT / VALUES / TABLE / `(` / a nested WITH — is an
+// ordinary query.
 const cteBody = custom<Preparable, SqlTokenType>(
   (ctx) => {
     if (ctx.is("ident", "insert")) return ctx.parse(insertStmt);
@@ -7939,6 +8035,7 @@ const cteBody = custom<Preparable, SqlTokenType>(
       { type: "ident", value: "with" },
       { type: "ident", value: "select" },
       { type: "ident", value: "values" },
+      { type: "ident", value: "table" },
       { type: "punc", value: "(" },
     ],
   },
@@ -8008,20 +8105,33 @@ const withPrefix = seq(
     optional(kw("recursive")).map((x) => x !== null),
   ),
   field("ctes", sepBy(cte, P(","))),
-).map(({ recursive, ctes }) => ({ recursive, ctes }));
+).map(({ recursive, ctes }, span) => ({ recursive, ctes, span }));
 
 // Attach a parsed WITH prefix to the statement it leads: for a set-op query the
-// CTEs bind to the leftmost SELECT; an INSERT/UPDATE/DELETE/MERGE takes them
-// directly.
-// A bare VALUES query has nowhere to hang CTEs, so croak rather than drop them.
+// CTEs bind to the leftmost arm — a SELECT, VALUES or TABLE query; an
+// INSERT/UPDATE/DELETE/MERGE takes them directly. A parenthesised query that
+// was written with a WITH of its own can't take a second one, as in PG's
+// insertSelectOptions — whatever node its WITH landed on, so the queries a WITH
+// was written over are tracked in `withOwners`. Under a set operation PG's WITH
+// belongs to the set-op node, so an arm's own WITH is no conflict there: when
+// the leftmost path already holds one, the outer WITH goes on the set-op node
+// itself rather than replacing it.
+const withOwners = new WeakSet<Preparable>();
+const hasWith = (node: Preparable): boolean => node.with_ !== null && node.with_ !== undefined;
 const attachWith = (
   ctx: ParseContext<SqlTokenType>,
   node: Preparable,
-  w: { recursive: boolean; ctes: Cte[] },
+  w: { recursive: boolean; ctes: Cte[]; span: Span },
 ): void => {
+  if (withOwners.has(node)) ctx.croak("multiple WITH clauses not allowed", w.span.start, w.span.end);
+  withOwners.add(node);
   let target: Preparable = node;
-  while (target.kind === "setOp") target = target.left;
-  if (target.kind === "values") ctx.croak("WITH must attach to a SELECT, INSERT, UPDATE, DELETE or MERGE");
+  let taken = false;
+  while (target.kind === "setOp") {
+    taken ||= hasWith(target);
+    target = target.left;
+  }
+  if (taken || hasWith(target)) target = node;
   target.with_ = w.ctes;
   target.recursive = w.recursive;
 };
@@ -8040,11 +8150,30 @@ const valuesQuery = seq(skip(kw("values")), field("rows", sepBy(exprList, P(",")
   }),
 );
 
-// A set-op term: a plain SELECT core, a VALUES query, or a parenthesised query
-// (which, being a full query, may carry a tail of its own inside the parens).
+// `TABLE [ONLY] name [*]` / `TABLE ONLY (name)` — PG's `TABLE relation_expr`.
+// `table` is reserved, and no statement or clause that reaches a query reads
+// it there for anything else, so it opens this form wherever a query starts.
+const tableQuery = custom<TableQuery, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("table"));
+    const only = ctx.eat("ident", "only") !== null;
+    const parenthesised = only && ctx.eat("punc", "(") !== null;
+    const name = ctx.parse(qualName);
+    if (parenthesised) expectClose(ctx);
+    else if (!only) ctx.eat("op", "*"); // the inheritance star spells the default
+    return { kind: "tableCmd", name, ...(only && { only: true }), span: ctx.spanFrom(start) };
+  },
+  { expected: '"table"', first: [{ type: "ident", value: "table" }] },
+);
+
+// A set-op term: a plain SELECT core, a VALUES or TABLE query, or a
+// parenthesised query (which, being a full query, may carry a tail of its own
+// inside the parens).
 const selectTerm: Rule<Query, SqlTokenType> = oneOf(
   selectCore,
   valuesQuery,
+  tableQuery,
   seq(skip(punc("(")), field("q", query), skip(punc(")"))).map((s) => s.q),
 );
 
@@ -8100,14 +8229,14 @@ const setOpQuery = custom<Query, SqlTokenType>(
     first: [
       { type: "ident", value: "select" },
       { type: "ident", value: "values" },
+      { type: "ident", value: "table" },
       { type: "punc", value: "(" },
     ],
   },
 );
 
-// A leading WITH attaches to the leftmost SELECT of the set-op tree (see
-// attachWith). A VALUES query as the target isn't supported (WITH before VALUES
-// is rare), so croak rather than silently drop the CTEs.
+// A leading WITH attaches to the leftmost arm of the set-op tree (see
+// attachWith).
 const queryRule = custom<Query, SqlTokenType>(
   (ctx) => {
     const w = ctx.is("ident", "with") ? ctx.parse(withPrefix) : null;
@@ -8121,6 +8250,7 @@ const queryRule = custom<Query, SqlTokenType>(
       { type: "ident", value: "with" },
       { type: "ident", value: "select" },
       { type: "ident", value: "values" },
+      { type: "ident", value: "table" },
       { type: "punc", value: "(" },
     ],
   },
@@ -8135,7 +8265,8 @@ const valuesSource = seq(skip(kw("values")), field("rows", sepBy(insertValuesRow
 }));
 // A dedicated dispatch (not oneOf) because `query` now claims `values` in its
 // first set too — a bare `VALUES …` is the INSERT-local rows source (no ORDER
-// BY / LIMIT tail), everything else (`SELECT …`, `(…)`, `WITH …`) is a query.
+// BY / LIMIT tail), everything else (`SELECT …`, `TABLE …`, `(…)`, `WITH …`)
+// is a query.
 const insertSource = custom<Insert["source"], SqlTokenType>(
   (ctx) => (ctx.is("ident", "values") ? ctx.parse(valuesSource) : { kind: "select", query: ctx.parse(query) }),
   {
@@ -8143,6 +8274,7 @@ const insertSource = custom<Insert["source"], SqlTokenType>(
     first: [
       { type: "ident", value: "values" },
       { type: "ident", value: "select" },
+      { type: "ident", value: "table" },
       { type: "ident", value: "with" },
       { type: "punc", value: "(" },
     ],
@@ -8430,8 +8562,9 @@ const mergeStmt = custom<Merge, SqlTokenType>(
 );
 
 // A DML statement, optionally led by a WITH prefix: `[WITH …]
-// SELECT|VALUES|(…)|INSERT|UPDATE|DELETE|MERGE`. The CTE list can precede any of these,
-// so it must be consumed before dispatch, then attached to the head statement.
+// SELECT|VALUES|TABLE|(…)|INSERT|UPDATE|DELETE|MERGE`. The CTE list can precede
+// any of these, so it must be consumed before dispatch, then attached to the
+// head statement.
 // The no-WITH query path goes straight to setOpQuery (queryRule's own WITH
 // handling would be redundant here).
 const dmlStatement = custom<Stmt, SqlTokenType>(
@@ -8456,6 +8589,7 @@ const dmlStatement = custom<Stmt, SqlTokenType>(
       { type: "ident", value: "merge" },
       { type: "ident", value: "select" },
       { type: "ident", value: "values" },
+      { type: "ident", value: "table" },
       { type: "punc", value: "(" },
     ],
   },
@@ -8478,10 +8612,10 @@ function optParenList<T>(ctx: ParseContext<SqlTokenType>, list: Rule<T[], SqlTok
 }
 
 // PG's PreparableStmt: a query or INSERT/UPDATE/DELETE/MERGE, each with an
-// optional WITH prefix — exactly dmlStatement's first set (PG's `TABLE name`
-// aside, which sql-lite doesn't parse; PREPARE should take it once it does).
-// Checked up front so a DDL or utility body reports what PREPARE accepts rather
-// than dmlStatement's generic "a statement" (which CREATE TABLE is).
+// optional WITH prefix — exactly dmlStatement's first set (the message counts
+// `TABLE name` among the SELECTs, as PG's grammar does). Checked up front so a
+// DDL or utility body reports what PREPARE accepts rather than dmlStatement's
+// generic "a statement" (which CREATE TABLE is).
 const PREPARABLE = "a SELECT, VALUES, INSERT, UPDATE, DELETE or MERGE statement";
 const PREPARABLE_FIRST = dmlStatement.first();
 const prepareStmt = custom<Stmt, SqlTokenType>(
@@ -8609,11 +8743,11 @@ function explainable(ctx: ParseContext<SqlTokenType>): Explain["statement"] {
 
 // A `(` after EXPLAIN opens the option list unless a query follows it: PG reads
 // `EXPLAIN (SELECT 1)` as the parenthesised query, since no option is named
-// `select`, `values` or `with`, nor opens with a `(`.
+// after a query word (all reserved), nor opens with a `(`.
 function opensQuery(tok: Token<SqlTokenType> | null): boolean {
   if (tok === null) return false;
   if (tok.type === "punc") return tok.value === "(";
-  return tok.type === "ident" && (tok.value === "select" || tok.value === "values" || tok.value === "with");
+  return tok.type === "ident" && QUERY_WORDS.has(tok.value);
 }
 
 const explainStmt = custom<Stmt, SqlTokenType>(
@@ -8746,7 +8880,6 @@ const declareCursorStmt = custom<Stmt, SqlTokenType>(
     ctx.parse(kw("for"));
     // Checked up front, as PREPARE's body is, so a non-query body reports what
     // DECLARE accepts rather than setOpQuery's narrower first set (no `with`).
-    // PG's `TABLE name` body aside, which sql-lite doesn't parse yet.
     if (!matchesFirst(ctx.peek(), QUERY_FIRST)) {
       return ctx.croak(`Expected a query but found ${describeFound(ctx.peek())}`);
     }
@@ -8878,8 +9011,8 @@ const copyStmt = custom<Stmt, SqlTokenType>(
 );
 
 // First-sets: the DDL and utility rules each dispatch on their own lead keyword;
-// dmlStatement owns `with`/`select`/`values`/`(`/`insert`/`update`/`delete`/
-// `merge`.
+// dmlStatement owns `with`/`select`/`values`/`table`/`(`/`insert`/`update`/
+// `delete`/`merge`.
 //
 // Three named groups rather than one flat list, so each family has its own place
 // to grow. Nesting is dispatch- and validation-equivalent to the flat form —
