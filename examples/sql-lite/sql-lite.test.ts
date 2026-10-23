@@ -1708,6 +1708,279 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
   });
 });
 
+// --- SQL-standard routine bodies ---
+
+// PG 14+'s opt_routine_body: `RETURN expr` or `BEGIN ATOMIC stmt; … END` in
+// place of `AS 'definition'`, on CREATE FUNCTION and CREATE PROCEDURE. The body
+// is SQL, so it is parsed, and it reads its own `;`s and END.
+describe("SQL-lite SQL-standard routine bodies", () => {
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const ret = (expr: unknown) => ({ kind: "return", expr });
+  const atomic = (...statements: unknown[]) => ({ kind: "atomic", statements });
+  const fn = (body: unknown, over: Record<string, unknown> = {}) => ({
+    kind: "createFunction",
+    orReplace: false,
+    name: ["f"],
+    args: [],
+    returns: { kind: "type", setof: false, type: ct("int") },
+    options: [{ kind: "language", name: "sql" }],
+    body,
+    ...over,
+  });
+
+  it("parses RETURN expr as a function body", () => {
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int LANGUAGE sql RETURN 1 + 2;")).toEqual(
+      fn(ret(bin("+", num(1), num(2)))),
+    );
+    // Options may precede it in any order, and RETURNS may be left out.
+    expect(firstStmt("CREATE OR REPLACE FUNCTION s.f(x int) IMMUTABLE RETURN x * x")).toEqual(
+      fn(ret(bin("*", name("x"), name("x"))), {
+        orReplace: true,
+        name: ["s", "f"],
+        args: [{ mode: null, name: "x", type: ct("int"), defaultValue: null }],
+        returns: null,
+        options: [{ kind: "volatility", value: "immutable" }],
+      }),
+    );
+  });
+
+  it("parses a BEGIN ATOMIC body of several statements, an inner RETURN among them", () => {
+    const [stmt, after] = parse(
+      "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC INSERT INTO t VALUES (1); UPDATE t SET a = 2; SELECT CASE WHEN a THEN 1 END FROM t; RETURN 3; END; SELECT 1;",
+    );
+    expect(stmt).toEqual(
+      fn(
+        atomic(
+          firstStmt("INSERT INTO t VALUES (1);"),
+          firstStmt("UPDATE t SET a = 2;"),
+          firstStmt("SELECT CASE WHEN a THEN 1 END FROM t;"),
+          ret(num(3)),
+        ),
+      ),
+    );
+    expect(after).toEqual(firstStmt("SELECT 1;"));
+  });
+
+  it("parses BEGIN ATOMIC on a procedure, and an empty body", () => {
+    expect(firstStmt("CREATE PROCEDURE p(a int) LANGUAGE sql BEGIN ATOMIC DELETE FROM t WHERE x = a; END;")).toEqual({
+      kind: "createProcedure",
+      orReplace: false,
+      name: ["p"],
+      args: [{ mode: null, name: "a", type: ct("int"), defaultValue: null }],
+      options: [{ kind: "language", name: "sql" }],
+      body: atomic(firstStmt("DELETE FROM t WHERE x = a;")),
+    });
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC END")).toEqual(fn(atomic()));
+    // Empty statements inside the body yield nothing, as at the top level.
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC ; SELECT 1;; END;")).toEqual(
+      fn(atomic(firstStmt("SELECT 1;"))),
+    );
+  });
+
+  it("nests transaction control and routines inside a body", () => {
+    expect(
+      firstStmt(
+        "CREATE PROCEDURE p() BEGIN ATOMIC START TRANSACTION; COMMIT; CREATE FUNCTION g() RETURNS int BEGIN ATOMIC RETURN 1; END; END;",
+      ).body,
+    ).toEqual(
+      atomic(firstStmt("START TRANSACTION;"), firstStmt("COMMIT;"), {
+        ...fn(atomic(ret(num(1)))),
+        name: ["g"],
+        options: [],
+      }),
+    );
+  });
+
+  it("omits body for an AS definition, and keeps a statement-level END a COMMIT", () => {
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1';")).not.toHaveProperty("body");
+    expect(firstStmt("CREATE PROCEDURE p() LANGUAGE sql AS 'SELECT 1';")).not.toHaveProperty("body");
+    expect(parse("BEGIN; SELECT 1; END;")).toEqual([
+      { kind: "begin", start: false, modes: [] },
+      firstStmt("SELECT 1;"),
+      { kind: "commit", chain: false },
+    ]);
+    expect(parse("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1; END; END;")[1]).toEqual({
+      kind: "commit",
+      chain: false,
+    });
+  });
+
+  it("spans the body from its first word through RETURN's expression or END", () => {
+    const sql = "CREATE FUNCTION f() RETURNS int\nBEGIN ATOMIC\n  SELECT 1;\n  RETURN 2;\nEND;";
+    const [stmt] = sqlLite.parse(sql) as any[];
+    expect(stmt.span.end).toEqual({ row: 5, col: 3 });
+    expect(stmt.body.span).toEqual({ start: { row: 2, col: 0 }, end: { row: 5, col: 3 } });
+    expect(stmt.body.statements[0].span).toEqual({ start: { row: 3, col: 2 }, end: { row: 3, col: 10 } });
+    expect(stmt.body.statements[1].span).toEqual({ start: { row: 4, col: 2 }, end: { row: 4, col: 10 } });
+    const [single] = sqlLite.parse("CREATE FUNCTION f() RETURN a + 1;") as any[];
+    expect(single.body.span).toEqual({ start: { row: 1, col: 20 }, end: { row: 1, col: 32 } });
+  });
+
+  it("rejects a body alongside AS, and a body left open", () => {
+    expect(bad("CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1' RETURN 1;")).toThrow(
+      /A routine cannot have both AS and a SQL-standard body/,
+    );
+    expect(bad("CREATE PROCEDURE p() AS 'x' BEGIN ATOMIC END;")).toThrow(/both AS and a SQL-standard body/);
+    // The body is last: AS after it is no option.
+    expect(bad("CREATE FUNCTION f() RETURN 1 AS 'x';")).toThrow(/Expected ";" but found "as"/);
+    expect(bad("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1;")).toThrow(
+      /Expected "end", "return" or a statement but found end of input/,
+    );
+    // Every inner statement ends with `;`, the last one too.
+    expect(bad("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1 END;")).toThrow(/Expected ";" but found "end"/);
+    expect(bad("CREATE FUNCTION f() RETURNS int RETURN;")).toThrow(/but found ";"/);
+  });
+
+  it("rejects BEGIN inside a body, as PG's routine_body_stmt does", () => {
+    expect(bad("CREATE PROCEDURE p() BEGIN ATOMIC BEGIN; END;")).toThrow(
+      /Expected "end", "return" or a statement but found "begin"/,
+    );
+    // Only a body can follow the options, so BEGIN must open one.
+    expect(bad("CREATE FUNCTION f() RETURNS int BEGIN SELECT 1; END;")).toThrow(/Expected "atomic" but found "select"/);
+  });
+
+  it("keeps begin, atomic and return unreserved as names and aliases", () => {
+    for (const word of ["begin", "atomic", "return"]) {
+      expect(firstStmt(`SELECT ${word}, x ${word} FROM ${word};`)).toEqual(
+        sel({
+          columns: [col(name(word)), col(name("x"), word)],
+          from: [tableFrom([word])],
+        }),
+      );
+      expect(firstStmt(`CREATE TABLE t (${word} int);`).items[0].name).toBe(word);
+    }
+    // As the routine's name, and as names inside its body.
+    expect(firstStmt("CREATE FUNCTION atomic(return int) RETURN return;")).toMatchObject({
+      name: ["atomic"],
+      body: ret(name("return")),
+    });
+  });
+
+  it("parses a body in a psql script without splitting it at its `;`s", () => {
+    const routine = "CREATE PROCEDURE p() BEGIN ATOMIC INSERT INTO t VALUES (1); SELECT 1; END;";
+    const text = `${routine}\n\\connect db\nSELECT 2;\nEND;`;
+    const items = stripSpans(sqlLiteScript.parse(text));
+    expect(items).toEqual([
+      firstStmt(routine),
+      { kind: "psqlMeta", command: "connect", args: "db" },
+      firstStmt("SELECT 2;"),
+      { kind: "commit", chain: false },
+    ]);
+    expect(stripSpans(sqlLiteScript.diagnose(text).ast)).toEqual(items);
+    // A COPY … FROM STDIN inside a body is part of the routine, so the lines
+    // after it are SQL, not COPY rows (psql's heuristic too). A COPY after the
+    // routine still takes its rows, CASE … END and parentheses in the body
+    // notwithstanding.
+    const replace = "CREATE OR REPLACE PROCEDURE p() BEGIN ATOMIC SELECT (CASE WHEN a THEN 1 END), f(end_); END;";
+    expect(stripSpans(sqlLiteScript.parse(`${replace}\nCOPY t FROM stdin;\n1\n\\.\nSELECT 2;`))).toEqual([
+      firstStmt(replace),
+      { ...firstStmt("COPY t FROM stdin;"), data: "1\n" },
+      firstStmt("SELECT 2;"),
+    ]);
+    expect(
+      stripSpans(sqlLiteScript.parse("CREATE PROCEDURE p() BEGIN ATOMIC COPY t FROM stdin; END;\nSELECT 2;")),
+    ).toEqual([firstStmt("CREATE PROCEDURE p() BEGIN ATOMIC COPY t FROM stdin; END;"), firstStmt("SELECT 2;")]);
+  });
+
+  // diagnose() resumes inside a broken body, after the bad statement's `;`
+  // (or at the body's END), so the routine keeps the rest of its body.
+  it("recovers inside a broken body in diagnose", () => {
+    const body = (text: string) => {
+      const { ast, errors } = sqlLite.diagnose(`${text}\nSELECT 3;`);
+      return { ast: stripSpans(ast), messages: errors.map((error) => error.message.replace(/ \(.*$/, "")) };
+    };
+    expect(body("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT FROM WHERE; SELECT 2; END;")).toEqual({
+      ast: [{ ...fn(atomic(firstStmt("SELECT 2;"))), options: [] }, firstStmt("SELECT 3;")],
+      messages: [expect.stringMatching(/^Expected/)],
+    });
+    // A CASE … END in the bad statement is skipped whole, opened before the
+    // error or after it; a missing `;` stops at the body's END.
+    for (const broken of ["SELECT CASE WHEN THEN 1 END;", "SELECT CASE WHEN a THEN 1 + END;", "SELECT 1 + + ;"]) {
+      expect(body(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${broken} SELECT 2; END;`)).toEqual({
+        ast: [{ ...fn(atomic(firstStmt("SELECT 2;"))), options: [] }, firstStmt("SELECT 3;")],
+        messages: [expect.stringMatching(/^Expected/)],
+      });
+    }
+    expect(body("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 2; SELECT 1 END;")).toEqual({
+      ast: [{ ...fn(atomic(firstStmt("SELECT 2;"), firstStmt("SELECT 1;"))), options: [] }, firstStmt("SELECT 3;")],
+      messages: ['Expected ";" but found "end"'],
+    });
+    // AS alongside a body is reported, and the routine kept.
+    expect(body("CREATE FUNCTION f() RETURNS int AS 'x' BEGIN ATOMIC SELECT 1; END;")).toEqual({
+      ast: [
+        {
+          ...fn(atomic(firstStmt("SELECT 1;"))),
+          options: [{ kind: "as", parts: ["x"] }],
+        },
+        firstStmt("SELECT 3;"),
+      ],
+      messages: ["A routine cannot have both AS and a SQL-standard body"],
+    });
+  });
+
+  it("keeps a body cut short by a meta-command line, reporting it once", () => {
+    const { ast, errors } = sqlLiteScript.diagnose(
+      "CREATE PROCEDURE p() BEGIN ATOMIC SELECT 1;\n\\connect db\nSELECT 2;",
+    );
+    expect(stripSpans(ast)).toEqual([
+      firstStmt("CREATE PROCEDURE p() BEGIN ATOMIC SELECT 1; END;"),
+      { kind: "psqlMeta", command: "connect", args: "db" },
+      firstStmt("SELECT 2;"),
+    ]);
+    expect(errors.map((error) => error.message)).toEqual([
+      'Expected "end", "return" or a statement but found "\\connect db" (2:0)',
+    ]);
+  });
+
+  it("reports a lexer error in a body as it would outside one", () => {
+    const fails = (inner: string) => () => sqlLite.parse(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${inner} END;`);
+    expect(fails("SELECT 1 \\ + 2;")).toThrow(/Unexpected character "\\"/);
+    expect(fails("SELECT 1; SELECT \\ 2;")).toThrow(/Unexpected character "\\"/);
+    expect(fails("SELECT 'abc;")).toThrow(/Unterminated/);
+    // Inside a backtracking branch too.
+    expect(fails("INSERT INTO t (a, X'G1') VALUES (1);")).toThrow(/Invalid hexadecimal digit "G"/);
+    // A parser error before the bad text still comes first.
+    expect(fails("SELECT 1 + + ) 'abc;")).toThrow(/but found "\)"/);
+    const errorsOf = (text: string) => {
+      const { ast, errors } = sqlLite.diagnose(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${text} END;\nSELECT 4;`);
+      return { ast: stripSpans(ast), messages: errors.map((error) => error.message.replace(/ \(.*$/, "")) };
+    };
+    const kept = (...statements: unknown[]) => [{ ...fn(atomic(...statements)), options: [] }, firstStmt("SELECT 4;")];
+    expect(errorsOf("SELECT 1 \\ + 2; SELECT 3;")).toEqual({
+      ast: kept(firstStmt("SELECT 3;")),
+      messages: ['Unexpected character "\\"'],
+    });
+    // `SELECT` is whole before the `)`, so it is kept, as a statement missing its `;` is.
+    expect(errorsOf("SELECT ) \\ 1; SELECT 3;")).toEqual({
+      ast: kept(firstStmt("SELECT;"), firstStmt("SELECT 3;")),
+      messages: [expect.stringMatching(/but found "\)"/), 'Unexpected character "\\"'],
+    });
+    expect(errorsOf("SELECT $1a \\ ; SELECT 3;").messages).toEqual([
+      "Trailing junk after parameter",
+      'Unexpected character "\\"',
+    ]);
+    // In a nested routine's body, the inner body recovers.
+    expect(errorsOf("CREATE FUNCTION g() RETURNS int BEGIN ATOMIC SELECT \\ ); END; SELECT 3;")).toEqual({
+      ast: kept({ ...fn(atomic()), name: ["g"], options: [] }, firstStmt("SELECT 3;")),
+      messages: ['Unexpected character "\\"'],
+    });
+  });
+
+  it("parses a column named begin in a body, which psql's heuristic miscounts", () => {
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT begin FROM t; RETURN 1; END;").body).toEqual(
+      atomic(firstStmt("SELECT begin FROM t;"), ret(num(1))),
+    );
+  });
+
+  it("reports a body left open at end of input and keeps the routine", () => {
+    const { ast, errors } = sqlLite.diagnose("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1;");
+    expect(stripSpans(ast)).toEqual([{ ...fn(atomic(firstStmt("SELECT 1;"))), options: [] }]);
+    expect(errors.map((error) => error.message)).toEqual([
+      'Expected "end", "return" or a statement but found end of input (1:54)',
+    ]);
+  });
+});
+
 // --- operator precedence among the tight tiers ---
 
 // PostgreSQL's gram.y orders these, loosest first: `^` < AT < COLLATE < unary

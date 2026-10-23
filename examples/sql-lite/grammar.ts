@@ -28,7 +28,7 @@ import {
   skip,
   type Token,
 } from "@parser-kit/core";
-import { copyDataError, type SqlTokenType, sqlParseLexer, sqlScriptParseLexer } from "./lexer";
+import { copyDataError, routineDepth, type SqlTokenType, sqlParseLexer, sqlScriptParseLexer } from "./lexer";
 
 // SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
@@ -1051,7 +1051,9 @@ export type CreateTableAs = {
 // --- Phase 8: functions / aggregates / triggers ---
 // The routine body (`AS $$…$$` / plpgsql) is kept OPAQUE — the dollar-quoted
 // string lexes as one `string` token and we store its inner text verbatim rather
-// than parsing plpgsql, matching node-sql-parser's practical depth.
+// than parsing plpgsql, matching node-sql-parser's practical depth. A
+// SQL-standard body (`RETURN expr`, `BEGIN ATOMIC … END`) is SQL, so it is
+// parsed (`RoutineBody`).
 
 // One argument of a function/aggregate signature: `[mode] [name] type [DEFAULT
 // expr]`. `mode` and `name` are null when absent; both are recovered by a small
@@ -1151,7 +1153,16 @@ export type FunctionOption =
   | { kind: "window" }
   | { kind: "set"; parameter: string; value: FunctionSetValue };
 
-// `CREATE [OR REPLACE] FUNCTION name (args) [RETURNS …] option*`.
+// `RETURN expr`: a SQL-standard routine body of its own, or one statement of
+// a `BEGIN ATOMIC` body.
+export type RoutineReturn = { kind: "return"; expr: Expr; span: Span };
+
+// A routine's SQL-standard body (PG 14+), in place of `AS 'definition'`:
+// `RETURN expr`, or `BEGIN ATOMIC stmt; … END` (`statements` may be empty).
+export type RoutineBody = RoutineReturn | { kind: "atomic"; statements: (Stmt | RoutineReturn)[]; span: Span };
+
+// `CREATE [OR REPLACE] FUNCTION name (args) [RETURNS …] option* [body]`.
+// `body` is omitted when absent.
 export type CreateFunction = {
   kind: "createFunction";
   orReplace: boolean;
@@ -1159,18 +1170,21 @@ export type CreateFunction = {
   args: FunctionArg[];
   returns: FunctionReturns | null;
   options: FunctionOption[];
+  body?: RoutineBody;
   span: Span;
 };
 
 // `CREATE [OR REPLACE] PROCEDURE name (args) option*` — a function with no
 // RETURNS, whose options are those of CREATE FUNCTION's that PG also admits on
-// a procedure (LANGUAGE, AS, [EXTERNAL] SECURITY and SET).
+// a procedure (LANGUAGE, AS, [EXTERNAL] SECURITY and SET). `body` is as
+// CREATE FUNCTION's, omitted when absent.
 export type CreateProcedure = {
   kind: "createProcedure";
   orReplace: boolean;
   name: string[];
   args: FunctionArg[];
   options: FunctionOption[];
+  body?: RoutineBody;
   span: Span;
 };
 
@@ -6856,7 +6870,17 @@ function parseFunctionBody(ctx: ParseContext<SqlTokenType>, start: Position, orR
   const args = ctx.parse(functionArgs);
   const returns = parseFunctionReturns(ctx);
   const options = parseFunctionOptions(ctx);
-  return { kind: "createFunction", orReplace, name, args, returns, options, span: ctx.spanFrom(start) };
+  const body = parseRoutineBody(ctx, options);
+  return {
+    kind: "createFunction",
+    orReplace,
+    name,
+    args,
+    returns,
+    options,
+    ...(body !== undefined && { body }),
+    span: ctx.spanFrom(start),
+  };
 }
 
 // The option words of parseFunctionOptions that PG also admits on a procedure
@@ -6871,7 +6895,116 @@ function parseProcedureBody(ctx: ParseContext<SqlTokenType>, start: Position, or
   const name = ctx.parse(qualName);
   const args = ctx.parse(functionArgs);
   const options = parseFunctionOptions(ctx, PROCEDURE_OPTIONS);
-  return { kind: "createProcedure", orReplace, name, args, options, span: ctx.spanFrom(start) };
+  const body = parseRoutineBody(ctx, options);
+  return {
+    kind: "createProcedure",
+    orReplace,
+    name,
+    args,
+    options,
+    ...(body !== undefined && { body }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// A statement inside a `BEGIN ATOMIC` body: any statement, reached lazily since
+// statementBody is defined (and includes CREATE FUNCTION) further down.
+const routineBodyStatement: Rule<Stmt, SqlTokenType> = lazy(() => statementBody);
+
+function parseRoutineReturn(ctx: ParseContext<SqlTokenType>): RoutineReturn {
+  const start = ctx.position();
+  ctx.parse(kw("return"));
+  return { kind: "return", expr: ctx.parse(expression), span: ctx.spanFrom(start) };
+}
+
+// PG's opt_routine_body, after a routine's options: `RETURN a_expr`, or
+// `BEGIN ATOMIC` then statements each ending in `;` (an empty one, a lone
+// `;`, yields nothing) up to `END`. The body reads its own `;`s and its `END`,
+// so neither ends the CREATE nor reaches statement dispatch, where a
+// statement-level END is COMMIT. As in PG's routine_body_stmt, an inner
+// statement may be `RETURN expr` but not BEGIN or END (START TRANSACTION and
+// COMMIT take their place). Nothing but a body can follow the options, so a
+// BEGIN commits to one. `begin`, `atomic` and `return` stay unreserved (`end`
+// is reserved).
+function parseRoutineBody(ctx: ParseContext<SqlTokenType>, options: FunctionOption[]): RoutineBody | undefined {
+  const at = ctx.peek();
+  if (at === null || at.type !== "ident" || (at.value !== "begin" && at.value !== "return")) return undefined;
+  const body = at.value === "return" ? parseRoutineReturn(ctx) : parseAtomicBody(ctx);
+  // PG rejects a body alongside `AS 'definition'` (when it creates the
+  // routine, so after any syntax error in the body). Reported once the body
+  // is read, so diagnose() keeps the node and lists body errors first.
+  if (options.some((option) => option.kind === "as")) {
+    const error = new ParseError(
+      "A routine cannot have both AS and a SQL-standard body",
+      at.position.start,
+      at.position.end,
+    );
+    if (!ctx.report(error)) throw error;
+  }
+  return body;
+}
+
+function parseAtomicBody(ctx: ParseContext<SqlTokenType>): RoutineBody {
+  const start = ctx.position();
+  const begin = ctx.next()!; // BEGIN, peeked by the caller
+  ctx.parse(kw("atomic"));
+  // The body's depth by psql's heuristic (0 when the heuristic doesn't see a
+  // routine), which recovery below resyncs by.
+  const level = routineDepth(begin);
+  bodyCut = null;
+  const statements: (Stmt | RoutineReturn)[] = [];
+  for (;;) {
+    try {
+      if (ctx.eat("ident", "end") !== null) break;
+      if (ctx.eat("punc", ";") !== null) continue;
+      if (ctx.is("ident", "return")) statements.push(parseRoutineReturn(ctx));
+      else if (!ctx.is("ident", "begin") && matchesFirst(ctx.peek(), routineBodyStatement.first())) {
+        statements.push(ctx.parse(routineBodyStatement));
+      } else ctx.croak(`Expected "end", "return" or a statement but found ${describeFound(ctx.peek())}`);
+      if (cutShort(ctx)) break;
+      ctx.parse(SEMICOLON);
+    } catch (error) {
+      // diagnose() records the error and resumes after the statement, so the
+      // rest of the body stays in the routine rather than surfacing as
+      // statements of their own (and its END as a COMMIT). parse() rethrows.
+      if (!(error instanceof ParseError) || level === 0 || !ctx.report(error)) throw error;
+      if (!skipBodyStatement(ctx, level)) {
+        bodyCut = ctx.peek() ?? END_OF_INPUT;
+        break;
+      }
+    }
+  }
+  return { kind: "atomic", statements, span: ctx.spanFrom(start) };
+}
+
+// Where a body that recovery ran out of stopped: the psql meta-command line
+// it stopped at, or END_OF_INPUT. Its error is reported, so the statements
+// around it don't report the missing `;` or END again (`cutShort`). Only read
+// right after the body returns; each body and each statement clears it.
+const END_OF_INPUT = {};
+let bodyCut: Token<SqlTokenType> | typeof END_OF_INPUT | null = null;
+const cutShort = (ctx: ParseContext<SqlTokenType>): boolean =>
+  bodyCut !== null && (ctx.peek() ?? END_OF_INPUT) === bodyCut;
+
+// Skips the rest of a broken statement in a body at `level`: through the `;`
+// that ends it, the next one at the body's own depth, or up to the END that
+// closes the body. Lexer errors on the way are reported, as recover() does.
+// False when the body runs out first, at end of input or a meta-command line
+// (which ends the statement in a script).
+function skipBodyStatement(ctx: ParseContext<SqlTokenType>, level: number): boolean {
+  for (;;) {
+    let tok: Token<SqlTokenType> | null;
+    try {
+      tok = ctx.peek();
+    } catch (error) {
+      if (!(error instanceof ParseError) || !ctx.report(error)) throw error;
+      continue;
+    }
+    if (tok === null || tok.type === "psqlmeta") return false;
+    if (tok.type === "ident" && tok.value === "end" && routineDepth(tok) === level - 1) return true;
+    ctx.next();
+    if (tok.type === "punc" && tok.value === ";" && routineDepth(tok) === level) return true;
+  }
 }
 
 // `( NAME [= value] , … )` — the aggregate definition list. `value` is a type/
@@ -13181,7 +13314,9 @@ const statement = custom<Stmt | null, SqlTokenType>(
   (ctx) => {
     if (ctx.eat("punc", ";") !== null) return null;
     const stmt = ctx.parse(statementBody);
-    if (!ctx.eof()) ctx.parse(SEMICOLON);
+    // A routine body that recovery ran out of has reported its error.
+    if (!ctx.eof() && !cutShort(ctx)) ctx.parse(SEMICOLON);
+    bodyCut = null;
     return stmt;
   },
   { expected: statementBody.expected(), first: [...statementBody.first(), { type: "punc", value: ";" }] },
