@@ -1663,8 +1663,9 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
     expect(exprOf("a >> -1")).toEqual(bin(">>", name("a"), un("-", num(1))));
     // Spaced, the sign is its own token and the power parses.
     expect(exprOf("2 ^ -2")).toEqual(bin("^", num(2), un("-", num(2))));
-    // Unspaced, `^-` lexes as one operator that no group claims.
-    expect(() => sqlLite.parse("SELECT 2^-2 FROM t;")).toThrow(/but found "\^-"/);
+    // Unspaced, `^-` lexes as one operator, as in PG, where it is the generic
+    // operator `^-` (which no catalog defines, so PG fails only at analysis).
+    expect(exprOf("2^-2")).toEqual(bin("^-", num(2), num(2)));
     // `++` is trimmed to a single `+`, so a doubled sign reaches the prefix.
     expect(exprOf("a ++ b")).toEqual(bin("+", name("a"), un("+", name("b"))));
   });
@@ -1757,6 +1758,331 @@ describe("SQL-lite precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts 
   it("rejects an AT with no TIME ZONE or no zone after it", () => {
     expect(() => sqlLite.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected "time"/);
     expect(() => sqlLite.parse("SELECT a AT TIME ZONE FROM t;")).toThrow(/Expected a name but found "from"/);
+  });
+});
+
+// --- generic operators, OPERATOR(…), quantified operators, ISNULL / NOTNULL ---
+
+// PG's scanner reads any run of operator characters as one operator, and its
+// grammar gives every operator outside the named tiers one precedence, `Op`.
+describe("SQL-lite generic operators", () => {
+  const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+
+  it("parses any operator outside the fixed table as a binary node", () => {
+    for (const op of ["&&", "<->", "-|-", "^@", "~~", "!~~", "~~*", "!~~*", "<<|", "&<", "@@@", "<^", "?#"]) {
+      expect(exprOf(`a ${op} b`)).toEqual(bin(op, name("a"), name("b")));
+    }
+    // The `~~` pg_dump writes for LIKE in CHECK constraints and views.
+    expect(exprOf("(email ~~ '%@gmail.com'::text)")).toEqual(
+      bin("~~", name("email"), { kind: "cast", expr: str("%@gmail.com"), type: ct("text") }),
+    );
+  });
+
+  it("keeps every fixed-table operator in its own group", () => {
+    const fixed = ["^", "*", "/", "%", "+", "-", "||", "@>", "&", "|", "#", "<<", ">>", "->", "->>", "#>", "#>>"];
+    const more = ["#-", "?", "?|", "?&", "<@", "~", "!~", "~*", "!~*", "@?", "@@", "<", ">", "<=", ">=", "=", "<>"];
+    for (const op of [...fixed, ...more, "!="]) {
+      expect(exprOf(`a ${op} b`)).toEqual(bin(op, name("a"), name("b")));
+    }
+    // Each still binds at its own bp, not the catch-all's: the comparisons
+    // below a generic operator, the arithmetic above it.
+    expect(exprOf("a <-> b = c")).toEqual(bin("=", bin("<->", name("a"), name("b")), name("c")));
+    expect(exprOf("a = b <-> c")).toEqual(bin("=", name("a"), bin("<->", name("b"), name("c"))));
+    expect(exprOf("a <-> b + c")).toEqual(bin("<->", name("a"), bin("+", name("b"), name("c"))));
+    expect(exprOf("a * b <-> c")).toEqual(bin("<->", bin("*", name("a"), name("b")), name("c")));
+    expect(exprOf("a ^ b && c")).toEqual(bin("&&", bin("^", name("a"), name("b")), name("c")));
+  });
+
+  it("shares the bp-12 tier left-associatively and ranks it above LIKE, IS and AND", () => {
+    expect(exprOf("a || b <-> c")).toEqual(bin("<->", bin("||", name("a"), name("b")), name("c")));
+    expect(exprOf("a <-> b || c")).toEqual(bin("||", bin("<->", name("a"), name("b")), name("c")));
+    expect(exprOf("a ~~ b ~~ c")).toEqual(bin("~~", bin("~~", name("a"), name("b")), name("c")));
+    expect(exprOf("a LIKE b <-> c")).toMatchObject({ kind: "like", pattern: bin("<->", name("b"), name("c")) });
+    expect(exprOf("a && b IS NULL")).toEqual({ kind: "is", expr: bin("&&", name("a"), name("b")), negated: false });
+    expect(exprOf("a ~~ b AND c")).toEqual(bin("and", bin("~~", name("a"), name("b")), name("c")));
+    expect(exprOf("NOT a ~~ b")).toEqual(un("not", bin("~~", name("a"), name("b"))));
+    expect(exprOf("-a ~~ b")).toEqual(bin("~~", un("-", name("a")), name("b")));
+    expect(exprOf("a BETWEEN b AND c && d")).toMatchObject({ kind: "between", hi: bin("&&", name("c"), name("d")) });
+  });
+
+  it("stops before the clause words and operators that follow an expression", () => {
+    const order = (firstStmt("SELECT x FROM t ORDER BY a <-> b USING <;") as any).orderBy;
+    expect(order).toEqual([{ expr: bin("<->", name("a"), name("b")), dir: null, using: "<", nulls: null }]);
+    const exclude = (firstStmt("CREATE TABLE t (c int, EXCLUDE USING gist ((c <-> d) WITH &&));") as any).items[1];
+    expect(exclude.elements).toEqual([{ expr: bin("<->", name("c"), name("d")), operator: "&&" }]);
+  });
+
+  it("reaches the b-expression, so a column DEFAULT takes a generic operator", () => {
+    const cols = (firstStmt("CREATE TABLE t (a int DEFAULT 1 <-> 2 NOT NULL, b int DEFAULT @ -1);") as any).items;
+    expect(cols[0].constraints).toEqual([{ kind: "default", expr: bin("<->", num(1), num(2)) }, { kind: "notNull" }]);
+    expect(cols[1].constraints).toEqual([{ kind: "default", expr: un("@", un("-", num(1))) }]);
+    // POSITION's first operand is a b-expression too.
+    expect(colExpr("position(a <-> b IN c)")).toEqual({
+      kind: "position",
+      substring: bin("<->", name("a"), name("b")),
+      string: name("c"),
+    });
+  });
+
+  it("leaves `=>` to named arguments", () => {
+    expect(colExpr("f(a => 1)")).toEqual({
+      kind: "call",
+      name: "f",
+      args: [{ kind: "namedArg", name: "a", value: num(1) }],
+    });
+    expect(() => sqlLite.parse("SELECT a => 1 FROM t;")).toThrow(/Expected ";" but found "=>" \(1:9\)/);
+    expect(() => sqlLite.parse("SELECT a => ANY (b) FROM t;")).toThrow(/Expected ";" but found "=>"/);
+  });
+
+  it("parses PostgreSQL's built-in prefix operators", () => {
+    for (const op of ["~", "@", "|/", "||/", "!!", "@-@", "@@", "#", "?-", "?|"]) {
+      expect(exprOf(`${op} a`)).toEqual(un(op, name("a")));
+    }
+    expect(exprOf("|/ 25 + ||/ 27")).toEqual(un("|/", bin("+", num(25), un("||/", num(27)))));
+    // The prefix binds at `Op`: its operand runs through `+` and tighter, and
+    // stops at another bp-12 operator, which then takes the prefix as its left.
+    expect(exprOf("@ a + b")).toEqual(un("@", bin("+", name("a"), name("b"))));
+    expect(exprOf("@ a <-> b")).toEqual(bin("<->", un("@", name("a")), name("b")));
+    expect(exprOf("~ a::int")).toEqual(un("~", { kind: "cast", expr: name("a"), type: ct("int") }));
+    expect(exprOf("a = ~ b")).toEqual(bin("=", name("a"), un("~", name("b"))));
+  });
+
+  it("rejects an operator with no operand", () => {
+    expect(() => sqlLite.parse("SELECT a <-> FROM t;")).toThrow(/Expected a name but found "from" \(1:13\)/);
+    expect(() => sqlLite.parse("SELECT @ FROM t;")).toThrow(/Expected a name but found "from" \(1:9\)/);
+    // `!` is no prefix operator, so it cannot open an expression.
+    expect(() => sqlLite.parse("SELECT ! a FROM t;")).toThrow(/but found "!" \(1:7\)/);
+  });
+
+  it("lexes an unspaced trailing sign into the operator when PG does", () => {
+    expect(exprOf("2^-2")).toEqual(bin("^-", num(2), num(2)));
+    expect(exprOf("a@-b")).toEqual(bin("@-", name("a"), name("b")));
+    // Without a "strong" character the sign is trimmed off and stays a prefix.
+    expect(exprOf("a<->-b")).toEqual(bin("<->", name("a"), un("-", name("b"))));
+  });
+
+  // PG's explicit `OPERATOR(schema.op)` spelling, which always binds at `Op`.
+  describe("OPERATOR(…)", () => {
+    const opBin = (op: string, opSchema: string[], left: unknown, right: unknown) => ({
+      ...bin(op, left, right),
+      opSchema,
+    });
+
+    it("parses it infix, with or without a schema", () => {
+      expect(exprOf("a OPERATOR(pg_catalog.+) b")).toEqual(opBin("+", ["pg_catalog"], name("a"), name("b")));
+      expect(exprOf("a OPERATOR(+) b")).toEqual(opBin("+", [], name("a"), name("b")));
+      expect(exprOf('a operator("S".x.~~) b')).toEqual(opBin("~~", ["S", "x"], name("a"), name("b")));
+      // At `Op`, whatever the operator: `*` no longer outranks `+`, and `=`
+      // outranks a following comparison.
+      expect(exprOf("a OPERATOR(pg_catalog.*) b + c")).toEqual(
+        opBin("*", ["pg_catalog"], name("a"), bin("+", name("b"), name("c"))),
+      );
+      expect(exprOf("a OPERATOR(pg_catalog.=) b = c")).toEqual(
+        bin("=", opBin("=", ["pg_catalog"], name("a"), name("b")), name("c")),
+      );
+      expect(exprOf("a + b OPERATOR(pg_catalog.~~) c")).toEqual(
+        opBin("~~", ["pg_catalog"], bin("+", name("a"), name("b")), name("c")),
+      );
+    });
+
+    it("parses it prefix, binding at `Op`", () => {
+      const opUn = (op: string, operand: unknown) => ({ ...un(op, operand), opSchema: ["pg_catalog"] });
+      expect(exprOf("OPERATOR(pg_catalog.-) a + b")).toEqual(opUn("-", bin("+", name("a"), name("b"))));
+      expect(exprOf("OPERATOR(pg_catalog.@) a <-> b")).toEqual(bin("<->", opUn("@", name("a")), name("b")));
+      expect(exprOf("x AND OPERATOR(pg_catalog.-) a")).toEqual(bin("and", name("x"), opUn("-", name("a"))));
+      expect(exprOf('OPERATOR(pg_catalog.-) a COLLATE "C"')).toEqual(
+        opUn("-", { kind: "collate", expr: name("a"), collation: ["C"] }),
+      );
+      // A NOT in the operand runs on through the comparisons, as NOT's does.
+      expect(exprOf("OPERATOR(pg_catalog.-) NOT a = b AND c")).toEqual(
+        bin("and", opUn("-", un("not", bin("=", name("a"), name("b")))), name("c")),
+      );
+      expect(exprOf("OPERATOR(pg_catalog.-) - NOT a = b")).toEqual(
+        opUn("-", un("-", un("not", bin("=", name("a"), name("b"))))),
+      );
+      expect(exprOf("OPERATOR(pg_catalog.-) a * NOT b")).toEqual(opUn("-", bin("*", name("a"), un("not", name("b")))));
+      expect(exprOf("OPERATOR(pg_catalog.-) NOT EXISTS (SELECT 1)")).toMatchObject({
+        op: "-",
+        operand: { kind: "exists", negated: true },
+      });
+      // In a b-expression as well.
+      const def = (firstStmt("CREATE TABLE t (a int DEFAULT OPERATOR(pg_catalog.-) 1);") as any).items[0];
+      expect(def.constraints).toEqual([{ kind: "default", expr: opUn("-", num(1)) }]);
+    });
+
+    it("rejects an incomplete spelling", () => {
+      // Only a complete `( [name .]… op )` is the operator; anything else
+      // leaves `operator` an alias, with the `(` stranded after it.
+      expect(() => sqlLite.parse("SELECT a OPERATOR(pg_catalog.+ b FROM t;")).toThrow(
+        /Expected ";" but found "\(" \(1:17\)/,
+      );
+      expect(() => sqlLite.parse("SELECT a OPERATOR(=>) b FROM t;")).toThrow(/Expected ";" but found "\("/);
+      expect(() => sqlLite.parse("SELECT a OPERATOR(select.+) b FROM t;")).toThrow(/Expected ";" but found "\("/);
+      expect(() => sqlLite.parse("SELECT a OPERATOR(pg_catalog.+) FROM t;")).toThrow(
+        /Expected a name but found "from" \(1:32\)/,
+      );
+    });
+
+    it("keeps operator unreserved as names and aliases", () => {
+      expect((firstStmt("SELECT operator, a operator, b AS operator FROM operator;") as any).columns).toEqual([
+        col(name("operator")),
+        col(name("a"), "operator"),
+        col(name("b"), "operator"),
+      ]);
+      expect((firstStmt("SELECT a FROM t operator;") as any).from).toEqual([
+        { kind: "table", name: ["t"], alias: "operator" },
+      ]);
+      expect((firstStmt("CREATE TABLE operator (operator int);") as any).items).toEqual([
+        { kind: "column", name: "operator", dataType: ct("int"), constraints: [] },
+      ]);
+      // A call named `operator` stays a call unless its argument is exactly an
+      // operator reference — leniently in a select list, where PG rejects it,
+      // and as PG reads it in an index, exclusion or partition element.
+      const call = (args: unknown[]) => ({ kind: "call", name: "operator", args });
+      expect(colExpr("operator(1)")).toEqual(call([num(1)]));
+      expect(colExpr("operator(-1)")).toEqual(call([un("-", num(1))]));
+      expect(colExpr("operator(a.b)")).toEqual(call([name("a", "b")]));
+      expect(colExpr("s.operator(1)")).toEqual({ kind: "call", name: "s.operator", args: [num(1)] });
+      expect((firstStmt("CREATE INDEX ON t (operator(a));") as any).columns[0].expr).toEqual(call([name("a")]));
+      expect((firstStmt("CREATE TABLE t (a int) PARTITION BY RANGE (operator(a));") as any).partitionBy).toMatchObject({
+        keys: [{ expr: call([name("a")]) }],
+      });
+      // `( * )` is an operator reference, so `operator(*)` opens a prefix — in an
+      // index element too, where PG would read it as a call.
+      expect(() => sqlLite.parse("SELECT operator(*) FROM t;")).toThrow(/Expected a name but found "from"/);
+      expect(() => sqlLite.parse("CREATE INDEX ON t (operator(*));")).toThrow(/but found "\)" \(1:30\)/);
+    });
+  });
+});
+
+// `a_expr subquery_Op sub_type (…)`: ANY / SOME / ALL after any operator.
+describe("SQL-lite quantified operators", () => {
+  const anyAll = (op: string, quantifier: string, left: unknown, right: unknown, extra = {}) => ({
+    kind: "anyAll",
+    op,
+    quantifier,
+    left,
+    right,
+    ...extra,
+  });
+
+  it("quantifies LIKE and ILIKE, negated or not", () => {
+    expect(exprOf("p LIKE ANY (a)")).toEqual(anyAll("like", "any", name("p"), name("a")));
+    expect(exprOf("p ILIKE ALL (a)")).toEqual(anyAll("ilike", "all", name("p"), name("a")));
+    expect(exprOf("p NOT LIKE SOME (a)")).toEqual(anyAll("not like", "some", name("p"), name("a")));
+    expect(exprOf("p NOT ILIKE ANY (a)")).toEqual(anyAll("not ilike", "any", name("p"), name("a")));
+    const where = (firstStmt("SELECT * FROM f WHERE path LIKE ANY (ARRAY['%.csv', '%.tsv']);") as any).where;
+    expect(where).toEqual(
+      anyAll("like", "any", name("path"), { kind: "array", elements: [str("%.csv"), str("%.tsv")] }),
+    );
+  });
+
+  it("quantifies arithmetic, fixed-table and generic operators at their own precedence", () => {
+    expect(exprOf("x ~ ANY (a)")).toEqual(anyAll("~", "any", name("x"), name("a")));
+    expect(exprOf("x || ALL (a)")).toEqual(anyAll("||", "all", name("x"), name("a")));
+    expect(exprOf("x + ANY (a)")).toEqual(anyAll("+", "any", name("x"), name("a")));
+    expect(exprOf("x ^ SOME (a)")).toEqual(anyAll("^", "some", name("x"), name("a")));
+    expect(exprOf("x <-> ANY (a)")).toEqual(anyAll("<->", "any", name("x"), name("a")));
+    expect(exprOf("x OPERATOR(pg_catalog.~~) ALL (a)")).toEqual(
+      anyAll("~~", "all", name("x"), name("a"), { opSchema: ["pg_catalog"] }),
+    );
+    // The operator's own bp decides how much of the left it takes.
+    expect(exprOf("a * b + ANY (c)")).toEqual(anyAll("+", "any", bin("*", name("a"), name("b")), name("c")));
+    expect(exprOf("a || b + ANY (c)")).toEqual(bin("||", name("a"), anyAll("+", "any", name("b"), name("c"))));
+    expect(exprOf("a + b || ANY (c)")).toEqual(anyAll("||", "any", bin("+", name("a"), name("b")), name("c")));
+    expect(exprOf("a = b || ANY (c)")).toEqual(bin("=", name("a"), anyAll("||", "any", name("b"), name("c"))));
+    // A subquery operand, as for a comparison.
+    expect(exprOf("x ~~ ANY (SELECT p FROM u)")).toEqual(
+      anyAll("~~", "any", name("x"), {
+        kind: "subquery",
+        query: sel({ columns: [col(name("p"))], from: [{ kind: "table", name: ["u"], alias: null }] }),
+      }),
+    );
+  });
+
+  it("lets a quantified comparison be compared again", () => {
+    // The quantified form ends in its `)`, so PG reads on: `(x = ANY (a)) = y`.
+    expect(exprOf("x = ANY (a) = y")).toEqual(bin("=", anyAll("=", "any", name("x"), name("a")), name("y")));
+    expect(exprOf("x LIKE ANY (a) LIKE 'b'")).toMatchObject({
+      kind: "like",
+      expr: anyAll("like", "any", name("x"), name("a")),
+      pattern: str("b"),
+    });
+    expect(exprOf("x = ANY (a) <> ALL (b)")).toEqual(
+      anyAll("<>", "all", anyAll("=", "any", name("x"), name("a")), name("b")),
+    );
+    // A plain comparison still does not chain.
+    expect(() => sqlLite.parse("SELECT x = y = z FROM t;")).toThrow(/Operator "=" is non-associative \(1:13\)/);
+    expect(() => sqlLite.parse("SELECT x = ANY (a) = y = z FROM t;")).toThrow(
+      /Operator "=" is non-associative \(1:23\)/,
+    );
+    expect(() => sqlLite.parse("SELECT x < y >= ANY (a) FROM t;")).toThrow(/Operator ">=" is non-associative/);
+  });
+
+  it("rejects a quantifier without a parenthesised operand, or with ESCAPE", () => {
+    expect(() => sqlLite.parse("SELECT x LIKE ANY (a, b) FROM t;")).toThrow(/Expected "\)" but found "," \(1:20\)/);
+    expect(() => sqlLite.parse("SELECT x ~ ANY y FROM t;")).toThrow(/Expected "\(" but found "y" \(1:15\)/);
+    // SIMILAR TO has no quantified form in PG.
+    expect(() => sqlLite.parse("SELECT x SIMILAR TO ANY (a) FROM t;")).toThrow(/Expected a name but found "any"/);
+    // PG's quantified LIKE takes no ESCAPE clause.
+    expect(() => sqlLite.parse("SELECT * FROM t WHERE x LIKE ANY (a) ESCAPE '!';")).toThrow(
+      /Expected ";" but found "escape"/,
+    );
+    // The b-expression has no quantified form, as in PG.
+    expect(() => sqlLite.parse("CREATE TABLE t (a int DEFAULT 1 + ANY (b));")).toThrow(
+      /Expected a name but found "any"/,
+    );
+    expect(() => sqlLite.parse("CREATE TABLE t (a int DEFAULT 1 OPERATOR(+) ANY (b));")).toThrow(
+      /Expected a name but found "any" \(1:44\)/,
+    );
+  });
+});
+
+// PG's postfix ISNULL / NOTNULL, spellings of IS [NOT] NULL.
+describe("SQL-lite ISNULL and NOTNULL", () => {
+  const isNull = (expr: unknown, negated = false) => ({ kind: "is", expr, negated });
+
+  it("parses both in WHERE and in the select list", () => {
+    const stmt = firstStmt("SELECT a ISNULL, b NOTNULL, c isnull x FROM t WHERE a ISNULL OR b NOTNULL;") as any;
+    expect(stmt.columns).toEqual([col(isNull(name("a"))), col(isNull(name("b"), true)), col(isNull(name("c")), "x")]);
+    expect(stmt.where).toEqual(bin("or", isNull(name("a")), isNull(name("b"), true)));
+    // Identical to the IS spelling.
+    expect(exprOf("a NOTNULL")).toEqual(exprOf("a IS NOT NULL"));
+  });
+
+  it("binds at IS's precedence", () => {
+    expect(exprOf("a + b ISNULL")).toEqual(isNull(bin("+", name("a"), name("b"))));
+    expect(exprOf("a = b NOTNULL")).toEqual(isNull(bin("=", name("a"), name("b")), true));
+    expect(exprOf("NOT a ISNULL")).toEqual({ kind: "unary", op: "not", operand: isNull(name("a")) });
+    expect(exprOf("a ISNULL AND b")).toEqual(bin("and", isNull(name("a")), name("b")));
+    expect(exprOf("a ISNULL::int")).toEqual({ kind: "cast", expr: isNull(name("a")), type: ct("int") });
+  });
+
+  it("rejects them where PG's grammar does", () => {
+    // A b-expression has no NULL test, so a DEFAULT stops before it.
+    expect(() => sqlLite.parse("CREATE TABLE t (a int DEFAULT 1 ISNULL);")).toThrow(
+      /Expected "," but found "isnull" \(1:32\)/,
+    );
+    // Both are AS_LABEL keywords in PG: a bare alias never. (PG refuses them as
+    // a table alias even after AS, which this grammar does not check.)
+    expect(() => sqlLite.parse("SELECT * FROM t isnull;")).toThrow(/Expected ";" but found "isnull" \(1:16\)/);
+    expect(() => sqlLite.parse("SELECT * FROM t notnull;")).toThrow(/Expected ";" but found "notnull"/);
+  });
+
+  it("keeps isnull and notnull unreserved as names, and as aliases after AS", () => {
+    expect((firstStmt("CREATE TABLE isnull (isnull int, notnull int);") as any).items).toEqual([
+      { kind: "column", name: "isnull", dataType: ct("int"), constraints: [] },
+      { kind: "column", name: "notnull", dataType: ct("int"), constraints: [] },
+    ]);
+    const stmt = firstStmt("SELECT t.isnull, isnull(a), b AS isnull, c AS notnull FROM t AS notnull;") as any;
+    expect(stmt.columns).toEqual([
+      col(name("t", "isnull")),
+      col({ kind: "call", name: "isnull", args: [name("a")] }),
+      col(name("b"), "isnull"),
+      col(name("c"), "notnull"),
+    ]);
+    expect(stmt.from).toEqual([{ kind: "table", name: ["t"], alias: "notnull" }]);
   });
 });
 
@@ -1906,7 +2232,7 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
     expect((firstStmt("SELECT x IS JSON keys FROM t;") as any).columns).toEqual([col(isJson(), "keys")]);
   });
 
-  it("keeps overlaps and the IS JSON words unreserved as names and aliases", () => {
+  it("keeps overlaps and the IS JSON words unreserved as names, and overlaps an AS-only alias", () => {
     // Every word these rules match by value that was not already reserved.
     // (`symmetric`, `asymmetric`, `with`, `array` and `unique` were reserved
     // long before; `json` only means anything straight after IS.)
@@ -1917,18 +2243,23 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
       { kind: "column", name: "overlaps", dataType: ct("int"), constraints: [] },
       { kind: "column", name: "json", dataType: ct("jsonb"), constraints: [] },
     ]);
-    // …and as aliases — including straight after a row, where `overlaps` is
-    // claimed only when a row follows it (a `(`, or ROW and then a `(`).
-    expect((firstStmt("SELECT a overlaps FROM t;") as any).columns).toEqual([col(name("a"), "overlaps")]);
-    expect((firstStmt("SELECT (a, b) overlaps FROM t;") as any).columns).toEqual([
+    // …and as aliases. `overlaps` is an AS_LABEL keyword in PG, so it is an
+    // alias only after AS — including straight after a row, where it is
+    // claimed as the operator only when a row follows it (a `(`, or ROW and
+    // then a `(`). Bare, PG rejects it, and so does this grammar.
+    expect((firstStmt("SELECT a AS overlaps FROM t;") as any).columns).toEqual([col(name("a"), "overlaps")]);
+    expect((firstStmt("SELECT (a, b) AS overlaps FROM t;") as any).columns).toEqual([
       col(row(name("a"), name("b")), "overlaps"),
     ]);
-    expect((firstStmt("SELECT ROW(a, b) overlaps, c AS json FROM t;") as any).columns).toEqual([
+    expect((firstStmt("SELECT ROW(a, b) AS overlaps, c AS json FROM t;") as any).columns).toEqual([
       col(explicitRow(name("a"), name("b")), "overlaps"),
       col(name("c"), "json"),
     ]);
-    // `overlaps row` without a `(` after it is an alias followed by a stray word.
-    expect(() => sqlLite.parse("SELECT (a, b) overlaps row FROM t;")).toThrow(/Expected ";" but found "row"/);
+    expect((firstStmt("SELECT c json FROM t;") as any).columns).toEqual([col(name("c"), "json")]);
+    expect(() => sqlLite.parse("SELECT a overlaps FROM t;")).toThrow(/Expected ";" but found "overlaps" \(1:9\)/);
+    expect(() => sqlLite.parse("SELECT (a, b) overlaps FROM t;")).toThrow(/Expected ";" but found "overlaps"/);
+    expect(() => sqlLite.parse("SELECT (a, b) overlaps row FROM t;")).toThrow(/Expected ";" but found "overlaps"/);
+    expect(() => sqlLite.parse("SELECT * FROM t overlaps;")).toThrow(/Expected ";" but found "overlaps"/);
   });
 
   it("takes the item-type word after IS JSON unconditionally, as PG does", () => {
@@ -1957,9 +2288,9 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
       /Expected 2 items on the right of OVERLAPS but found 0/,
     );
     // A row OVERLAPS row predicate does not chain: the second `overlaps` has no
-    // row before it, so it reads as an alias, and the row after it is stranded.
+    // row before it, and as an AS_LABEL keyword it cannot be a bare alias.
     expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (c, d) OVERLAPS (e, f) FROM t;")).toThrow(
-      /Expected ";" but found "\(" \(1:39\)/,
+      /Expected ";" but found "overlaps" \(1:30\)/,
     );
     // A subquery is not a period.
     expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (SELECT 1) FROM t;")).toThrow(/but found "select"/);
