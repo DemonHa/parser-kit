@@ -7455,8 +7455,8 @@ function alterSubscriptionRest(ctx: ParseContext<SqlTokenType>, start: Position)
 // parseDefinition's to read. Every lead and clause word is matched by value, so
 // none of them stops being usable as a name.
 
-// A number in a definition list, a sign folded in.
-// The node carries no span, so numberNode's is dropped.
+// A number in a definition list, a sign folded in. The node carries no span,
+// so numberNode's is dropped.
 function definitionNumber(ctx: ParseContext<SqlTokenType>, start: Position, sign: string): DefinitionArg {
   const text = ctx.next()!.value;
   const { value, raw } = numberNode(text, ctx.spanFrom(start), sign);
