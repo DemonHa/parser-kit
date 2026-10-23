@@ -5573,7 +5573,8 @@ type ObjectKind = {
   // ALTER EXTENSION ADD / DROP takes the kind.
   member?: true;
   // The generic ALTER's actions on the kind, for a kind with no ALTER target of
-  // its own; absent where PG has none or a dedicated target owns the ALTER.
+  // its own; absent where PG has none, a dedicated target owns the ALTER, or
+  // one is to (ROLE, POLICY, FOREIGN TABLE).
   alter?: readonly AlterObjectVerb[];
 };
 
@@ -5582,8 +5583,8 @@ const RENAME_OWNER: readonly AlterObjectVerb[] = ["rename", "owner"];
 const RENAME_SCHEMA: readonly AlterObjectVerb[] = ["rename", "set"];
 
 // Grouped as gram.y groups them; the order is the order an "Expected …" croak
-// lists the lead words in. ROLE, POLICY and FOREIGN TABLE take no generic ALTER: each has a
-// grammar of its own beyond these three actions.
+// lists the lead words in. ROLE, POLICY and FOREIGN TABLE take no generic
+// ALTER: each is left for a dedicated target that will own its whole ALTER.
 const OBJECT_KINDS: readonly ObjectKind[] = [
   // object_type_any_name
   { objectType: "table", shape: "qualName", label: true, member: true },
@@ -5708,7 +5709,7 @@ function parseOperatorRef(ctx: ParseContext<SqlTokenType>): Pick<ObjectRef, "nam
     name.push(ctx.parse(nameWord));
     ctx.parse(punc("."));
   }
-  name.push(ctx.next()!.value);
+  name.push(ctx.parse(sortOperator)); // any operator but `=>`, as in PG
   ctx.parse(punc("("));
   const operand = () => (ctx.eat("ident", "none") !== null ? null : ctx.parse(typeRef));
   const left = operand();

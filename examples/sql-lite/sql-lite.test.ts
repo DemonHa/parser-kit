@@ -6156,6 +6156,7 @@ describe("SQL-lite object references", () => {
     });
     expect(firstStmt("SECURITY LABEL ON LARGE OBJECT 7 IS 'x';")).not.toHaveProperty("provider");
     expect(firstStmt("SECURITY LABEL ON LARGE OBJECT -7 IS 'x';")).toMatchObject({ oid: -7 });
+    expect(comment("LARGE OBJECT +7")).toMatchObject({ oid: 7 });
   });
 
   it("parses ALTER EXTENSION ADD / DROP, SET SCHEMA and UPDATE", () => {
@@ -6212,6 +6213,7 @@ describe("SQL-lite object references", () => {
     expect(fails("COMMENT ON OPERATOR + (int) IS 'c';")).toThrow(/Expected "," but found "\)"/);
     expect(fails("COMMENT ON OPERATOR + (NONE, NONE) IS 'c';")).toThrow(/not NONE twice/);
     expect(fails("COMMENT ON OPERATOR (int, int) IS 'c';")).toThrow(/Expected an operator but found "\("/);
+    expect(fails("COMMENT ON OPERATOR => (int, int) IS 'c';")).toThrow(/Expected an operator but found "=>"/);
     expect(fails("COMMENT ON CAST (int, text) IS 'c';")).toThrow(/Expected "as" but found ","/);
     expect(fails("COMMENT ON OPERATOR CLASS c IS 'c';")).toThrow(/Expected "using" but found "is"/);
     expect(fails("COMMENT ON LARGE OBJECT x IS 'c';")).toThrow(/Expected a number but found "x"/);
