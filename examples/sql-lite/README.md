@@ -170,7 +170,6 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 
 These statements parse without error, but the tree they produce is wrong:
 
-- **`-2 ^ 2` parses as `-(2 ^ 2)`.** In PostgreSQL, unary minus binds tighter than `^`, so the value is 4, not -4.
 - **`NATURAL` is dropped.** `a NATURAL JOIN b` yields the same node as `a JOIN b` with no condition.
 - **`WITH TIES` is dropped.** `FETCH FIRST 3 ROWS WITH TIES` yields the same `limit` as `FETCH FIRST 3 ROWS ONLY`.
 - **`SELECT a ISNULL FROM t` reads `isnull` as a column alias.** PostgreSQL reads it as the null test.

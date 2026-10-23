@@ -1168,8 +1168,7 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
     expect(exprOf("+a")).toEqual(un("+", name("a")));
     // The operator is kept verbatim rather than folded away.
     expect(exprOf("+1")).toEqual(un("+", num(1)));
-    // bp 16, above `*`: `(+a) * b`, not `+(a * b)`. (It is *not* above every
-    // arithmetic tier — `^` at bp 17 is tighter still; see the next test.)
+    // bp 18, above every arithmetic tier: `(+a) * b`, not `+(a * b)`.
     expect(exprOf("+a * b")).toEqual(bin("*", un("+", name("a")), name("b")));
     // A sign on the right-hand side of a binary operator still reaches the prefix.
     expect(exprOf("a * +b")).toEqual(bin("*", name("a"), un("+", name("b"))));
@@ -1177,13 +1176,13 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
     expect(exprOf("-a * b")).toEqual(bin("*", un("-", name("a")), name("b")));
   });
 
-  it("parses exponentiation tighter than the unary sign, left-associatively", () => {
+  it("parses exponentiation looser than the unary sign, left-associatively", () => {
     expect(exprOf("a ^ b")).toEqual(bin("^", name("a"), name("b")));
     expect(exprOf("a ^ b ^ c")).toEqual(bin("^", bin("^", name("a"), name("b")), name("c")));
-    // bp 17 is above the unary sign (16), so the sign wraps the whole power.
-    expect(exprOf("-2 ^ 2")).toEqual(un("-", bin("^", num(2), num(2))));
-    expect(exprOf("+2 ^ 2")).toEqual(un("+", bin("^", num(2), num(2))));
-    // ... and below the bp-18 postfixes. The right operand is what discriminates:
+    // bp 15 is below the unary sign (18), so the sign binds to the base alone.
+    expect(exprOf("-2 ^ 2")).toEqual(bin("^", un("-", num(2)), num(2)));
+    expect(exprOf("+2 ^ 2")).toEqual(bin("^", un("+", num(2)), num(2)));
+    // ... and below the bp-19 postfixes. The right operand is what discriminates:
     // a cast there binds to that operand, not to the power. (`a::int ^ 2` is the
     // same tree at any bp, since the postfix loop runs before the infix scan.)
     expect(exprOf("a ^ b::int")).toEqual(bin("^", name("a"), cast(name("b"), "int")));
@@ -1192,11 +1191,10 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
     expect(exprOf("2 ^ 3 * 4")).toEqual(bin("*", bin("^", num(2), num(3)), num(4)));
   });
 
-  it("nests a signed right operand of ^ under the sign, not the power", () => {
-    // The tail of putting `^` above the unary sign: a prefix parses its operand
-    // at its own bp (16), which is below `^`'s 17, so the sign on the right
-    // swallows the rest of the chain instead of the chain nesting left.
-    expect(exprOf("2 ^ -3 ^ 4")).toEqual(bin("^", num(2), un("-", bin("^", num(3), num(4)))));
+  it("binds a signed right operand of ^ to its own operand only", () => {
+    // A prefix parses its operand at its own bp (18), above `^`'s 15, so the
+    // sign on the right takes `3` alone and the chain still nests left.
+    expect(exprOf("2 ^ -3 ^ 4")).toEqual(bin("^", bin("^", num(2), un("-", num(3))), num(4)));
     // Without a sign the same chain is plain left-associative.
     expect(exprOf("2 ^ 3 ^ 4")).toEqual(bin("^", bin("^", num(2), num(3)), num(4)));
   });
@@ -1264,12 +1262,79 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
       substring: bin("^", name("a"), num(2)),
       string: name("s"),
     });
-    // The prefix group is shared too, so the widened sign reaches it as well.
+    // The prefix group is shared too, so the widened sign reaches it as well,
+    // binding tighter than `^` there too.
     expect(posOf("+a IN s")).toEqual({ kind: "position", substring: un("+", name("a")), string: name("s") });
+    expect(posOf("-a ^ 2 IN s")).toEqual({
+      kind: "position",
+      substring: bin("^", un("-", name("a")), num(2)),
+      string: name("s"),
+    });
   });
 
   it("reports a missing right operand at the token that should have started it", () => {
     expect(() => sqlLite.parse("SELECT a ^ FROM t;")).toThrow(/Expected a name but found "from"/);
+  });
+});
+
+// --- operator precedence among the tight tiers ---
+
+// PostgreSQL's gram.y orders these, loosest first: `^` < AT < COLLATE < unary
+// sign < `[ ]` < `::`, all left-associative except the right-associative sign.
+describe("SQL-lite precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts and casts", () => {
+  const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
+  const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(type) });
+  const at = (expr: unknown, zone: unknown) => ({ kind: "atTimeZone", expr, zone });
+  const coll = (expr: unknown, ...collation: string[]) => ({ kind: "collate", expr, collation });
+  const sub = (base: unknown, index: unknown) => ({ kind: "subscript", base, index });
+
+  it("binds the unary sign tighter than ^, as PostgreSQL does", () => {
+    expect(exprOf("-2 ^ 2")).toEqual(bin("^", un("-", num(2)), num(2)));
+    expect(exprOf("-a ^ -b")).toEqual(bin("^", un("-", name("a")), un("-", name("b"))));
+    expect(exprOf("2 ^ -3 ^ 4")).toEqual(bin("^", bin("^", num(2), un("-", num(3))), num(4)));
+    // Parentheses still give the other reading.
+    expect(exprOf("-(2 ^ 2)")).toEqual(un("-", bin("^", num(2), num(2))));
+  });
+
+  it("binds AT TIME ZONE tighter than ^ and looser than the sign", () => {
+    expect(exprOf("a ^ b AT TIME ZONE 'z'")).toEqual(bin("^", name("a"), at(name("b"), str("z"))));
+    expect(exprOf("a AT TIME ZONE 'z' ^ 2")).toEqual(bin("^", at(name("a"), str("z")), num(2)));
+    expect(exprOf("-a AT TIME ZONE z")).toEqual(at(un("-", name("a")), name("z")));
+    // A sign opening the zone is still the zone's own.
+    expect(exprOf("a AT TIME ZONE -z")).toEqual(at(name("a"), un("-", name("z"))));
+    // The arithmetic tiers below `^` take the conversion as their operand too.
+    expect(exprOf("a + b AT TIME ZONE 'z'")).toEqual(bin("+", name("a"), at(name("b"), str("z"))));
+  });
+
+  it("chains AT TIME ZONE to the left", () => {
+    expect(exprOf("a AT TIME ZONE 'z' AT TIME ZONE 'y'")).toEqual(at(at(name("a"), str("z")), str("y")));
+  });
+
+  it("binds COLLATE tighter than AT TIME ZONE and ^, and looser than the sign", () => {
+    expect(exprOf('-x COLLATE "C"')).toEqual(coll(un("-", name("x")), "C"));
+    expect(exprOf('a ^ b COLLATE "C"')).toEqual(bin("^", name("a"), coll(name("b"), "C")));
+    expect(exprOf('a COLLATE "C" ^ 2')).toEqual(bin("^", coll(name("a"), "C"), num(2)));
+    // A signed right operand of `^` takes the COLLATE before the power does.
+    expect(exprOf('x ^ -a COLLATE "C"')).toEqual(bin("^", name("x"), coll(un("-", name("a")), "C")));
+    // The zone takes a COLLATE; a COLLATE before AT applies to the timestamp.
+    expect(exprOf('a AT TIME ZONE z COLLATE "C"')).toEqual(at(name("a"), coll(name("z"), "C")));
+    expect(exprOf('a COLLATE "C" AT TIME ZONE z')).toEqual(at(coll(name("a"), "C"), name("z")));
+  });
+
+  it("binds casts and subscripts tighter than the sign", () => {
+    expect(exprOf("-x::int")).toEqual(un("-", cast(name("x"), "int")));
+    expect(exprOf("-a[1]")).toEqual(un("-", sub(name("a"), num(1))));
+    expect(exprOf("-a[1] ^ 2")).toEqual(bin("^", un("-", sub(name("a"), num(1))), num(2)));
+    expect(exprOf("a[1]::int")).toEqual(cast(sub(name("a"), num(1)), "int"));
+    expect(exprOf('x::text COLLATE "C"')).toEqual(coll(cast(name("x"), "text"), "C"));
+    expect(exprOf('x COLLATE "C"::text')).toEqual(cast(coll(name("x"), "C"), "text"));
+    expect(exprOf("a AT TIME ZONE z::text")).toEqual(at(name("a"), cast(name("z"), "text")));
+    expect(exprOf("a AT TIME ZONE z[1]")).toEqual(at(name("a"), sub(name("z"), num(1))));
+  });
+
+  it("rejects an AT with no TIME ZONE or no zone after it", () => {
+    expect(() => sqlLite.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected "time"/);
+    expect(() => sqlLite.parse("SELECT a AT TIME ZONE FROM t;")).toThrow(/Expected a name but found "from"/);
   });
 });
 
