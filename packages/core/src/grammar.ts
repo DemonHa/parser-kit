@@ -91,6 +91,13 @@ interface GrammarCommon<TT extends string> {
    * parser error. Off = errors and messages unchanged.
    */
   errorReporting?: { preferFarthest?: boolean; propagateLexerErrors?: boolean };
+  /**
+   * A delimited() list that reaches end of input before its close token fails
+   * with `Expected <close> but found end of input`, instead of ending there as
+   * if closed. Grammars whose statements need no terminator want this, or
+   * `(a, b` at the end of the input parses as a complete list. Off = unchanged.
+   */
+  strictDelimited?: boolean;
 }
 
 export interface RootGrammarDef<R extends Rule<unknown, TT>, TT extends string> extends GrammarCommon<TT> {
@@ -170,6 +177,7 @@ export function defineGrammar<TT extends string>(
 
   const preferFarthest = def.errorReporting?.preferFarthest ?? false;
   const propagateLexerErrors = def.errorReporting?.propagateLexerErrors ?? false;
+  const strictDelimited = def.strictDelimited ?? false;
 
   const run = (text: string, errors?: ParseError[]) => {
     const stream = def.lexer.tokenize(createInputStream(text));
@@ -180,6 +188,7 @@ export function defineGrammar<TT extends string>(
       errors,
       preferFarthest,
       propagateLexerErrors,
+      strictDelimited,
     });
     let ast: unknown;
     try {
@@ -218,7 +227,12 @@ export function defineGrammar<TT extends string>(
     },
     parseValue: (rule, text) => {
       const stream = def.lexer.tokenize(createInputStream(text));
-      const ctx = createParseContext(stream, { labels: def.lexer.labels, trivia, propagateLexerErrors });
+      const ctx = createParseContext(stream, {
+        labels: def.lexer.labels,
+        trivia,
+        propagateLexerErrors,
+        strictDelimited,
+      });
       ctx.skipTrivia();
       const value = rule.parse(ctx);
       ctx.skipTrivia();

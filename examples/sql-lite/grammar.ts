@@ -213,7 +213,9 @@ export type Expr =
   // `DATE '2024-01-01'`, `TIMESTAMP(3) WITH TIME ZONE '…'` — a string literal
   // prefixed by the type it is read as. `type` is the full typeRef node, so the
   // multi-word spellings and the hoisted precision come out exactly as they do
-  // in a cast. INTERVAL keeps its own node: its field spec trails the literal.
+  // in a cast. `N'…'` is one too, typed `bpchar` (PG's unconstrained NCHAR)
+  // and spanning the `N`. INTERVAL keeps its own node: its field spec trails
+  // the literal.
   | { kind: "typedLiteral"; type: ColType; value: string; span: Span }
   // `OVERLAY(value PLACING placing FROM from [FOR for_])`. The comma spelling,
   // `overlay(a, b, 1)`, stays an ordinary call node.
@@ -276,31 +278,56 @@ export type NamedWindow = { name: string; spec: WindowSpec };
 // alone still means deferrable, as INITIALLY DEFERRED implies it.
 export type ConstraintAttrs = { deferrable?: boolean; initially?: "deferred" | "immediate" };
 
+// The table-level attributes PG reads alongside DEFERRABLE / INITIALLY: `NOT
+// VALID` (CHECK and foreign keys) and `NO INHERIT` (CHECK only). Each is
+// present only when written.
+export type TableConstraintAttrs = ConstraintAttrs & { notValid?: true; noInherit?: true };
+
+// `NULLS [NOT] DISTINCT` on a UNIQUE constraint or index, as written; omitted
+// when absent (PG's default, NULLS DISTINCT).
+export type NullsTreatment = "distinct" | "not distinct";
+
+// The index parameters of a PRIMARY KEY, UNIQUE or EXCLUDE constraint: `INCLUDE
+// (cols)` (table level only), `WITH (storage parameters)` and `USING INDEX
+// TABLESPACE name`. Each is omitted when absent.
+export type IndexParams = {
+  include?: string[];
+  options?: Omit<RelationOption, "namespace">[];
+  indexTablespace?: string;
+};
+
 export type RefAction = "no action" | "restrict" | "cascade" | "set null" | "set default";
 
 // What follows `REFERENCES t [(cols)]`. `onDelete` predates the rest, so it is
-// always present (null when absent); `match` and `onUpdate` are omitted when
-// absent.
+// always present (null when absent); `match`, `onUpdate` and `onDeleteColumns`
+// (the column list of `ON DELETE SET NULL | SET DEFAULT (cols)`) are omitted
+// when absent.
 export type ForeignKeyTail = {
   match?: "full" | "partial" | "simple";
   onDelete: RefAction | null;
+  onDeleteColumns?: string[];
   onUpdate?: RefAction;
 };
 
-export type ColConstraint =
+// A column constraint that `CONSTRAINT name` may lead; `name` is present only
+// when it does.
+export type ColConstraintElem = (
   | { kind: "notNull"; span: Span }
   | { kind: "nullable"; span: Span }
   | { kind: "default"; expr: Expr; span: Span }
-  | ({ kind: "primaryKey"; span: Span } & ConstraintAttrs)
-  | ({ kind: "unique"; span: Span } & ConstraintAttrs)
+  | ({ kind: "primaryKey"; span: Span } & Omit<IndexParams, "include"> & ConstraintAttrs)
+  | ({ kind: "unique"; nulls?: NullsTreatment; span: Span } & Omit<IndexParams, "include"> & ConstraintAttrs)
   | ({ kind: "references"; table: string[]; columns: string[] | null; span: Span } & ForeignKeyTail & ConstraintAttrs)
-  | { kind: "check"; expr: Expr; span: Span }
+  | { kind: "check"; expr: Expr; noInherit?: true; span: Span }
   // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(sequence options)]`;
   // `options` is present only when the parenthesised list is.
   | { kind: "identity"; generated: "always" | "by default"; options?: SequenceOption[]; span: Span }
-  // `GENERATED ALWAYS AS (expr) STORED` — a stored generated column.
-  | { kind: "generated"; expr: Expr; span: Span }
-  | { kind: "collate"; collation: string[]; span: Span };
+  // `GENERATED ALWAYS AS (expr) STORED | VIRTUAL`; `virtual` is present only
+  // for VIRTUAL (PG 18).
+  | { kind: "generated"; expr: Expr; virtual?: true; span: Span }
+) & { name?: string };
+
+export type ColConstraint = ColConstraintElem | { kind: "collate"; collation: string[]; span: Span };
 
 export type ColumnDef = {
   kind: "column";
@@ -311,9 +338,21 @@ export type ColumnDef = {
 };
 
 export type TableConstraint =
-  | ({ kind: "primaryKey"; name: string | null; columns: string[]; span: Span } & ConstraintAttrs)
-  | ({ kind: "unique"; name: string | null; columns: string[]; span: Span } & ConstraintAttrs)
-  | { kind: "check"; name: string | null; expr: Expr; span: Span }
+  | ({ kind: "primaryKey"; name: string | null; columns: string[]; span: Span } & IndexParams & ConstraintAttrs)
+  | ({ kind: "unique"; name: string | null; nulls?: NullsTreatment; columns: string[]; span: Span } & IndexParams &
+      ConstraintAttrs)
+  // A CHECK can never be deferred, so of the deferral attributes only their
+  // defaults (NOT DEFERRABLE, INITIALLY IMMEDIATE) can appear.
+  | {
+      kind: "check";
+      name: string | null;
+      expr: Expr;
+      deferrable?: false;
+      initially?: "immediate";
+      notValid?: true;
+      noInherit?: true;
+      span: Span;
+    }
   | ({
       kind: "foreignKey";
       name: string | null;
@@ -322,25 +361,26 @@ export type TableConstraint =
       refColumns: string[] | null;
       span: Span;
     } & ForeignKeyTail &
-      ConstraintAttrs)
+      Omit<TableConstraintAttrs, "noInherit">)
   | ExcludeConstraint;
 
 // One `element WITH operator` pair of an EXCLUDE constraint. `operator` is the
 // operator's text (`=`, `&&`).
 export type ExclusionElement = { expr: Expr; operator: string; span: Span };
 
-// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WHERE
-// (pred)]`. `using` is null when PG's default (btree) applies, as on
-// createIndex; `include` and `where` are omitted when absent.
+// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WITH
+// (params)] [USING INDEX TABLESPACE name] [WHERE (pred)]`. `using` is null when
+// PG's default (btree) applies, as on createIndex; the index parameters and
+// `where` are omitted when absent.
 export type ExcludeConstraint = {
   kind: "exclude";
   name: string | null;
   using: string | null;
   elements: ExclusionElement[];
-  include?: string[];
   where?: Expr;
   span: Span;
-} & ConstraintAttrs;
+} & IndexParams &
+  ConstraintAttrs;
 
 // One `{INCLUDING | EXCLUDING} property` option of a `LIKE source` table item.
 export type LikeOption = {
@@ -861,12 +901,17 @@ export type TransactionMode =
   | { kind: "deferrable"; value: boolean }; // true = DEFERRABLE, false = NOT DEFERRABLE
 
 // BEGIN / START TRANSACTION / COMMIT / ROLLBACK / SAVEPOINT / RELEASE SAVEPOINT.
+// END is COMMIT and ABORT is ROLLBACK (without TO SAVEPOINT), as in PG, so each
+// gives the node of the word it stands for. The two-phase forms carry the
+// transaction's string identifier: `PREPARE TRANSACTION 'gid'`, `COMMIT
+// PREPARED 'gid'` and `ROLLBACK PREPARED 'gid'`.
 export type Transaction =
   | { kind: "begin"; start: boolean; modes: TransactionMode[]; span: Span } // start = `START TRANSACTION`
   | { kind: "commit"; chain: boolean; span: Span } // chain = AND CHAIN
   | { kind: "rollback"; chain: boolean; savepoint: string | null; span: Span } // savepoint = ROLLBACK TO [SAVEPOINT] name
   | { kind: "savepoint"; name: string; span: Span }
-  | { kind: "releaseSavepoint"; name: string; span: Span };
+  | { kind: "releaseSavepoint"; name: string; span: Span }
+  | { kind: "prepareTransaction" | "commitPrepared" | "rollbackPrepared"; gid: string; span: Span };
 
 // SET [SESSION|LOCAL] { name {=|TO} value[, …] | name FROM CURRENT | TIME ZONE
 // value | ROLE|SCHEMA|NAMES|… value | SESSION AUTHORIZATION value }. `name` is
@@ -1000,6 +1045,34 @@ export type Explain = {
 export type Analyze = { kind: "analyze"; options: RelationOption[]; tables: MaintenanceTarget[]; span: Span };
 export type Vacuum = { kind: "vacuum"; options: RelationOption[]; tables: MaintenanceTarget[]; span: Span };
 
+// `CLUSTER [(option, …) | VERBOSE] [table [USING index]]`, and the pre-8.3
+// `CLUSTER [VERBOSE] index ON table`, with `options` as on EXPLAIN. `table` is
+// omitted when none is named (every previously clustered table), `index` when
+// neither USING nor the old ON form names one.
+export type Cluster = { kind: "cluster"; options: RelationOption[]; table?: string[]; index?: string; span: Span };
+// `REINDEX [(option, …)] {INDEX | TABLE | SCHEMA | DATABASE | SYSTEM}
+// [CONCURRENTLY] name`. The name is qualified for INDEX and TABLE, a single
+// part otherwise, and may be left off (omitted) for DATABASE and SYSTEM, which
+// then mean the current database. `concurrently` is present only when written.
+export type Reindex = {
+  kind: "reindex";
+  options: RelationOption[];
+  target: "index" | "table" | "schema" | "database" | "system";
+  concurrently?: true;
+  name?: string[];
+  span: Span;
+};
+// CHECKPOINT; LOAD 'file'; DISCARD {ALL | PLANS | SEQUENCES | TEMP |
+// TEMPORARY}, the two spellings of the last both "temp".
+export type Checkpoint = { kind: "checkpoint"; span: Span };
+export type Load = { kind: "load"; file: string; span: Span };
+export type Discard = { kind: "discard"; target: "all" | "plans" | "sequences" | "temp"; span: Span };
+// LISTEN channel; NOTIFY channel [, 'payload'] (`payload` present only when
+// written); UNLISTEN {channel | *}, `channel` null for `*`.
+export type Listen = { kind: "listen"; channel: string; span: Span };
+export type Notify = { kind: "notify"; channel: string; payload?: string; span: Span };
+export type Unlisten = { kind: "unlisten"; channel: string | null; span: Span };
+
 // Where COPY reads from or writes to: a server-side file, a shell command's
 // pipe, or the client connection: STDIN for FROM, STDOUT for TO, as PG's docs
 // spell it. (PG's grammar takes either word in either direction; this parser
@@ -1051,8 +1124,9 @@ export type Stmt =
       modifiers?: string[];
       span: Span;
     }
-  // `options` (WITH (…)) and `only` (ON ONLY t) are present only when written;
-  // the older `include` and `where` keys stay null when absent.
+  // `options` (WITH (…)), `only` (ON ONLY t), `nulls` (NULLS [NOT] DISTINCT) and
+  // `tablespace` are present only when written; the older `include` and `where`
+  // keys stay null when absent.
   | {
       kind: "createIndex";
       unique: boolean;
@@ -1064,7 +1138,9 @@ export type Stmt =
       using: string | null;
       columns: IndexColumn[];
       include: string[] | null;
+      nulls?: NullsTreatment;
       options?: RelationOption[];
+      tablespace?: string;
       where: Expr | null;
       span: Span;
     }
@@ -1175,6 +1251,14 @@ export type Stmt =
   | Explain
   | Analyze
   | Vacuum
+  | Cluster
+  | Reindex
+  | Checkpoint
+  | Load
+  | Discard
+  | Listen
+  | Notify
+  | Unlisten
   | Lock
   | CallProcedure
   | DeclareCursor
@@ -1800,6 +1884,32 @@ const numberNode = (text: string, span: Span, sign = ""): Extract<Expr, { kind: 
 };
 const numberLit = token("number").map((node, span): Expr => numberNode(node.value, span));
 const stringLit = token("string").map((node, span): Expr => ({ kind: "string", value: node.value, span }));
+// The expression atom's string constant: a plain `'…'` (any of the forms that
+// lex to a `string` token) or `N'abc'`, PG's national character string. The
+// national form is a `bpchar`-typed literal, which is what PG's grammar makes of
+// the NCHAR its scanner emits before the string; the lexer reads it as one
+// token spanning the `N` too, so the type's span is that one character. It is
+// accepted in expressions only, as in PG — where a bare string constant is
+// required (`COMMENT ON … IS`, option values) it is not one. One rule rather
+// than a `oneOf` of two: this sits on the path of every string in every
+// expression, and the nested dispatch measurably slowed string-heavy input.
+// Its `expected` is the plain string's, so no "Expected …" message gains an
+// entry for the national form.
+const stringConstant = custom<Expr, SqlTokenType>(
+  (ctx) => {
+    const tok = ctx.next()!;
+    const span = { ...tok.position };
+    if (tok.type === "string") return { kind: "string", value: tok.value, span };
+    const prefix = { start: span.start, end: { row: span.start.row, col: span.start.col + 1 } };
+    return {
+      kind: "typedLiteral",
+      type: { name: "bpchar", args: [], array: false, span: prefix },
+      value: tok.value,
+      span,
+    };
+  },
+  { expected: "a string", first: [{ type: "string" }, { type: "nstring" }] },
+);
 // `B'1011'` and `X'ff'` lex as token types of their own, which is what lets the
 // node record the spelling without re-reading the source. Any literal that
 // closed has had its digits checked by the lexer, leaving these plain maps; one
@@ -2393,7 +2503,7 @@ const sqlValueFunction = custom<Expr, SqlTokenType>(
 
 const atom = oneOf(
   numberLit,
-  stringLit,
+  stringConstant,
   bitStringLit,
   hexStringLit,
   boolLit,
@@ -2496,10 +2606,10 @@ const ARGS_BEFORE_TAIL: ReadonlySet<string> = new Set(["timestamp", "time"]);
 // as no token at all. Lexing is lazy, so a peek past the cursor can raise the
 // *next* token's lex error. Two things have to happen to it. Input that does not
 // lex cannot complete a lookahead pattern, so the candidate fails rather than
-// the whole rule — otherwise `diagnose("CREATE TABLE t (c timestamp with é);")`
+// the whole rule — otherwise `diagnose("CREATE TABLE t (c timestamp with \\);")`
 // reports the bad character and loses the column-definition error. But filling
 // the lookahead buffer consumes the offending character, so simply discarding
-// the error would drop it for good, and `c interval day é` would parse clean.
+// the error would drop it for good, and `c interval day \` would parse clean.
 // Hence report() — which records it in diagnose() and returns false under
 // strict parse(), where there is no collector and rethrowing is the only honest
 // answer.
@@ -2556,7 +2666,7 @@ const TYPED_LITERAL_LEADS: ReadonlySet<string> = new Set(["date", "time", "times
 // read two past its `)`), so a lex error there surfaces exactly as it always
 // did. Everything further out is lookahead the old parse need not have done,
 // and goes through peekOrReport — under diagnose() the syntax error that
-// follows (`SELECT time with time zone é;` still reports `with`) is kept.
+// follows (`SELECT time with time zone \;` still reports `with`) is kept.
 function startsTypedLiteral(ctx: ParseContext<SqlTokenType>): boolean {
   const lead = ctx.peek();
   if (lead === null || lead.type !== "ident" || !TYPED_LITERAL_LEADS.has(lead.value)) return false;
@@ -3148,48 +3258,85 @@ const matchType = oneOf(kw("full"), kw("partial"), kw("simple"));
 // `on` with no rollback, so whichever came first would croak on the other's
 // verb. A repeated verb croaks naming the one still open, as PG rejects it too;
 // once both are filled the loop stops, and a third ON is left to the caller.
+//
+// SET NULL and SET DEFAULT may name the columns they set, `(cols)`; nothing
+// else can follow them with a `(`. PG's grammar reads the list after either
+// verb and then rejects it on ON UPDATE, so this does too.
 function parseForeignKeyTail(ctx: ParseContext<SqlTokenType>): ForeignKeyTail {
   const match =
     ctx.eat("ident", "match") !== null ? (ctx.parse(matchType).value as "full" | "partial" | "simple") : null;
   let onDelete: RefAction | null = null;
+  let onDeleteColumns: string[] | null = null;
   let onUpdate: RefAction | null = null;
   while ((onDelete === null || onUpdate === null) && ctx.is("ident", "on")) {
+    const start = ctx.position();
     ctx.next(); // ON
     if (onDelete === null && ctx.eat("ident", "delete") !== null) {
       onDelete = dispatch(REF_ACTIONS, REF_ACTION_EXPECTED, ctx);
+      if (isSetAction(onDelete) && ctx.is("punc", "(")) onDeleteColumns = parseColumnNames(ctx);
     } else if (onUpdate === null && ctx.eat("ident", "update") !== null) {
       onUpdate = dispatch(REF_ACTIONS, REF_ACTION_EXPECTED, ctx);
+      if (isSetAction(onUpdate) && ctx.is("punc", "(")) {
+        parseColumnNames(ctx);
+        return ctx.croak(
+          `a column list with ${onUpdate.toUpperCase()} is only supported for ON DELETE actions`,
+          start,
+          ctx.lastEnd(),
+        );
+      }
     } else {
       const open = [...(onDelete === null ? ["delete"] : []), ...(onUpdate === null ? ["update"] : [])];
       return ctx.croak(`Expected ${quoteList(open)} but found ${describeFound(ctx.peek())}`);
     }
   }
-  return { ...(match && { match }), onDelete, ...(onUpdate && { onUpdate }) };
+  return {
+    ...(match && { match }),
+    onDelete,
+    ...(onDeleteColumns && { onDeleteColumns }),
+    ...(onUpdate && { onUpdate }),
+  };
 }
+
+const isSetAction = (action: RefAction) => action === "set null" || action === "set default";
 
 const initiallyWhen = oneOf(kw("deferred"), kw("immediate"));
 
-// True when the cursor sits on `NOT DEFERRABLE`. Lexing is lazy, so the peek
-// past `not` is taken only on a `not`: peeking on every token would raise the
-// lex error of a token two on from inside the constraint handler, and
-// diagnose() would drop the constraint — and the column — over a character the
-// column never reaches. After a `not` in a column constraint there is nothing
-// to save: NOT NULL would raise the same error on the same token. (At table
-// level the tail meets a bad token inside the constraint rather than between
-// items, so diagnose() keeps the table around it.)
-function atNotDeferrable(ctx: ParseContext<SqlTokenType>): boolean {
+// True when the cursor sits on `NOT <word>` — `NOT DEFERRABLE`, or at table
+// level `NOT VALID`. Lexing is lazy, so the peek past `not` is taken only on a
+// `not`: peeking on every token would raise the lex error of a token two on
+// from inside the constraint handler, and diagnose() would drop the constraint
+// — and the column — over a character the column never reaches. After a `not`
+// in a column constraint there is nothing to save: NOT NULL would raise the
+// same error on the same token. (At table level the tail meets a bad token
+// inside the constraint rather than between items, so diagnose() keeps the
+// table around it.)
+function atNot(ctx: ParseContext<SqlTokenType>, word: string): boolean {
   if (!ctx.is("ident", "not")) return false;
   const next = ctx.peekAhead(1);
-  return next !== null && next.type === "ident" && next.value === "deferrable";
+  return next !== null && next.type === "ident" && next.value === word;
 }
 
-// `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. Only
-// UNIQUE, PRIMARY KEY, foreign keys and EXCLUDE read this tail, so PG's "misplaced
-// DEFERRABLE clause" (`a int NOT NULL DEFERRABLE`) never parses.
+// The constraint a table-level attribute list belongs to, spelled as PG's
+// "%s constraints cannot be marked …" messages name it.
+type ConstraintType = "PRIMARY KEY" | "UNIQUE" | "EXCLUDE" | "FOREIGN KEY" | "CHECK";
+
+// `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. At
+// column level only UNIQUE, PRIMARY KEY and REFERENCES read this tail, so PG's
+// "misplaced DEFERRABLE clause" (`a int NOT NULL DEFERRABLE`) never parses.
+//
+// At table level every constraint reads PG's whole `ConstraintAttributeSpec`,
+// which adds `NOT VALID` and `NO INHERIT`, and then judges it by the
+// constraint's `type` as PG's processCASbits does: CHECK takes NOT VALID and NO
+// INHERIT but nothing that makes it deferrable (NOT DEFERRABLE and INITIALLY
+// IMMEDIATE are its defaults, so those pass); a foreign key takes NOT VALID;
+// the index-backed ones take neither. NOT VALID and NO INHERIT may repeat, as
+// in PG. That judgement comes after the whole list is read, so a contradiction
+// within it is reported first, as in PG. Unlike PG, which points at the start
+// of the list, the error sits on the clause refused.
 //
 // `not` is shared with a following column constraint's NOT NULL, so it is taken
-// here only when `deferrable` comes next; a bare `ctx.eat("not")` would steal
-// `a int UNIQUE NOT NULL`.
+// here only when `deferrable` (or, at table level, `valid`) comes next; a bare
+// `ctx.eat("not")` would steal `a int UNIQUE NOT NULL`.
 //
 // A second clause of either kind is still read, rather than falling out of the
 // loop to be misread as the start of the next constraint, and is then judged as
@@ -3200,12 +3347,42 @@ function atNotDeferrable(ctx: ParseContext<SqlTokenType>): boolean {
 // through and reports only a contradiction. Both levels reject a constraint that
 // can never be deferred starting out deferred; the column check looks for a
 // repeat first, the table check for that case first, and so do these.
-function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column" | "table"): ConstraintAttrs {
+function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column"): ConstraintAttrs;
+// A CHECK's attributes, which the CHECK judgement below keeps from deferring.
+function parseConstraintAttrs(
+  ctx: ParseContext<SqlTokenType>,
+  level: "table",
+  type: "CHECK",
+): Omit<Extract<TableConstraint, { kind: "check" }>, "kind" | "name" | "expr" | "span">;
+function parseConstraintAttrs(
+  ctx: ParseContext<SqlTokenType>,
+  level: "table",
+  type: ConstraintType,
+): TableConstraintAttrs;
+function parseConstraintAttrs(
+  ctx: ParseContext<SqlTokenType>,
+  level: "column" | "table",
+  type?: ConstraintType,
+): TableConstraintAttrs {
   let deferrable: boolean | null = null;
   let initially: "deferred" | "immediate" | null = null;
+  // Where each clause the constraint type may refuse was first written.
+  let deferredAt: [Position, Position] | null = null;
+  let notValidAt: [Position, Position] | null = null;
+  let noInheritAt: [Position, Position] | null = null;
   while (true) {
     const start = ctx.position();
-    const negated = atNotDeferrable(ctx);
+    if (level === "table" && atNot(ctx, "valid")) {
+      ctx.parse(kwseq("not", "valid"));
+      notValidAt ??= [start, ctx.lastEnd()];
+      continue;
+    }
+    if (level === "table" && ctx.is("ident", "no")) {
+      ctx.parse(kwseq("no", "inherit"));
+      noInheritAt ??= [start, ctx.lastEnd()];
+      continue;
+    }
+    const negated = atNot(ctx, "deferrable");
     let repeated: string;
     let conflicting: boolean;
     if (negated || ctx.is("ident", "deferrable")) {
@@ -3213,11 +3390,13 @@ function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column" |
       repeated = "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed";
       conflicting = deferrable !== null && (level === "column" || deferrable === negated);
       deferrable = !negated;
+      if (!negated) deferredAt ??= [start, ctx.lastEnd()];
     } else if (ctx.eat("ident", "initially") !== null) {
       const when = ctx.parse(initiallyWhen).value as "deferred" | "immediate";
       repeated = "multiple INITIALLY IMMEDIATE/DEFERRED clauses not allowed";
       conflicting = initially !== null && (level === "column" || initially !== when);
       initially = when;
+      if (when === "deferred") deferredAt ??= [start, ctx.lastEnd()];
     } else {
       break;
     }
@@ -3229,10 +3408,79 @@ function parseConstraintAttrs(ctx: ParseContext<SqlTokenType>, level: "column" |
       return ctx.croak("constraint declared INITIALLY DEFERRED must be DEFERRABLE", start, ctx.lastEnd());
     }
   }
-  return { ...(deferrable !== null && { deferrable }), ...(initially && { initially }) };
+  if (deferredAt !== null && type === "CHECK") {
+    return ctx.croak(`${type} constraints cannot be marked DEFERRABLE`, ...deferredAt);
+  }
+  if (notValidAt !== null && type !== "CHECK" && type !== "FOREIGN KEY") {
+    return ctx.croak(`${type} constraints cannot be marked NOT VALID`, ...notValidAt);
+  }
+  if (noInheritAt !== null && type !== "CHECK") {
+    return ctx.croak(`${type} constraints cannot be marked NO INHERIT`, ...noInheritAt);
+  }
+  return {
+    ...(deferrable !== null && { deferrable }),
+    ...(initially && { initially }),
+    ...(notValidAt && { notValid: true }),
+    ...(noInheritAt && { noInherit: true }),
+  };
 }
 
-const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
+// `NULLS [NOT] DISTINCT`, after UNIQUE or after an index's column list and
+// INCLUDE. Nothing else may start with `nulls` in either place, so the word
+// commits.
+const nullsTreatment = seq(skip(kw("nulls")), field("not", optional(kw("not"))), skip(kw("distinct"))).map(
+  (s): NullsTreatment => (s.not !== null ? "not distinct" : "distinct"),
+);
+
+const parseNullsTreatment = (ctx: ParseContext<SqlTokenType>): NullsTreatment | null =>
+  ctx.is("ident", "nulls") ? ctx.parse(nullsTreatment) : null;
+
+// A parenthesised list of at least one column, as PG's columnList: unlike
+// the shared `columnList`, an empty `()` is a syntax error. INCLUDE and the
+// ON DELETE SET NULL / SET DEFAULT list read it.
+const nonEmptyColumnNames = sepBy(nameWord, P(","));
+
+function parseColumnNames(ctx: ParseContext<SqlTokenType>): string[] {
+  ctx.parse(punc("("));
+  const columns = ctx.parse(nonEmptyColumnNames);
+  expectClose(ctx);
+  return columns;
+}
+
+// The index parameters of PRIMARY KEY, UNIQUE and EXCLUDE, in PG's fixed order
+// (see IndexParams). INCLUDE exists only at table level. None of the lead
+// words takes a name away: `with` and `using` are reserved, and after a
+// constraint nothing else may follow with `include`.
+function parseIndexParams(ctx: ParseContext<SqlTokenType>, level: "column" | "table"): IndexParams {
+  const include = level === "table" && ctx.eat("ident", "include") !== null ? parseColumnNames(ctx) : null;
+  const options = ctx.eat("ident", "with") !== null ? ctx.parse(relationOptions) : null;
+  // PG reads these as a plain definition list, not reloptions, so an option
+  // has no `namespace.` prefix here, though relationOptions, which other lists
+  // share, accepts one. Its other leniencies (a missing `=`, list values) stay.
+  const namespaced = options?.find((option) => option.namespace !== undefined);
+  if (namespaced !== undefined) {
+    return ctx.croak(
+      `a constraint's index parameters take no namespace, but found "${namespaced.namespace}.${namespaced.name}"`,
+      namespaced.span.start,
+      namespaced.span.end,
+    );
+  }
+  let indexTablespace: string | null = null;
+  if (ctx.is("ident", "using")) {
+    ctx.parse(kwseq("using", "index", "tablespace"));
+    indexTablespace = ctx.parse(nameWord);
+  }
+  return {
+    ...(include && { include }),
+    ...(options && { options }),
+    ...(indexTablespace !== null && { indexTablespace }),
+  };
+}
+
+const generatedKind = oneOf(kw("stored"), kw("virtual"));
+
+// The column constraints `CONSTRAINT name` may lead — every one but COLLATE.
+const COLUMN_CONSTRAINT_ELEMS: DispatchMap<ColConstraintElem> = {
   not: {
     expected: '"not null"',
     parse: (ctx) => {
@@ -3260,16 +3508,19 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kwseq("primary", "key"));
+      const params = parseIndexParams(ctx, "column");
       const attrs = parseConstraintAttrs(ctx, "column");
-      return { kind: "primaryKey", ...attrs, span: ctx.spanFrom(start) };
+      return { kind: "primaryKey", ...params, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   unique: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("unique"));
+      const nulls = parseNullsTreatment(ctx);
+      const params = parseIndexParams(ctx, "column");
       const attrs = parseConstraintAttrs(ctx, "column");
-      return { kind: "unique", ...attrs, span: ctx.spanFrom(start) };
+      return { kind: "unique", ...(nulls && { nulls }), ...params, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   references: {
@@ -3283,20 +3534,27 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
       return { kind: "references", table, columns, ...tail, ...attrs, span: ctx.spanFrom(start) };
     },
   },
+  // `CHECK (expr) [NO INHERIT]`. A column-level CHECK takes no other
+  // attribute: NOT VALID exists only at table level, and NOT NULL takes no NO
+  // INHERIT before PG 18.
   check: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("check"));
-      return { kind: "check", expr: ctx.parse(parenExpr), span: ctx.spanFrom(start) };
+      const expr = ctx.parse(parenExpr);
+      const noInherit = ctx.is("ident", "no");
+      if (noInherit) ctx.parse(kwseq("no", "inherit"));
+      return { kind: "check", expr, ...(noInherit && { noInherit: true as const }), span: ctx.spanFrom(start) };
     },
   },
   // `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(options)]` or `GENERATED
-  // ALWAYS AS (expr) STORED`. The handler owns all of its lookahead, so one key
-  // covers both forms. As in PG, BY DEFAULT is only for identity columns, and
-  // STORED is required (PG 18's VIRTUAL and bare form are not parsed); PG's
-  // identity-only `SEQUENCE NAME` option is not parsed yet. GENERATED, ALWAYS,
-  // IDENTITY and STORED stay unreserved: they are matched only here, in a
-  // column's constraint list.
+  // ALWAYS AS (expr) {STORED | VIRTUAL}`. The handler owns all of its
+  // lookahead, so one key covers both forms. As in PG, BY DEFAULT is only for
+  // identity columns. VIRTUAL is PG 18's, taken because schemas (pagila's
+  // among them) write it; PG 18's bare form (no STORED or VIRTUAL) is still
+  // rejected, as PG 17 does. PG's identity-only `SEQUENCE NAME` option is not
+  // parsed yet. GENERATED, ALWAYS, IDENTITY, STORED and VIRTUAL stay
+  // unreserved: they are matched only here, in a column's constraint list.
   generated: {
     parse: (ctx) => {
       const start = ctx.position();
@@ -3325,14 +3583,20 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
         return ctx.croak(`Expected ${quoteList(["identity", "("])} but found ${describeFound(ctx.peek())}`);
       }
       const expr = ctx.parse(parenExpr);
-      ctx.parse(kw("stored"));
+      const virtual = ctx.parse(generatedKind).value === "virtual";
       // Judged once the clause is whole and pinned to the BY DEFAULT, as PG does.
       if (generated !== "always") {
         return ctx.croak("for a generated column, GENERATED ALWAYS must be specified", whenStart, whenEnd);
       }
-      return { kind: "generated", expr, span: ctx.spanFrom(start) };
+      return { kind: "generated", expr, ...(virtual && { virtual: true as const }), span: ctx.spanFrom(start) };
     },
   },
+};
+
+const COLUMN_CONSTRAINT_ELEM_EXPECTED = joinExpected(COLUMN_CONSTRAINT_ELEMS);
+
+const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
+  ...COLUMN_CONSTRAINT_ELEMS,
   // Column-level `COLLATE name`. `collate` is reserved, so it cannot be a type
   // word and, straight after the type, it can only be this. A DEFAULT's operand
   // is a b-expression, which has no COLLATE, so `DEFAULT 'a' COLLATE "C"`
@@ -3343,6 +3607,18 @@ const COLUMN_CONSTRAINTS: DispatchMap<ColConstraint> = {
       const start = ctx.position();
       ctx.parse(kw("collate"));
       return { kind: "collate", collation: ctx.parse(qualName), span: ctx.spanFrom(start) };
+    },
+  },
+  // `CONSTRAINT name` then any constraint but COLLATE. `constraint` is
+  // reserved, so it takes no name away; after a column's type it can only lead
+  // this. The span runs from CONSTRAINT.
+  constraint: {
+    parse: (ctx) => {
+      const start = ctx.position();
+      ctx.parse(kw("constraint"));
+      const name = ctx.parse(nameWord);
+      const elem = dispatch(COLUMN_CONSTRAINT_ELEMS, COLUMN_CONSTRAINT_ELEM_EXPECTED, ctx);
+      return { ...elem, name, span: ctx.spanFrom(start) };
     },
   },
 };
@@ -3364,24 +3640,37 @@ const TABLE_CONSTRAINTS: DispatchMap<TableConstraint> = {
       const start = ctx.position();
       ctx.parse(kwseq("primary", "key"));
       const columns = ctx.parse(columnList);
-      const attrs = parseConstraintAttrs(ctx, "table");
-      return { kind: "primaryKey", name: null, columns, ...attrs, span: ctx.spanFrom(start) };
+      const params = parseIndexParams(ctx, "table");
+      const attrs = parseConstraintAttrs(ctx, "table", "PRIMARY KEY");
+      return { kind: "primaryKey", name: null, columns, ...params, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   unique: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("unique"));
+      const nulls = parseNullsTreatment(ctx);
       const columns = ctx.parse(columnList);
-      const attrs = parseConstraintAttrs(ctx, "table");
-      return { kind: "unique", name: null, columns, ...attrs, span: ctx.spanFrom(start) };
+      const params = parseIndexParams(ctx, "table");
+      const attrs = parseConstraintAttrs(ctx, "table", "UNIQUE");
+      return {
+        kind: "unique",
+        name: null,
+        ...(nulls && { nulls }),
+        columns,
+        ...params,
+        ...attrs,
+        span: ctx.spanFrom(start),
+      };
     },
   },
   check: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("check"));
-      return { kind: "check", name: null, expr: ctx.parse(parenExpr), span: ctx.spanFrom(start) };
+      const expr = ctx.parse(parenExpr);
+      const attrs = parseConstraintAttrs(ctx, "table", "CHECK");
+      return { kind: "check", name: null, expr, ...attrs, span: ctx.spanFrom(start) };
     },
   },
   foreign: {
@@ -3394,7 +3683,7 @@ const TABLE_CONSTRAINTS: DispatchMap<TableConstraint> = {
       const refTable = ctx.parse(qualName);
       const refColumns = ctx.parse(optColumnList);
       const tail = parseForeignKeyTail(ctx);
-      const attrs = parseConstraintAttrs(ctx, "table");
+      const attrs = parseConstraintAttrs(ctx, "table", "FOREIGN KEY");
       return {
         kind: "foreignKey",
         name: null,
@@ -3429,10 +3718,8 @@ const exclusionElement = seq(
   ),
 ).map(({ expr, operator }, span): ExclusionElement => ({ expr, operator, span }));
 
-// At least one entry, as in PG: an empty `EXCLUDE ()` or `INCLUDE ()` is a
-// syntax error.
+// At least one entry, as in PG: an empty `EXCLUDE ()` is a syntax error.
 const exclusionElements = sepBy(exclusionElement, P(","));
-const includeColumns = sepBy(nameWord, P(","));
 
 // True when the cursor sits on `EXCLUDE USING` or `EXCLUDE (` — neither of
 // which can begin a column definition, as `using` is reserved and `(` cannot
@@ -3448,12 +3735,10 @@ function atExcludeConstraint(ctx: ParseContext<SqlTokenType>): boolean {
   );
 }
 
-// `EXCLUDE [USING method] (element WITH operator, …) [INCLUDE (cols)] [WHERE
-// (pred)]` plus the DEFERRABLE/INITIALLY tail. Kept out of TABLE_CONSTRAINTS on
+// `EXCLUDE [USING method] (element WITH operator, …)`, the index parameters,
+// `[WHERE (pred)]` and the attribute tail. Kept out of TABLE_CONSTRAINTS on
 // purpose: `exclude` is unreserved, and a key there would join tableItem's
 // value-specific first set and take the word away from columns (see tableItem).
-// PG's index parameters (`WITH (…)`, `USING INDEX TABLESPACE`) are not parsed
-// yet.
 const excludeBody = custom<ExcludeConstraint, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -3462,20 +3747,15 @@ const excludeBody = custom<ExcludeConstraint, SqlTokenType>(
     ctx.parse(punc("("));
     const elements = ctx.parse(exclusionElements);
     expectClose(ctx);
-    let include: string[] | null = null;
-    if (ctx.eat("ident", "include") !== null) {
-      ctx.parse(punc("("));
-      include = ctx.parse(includeColumns);
-      expectClose(ctx);
-    }
+    const params = parseIndexParams(ctx, "table");
     const where = ctx.eat("ident", "where") !== null ? ctx.parse(parenExpr) : null;
-    const attrs = parseConstraintAttrs(ctx, "table");
+    const attrs = parseConstraintAttrs(ctx, "table", "EXCLUDE");
     return {
       kind: "exclude",
       name: null,
       using,
       elements,
-      ...(include && { include }),
+      ...params,
       ...(where && { where }),
       ...attrs,
       span: ctx.spanFrom(start),
@@ -3597,7 +3877,8 @@ function parseWithData(ctx: ParseContext<SqlTokenType>): boolean | null {
 // wants the `=`; one shape for every list is the trade. The same goes for the
 // `toast.` namespace, which only reloptions take, and for COPY's `*` and list
 // values. (RESET's values-free form is PG's to police too: its grammar takes the
-// same list and rejects a value only in analysis.)
+// same list and rejects a value only in analysis.) A constraint's index
+// parameters refuse the namespace afterwards (see parseIndexParams).
 //
 // Option names are PG's ColLabel, so a reserved word is a name here too
 // (`EXPLAIN (ANALYZE)`, COPY's `NULL '…'`). A word value may also be reserved
@@ -4123,12 +4404,19 @@ const createIndexRest = seq(
   field("columns", indexColumns),
   // `INCLUDE (col, …)` covering columns — plain names, kept null when absent.
   field("include", optional(seq(skip(kw("include")), field("cols", columnList)).map((s) => s.cols))),
+  field("nulls", optional(nullsTreatment)),
   // `WITH (storage_parameter = value, …)`, omitted when absent. `with` is
   // reserved, so it cannot be the start of anything else here.
   field("options", optional(seq(skip(kw("with")), field("o", relationOptions)).map((s) => s.o))),
+  // `TABLESPACE name`; no table clause can follow an index's column list, so
+  // the word commits.
+  field("tablespace", optional(seq(skip(kw("tablespace")), field("t", nameWord)).map((s) => s.t))),
   field("where", optional(seq(skip(kw("where")), field("e", expression)).map((s) => s.e))),
 ).map(
-  ({ unique, concurrently, ifNotExists, name, table, using, columns, include, options, where }, span): Stmt => ({
+  (
+    { unique, concurrently, ifNotExists, name, table, using, columns, include, nulls, options, tablespace, where },
+    span,
+  ): Stmt => ({
     kind: "createIndex",
     unique,
     concurrently,
@@ -4139,7 +4427,9 @@ const createIndexRest = seq(
     using,
     columns,
     include,
+    ...(nulls !== null && { nulls }),
     ...(options !== null && { options }),
+    ...(tablespace !== null && { tablespace }),
     where,
     span,
   }),
@@ -6756,6 +7046,15 @@ function parseAndChain(ctx: ParseContext<SqlTokenType>): boolean {
   return !no;
 }
 
+// The string identifier of a two-phase transaction (PG's Sconst).
+function gidString(ctx: ParseContext<SqlTokenType>): string {
+  if (!ctx.is("string")) return ctx.croak(`Expected a string but found ${describeFound(ctx.peek())}`);
+  return ctx.parse(strValue);
+}
+
+// `end` is reserved, so it is matched by value here, at a statement's head only:
+// a construct that closes with END (a CASE, a `BEGIN ATOMIC … END` routine body)
+// consumes its own END before statement dispatch could see it.
 const transactionStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -6769,13 +7068,28 @@ const transactionStmt = custom<Stmt, SqlTokenType>(
       ctx.parse(kwseq("start", "transaction"));
       return { kind: "begin", start: true, modes: parseTransactionModes(ctx), span: ctx.spanFrom(start) };
     }
-    if (head.value === "commit") {
+    // END [WORK | TRANSACTION] [AND [NO] CHAIN] is COMMIT's synonym; only
+    // COMMIT takes PREPARED.
+    if (head.value === "commit" || head.value === "end") {
       ctx.next();
+      if (head.value === "commit" && ctx.eat("ident", "prepared") !== null) {
+        return { kind: "commitPrepared", gid: gidString(ctx), span: ctx.spanFrom(start) };
+      }
       ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
       return { kind: "commit", chain: parseAndChain(ctx), span: ctx.spanFrom(start) };
     }
+    // ABORT [WORK | TRANSACTION] [AND [NO] CHAIN] is ROLLBACK's, without the TO
+    // SAVEPOINT and PREPARED forms.
+    if (head.value === "abort") {
+      ctx.next();
+      ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
+      return { kind: "rollback", chain: parseAndChain(ctx), savepoint: null, span: ctx.spanFrom(start) };
+    }
     if (head.value === "rollback") {
       ctx.next();
+      if (ctx.eat("ident", "prepared") !== null) {
+        return { kind: "rollbackPrepared", gid: gidString(ctx), span: ctx.spanFrom(start) };
+      }
       ctx.eat("ident", "work") ?? ctx.eat("ident", "transaction");
       // `ROLLBACK TO [SAVEPOINT] name` and `ROLLBACK AND CHAIN` are exclusive.
       if (ctx.eat("ident", "to") !== null) {
@@ -6798,7 +7112,9 @@ const transactionStmt = custom<Stmt, SqlTokenType>(
       { type: "ident", value: "begin" },
       { type: "ident", value: "start" },
       { type: "ident", value: "commit" },
+      { type: "ident", value: "end" },
       { type: "ident", value: "rollback" },
+      { type: "ident", value: "abort" },
       { type: "ident", value: "savepoint" },
       { type: "ident", value: "release" },
     ],
@@ -6920,6 +7236,72 @@ const deallocateStmt = custom<Stmt, SqlTokenType>(
     return { kind: "deallocate", name, span: ctx.spanFrom(start) };
   },
   { expected: '"deallocate"', first: [{ type: "ident", value: "deallocate" }] },
+);
+
+// --- LISTEN / NOTIFY / UNLISTEN, LOAD, DISCARD ---
+//
+// Every lead word stays UNRESERVED, matched by value; so do DISCARD's targets.
+
+const listenStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("listen"));
+    return { kind: "listen", channel: ctx.parse(nameWord), span: ctx.spanFrom(start) };
+  },
+  { expected: '"listen"', first: [{ type: "ident", value: "listen" }] },
+);
+
+const notifyStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("notify"));
+    const channel = ctx.parse(nameWord);
+    if (ctx.eat("punc", ",") === null) return { kind: "notify", channel, span: ctx.spanFrom(start) };
+    if (!ctx.is("string")) return ctx.croak(`Expected a payload string but found ${describeFound(ctx.peek())}`);
+    return { kind: "notify", channel, payload: ctx.parse(strValue), span: ctx.spanFrom(start) };
+  },
+  { expected: '"notify"', first: [{ type: "ident", value: "notify" }] },
+);
+
+const unlistenStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("unlisten"));
+    const channel = ctx.eat("op", "*") !== null ? null : ctx.parse(nameWord);
+    return { kind: "unlisten", channel, span: ctx.spanFrom(start) };
+  },
+  { expected: '"unlisten"', first: [{ type: "ident", value: "unlisten" }] },
+);
+
+const loadStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("load"));
+    if (!ctx.is("string")) return ctx.croak(`Expected a file name but found ${describeFound(ctx.peek())}`);
+    return { kind: "load", file: ctx.parse(strValue), span: ctx.spanFrom(start) };
+  },
+  { expected: '"load"', first: [{ type: "ident", value: "load" }] },
+);
+
+const DISCARD_TARGETS: Readonly<Record<string, Discard["target"]>> = {
+  all: "all",
+  plans: "plans",
+  sequences: "sequences",
+  temp: "temp",
+  temporary: "temp",
+};
+const discardStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("discard"));
+    const tok = ctx.peek();
+    if (tok?.type !== "ident" || !Object.hasOwn(DISCARD_TARGETS, tok.value)) {
+      return ctx.croak(`Expected ${keyList(DISCARD_TARGETS)} but found ${describeFound(tok)}`);
+    }
+    ctx.next();
+    return { kind: "discard", target: DISCARD_TARGETS[tok.value]!, span: ctx.spanFrom(start) };
+  },
+  { expected: '"discard"', first: [{ type: "ident", value: "discard" }] },
 );
 
 // --- DML: shared clause pieces ---
@@ -8618,10 +9000,17 @@ function optParenList<T>(ctx: ParseContext<SqlTokenType>, list: Rule<T[], SqlTok
 // generic "a statement" (which CREATE TABLE is).
 const PREPARABLE = "a SELECT, VALUES, INSERT, UPDATE, DELETE or MERGE statement";
 const PREPARABLE_FIRST = dmlStatement.first();
+// `PREPARE TRANSACTION 'gid'` (two-phase commit) shares the lead word, and
+// `transaction` is unreserved, so a statement may be named it: the string after
+// the word tells the two apart, as in PG.
 const prepareStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
     ctx.parse(kw("prepare"));
+    if (ctx.is("ident", "transaction") && peekOrReport(ctx, 1)?.type === "string") {
+      ctx.next(); // TRANSACTION
+      return { kind: "prepareTransaction", gid: gidString(ctx), span: ctx.spanFrom(start) };
+    }
     const name = ctx.parse(nameWord);
     const types = optParenList(ctx, prepareTypes);
     ctx.parse(kw("as"));
@@ -8679,6 +9068,11 @@ const maintenanceTarget = custom<MaintenanceTarget, SqlTokenType>(
 );
 const maintenanceTargets = sepBy(maintenanceTarget, P(","));
 
+// Whether the statement ends at the cursor.
+function atStatementEnd(ctx: ParseContext<SqlTokenType>): boolean {
+  return ctx.is("punc", ";") || ctx.peek() === null;
+}
+
 // `[(option, …) | flags] [target, …]` — the tail ANALYZE and VACUUM share. PG
 // takes either option form but not both; the target list ends the statement.
 // A bare flag word left over after the flags (one out of order, or repeated)
@@ -8691,7 +9085,7 @@ function maintenanceTail(ctx: ParseContext<SqlTokenType>, flags: readonly (reado
   if (!parenthesised && tok?.type === "ident" && flags.some((spellings) => spellings.includes(tok.value))) {
     return ctx.croak(`Expected a name but found ${describeFound(tok)}`);
   }
-  const tables = ctx.is("punc", ";") || ctx.peek() === null ? [] : ctx.parse(maintenanceTargets);
+  const tables = atStatementEnd(ctx) ? [] : ctx.parse(maintenanceTargets);
   return { options, tables };
 }
 
@@ -8712,6 +9106,81 @@ const vacuumStmt = custom<Stmt, SqlTokenType>(
     return { kind: "vacuum", ...tail, span: ctx.spanFrom(start) };
   },
   { expected: '"vacuum"', first: [{ type: "ident", value: "vacuum" }] },
+);
+
+// --- CHECKPOINT, CLUSTER and REINDEX ---
+//
+// The lead words, REINDEX's target words and CONCURRENTLY stay UNRESERVED,
+// matched by value (`table` is reserved already). VERBOSE and CONCURRENTLY
+// never name the relation, index or schema here: PG reserves both from a
+// name's position (type_func_name keywords), so `CLUSTER verbose` and
+// `REINDEX INDEX concurrently` name none there either.
+const FLAG_WORDS: readonly string[] = ["verbose", "concurrently"];
+// `rule`'s name, croaking on a bare flag word where it would start.
+function flagFreeName<T>(ctx: ParseContext<SqlTokenType>, rule: Rule<T, SqlTokenType>): T {
+  const tok = ctx.peek();
+  if (tok?.type === "ident" && FLAG_WORDS.includes(tok.value)) {
+    return ctx.croak(`Expected a name but found ${describeFound(tok)}`);
+  }
+  return ctx.parse(rule);
+}
+
+const checkpointStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("checkpoint"));
+    return { kind: "checkpoint", span: ctx.spanFrom(start) };
+  },
+  { expected: '"checkpoint"', first: [{ type: "ident", value: "checkpoint" }] },
+);
+
+const clusterStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("cluster"));
+    const parenthesised = ctx.is("punc", "(");
+    const options = parenthesised ? ctx.parse(relationOptions) : legacyFlags(ctx, [["verbose"]]);
+    if (atStatementEnd(ctx)) return { kind: "cluster", options, span: ctx.spanFrom(start) };
+    const name = flagFreeName(ctx, qualName);
+    // The pre-8.3 `index ON table`, which only the unparenthesised form takes.
+    if (!parenthesised && name.length === 1 && ctx.eat("ident", "on") !== null) {
+      const table = flagFreeName(ctx, qualName);
+      return { kind: "cluster", options, table, index: name[0]!, span: ctx.spanFrom(start) };
+    }
+    if (ctx.eat("ident", "using") === null) return { kind: "cluster", options, table: name, span: ctx.spanFrom(start) };
+    return { kind: "cluster", options, table: name, index: flagFreeName(ctx, nameWord), span: ctx.spanFrom(start) };
+  },
+  { expected: '"cluster"', first: [{ type: "ident", value: "cluster" }] },
+);
+
+const REINDEX_TARGETS = ["index", "table", "schema", "database", "system"] as const;
+const reindexStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kw("reindex"));
+    const options = ctx.is("punc", "(") ? ctx.parse(relationOptions) : [];
+    const tok = ctx.peek();
+    const target = REINDEX_TARGETS.find((t) => tok?.type === "ident" && tok.value === t);
+    if (target === undefined) {
+      return ctx.croak(`Expected ${quoteList(REINDEX_TARGETS)} but found ${describeFound(tok)}`);
+    }
+    ctx.next();
+    const concurrently = ctx.eat("ident", "concurrently") !== null;
+    // INDEX and TABLE name a relation; SCHEMA names a schema; DATABASE and
+    // SYSTEM may name the current database, or leave it off.
+    let name: string[] | undefined;
+    if (target === "index" || target === "table") name = flagFreeName(ctx, qualName);
+    else if (target === "schema" || !atStatementEnd(ctx)) name = [flagFreeName(ctx, nameWord)];
+    return {
+      kind: "reindex",
+      options,
+      target,
+      ...(concurrently ? { concurrently: true as const } : {}),
+      ...(name === undefined ? {} : { name }),
+      span: ctx.spanFrom(start),
+    };
+  },
+  { expected: '"reindex"', first: [{ type: "ident", value: "reindex" }] },
 );
 
 // PG's ExplainableStmt, as far as sql-lite parses it: a preparable statement
@@ -9030,6 +9499,14 @@ const utilityStmt = oneOf(
   explainStmt,
   analyzeStmt,
   vacuumStmt,
+  clusterStmt,
+  reindexStmt,
+  checkpointStmt,
+  loadStmt,
+  discardStmt,
+  listenStmt,
+  notifyStmt,
+  unlistenStmt,
   lockStmt,
   callStmt,
   declareCursorStmt,
@@ -9039,14 +9516,34 @@ const utilityStmt = oneOf(
   copyStmt,
 );
 const statementBody = oneOf(ddlStmt, utilityStmt, dmlStatement).describe("a statement");
-// Each statement owns its trailing `;`; `;` is also the recovery sync point.
-const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt }) => stmt);
+// PG's stmtmulti: `;` separates statements rather than ending them, so the
+// last statement may omit it (`SELECT 1`), and an empty statement (`;;`, a
+// leading `;`) yields no node — `null` here, dropped by the root. Anything
+// else after a statement is an error at that token (`SELECT 1 SELECT 2`).
+// `;` is also the recovery sync point.
+const SEMICOLON = punc(";");
+const statement = custom<Stmt | null, SqlTokenType>(
+  (ctx) => {
+    if (ctx.eat("punc", ";") !== null) return null;
+    const stmt = ctx.parse(statementBody);
+    if (!ctx.eof()) ctx.parse(SEMICOLON);
+    return stmt;
+  },
+  { expected: statementBody.expected(), first: [...statementBody.first(), { type: "punc", value: ";" }] },
+);
+// Not `.map()`: it reads the start position before repeat() runs, so a lexer
+// error on the first token would escape diagnose()'s recovery.
+const statements = repeat(statement);
+const script = custom<Stmt[], SqlTokenType>((ctx) => ctx.parse(statements).filter((stmt) => stmt !== null), {
+  expected: statements.expected(),
+  first: statements.first(),
+});
 
 // --- grammar ---
 
 export const sqlLite = defineGrammar({
   lexer: sqlParseLexer,
-  root: repeat(statement),
+  root: script,
   recovery: { sync: [{ type: "punc", value: ";", consume: true }] },
   // Opt into PG-style farthest-failure reporting: when a discarded backtracking
   // branch (a mistyped IF NOT EXISTS) got deeper than the error that surfaced,
@@ -9054,4 +9551,7 @@ export const sqlLite = defineGrammar({
   // backtracking branch (`INSERT INTO t (a, X'G1')`) reports itself rather
   // than whatever the rolled-back parse trips over next.
   errorReporting: { preferFarthest: true, propagateLexerErrors: true },
+  // The last statement needs no `;`, so a list still open at end of input
+  // (`INSERT INTO t VALUES (1`) must fail rather than close there.
+  strictDelimited: true,
 });
