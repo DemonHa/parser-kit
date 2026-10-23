@@ -8769,6 +8769,411 @@ describe("SQL-lite object references", () => {
   });
 });
 
+// --- policies, publications and subscriptions ---
+
+describe("SQL-lite policies, publications and subscriptions", () => {
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const opt = (optionName: string, value: unknown) => ({ name: optionName, value });
+
+  it("parses CREATE POLICY with every clause, and with none", () => {
+    expect(
+      firstStmt(
+        "CREATE POLICY own_rows ON app.docs AS RESTRICTIVE FOR UPDATE TO app_user, CURRENT_USER, public " +
+          "USING (owner = current_user) WITH CHECK (owner = current_user);",
+      ),
+    ).toEqual({
+      kind: "createPolicy",
+      name: "own_rows",
+      table: ["app", "docs"],
+      as: "restrictive",
+      command: "update",
+      roles: ["app_user", "current_user", "public"],
+      using: exprOf("owner = current_user"),
+      withCheck: exprOf("owner = current_user"),
+    });
+    expect(firstStmt("CREATE POLICY p ON t;")).toEqual({ kind: "createPolicy", name: "p", table: ["t"] });
+    expect(firstStmt("CREATE POLICY p ON t AS PERMISSIVE FOR ALL;")).toEqual({
+      kind: "createPolicy",
+      name: "p",
+      table: ["t"],
+      as: "permissive",
+      command: "all",
+    });
+    // PG compares AS's identifier by its text, so a quoted one counts.
+    expect(firstStmt('CREATE POLICY p ON t AS "permissive";')).toMatchObject({ as: "permissive" });
+    for (const command of ["select", "insert", "delete"]) {
+      expect(firstStmt(`CREATE POLICY p ON t FOR ${command.toUpperCase()} USING (true);`)).toMatchObject({ command });
+    }
+    expect(firstStmt("CREATE POLICY p ON t WITH CHECK (a > 0);")).toEqual({
+      kind: "createPolicy",
+      name: "p",
+      table: ["t"],
+      withCheck: exprOf("a > 0"),
+    });
+  });
+
+  it("parses ALTER POLICY's clauses and RENAME TO, and DROP POLICY", () => {
+    expect(firstStmt("ALTER POLICY p ON s.t TO a, b USING (x) WITH CHECK (y);")).toEqual({
+      kind: "alterPolicy",
+      name: "p",
+      table: ["s", "t"],
+      roles: ["a", "b"],
+      using: name("x"),
+      withCheck: name("y"),
+    });
+    expect(firstStmt("ALTER POLICY p ON t WITH CHECK (y);")).toEqual({
+      kind: "alterPolicy",
+      name: "p",
+      table: ["t"],
+      withCheck: name("y"),
+    });
+    // PG's grammar takes every clause as optional.
+    expect(firstStmt("ALTER POLICY p ON t;")).toEqual({ kind: "alterPolicy", name: "p", table: ["t"] });
+    expect(firstStmt("ALTER POLICY p ON t RENAME TO q;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "policy", name: ["p"], table: ["t"] },
+      action: { kind: "rename", to: "q" },
+    });
+    expect(firstStmt("ALTER POLICY IF EXISTS p ON t RENAME TO q;")).toEqual({
+      kind: "alterObject",
+      ifExists: true,
+      object: { objectType: "policy", name: ["p"], table: ["t"] },
+      action: { kind: "rename", to: "q" },
+    });
+    expect(firstStmt("DROP POLICY IF EXISTS p ON s.t CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "policy",
+      concurrently: false,
+      ifExists: true,
+      names: [["p"]],
+      behavior: "cascade",
+      table: ["s", "t"],
+    });
+    expect(firstStmt("DROP POLICY p ON t;")).toMatchObject({ ifExists: false, behavior: null, table: ["t"] });
+  });
+
+  it("parses CREATE PUBLICATION's object lists and options", () => {
+    expect(firstStmt("CREATE PUBLICATION p;")).toEqual({ kind: "createPublication", name: "p" });
+    expect(
+      firstStmt("CREATE PUBLICATION p FOR ALL TABLES WITH (publish = 'insert', publish_via_partition_root);"),
+    ).toEqual({
+      kind: "createPublication",
+      name: "p",
+      allTables: true,
+      options: [opt("publish", str("insert")), opt("publish_via_partition_root", null)],
+    });
+    expect(
+      firstStmt(
+        "CREATE PUBLICATION p FOR TABLE ONLY s.a (id, email) WHERE (id > 0), b *, TABLES IN SCHEMA s, CURRENT_SCHEMA, TABLE c;",
+      ),
+    ).toEqual({
+      kind: "createPublication",
+      name: "p",
+      objects: [
+        { kind: "table", name: ["s", "a"], only: true, columns: ["id", "email"], where: exprOf("id > 0") },
+        { kind: "table", name: ["b"] },
+        { kind: "tablesInSchema", schema: "s" },
+        { kind: "tablesInSchema", schema: null },
+        { kind: "table", name: ["c"] },
+      ],
+    });
+    // `tables` is a table's name unless IN follows it.
+    expect(firstStmt("CREATE PUBLICATION p FOR TABLE a, tables;").objects).toEqual([
+      { kind: "table", name: ["a"] },
+      { kind: "table", name: ["tables"] },
+    ]);
+    expect(firstStmt("CREATE PUBLICATION p FOR TABLE ONLY (a);").objects).toEqual([
+      { kind: "table", name: ["a"], only: true },
+    ]);
+    // An entry with no lead words may still say ONLY; `tables` is a schema's
+    // name when it continues a schema list.
+    expect(firstStmt("CREATE PUBLICATION p FOR TABLE a, ONLY b, ONLY (c);").objects).toEqual([
+      { kind: "table", name: ["a"] },
+      { kind: "table", name: ["b"], only: true },
+      { kind: "table", name: ["c"], only: true },
+    ]);
+    expect(firstStmt("CREATE PUBLICATION p FOR TABLES IN SCHEMA s, tables;").objects).toEqual([
+      { kind: "tablesInSchema", schema: "s" },
+      { kind: "tablesInSchema", schema: "tables" },
+    ]);
+    // Quoted lead words are names.
+    expect(firstStmt('CREATE PUBLICATION p FOR TABLE a, "table", "tables";').objects).toEqual([
+      { kind: "table", name: ["a"] },
+      { kind: "table", name: ["table"] },
+      { kind: "table", name: ["tables"] },
+    ]);
+    expect(firstStmt('CREATE PUBLICATION p FOR TABLES IN SCHEMA "current_schema";').objects).toEqual([
+      { kind: "tablesInSchema", schema: "current_schema" },
+    ]);
+  });
+
+  it("parses ALTER PUBLICATION's actions, RENAME TO and OWNER TO", () => {
+    const alter = (action: unknown) => ({ kind: "alterPublication", name: "p", action });
+    expect(firstStmt("ALTER PUBLICATION p ADD TABLE ONLY app.customers (id, email) WHERE ((id > 0));")).toEqual(
+      alter({
+        kind: "add",
+        objects: [
+          {
+            kind: "table",
+            name: ["app", "customers"],
+            only: true,
+            columns: ["id", "email"],
+            where: exprOf("(id > 0)"),
+          },
+        ],
+      }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p SET TABLES IN SCHEMA a, b;")).toEqual(
+      alter({
+        kind: "set",
+        objects: [
+          { kind: "tablesInSchema", schema: "a" },
+          { kind: "tablesInSchema", schema: "b" },
+        ],
+      }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p DROP TABLE t, u;")).toEqual(
+      alter({
+        kind: "drop",
+        objects: [
+          { kind: "table", name: ["t"] },
+          { kind: "table", name: ["u"] },
+        ],
+      }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p SET TABLE t (a);")).toEqual(
+      alter({ kind: "set", objects: [{ kind: "table", name: ["t"], columns: ["a"] }] }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p DROP TABLES IN SCHEMA CURRENT_SCHEMA;")).toEqual(
+      alter({ kind: "drop", objects: [{ kind: "tablesInSchema", schema: null }] }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p SET (publish = 'insert, update');")).toEqual(
+      alter({ kind: "setOptions", options: [opt("publish", str("insert, update"))] }),
+    );
+    expect(firstStmt("ALTER PUBLICATION p RENAME TO q;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "publication", name: ["p"] },
+      action: { kind: "rename", to: "q" },
+    });
+    expect(firstStmt("ALTER PUBLICATION p OWNER TO app_owner;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "publication", name: ["p"] },
+      action: { kind: "ownerTo", owner: "app_owner" },
+    });
+  });
+
+  it("parses CREATE and ALTER SUBSCRIPTION", () => {
+    expect(
+      firstStmt("CREATE SUBSCRIPTION s CONNECTION 'host=primary dbname=app' PUBLICATION a, b WITH (enabled = false);"),
+    ).toEqual({
+      kind: "createSubscription",
+      name: "s",
+      connection: "host=primary dbname=app",
+      publications: ["a", "b"],
+      options: [opt("enabled", { kind: "bool", value: false })],
+    });
+    expect(firstStmt("CREATE SUBSCRIPTION s CONNECTION $$host=a$$ PUBLICATION a;")).toMatchObject({
+      connection: "host=a",
+    });
+    expect(firstStmt("CREATE SUBSCRIPTION s CONNECTION E'host=\\x61' PUBLICATION a;")).toMatchObject({
+      connection: "host=a",
+    });
+    expect(firstStmt("CREATE SUBSCRIPTION s CONNECTION '' PUBLICATION a;")).toEqual({
+      kind: "createSubscription",
+      name: "s",
+      connection: "",
+      publications: ["a"],
+    });
+    const alter = (sql: string) => (firstStmt(`ALTER SUBSCRIPTION s ${sql};`) as any).action;
+    expect(firstStmt("ALTER SUBSCRIPTION s ENABLE;")).toEqual({
+      kind: "alterSubscription",
+      name: "s",
+      action: { kind: "enable" },
+    });
+    expect(alter("DISABLE")).toEqual({ kind: "disable" });
+    expect(alter("CONNECTION 'host=b'")).toEqual({ kind: "connection", connection: "host=b" });
+    expect(alter("SET PUBLICATION a, b WITH (refresh = false)")).toEqual({
+      kind: "setPublication",
+      publications: ["a", "b"],
+      options: [opt("refresh", { kind: "bool", value: false })],
+    });
+    expect(alter("ADD PUBLICATION a")).toEqual({ kind: "addPublication", publications: ["a"] });
+    expect(alter("ADD PUBLICATION a WITH (refresh = true)")).toEqual({
+      kind: "addPublication",
+      publications: ["a"],
+      options: [opt("refresh", { kind: "bool", value: true })],
+    });
+    expect(alter("SET PUBLICATION a")).toEqual({ kind: "setPublication", publications: ["a"] });
+    expect(alter("DROP PUBLICATION a, b")).toEqual({ kind: "dropPublication", publications: ["a", "b"] });
+    expect(alter("REFRESH PUBLICATION")).toEqual({ kind: "refreshPublication" });
+    expect(alter("REFRESH PUBLICATION WITH (copy_data = false)")).toEqual({
+      kind: "refreshPublication",
+      options: [opt("copy_data", { kind: "bool", value: false })],
+    });
+    expect(alter("SET (slot_name = NONE, synchronous_commit = off)")).toEqual({
+      kind: "setOptions",
+      options: [
+        opt("slot_name", { kind: "name", parts: ["none"] }),
+        opt("synchronous_commit", { kind: "name", parts: ["off"] }),
+      ],
+    });
+    expect(alter("SKIP (lsn = '0/14C0378')")).toEqual({ kind: "skip", options: [opt("lsn", str("0/14C0378"))] });
+    expect(firstStmt("ALTER SUBSCRIPTION s RENAME TO t;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "subscription", name: ["s"] },
+      action: { kind: "rename", to: "t" },
+    });
+    expect(firstStmt("ALTER SUBSCRIPTION s OWNER TO SESSION_USER;")).toEqual({
+      kind: "alterObject",
+      object: { objectType: "subscription", name: ["s"] },
+      action: { kind: "ownerTo", owner: "session_user" },
+    });
+  });
+
+  it("parses DROP PUBLICATION and DROP SUBSCRIPTION", () => {
+    expect(firstStmt("DROP SUBSCRIPTION s;")).toMatchObject({ ifExists: false, names: [["s"]], behavior: null });
+    expect(firstStmt("DROP PUBLICATION IF EXISTS a, b RESTRICT;")).toEqual({
+      kind: "drop",
+      objectType: "publication",
+      concurrently: false,
+      ifExists: true,
+      names: [["a"], ["b"]],
+      behavior: "restrict",
+    });
+    expect(firstStmt("DROP SUBSCRIPTION IF EXISTS s CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "subscription",
+      concurrently: false,
+      ifExists: true,
+      names: [["s"]],
+      behavior: "cascade",
+    });
+  });
+
+  it("still parses COMMENT ON, SECURITY LABEL and ALTER EXTENSION members for the three kinds", () => {
+    expect(firstStmt("ALTER EXTENSION e ADD PUBLICATION p;")).toEqual({
+      kind: "alterExtension",
+      name: "e",
+      action: { kind: "add", object: { objectType: "publication", name: ["p"] } },
+    });
+    expect(firstStmt("ALTER EXTENSION e DROP SUBSCRIPTION s;")).toEqual({
+      kind: "alterExtension",
+      name: "e",
+      action: { kind: "drop", object: { objectType: "subscription", name: ["s"] } },
+    });
+    expect(firstStmt("COMMENT ON POLICY p ON s.t IS 'c';")).toEqual({
+      kind: "comment",
+      objectType: "policy",
+      name: ["p"],
+      table: ["s", "t"],
+      comment: "c",
+    });
+    for (const kind of ["publication", "subscription"]) {
+      expect(firstStmt(`COMMENT ON ${kind.toUpperCase()} x IS 'c';`)).toEqual({
+        kind: "comment",
+        objectType: kind,
+        name: ["x"],
+        comment: "c",
+      });
+      expect(firstStmt(`SECURITY LABEL ON ${kind.toUpperCase()} x IS 'l';`)).toMatchObject({ objectType: kind });
+    }
+  });
+
+  it("rejects what PostgreSQL's grammar rejects", () => {
+    expect(bad("CREATE POLICY p ON t AS OTHER;")).toThrow(/Expected "permissive" or "restrictive" but found "other"/);
+    expect(bad("CREATE POLICY p ON t FOR TRUNCATE;")).toThrow(
+      /Expected "all", "select", "insert", "update" or "delete" but found "truncate"/,
+    );
+    expect(bad("CREATE POLICY p ON t USING x;")).toThrow(/Expected "\(" but found "x"/);
+    expect(bad("CREATE POLICY p ON t WITH (x);")).toThrow(/Expected "check" but found "\("/);
+    // The clauses come in PG's fixed order.
+    expect(bad("CREATE POLICY p ON t USING (x) TO r;")).toThrow(/Expected ";" but found "to"/);
+    expect(bad("CREATE POLICY p ON t FOR ALL AS PERMISSIVE;")).toThrow(/Expected ";" but found "as"/);
+    expect(bad("CREATE POLICY p;")).toThrow(/Expected "on" but found ";"/);
+    expect(bad("ALTER POLICY p ON t AS RESTRICTIVE;")).toThrow(/Expected ";" but found "as"/);
+    expect(bad("ALTER POLICY p ON t RENAME q;")).toThrow(/Expected "to" but found "q"/);
+    expect(bad("ALTER POLICY IF EXISTS p ON t TO r;")).toThrow(/Expected "rename" but found "to"/);
+    expect(bad("ALTER POLICY p ON t OWNER TO r;")).toThrow(/Expected ";" but found "owner"/);
+    expect(bad("ALTER POLICY p ON t SET SCHEMA s;")).toThrow(/Expected ";" but found "set"/);
+    expect(bad('CREATE POLICY p ON t AS "PERMISSIVE";')).toThrow(/Expected "permissive" or "restrictive"/);
+    expect(bad('CREATE POLICY p ON t FOR "select";')).toThrow(/Expected "all", "select"/);
+    expect(bad("DROP POLICY p;")).toThrow(/Expected "on" but found ";"/);
+    // The first object must say TABLE or TABLES IN SCHEMA.
+    expect(bad("CREATE PUBLICATION p FOR t;")).toThrow(/Expected "all", "table" or "tables" but found "t"/);
+    expect(bad("CREATE PUBLICATION p FOR ALL t;")).toThrow(/Expected "tables" but found "t"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLES s;")).toThrow(/Expected "in" but found "s"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE t WHERE id > 0;")).toThrow(/Expected "\(" but found "id"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE CURRENT_SCHEMA;")).toThrow(/Expected a name but found "current_schema"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE t ();")).toThrow(/Expected a name but found "\)" \(1:34\)/);
+    expect(bad("ALTER PUBLICATION p ADD TABLE t ();")).toThrow(/Expected a name but found "\)"/);
+    expect(bad("CREATE PUBLICATION p FOR ALL TABLES, TABLE t;")).toThrow(/Expected ";" but found ","/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE ONLY current_schema;")).toThrow(/found "current_schema" \(1:36\)/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE a, ONLY (current_schema);")).toThrow(/found "current_schema"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLES IN SCHEMA s WHERE (x);")).toThrow(/Expected ";" but found "where"/);
+    expect(bad("CREATE PUBLICATION p FOR TABLE a, CURRENT_SCHEMA;")).toThrow(
+      /Expected a name but found "current_schema"/,
+    );
+    // A schema takes no column list, no WHERE and no qualifier.
+    expect(bad("CREATE PUBLICATION p FOR TABLES IN SCHEMA s (a);")).toThrow(/Expected ";" but found "\("/);
+    expect(bad("CREATE PUBLICATION p FOR TABLES IN SCHEMA s, x.y;")).toThrow(/Expected ";" but found "\."/);
+    expect(bad("ALTER PUBLICATION p ADD t;")).toThrow(/Expected "table" or "tables" but found "t"/);
+    expect(bad("ALTER PUBLICATION p SET t;")).toThrow(/Expected "\(", "table" or "tables" but found "t"/);
+    expect(bad("ALTER PUBLICATION p ENABLE;")).toThrow(
+      /Expected "add", "set", "drop", "rename" or "owner" but found "enable"/,
+    );
+    expect(bad("ALTER PUBLICATION p SET SCHEMA s;")).toThrow(/Expected "\(", "table" or "tables" but found "schema"/);
+    expect(bad("CREATE SUBSCRIPTION s PUBLICATION a;")).toThrow(/Expected "connection" but found "publication"/);
+    expect(bad("CREATE SUBSCRIPTION s CONNECTION conn PUBLICATION a;")).toThrow(/Expected a string but found "conn"/);
+    expect(bad("CREATE SUBSCRIPTION s CONNECTION 'c';")).toThrow(/Expected "publication" but found ";"/);
+    expect(bad("ALTER SUBSCRIPTION s SET a;")).toThrow(/Expected "\(" or "publication" but found "a"/);
+    expect(bad("ALTER SUBSCRIPTION s ADD a;")).toThrow(/Expected "publication" but found "a"/);
+    expect(bad("ALTER SUBSCRIPTION s REFRESH;")).toThrow(/Expected "publication" but found ";"/);
+    expect(bad("ALTER SUBSCRIPTION s SKIP lsn;")).toThrow(/Expected "\(" but found "lsn"/);
+    expect(bad("ALTER SUBSCRIPTION s SET SCHEMA x;")).toThrow(/Expected "\(" or "publication" but found "schema"/);
+    expect(bad("ALTER SUBSCRIPTION s;")).toThrow(/Expected "connection", "set", [^\n]*"owner" but found ";"/);
+    expect(bad("DROP SUBSCRIPTION a, b;")).toThrow(/Expected ";" but found ","/);
+  });
+
+  it("keeps the policy, publication and subscription words unreserved as names and aliases", () => {
+    const words = [
+      "policy permissive restrictive publication subscription connection refresh skip enable disable tables",
+      "current_schema",
+    ]
+      .join(" ")
+      .split(" ");
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    expect(firstStmt("SELECT 1 AS policy, 2 publication FROM subscription AS refresh;")).toMatchObject({
+      columns: [{ alias: "policy" }, { alias: "publication" }],
+      from: [{ name: ["subscription"], alias: "refresh" }],
+    });
+    expect(firstStmt("CREATE TABLE policy (permissive int, restrictive int, skip int, tables int);")).toMatchObject({
+      name: ["policy"],
+    });
+    // …and as the names of the objects themselves.
+    expect(firstStmt("CREATE POLICY policy ON restrictive TO permissive;")).toMatchObject({
+      name: "policy",
+      table: ["restrictive"],
+      roles: ["permissive"],
+    });
+    expect(firstStmt("CREATE PUBLICATION publication FOR TABLE subscription, tables;")).toMatchObject({
+      name: "publication",
+      objects: [{ name: ["subscription"] }, { name: ["tables"] }],
+    });
+    expect(firstStmt("CREATE SUBSCRIPTION connection CONNECTION 'c' PUBLICATION publication, refresh;")).toMatchObject({
+      name: "connection",
+      publications: ["publication", "refresh"],
+    });
+    expect(firstStmt("ALTER SUBSCRIPTION enable DISABLE;")).toMatchObject({ name: "enable" });
+    // A policy called `if` is no IF EXISTS.
+    expect(firstStmt("ALTER POLICY if ON t RENAME TO x;")).toMatchObject({ object: { name: ["if"] } });
+    expect(firstStmt("ALTER POLICY if ON t TO r;")).toMatchObject({ name: "if", roles: ["r"] });
+    expect(firstStmt("DROP POLICY if ON t;")).toMatchObject({ ifExists: false, names: [["if"]] });
+    expect(firstStmt("DROP PUBLICATION skip;")).toMatchObject({ names: [["skip"]] });
+  });
+});
+
 // --- INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT ---
 
 describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT", () => {
