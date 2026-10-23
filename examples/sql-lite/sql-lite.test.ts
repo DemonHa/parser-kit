@@ -604,6 +604,143 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
   });
 });
 
+// --- ONLY on ALTER TABLE and CREATE INDEX ---
+
+describe("SQL-lite ONLY on ALTER TABLE and CREATE INDEX", () => {
+  const addA = {
+    kind: "addColumn",
+    ifNotExists: false,
+    column: { kind: "column", name: "a", dataType: { name: "int", args: [], array: false }, constraints: [] },
+  };
+  const index = (over: Record<string, unknown>) => ({
+    kind: "createIndex",
+    unique: false,
+    concurrently: false,
+    ifNotExists: false,
+    name: "i",
+    table: ["t"],
+    using: null,
+    columns: [{ expr: name("a") }],
+    include: null,
+    where: null,
+    ...over,
+  });
+
+  it("records ONLY on ALTER TABLE, after IF EXISTS and around a parenthesised name", () => {
+    expect(firstStmt("ALTER TABLE ONLY t ADD a int;")).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["t"],
+      only: true,
+      actions: [addA],
+    });
+    expect(firstStmt("ALTER TABLE IF EXISTS ONLY s.t ADD a int;")).toEqual({
+      kind: "alterTable",
+      ifExists: true,
+      name: ["s", "t"],
+      only: true,
+      actions: [addA],
+    });
+    expect(firstStmt("ALTER TABLE ONLY (s.t) ADD a int;")).toEqual(firstStmt("ALTER TABLE ONLY s.t ADD a int;"));
+  });
+
+  it("takes ONLY before every ALTER TABLE action pg_dump writes it with", () => {
+    expect(firstStmt("ALTER TABLE ONLY public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id);")).toMatchObject({
+      name: ["public", "t"],
+      only: true,
+      actions: [{ kind: "addConstraint", name: "t_pkey", constraint: { kind: "primaryKey", columns: ["id"] } }],
+    });
+    expect(
+      firstStmt("ALTER TABLE ONLY public.t ALTER COLUMN id SET DEFAULT nextval('public.t_id_seq'::regclass);"),
+    ).toMatchObject({ only: true, actions: [{ kind: "setDefault", column: "id" }] });
+    expect(firstStmt("ALTER TABLE ONLY public.p ATTACH PARTITION public.c FOR VALUES IN (1);")).toMatchObject({
+      only: true,
+      actions: [{ kind: "attachPartition", partition: ["public", "c"] }],
+    });
+    expect(firstStmt("ALTER TABLE ONLY t RENAME TO u;")).toMatchObject({
+      only: true,
+      actions: [{ kind: "renameTable", to: "u" }],
+    });
+    expect(firstStmt("ALTER TABLE IF EXISTS ONLY (s.t) RENAME TO u;")).toMatchObject({
+      ifExists: true,
+      name: ["s", "t"],
+      only: true,
+      actions: [{ kind: "renameTable", to: "u" }],
+    });
+    expect(firstStmt("ALTER TABLE ONLY t ADD a int, DROP b;")).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["t"],
+      only: true,
+      actions: [addA, { kind: "dropColumn", name: "b" }],
+    });
+  });
+
+  it("accepts the inheritance star, which is the default and not recorded", () => {
+    expect(firstStmt("ALTER TABLE t * ADD a int;")).toEqual(firstStmt("ALTER TABLE t ADD a int;"));
+    expect(firstStmt("ALTER TABLE IF EXISTS t * ADD a int;")).toEqual(firstStmt("ALTER TABLE IF EXISTS t ADD a int;"));
+  });
+
+  it("records ON ONLY on CREATE INDEX, bare or parenthesised, and omits it otherwise", () => {
+    expect(firstStmt("CREATE INDEX i ON ONLY t (a);")).toEqual(index({ only: true }));
+    expect(firstStmt("CREATE INDEX ON ONLY (s.t) USING btree (a);")).toEqual(
+      index({ name: null, table: ["s", "t"], only: true, using: "btree" }),
+    );
+    expect(firstStmt("CREATE INDEX i ON t * (a);")).toEqual(index({}));
+    expect(
+      firstStmt(
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS i ON ONLY t (a) INCLUDE (b) WITH (fillfactor = 70) WHERE a > 0;",
+      ),
+    ).toMatchObject({
+      unique: true,
+      concurrently: true,
+      ifNotExists: true,
+      table: ["t"],
+      only: true,
+      include: ["b"],
+      options: [{ name: "fillfactor" }],
+      where: { kind: "binary", op: ">" },
+    });
+    expect(firstStmt("CREATE INDEX i ON t (a);")).not.toHaveProperty("only");
+    expect(firstStmt("ALTER TABLE t ADD a int;")).not.toHaveProperty("only");
+  });
+
+  it("keeps a quoted only usable as a table name", () => {
+    expect(firstStmt('ALTER TABLE "only" ADD a int;')).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["only"],
+      actions: [addA],
+    });
+    expect(firstStmt('CREATE INDEX i ON "only" (a);')).toEqual(index({ table: ["only"] }));
+  });
+
+  it("spans ALTER TABLE ONLY from ALTER and CREATE INDEX ON ONLY from after CREATE", () => {
+    const [alter] = sqlLite.parse("ALTER TABLE ONLY (t) ADD a int;") as Record<string, any>[];
+    expect(alter!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 30 } });
+    const [star] = sqlLite.parse("ALTER TABLE t * ADD a int;") as Record<string, any>[];
+    expect(star!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 25 } });
+    const [idx] = sqlLite.parse("CREATE INDEX i ON ONLY t (a);") as Record<string, any>[];
+    expect(idx!.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 28 } });
+  });
+
+  it("rejects ONLY with a star, IF EXISTS after ONLY, and an unclosed parenthesis", () => {
+    expect(() => sqlLite.parse("ALTER TABLE ONLY t * ADD a int;")).toThrow(
+      /Expected "add", .* but found "\*" \(1:19\)/,
+    );
+    expect(() => sqlLite.parse("ALTER TABLE ONLY (t) * ADD a int;")).toThrow(/but found "\*" \(1:21\)/);
+    expect(() => sqlLite.parse("ALTER TABLE ONLY IF EXISTS t ADD a int;")).toThrow(/but found "exists" \(1:20\)/);
+    expect(() => sqlLite.parse("ALTER TABLE ONLY (t ADD a int;")).toThrow(/Expected "\)" but found "add" \(1:20\)/);
+    expect(() => sqlLite.parse("ALTER TABLE ONLY;")).toThrow(/Expected a name but found ";" \(1:16\)/);
+    expect(() => sqlLite.parse("CREATE INDEX i ON ONLY t * (a);")).toThrow(/Expected "\(" but found "\*" \(1:25\)/);
+    // ALTER INDEX, VIEW and SEQUENCE take a plain name in PG, without ONLY or `*`.
+    expect(() => sqlLite.parse("ALTER INDEX ONLY i RENAME TO j;")).toThrow(/Expected a name but found "only" \(1:12\)/);
+    expect(() => sqlLite.parse("ALTER VIEW v * RENAME TO w;")).toThrow(/but found "\*" \(1:13\)/);
+    expect(() => sqlLite.parse("ALTER SEQUENCE ONLY s RESTART;")).toThrow(/Expected a name but found "only" \(1:15\)/);
+    expect(() => sqlLite.parse("CREATE INDEX i ON ONLY (t (a);")).toThrow(/Expected "\)" but found "\(" \(1:26\)/);
+  });
+});
+
 // --- Phase 6: DROP family & TRUNCATE ---
 
 describe("SQL-lite DROP family & TRUNCATE", () => {

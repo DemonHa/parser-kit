@@ -878,8 +878,8 @@ export type LockMode =
 // LOCK [TABLE] [ONLY] name [*] [, …] [IN mode MODE] [NOWAIT]. ONLY is per table;
 // a trailing `*` spells the default (descendants included) and is not recorded.
 // `mode` is null when IN … MODE is omitted (PG then takes ACCESS EXCLUSIVE).
-// MERGE, UPDATE, DELETE and TRUNCATE targets are read by the same rule
-// (relationExpr).
+// MERGE, UPDATE, DELETE, TRUNCATE, ALTER TABLE and CREATE INDEX … ON targets
+// are read by the same rule (relationExpr).
 export type LockTarget = { name: string[]; only: boolean };
 export type Lock = {
   kind: "lock";
@@ -989,8 +989,8 @@ export type Stmt =
       modifiers?: string[];
       span: Span;
     }
-  // `options` (WITH (…)) is present only when written; the older `include` and
-  // `where` keys stay null when absent.
+  // `options` (WITH (…)) and `only` (ON ONLY t) are present only when written;
+  // the older `include` and `where` keys stay null when absent.
   | {
       kind: "createIndex";
       unique: boolean;
@@ -998,6 +998,7 @@ export type Stmt =
       ifNotExists: boolean;
       name: string | null;
       table: string[];
+      only?: true;
       using: string | null;
       columns: IndexColumn[];
       include: string[] | null;
@@ -1022,9 +1023,10 @@ export type Stmt =
   // `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`; `withData`
   // is null when the clause is absent, as on createView.
   | { kind: "refreshMaterializedView"; concurrently: boolean; name: string[]; withData: boolean | null; span: Span }
-  // `ALTER TABLE [IF EXISTS] name action[, …]`. `actions` is never empty, and a
-  // RENAME is always its only element — PG keeps those out of the action list.
-  | { kind: "alterTable"; ifExists: boolean; name: string[]; actions: AlterAction[]; span: Span }
+  // `ALTER TABLE [IF EXISTS] [ONLY] name [*] action[, …]`. `actions` is never
+  // empty, and a RENAME is always its only element — PG keeps those out of the
+  // action list. `only` is present only when ONLY is written.
+  | { kind: "alterTable"; ifExists: boolean; name: string[]; only?: true; actions: AlterAction[]; span: Span }
   | { kind: "alterSchema"; name: string; action: AlterSchemaAction; span: Span }
   | { kind: "alterDomain"; name: string[]; action: AlterDomainAction; span: Span }
   | { kind: "alterType"; name: string[]; action: AlterTypeAction; span: Span }
@@ -3955,7 +3957,12 @@ const createIndexRest = seq(
   // instead (an `on` ident matches the type-only first set but is reserved).
   field("name", optional(attempt(nameWord))),
   skip(kw("on")),
-  field("table", qualName),
+  // PG's relation_expr: `[ONLY] name [*]` or `ONLY (name)`. lazy() because the
+  // rule is defined further down.
+  field(
+    "table",
+    lazy(() => relationExpr),
+  ),
   field("using", optional(seq(skip(kw("using")), field("m", nameWord)).map((s) => s.m))),
   field("columns", indexColumns),
   // `INCLUDE (col, …)` covering columns — plain names, kept null when absent.
@@ -3971,7 +3978,8 @@ const createIndexRest = seq(
     concurrently,
     ifNotExists,
     name,
-    table,
+    table: table.name,
+    ...(table.only && { only: true }),
     using,
     columns,
     include,
@@ -5203,14 +5211,15 @@ function parseIfExists(ctx: ParseContext<SqlTokenType>): boolean {
   return ifExists;
 }
 
-// `TABLE [IF EXISTS] name action[, …]` — TABLE consumed here, ALTER by the
-// caller, whose `start` the node spans from.
+// `TABLE [IF EXISTS] relation action[, …]` — TABLE consumed here, ALTER by the
+// caller, whose `start` the node spans from. The relation is PG's relation_expr
+// (`[ONLY] name [*]`, `ONLY (name)`), which pg_dump writes as ALTER TABLE ONLY.
 function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
   ctx.next(); // TABLE
   const ifExists = parseIfExists(ctx);
-  const name = ctx.parse(qualName);
+  const { name, only } = ctx.parse(relationExpr);
   const actions = parseActionList(ctx, "TABLE", (c) => c.parse(alterAction), ALTER_ACTIONS, SOLO_ALTER_ACTIONS);
-  return { kind: "alterTable", ifExists, name, actions, span: ctx.spanFrom(start) };
+  return { kind: "alterTable", ifExists, name, ...(only && { only: true }), actions, span: ctx.spanFrom(start) };
 }
 
 // The `action[, …]` list of ALTER TABLE, INDEX and [MATERIALIZED] VIEW, whose
@@ -5765,8 +5774,8 @@ const dropStmt = custom<Stmt, SqlTokenType>(
   { expected: '"drop"', first: [{ type: "ident", value: "drop" }] },
 );
 
-// PG's relation_expr, a LOCK, MERGE, UPDATE, DELETE or TRUNCATE target —
-// `[ONLY] name [*]` or `ONLY (name)`.
+// PG's relation_expr, a LOCK, MERGE, UPDATE, DELETE, TRUNCATE, ALTER TABLE or
+// CREATE INDEX target — `[ONLY] name [*]` or `ONLY (name)`.
 // `only` and `table` are reserved, so neither can begin a name.
 const relationExpr = custom<LockTarget, SqlTokenType>(
   (ctx) => {
