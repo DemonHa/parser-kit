@@ -291,7 +291,50 @@ export type Expr =
   | { kind: "typedLiteral"; type: ColType; value: string; span: Span }
   // `OVERLAY(value PLACING placing FROM from [FOR for_])`. The comma spelling,
   // `overlay(a, b, 1)`, stays an ordinary call node.
-  | { kind: "overlay"; value: Expr; placing: Expr; from: Expr; for_: Expr | null; span: Span };
+  | { kind: "overlay"; value: Expr; placing: Expr; from: Expr; for_: Expr | null; span: Span }
+  // --- XML functions (PG's xml_* productions; XMLCONCAT is a plain call) ---
+  // `XMLELEMENT(NAME name [, XMLATTRIBUTES(…)] [, content, …])`. `attributes`
+  // and `content` are each present only when written.
+  | { kind: "xmlElement"; name: string; attributes?: XmlNamedValue[]; content?: Expr[]; span: Span }
+  // `XMLFOREST(value [AS name], …)`.
+  | { kind: "xmlForest"; items: XmlNamedValue[]; span: Span }
+  // `XMLPI(NAME target [, content])`.
+  | { kind: "xmlPi"; name: string; content?: Expr; span: Span }
+  // `XMLROOT(xml, VERSION {expr | NO VALUE} [, STANDALONE {YES | NO | NO VALUE}])`.
+  // `version` is omitted for VERSION NO VALUE, and `standalone` when no
+  // STANDALONE clause is written.
+  | { kind: "xmlRoot"; expr: Expr; version?: Expr; standalone?: "yes" | "no" | "no value"; span: Span }
+  // `XMLPARSE({DOCUMENT | CONTENT} expr [{PRESERVE | STRIP} WHITESPACE])`;
+  // `whitespace` is present only when written.
+  | { kind: "xmlParse"; option: XmlOption; expr: Expr; whitespace?: "preserve" | "strip"; span: Span }
+  // `XMLSERIALIZE({DOCUMENT | CONTENT} expr AS type [[NO] INDENT])`. `indent`
+  // is true for INDENT, false for NO INDENT, and omitted when neither is written.
+  | { kind: "xmlSerialize"; option: XmlOption; expr: Expr; type: ColType; indent?: boolean; span: Span }
+  // `XMLEXISTS(xpath PASSING [BY {REF | VALUE}] xml [BY {REF | VALUE}])`.
+  | { kind: "xmlExists"; path: Expr; passing: XmlPassing; span: Span };
+
+// Whether an XML value is parsed or serialized as a whole document or as a
+// content fragment.
+export type XmlOption = "document" | "content";
+
+// One `value [AS name]` of XMLATTRIBUTES or XMLFOREST. `name` is omitted when
+// no AS is written (PG then names the item after the column it references).
+export type XmlNamedValue = { value: Expr; name?: string };
+
+// The `PASSING [BY {REF | VALUE}] doc [BY {REF | VALUE}]` of XMLEXISTS and
+// XMLTABLE. PG accepts a mechanism on either side of the document and ignores
+// both; each is present only when written.
+export type XmlPassing = { expr: Expr; byBefore?: "ref" | "value"; byAfter?: "ref" | "value" };
+
+// One XMLNAMESPACES entry: `uri AS prefix`, or the `DEFAULT uri` namespace.
+export type XmlNamespace = { uri: Expr; name: string } | { uri: Expr; default: true };
+
+// One XMLTABLE column: `name FOR ORDINALITY`, or `name type` with its options
+// in any order. `path` and `default` are present only when written; `notNull`
+// is true for NOT NULL, false for NULL, and omitted when neither is written.
+export type XmlTableColumn =
+  | { name: string; forOrdinality: true }
+  | { name: string; type: ColType; path?: Expr; default?: Expr; notNull?: boolean };
 
 // The nine niladic keyword functions. All are reserved words, so none of them
 // was usable as a bare name before it became an expression either.
@@ -2103,6 +2146,20 @@ export type FromItem =
       lateral?: boolean;
       ordinality?: boolean;
     }
+  // `XMLTABLE([XMLNAMESPACES(…),] row_path PASSING doc COLUMNS …) [alias]`,
+  // optionally LATERAL. `namespaces` is present only when written;
+  // `tableColumns` are the COLUMNS entries, and `columns` the alias's column
+  // list, as on the other items.
+  | {
+      kind: "xmlTable";
+      namespaces?: XmlNamespace[];
+      rowPath: Expr;
+      passing: XmlPassing;
+      tableColumns: XmlTableColumn[];
+      alias: string | null;
+      columns?: string[];
+      lateral?: boolean;
+    }
   // `alias` and `columns` are present only on a parenthesised join that carries
   // an alias clause — `(a JOIN b ON …) AS x (c, d)`. A parenthesised join
   // without one is the bare join node: the parentheses only group. `natural`
@@ -2864,6 +2921,321 @@ function parseNormalize(ctx: ParseContext<SqlTokenType>, start: Position): Expr 
   return { kind: "normalize", value, form: form.value as NormalForm, span: ctx.spanFrom(start) };
 }
 
+// --- XML functions ---
+// PG's xml_* productions. Every lead word is one of its col_name_keywords,
+// which it never takes as a bare function name, so a bare `xmlelement(` (and
+// the rest) always opens the keyword form here, as there; quoted or qualified,
+// each is an ordinary function (see BARE_ONLY_CALLS). XMLCONCAT's keyword form
+// is just a list of expressions, so it gives a plain call node. The clause
+// words (`name`, `version`, `passing`, …) are matched by value inside the
+// parentheses alone, and stay unreserved.
+
+// PG's ColLabel: a name that may be any word, reserved or not.
+function xmlLabel(ctx: ParseContext<SqlTokenType>): string {
+  const tok = ctx.peek();
+  if (tok === null || (tok.type !== "ident" && tok.type !== "qident")) {
+    return ctx.croak(`Expected a name but found ${describeFound(tok)}`);
+  }
+  ctx.next();
+  return tok.value;
+}
+
+// Whether the bare keyword `word` sits at the cursor with a `(` after it.
+const startsXmlCall = (ctx: ParseContext<SqlTokenType>, word: string): boolean =>
+  ctx.is("ident", word) && isPuncToken(ctx.peekAhead(1), "(");
+
+// `value [AS name], …` up to the closing `)`, which is consumed: the list of
+// XMLATTRIBUTES and XMLFOREST.
+function parseXmlNamedValues(ctx: ParseContext<SqlTokenType>): XmlNamedValue[] {
+  const items: XmlNamedValue[] = [];
+  do {
+    const value = ctx.parse(expression);
+    items.push(ctx.eat("ident", "as") !== null ? { value, name: xmlLabel(ctx) } : { value });
+  } while (ctx.eat("punc", ",") !== null);
+  expectClose(ctx);
+  return items;
+}
+
+// `DOCUMENT` or `CONTENT`, which XMLPARSE and XMLSERIALIZE open with.
+function parseXmlOption(ctx: ParseContext<SqlTokenType>): XmlOption {
+  const tok = ctx.eat("ident", ["document", "content"]);
+  if (tok === null) ctx.croak(`Expected "document" or "content" but found ${describeFound(ctx.peek())}`);
+  return tok!.value as XmlOption;
+}
+
+// `PASSING [BY {REF | VALUE}] doc [BY {REF | VALUE}]`, positioned on PASSING.
+// Like the path before it, the document is an atom (PG's c_expr), so an
+// operator needs parentheses. `by` opens a mechanism only before REF or VALUE.
+function parseXmlPassing(ctx: ParseContext<SqlTokenType>): XmlPassing {
+  ctx.parse(kw("passing"));
+  const mechanism = (): "ref" | "value" | null => {
+    const after = ctx.peekAhead(1);
+    if (!ctx.is("ident", "by") || after?.type !== "ident" || (after.value !== "ref" && after.value !== "value")) {
+      return null;
+    }
+    ctx.next(); // by
+    return ctx.next()!.value as "ref" | "value";
+  };
+  const byBefore = mechanism();
+  const expr = ctx.parse(atom);
+  const byAfter = mechanism();
+  return { expr, ...(byBefore !== null && { byBefore }), ...(byAfter !== null && { byAfter }) };
+}
+
+// XMLCONCAT(expr, …): at least one expression, and none of a call's modifiers.
+function parseXmlConcat(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const args = [ctx.parse(expression)];
+  while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(expression));
+  expectClose(ctx);
+  return { kind: "call", name: "xmlconcat", args, span: ctx.spanFrom(start) };
+}
+
+// XMLELEMENT(NAME name [, XMLATTRIBUTES(…)] [, content, …]). The attributes
+// may only come first; a column named `xmlattributes` is content.
+function parseXmlElement(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  ctx.parse(kw("name"));
+  const name = xmlLabel(ctx);
+  let attributes: XmlNamedValue[] | null = null;
+  const content: Expr[] = [];
+  if (ctx.eat("punc", ",") !== null) {
+    if (startsXmlCall(ctx, "xmlattributes")) {
+      ctx.next(); // xmlattributes
+      ctx.next(); // "("
+      attributes = parseXmlNamedValues(ctx);
+      if (ctx.eat("punc", ",") !== null) content.push(ctx.parse(expression));
+    } else {
+      content.push(ctx.parse(expression));
+    }
+    while (content.length > 0 && ctx.eat("punc", ",") !== null) content.push(ctx.parse(expression));
+  }
+  expectClose(ctx);
+  return {
+    kind: "xmlElement",
+    name,
+    ...(attributes !== null && { attributes }),
+    ...(content.length > 0 && { content }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// XMLFOREST(value [AS name], …).
+function parseXmlForest(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  return { kind: "xmlForest", items: parseXmlNamedValues(ctx), span: ctx.spanFrom(start) };
+}
+
+// XMLPI(NAME target [, content]).
+function parseXmlPi(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  ctx.parse(kw("name"));
+  const name = xmlLabel(ctx);
+  const content = ctx.eat("punc", ",") !== null ? ctx.parse(expression) : null;
+  expectClose(ctx);
+  return { kind: "xmlPi", name, ...(content !== null && { content }), span: ctx.spanFrom(start) };
+}
+
+// Whether `no value` sits at the cursor: the NO VALUE of XMLROOT, which a
+// column named `no` cannot be followed by.
+const startsNoValue = (ctx: ParseContext<SqlTokenType>): boolean =>
+  ctx.is("ident", "no") && isWordAhead(ctx, 1, "value");
+
+// XMLROOT(xml, VERSION {expr | NO VALUE} [, STANDALONE {YES | NO | NO VALUE}]).
+function parseXmlRoot(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const expr = ctx.parse(expression);
+  ctx.parse(punc(","));
+  ctx.parse(kw("version"));
+  let version: Expr | null = null;
+  if (startsNoValue(ctx)) {
+    ctx.next(); // no
+    ctx.next(); // value
+  } else {
+    version = ctx.parse(expression);
+  }
+  let standalone: "yes" | "no" | "no value" | null = null;
+  if (ctx.eat("punc", ",") !== null) {
+    ctx.parse(kw("standalone"));
+    if (startsNoValue(ctx)) {
+      ctx.next(); // no
+      ctx.next(); // value
+      standalone = "no value";
+    } else {
+      const tok = ctx.eat("ident", ["yes", "no"]);
+      if (tok === null) ctx.croak(`Expected "yes" or "no" but found ${describeFound(ctx.peek())}`);
+      standalone = tok!.value as "yes" | "no";
+    }
+  }
+  expectClose(ctx);
+  return {
+    kind: "xmlRoot",
+    expr,
+    ...(version !== null && { version }),
+    ...(standalone !== null && { standalone }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// XMLPARSE({DOCUMENT | CONTENT} expr [{PRESERVE | STRIP} WHITESPACE]).
+function parseXmlParse(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const option = parseXmlOption(ctx);
+  const expr = ctx.parse(expression);
+  const whitespace = ctx.eat("ident", ["preserve", "strip"]);
+  if (whitespace !== null) ctx.parse(kw("whitespace"));
+  expectClose(ctx);
+  return {
+    kind: "xmlParse",
+    option,
+    expr,
+    ...(whitespace !== null && { whitespace: whitespace.value as "preserve" | "strip" }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// XMLSERIALIZE({DOCUMENT | CONTENT} expr AS type [[NO] INDENT]). The type is
+// PG's SimpleTypename, which takes neither SETOF nor array bounds.
+function parseXmlSerialize(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const option = parseXmlOption(ctx);
+  const expr = ctx.parse(expression);
+  ctx.parse(kw("as"));
+  const type = ctx.parse(typeRef);
+  if (type.array || type.setof) {
+    ctx.croak(`Expected a type without ${type.setof ? "SETOF" : "array bounds"}`, type.span.start, type.span.end);
+  }
+  let indent: boolean | null = null;
+  if (ctx.eat("ident", "indent") !== null) {
+    indent = true;
+  } else if (ctx.is("ident", "no")) {
+    ctx.parse(kwseq("no", "indent"));
+    indent = false;
+  }
+  expectClose(ctx);
+  return {
+    kind: "xmlSerialize",
+    option,
+    expr,
+    type,
+    ...(indent !== null && { indent }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// XMLEXISTS(xpath PASSING [BY …] xml [BY …]). The path is an atom, as in PG.
+function parseXmlExists(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const path = ctx.parse(atom);
+  const passing = parseXmlPassing(ctx);
+  expectClose(ctx);
+  return { kind: "xmlExists", path, passing, span: ctx.spanFrom(start) };
+}
+
+// XMLATTRIBUTES, XMLNAMESPACES and XMLTABLE have no call form of their own:
+// PG takes each only inside another construct, and so does this grammar.
+const misplacedXmlCall =
+  (what: string, where: string) =>
+  (ctx: ParseContext<SqlTokenType>, start: Position): Expr =>
+    ctx.croak(`${what} is allowed only ${where}`, start, ctx.lastEnd());
+
+const XML_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Position) => Expr> = {
+  xmlconcat: parseXmlConcat,
+  xmlelement: parseXmlElement,
+  xmlforest: parseXmlForest,
+  xmlpi: parseXmlPi,
+  xmlroot: parseXmlRoot,
+  xmlparse: parseXmlParse,
+  xmlserialize: parseXmlSerialize,
+  xmlexists: parseXmlExists,
+  xmlattributes: misplacedXmlCall("XMLATTRIBUTES", "as the second argument of XMLELEMENT"),
+  xmlnamespaces: misplacedXmlCall("XMLNAMESPACES", "as the first argument of XMLTABLE"),
+  xmltable: misplacedXmlCall("XMLTABLE", "as a FROM item"),
+};
+
+// One XMLNAMESPACES entry: `uri AS prefix` or `DEFAULT uri`, each a b_expr.
+function parseXmlNamespace(ctx: ParseContext<SqlTokenType>): XmlNamespace {
+  if (ctx.eat("ident", "default") !== null) return { uri: ctx.parse(bExpression), default: true };
+  const uri = ctx.parse(bExpression);
+  ctx.parse(kw("as"));
+  return { uri, name: xmlLabel(ctx) };
+}
+
+// One XMLTABLE column. The options may come in any order, but each at most
+// once — PG's grammar action rejects a repeat, and so does this one, over the
+// repeated option. PATH and DEFAULT take a b_expr, so a NOT NULL after either
+// is the option, never an operator.
+function parseXmlTableColumn(ctx: ParseContext<SqlTokenType>): XmlTableColumn {
+  const name = ctx.parse(nameWord);
+  if (ctx.is("ident", "for")) {
+    ctx.parse(kwseq("for", "ordinality"));
+    return { name, forOrdinality: true };
+  }
+  const type = ctx.parse(typeRef);
+  let path: Expr | null = null;
+  let default_: Expr | null = null;
+  let notNull: boolean | null = null;
+  for (;;) {
+    const optStart = ctx.position();
+    if (ctx.eat("ident", "path") !== null) {
+      const value = ctx.parse(bExpression);
+      if (path !== null) ctx.croak("only one PATH value per column is allowed", optStart, ctx.lastEnd());
+      path = value;
+    } else if (ctx.eat("ident", "default") !== null) {
+      const value = ctx.parse(bExpression);
+      if (default_ !== null) ctx.croak("only one DEFAULT value is allowed", optStart, ctx.lastEnd());
+      default_ = value;
+    } else if (ctx.is("ident", "not") || ctx.is("ident", "null")) {
+      const not = ctx.eat("ident", "not") !== null;
+      ctx.parse(kw("null"));
+      if (notNull !== null) {
+        ctx.croak(
+          `conflicting or redundant NULL / NOT NULL declarations for column "${name}"`,
+          optStart,
+          ctx.lastEnd(),
+        );
+      }
+      notNull = not;
+    } else {
+      break;
+    }
+  }
+  return {
+    name,
+    type,
+    ...(path !== null && { path }),
+    ...(default_ !== null && { default: default_ }),
+    ...(notNull !== null && { notNull }),
+  };
+}
+
+// `XMLTABLE([XMLNAMESPACES(…),] row_path PASSING … COLUMNS col, …) [alias]`,
+// positioned on `xmltable` (with a `(` after it). The row path and the
+// document are atoms, as in PG. Like a subquery, the item takes an alias
+// clause but no WITH ORDINALITY.
+function parseXmlTable(ctx: ParseContext<SqlTokenType>, lateral: boolean): FromItem {
+  ctx.next(); // xmltable
+  ctx.next(); // "("
+  let namespaces: XmlNamespace[] | null = null;
+  if (startsXmlCall(ctx, "xmlnamespaces")) {
+    ctx.next(); // xmlnamespaces
+    ctx.next(); // "("
+    namespaces = [parseXmlNamespace(ctx)];
+    while (ctx.eat("punc", ",") !== null) namespaces.push(parseXmlNamespace(ctx));
+    expectClose(ctx);
+    ctx.parse(punc(","));
+  }
+  const rowPath = ctx.parse(atom);
+  const passing = parseXmlPassing(ctx);
+  ctx.parse(kw("columns"));
+  const tableColumns = [parseXmlTableColumn(ctx)];
+  while (ctx.eat("punc", ",") !== null) tableColumns.push(parseXmlTableColumn(ctx));
+  expectClose(ctx);
+  const { alias, columns } = parseAliasClause(ctx);
+  return {
+    kind: "xmlTable",
+    ...(namespaces !== null && { namespaces }),
+    rowPath,
+    passing,
+    tableColumns,
+    alias,
+    ...(columns !== null && { columns }),
+    ...(lateral && { lateral: true }),
+  };
+}
+
 // The keyword-argument functions columnRef's call branch hands a single-part
 // callee over to, entered just past the `(`.
 const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Position) => Expr> = {
@@ -2873,7 +3245,12 @@ const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Pos
   row: parseRow,
   substring: parseSubstring,
   normalize: parseNormalize,
+  ...XML_CALLS,
 };
+
+// The SPECIAL_CALLS that are PG keywords only when bare: quoted, each is an
+// ordinary function name to it.
+const BARE_ONLY_CALLS: ReadonlySet<string> = new Set(["normalize", ...Object.keys(XML_CALLS)]);
 
 // --- window functions ---
 // `fn(…)` may carry, in order, `WITHIN GROUP (ORDER BY …)`, `IGNORE|RESPECT
@@ -3069,14 +3446,15 @@ const columnRef = custom<Expr, SqlTokenType>(
     if (ctx.is("punc", "(")) {
       ctx.next(); // "("
       // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW /
-      // SUBSTRING / NORMALIZE) owns the rest of the call; a plain name falls
-      // through to a normal call.
+      // SUBSTRING / NORMALIZE / the XML functions) owns the rest of the call;
+      // a plain name falls through to a normal call.
       // `Object.hasOwn` for the reason `lookup` gives: `constructor(1)` and
       // `__proto__(1)` would otherwise find an inherited "handler".
-      // NORMALIZE is a keyword only when bare: a quoted `"normalize"(x, 'NFC')`
-      // is an ordinary call to PG.
+      // NORMALIZE and the XML functions are keywords only when bare (see
+      // BARE_ONLY_CALLS): a quoted `"normalize"(x, 'NFC')` is an ordinary call
+      // to PG.
       const special =
-        parts.length === 1 && Object.hasOwn(SPECIAL_CALLS, parts[0]!) && (bareLead || parts[0] !== "normalize")
+        parts.length === 1 && Object.hasOwn(SPECIAL_CALLS, parts[0]!) && (bareLead || !BARE_ONLY_CALLS.has(parts[0]!))
           ? SPECIAL_CALLS[parts[0]!]
           : undefined;
       if (special !== undefined) return special(ctx, start);
@@ -11408,6 +11786,7 @@ const tableRef = custom<FromItem, SqlTokenType>(
       return lateral ? parseParenSubquery(ctx, true) : parenFromItem(ctx);
     }
     if (startsRowsFrom(ctx)) return parseRowsFrom(ctx, lateral);
+    if (startsXmlCall(ctx, "xmltable")) return parseXmlTable(ctx, lateral);
     const nameParts = ctx.parse(qualName);
     if (ctx.is("punc", "(")) {
       const call = parseFromCallArgs(ctx, nameParts, start);

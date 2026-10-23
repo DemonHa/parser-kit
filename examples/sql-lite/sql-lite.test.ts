@@ -14924,3 +14924,311 @@ describe("SQL-lite foreign data", () => {
     expect(firstStmt("ALTER TABLE t ALTER options TYPE int;").actions[0]).toMatchObject({ column: "options" });
   });
 });
+
+// --- XML functions ---
+
+describe("SQL-lite XML functions", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const fromItem = (src: string) => (firstStmt(`SELECT * FROM ${src};`) as any).from[0];
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const ty = (typeName: string, args: number[] = []) => ({ name: typeName, args, array: false });
+  const x = name("x");
+
+  it("parses XMLELEMENT with and without attributes and content", () => {
+    expect(colExpr("XMLELEMENT(NAME foo, XMLATTRIBUTES('bar' AS baz), 'content')")).toEqual({
+      kind: "xmlElement",
+      name: "foo",
+      attributes: [{ value: str("bar"), name: "baz" }],
+      content: [str("content")],
+    });
+    expect(colExpr("xmlelement(name foo)")).toEqual({ kind: "xmlElement", name: "foo" });
+    // The name is a ColLabel: quoted, or even a reserved word.
+    expect(colExpr('xmlelement(name "Foo", a, b || c)')).toEqual({
+      kind: "xmlElement",
+      name: "Foo",
+      content: [name("a"), bin("||", name("b"), name("c"))],
+    });
+    expect(colExpr("xmlelement(name select, xmlattributes(a, b AS from))")).toEqual({
+      kind: "xmlElement",
+      name: "select",
+      attributes: [{ value: name("a") }, { value: name("b"), name: "from" }],
+    });
+    // Only the argument after the name may be XMLATTRIBUTES; a bare
+    // `xmlattributes` there is a column.
+    expect(colExpr("xmlelement(name foo, xmlattributes)")).toEqual({
+      kind: "xmlElement",
+      name: "foo",
+      content: [name("xmlattributes")],
+    });
+    expect(bad("SELECT xmlelement(name foo, a, xmlattributes(b)) FROM t;")).toThrow(
+      /XMLATTRIBUTES is allowed only as the second argument of XMLELEMENT/,
+    );
+    expect(bad("SELECT xmlelement(foo) FROM t;")).toThrow(/Expected "name" but found "foo"/);
+    expect(bad("SELECT xmlelement(name 'foo') FROM t;")).toThrow(/Expected a name but found "foo"/);
+    expect(bad("SELECT xmlelement(name foo, xmlattributes()) FROM t;")).toThrow(/but found "\)"/);
+  });
+
+  it("parses XMLFOREST and XMLCONCAT", () => {
+    expect(colExpr("xmlforest(a, b AS bee, 'x' AS \"Y\")")).toEqual({
+      kind: "xmlForest",
+      items: [{ value: name("a") }, { value: name("b"), name: "bee" }, { value: str("x"), name: "Y" }],
+    });
+    // XMLCONCAT's keyword form is a list of expressions: a plain call node.
+    expect(colExpr("xmlconcat(a, b || c)")).toEqual({
+      kind: "call",
+      name: "xmlconcat",
+      args: [name("a"), bin("||", name("b"), name("c"))],
+    });
+    expect(bad("SELECT xmlforest() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT xmlconcat() FROM t;")).toThrow(/but found "\)"/);
+    // A col_name_keyword in PG, so no call modifiers or named arguments.
+    expect(bad("SELECT xmlconcat(a) OVER () FROM t;")).toThrow(/Expected ";" but found "\("/);
+    expect(bad("SELECT xmlconcat(DISTINCT a) FROM t;")).toThrow(/but found "distinct"/);
+  });
+
+  it("parses XMLPI and XMLROOT", () => {
+    expect(colExpr("xmlpi(name php)")).toEqual({ kind: "xmlPi", name: "php" });
+    expect(colExpr("xmlpi(NAME php, 'echo ' || x)")).toEqual({
+      kind: "xmlPi",
+      name: "php",
+      content: bin("||", str("echo "), x),
+    });
+    expect(colExpr("xmlroot(x, VERSION '1.0', STANDALONE YES)")).toEqual({
+      kind: "xmlRoot",
+      expr: x,
+      version: str("1.0"),
+      standalone: "yes",
+    });
+    expect(colExpr("xmlroot(x, version no value, standalone no value)")).toEqual({
+      kind: "xmlRoot",
+      expr: x,
+      standalone: "no value",
+    });
+    expect(colExpr("xmlroot(x, version '1.1', standalone no)")).toMatchObject({ standalone: "no" });
+    expect(colExpr("xmlroot(x, version v)")).toEqual({ kind: "xmlRoot", expr: x, version: name("v") });
+    // A column named `no` is a version; only NO VALUE is the keyword form.
+    expect(colExpr("xmlroot(x, version no)")).toEqual({ kind: "xmlRoot", expr: x, version: name("no") });
+    expect(bad("SELECT xmlpi(name php, a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT xmlroot(x) FROM t;")).toThrow(/Expected "," but found "\)"/);
+    expect(bad("SELECT xmlroot(x, '1.0') FROM t;")).toThrow(/Expected "version" but found "1.0"/);
+    expect(bad("SELECT xmlroot(x, version '1.0', standalone maybe) FROM t;")).toThrow(
+      /Expected "yes" or "no" but found "maybe"/,
+    );
+  });
+
+  it("parses XMLPARSE and XMLSERIALIZE", () => {
+    expect(colExpr("xmlparse(DOCUMENT x)")).toEqual({ kind: "xmlParse", option: "document", expr: x });
+    expect(colExpr("xmlparse(content '<a/>' || x strip whitespace)")).toEqual({
+      kind: "xmlParse",
+      option: "content",
+      expr: bin("||", str("<a/>"), x),
+      whitespace: "strip",
+    });
+    expect(colExpr("xmlparse(content x PRESERVE WHITESPACE)")).toMatchObject({ whitespace: "preserve" });
+    expect(colExpr("xmlserialize(CONTENT x AS text)")).toEqual({
+      kind: "xmlSerialize",
+      option: "content",
+      expr: x,
+      type: ty("text"),
+    });
+    expect(colExpr("xmlserialize(document x AS varchar(30) INDENT)")).toEqual({
+      kind: "xmlSerialize",
+      option: "document",
+      expr: x,
+      type: ty("varchar", [30]),
+      indent: true,
+    });
+    expect(colExpr("xmlserialize(content x AS character varying NO INDENT)")).toMatchObject({
+      type: ty("character varying"),
+      indent: false,
+    });
+    expect(bad("SELECT xmlparse(x) FROM t;")).toThrow(/Expected "document" or "content" but found "x"/);
+    expect(bad("SELECT xmlparse(content x preserve) FROM t;")).toThrow(/Expected "whitespace" but found "\)"/);
+    expect(bad("SELECT xmlserialize(content x) FROM t;")).toThrow(/Expected "as" but found "\)"/);
+    expect(bad("SELECT xmlserialize(content x AS text NO) FROM t;")).toThrow(/Expected "indent" but found "\)"/);
+    // PG's SimpleTypename: no array bounds and no SETOF.
+    expect(bad("SELECT xmlserialize(content x AS text[]) FROM t;")).toThrow(/Expected a type without array bounds/);
+    expect(bad("SELECT xmlserialize(content x AS setof text) FROM t;")).toThrow(/Expected a type without SETOF/);
+  });
+
+  it("parses XMLEXISTS with each passing mechanism", () => {
+    const exists = (passing: unknown) => ({ kind: "xmlExists", path: str("//a"), passing });
+    expect(colExpr("xmlexists('//a' PASSING doc)")).toEqual(exists({ expr: name("doc") }));
+    expect(colExpr("xmlexists('//a' PASSING BY REF doc)")).toEqual(exists({ expr: name("doc"), byBefore: "ref" }));
+    expect(colExpr("xmlexists('//a' passing doc by value)")).toEqual(exists({ expr: name("doc"), byAfter: "value" }));
+    expect(colExpr("xmlexists('//a' PASSING BY VALUE t.doc BY REF)")).toEqual(
+      exists({ expr: name("t", "doc"), byBefore: "value", byAfter: "ref" }),
+    );
+    // A boolean, so it composes as a predicate.
+    expect(firstStmt("SELECT a FROM t WHERE xmlexists('//a' PASSING doc) AND b;").where).toEqual(
+      bin("and", exists({ expr: name("doc") }), name("b")),
+    );
+    // Both operands are PG's c_expr: an operator needs parentheses.
+    expect(colExpr("xmlexists(('/' || p) PASSING (d))")).toEqual({
+      kind: "xmlExists",
+      path: bin("||", str("/"), name("p")),
+      passing: { expr: name("d") },
+    });
+    expect(bad("SELECT xmlexists('/' || p PASSING d) FROM t;")).toThrow(/Expected "passing" but found "\|\|"/);
+    expect(bad("SELECT xmlexists('//a' PASSING d::xml) FROM t;")).toThrow(/Expected "\)" but found "::"/);
+    expect(bad("SELECT xmlexists('//a') FROM t;")).toThrow(/Expected "passing" but found "\)"/);
+    expect(bad("SELECT xmlexists('//a' PASSING BY doc) FROM t;")).toThrow(/Expected "\)" but found "doc"/);
+  });
+
+  it("parses XMLTABLE as a FROM item with an alias", () => {
+    expect(
+      fromItem(
+        "XMLTABLE('/rows/row' PASSING data COLUMNS id int PATH '@id', name text PATH 'n' DEFAULT 'none' NOT NULL, " +
+          "n FOR ORDINALITY, note text NULL) AS x (a, b, c, d)",
+      ),
+    ).toEqual({
+      kind: "xmlTable",
+      rowPath: str("/rows/row"),
+      passing: { expr: name("data") },
+      tableColumns: [
+        { name: "id", type: ty("int"), path: str("@id") },
+        { name: "name", type: ty("text"), path: str("n"), default: str("none"), notNull: true },
+        { name: "n", forOrdinality: true },
+        { name: "note", type: ty("text"), notNull: false },
+      ],
+      alias: "x",
+      columns: ["a", "b", "c", "d"],
+    });
+    // Options in any order, and the item without an alias.
+    expect(fromItem("xmltable('/r' PASSING BY REF d COLUMNS a int NOT NULL DEFAULT 1 + 2 PATH 'p')")).toEqual({
+      kind: "xmlTable",
+      rowPath: str("/r"),
+      passing: { expr: name("d"), byBefore: "ref" },
+      tableColumns: [{ name: "a", type: ty("int"), path: str("p"), default: bin("+", num(1), num(2)), notNull: true }],
+      alias: null,
+    });
+  });
+
+  it("parses XMLTABLE's namespaces, LATERAL and joins", () => {
+    expect(
+      fromItem("xmltable(XMLNAMESPACES('http://a' AS a, DEFAULT 'http://d'), '/a:r' PASSING d COLUMNS c text) t"),
+    ).toEqual({
+      kind: "xmlTable",
+      namespaces: [
+        { uri: str("http://a"), name: "a" },
+        { uri: str("http://d"), default: true },
+      ],
+      rowPath: str("/a:r"),
+      passing: { expr: name("d") },
+      tableColumns: [{ name: "c", type: ty("text") }],
+      alias: "t",
+    });
+    expect(
+      (firstStmt("SELECT x.* FROM docs, LATERAL xmltable('/r' PASSING docs.body COLUMNS a int) x;") as any).from[1],
+    ).toEqual({
+      kind: "xmlTable",
+      rowPath: str("/r"),
+      passing: { expr: name("docs", "body") },
+      tableColumns: [{ name: "a", type: ty("int") }],
+      alias: "x",
+      lateral: true,
+    });
+    expect(
+      (firstStmt("SELECT * FROM docs d JOIN xmltable('/r' PASSING d.body COLUMNS a int) x ON true;") as any).from[0],
+    ).toMatchObject({ kind: "join", right: { kind: "xmlTable", alias: "x" } });
+  });
+
+  it("rejects malformed XMLTABLE forms", () => {
+    const table = (cols: string) => bad(`SELECT * FROM xmltable('/r' PASSING d COLUMNS ${cols});`);
+    expect(table("a int PATH 'a' PATH 'b'")).toThrow(/only one PATH value per column is allowed/);
+    expect(table("a int DEFAULT 1 DEFAULT 2")).toThrow(/only one DEFAULT value is allowed/);
+    expect(table("a int NULL NOT NULL")).toThrow(
+      /conflicting or redundant NULL \/ NOT NULL declarations for column "a"/,
+    );
+    expect(table("")).toThrow(/Expected a name but found "\)"/);
+    expect(table("a")).toThrow(/but found "\)"/);
+    expect(table("a FOR")).toThrow(/Expected "ordinality" but found "\)"/);
+    expect(bad("SELECT * FROM xmltable('/r' PASSING d);")).toThrow(/Expected "columns" but found "\)"/);
+    expect(bad("SELECT * FROM xmltable(xmlnamespaces('u' AS a) '/r' PASSING d COLUMNS a int);")).toThrow(
+      /Expected "," but found "\/r"/,
+    );
+    expect(bad("SELECT * FROM xmltable('/r' PASSING d COLUMNS a int) WITH ORDINALITY;")).toThrow(/but found "with"/);
+    // Not an expression, and XMLNAMESPACES not a call, in PG either.
+    expect(bad("SELECT xmltable('/r' PASSING d COLUMNS a int) FROM t;")).toThrow(
+      /XMLTABLE is allowed only as a FROM item/,
+    );
+    expect(bad("SELECT xmlnamespaces('u' AS a) FROM t;")).toThrow(
+      /XMLNAMESPACES is allowed only as the first argument of XMLTABLE/,
+    );
+  });
+
+  it("keeps quoted and qualified XML function names ordinary calls", () => {
+    expect(colExpr('"xmlelement"(a, b)')).toEqual({ kind: "call", name: "xmlelement", args: [name("a"), name("b")] });
+    expect(colExpr("s.xmlpi(a)")).toEqual({ kind: "call", name: "s.xmlpi", args: [name("a")] });
+    expect(colExpr('"xmlattributes"(a)')).toEqual({ kind: "call", name: "xmlattributes", args: [name("a")] });
+    expect(fromItem('"xmltable"(1) t')).toEqual({
+      kind: "function",
+      call: { kind: "call", name: "xmltable", args: [num(1)] },
+      alias: "t",
+    });
+    // `xmlagg` is an ordinary aggregate, with an ORDER BY.
+    expect(colExpr("xmlagg(x ORDER BY y)")).toEqual({
+      kind: "call",
+      name: "xmlagg",
+      args: [x],
+      orderBy: [{ expr: name("y"), dir: null, nulls: null }],
+    });
+  });
+
+  it("keeps the XML keywords unreserved as names and aliases", () => {
+    for (const word of [
+      "name",
+      "version",
+      "standalone",
+      "document",
+      "content",
+      "whitespace",
+      "preserve",
+      "strip",
+      "indent",
+      "passing",
+      "ref",
+      "columns",
+      "ordinality",
+      "path",
+      "yes",
+      "xmlconcat",
+      "xmlelement",
+      "xmlexists",
+      "xmlforest",
+      "xmlparse",
+      "xmlpi",
+      "xmlroot",
+      "xmlserialize",
+      "xmltable",
+      "xmlattributes",
+      "xmlnamespaces",
+    ]) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [col(name(word))],
+        from: [{ kind: "table", name: [word], alias: null }],
+      });
+      expect(firstStmt(`SELECT a AS ${word} FROM t ${word};`)).toMatchObject({
+        columns: [col(name("a"), word)],
+        from: [{ kind: "table", name: ["t"], alias: word }],
+      });
+      expect(firstStmt(`CREATE TABLE t (${word} int);`)).toMatchObject({ items: [{ name: word }] });
+    }
+    // As XML operands and column names too.
+    expect(colExpr("xmlelement(name name, content, version)")).toEqual({
+      kind: "xmlElement",
+      name: "name",
+      content: [name("content"), name("version")],
+    });
+    expect(fromItem("xmltable(path PASSING passing COLUMNS path text PATH path, columns FOR ORDINALITY)")).toEqual({
+      kind: "xmlTable",
+      rowPath: name("path"),
+      passing: { expr: name("passing") },
+      tableColumns: [
+        { name: "path", type: ty("text"), path: name("path") },
+        { name: "columns", forOrdinality: true },
+      ],
+      alias: null,
+    });
+  });
+});

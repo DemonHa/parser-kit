@@ -274,7 +274,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ["func", "sql-lite", "SELECT make_interval(days := 10);"],
     ["func", "both", "SELECT date_trunc('week', ts), to_char(ts, 'YYYY-MM-DD') FROM t;"],
     ["func", "both", "SELECT pg_catalog.lower('ABC');"],
-    ["func", "neither", "SELECT XMLELEMENT(NAME foo, XMLATTRIBUTES('bar' AS baz), 'content');"],
+    ["func", "sql-lite", "SELECT XMLELEMENT(NAME foo, XMLATTRIBUTES('bar' AS baz), 'content');"],
     ["func", "sql-lite", "SELECT count(ALL x) FROM t;"],
     ["func", "sql-lite", "SELECT sum(x ORDER BY y) FROM t;"],
     ["func", "both", "SELECT normalize('abc', NFC), 'abc' IS NFC NORMALIZED;"],
