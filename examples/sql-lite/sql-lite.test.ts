@@ -3443,7 +3443,7 @@ describe("SQL-lite quoted literals", () => {
     // A byte run that isn't UTF-8 is rejected, as PG's encoding check does:
     // a lone lead byte, a lone continuation byte, a run cut short by a
     // character, and `\777` (whose low byte is 0xFF).
-    expect(fails("SELECT E'\\xC3';")).toThrow(/Invalid byte sequence for encoding "UTF8": 0xc3 \(/);
+    expect(fails("SELECT E'\\xC3';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
     expect(fails("SELECT E'\\251';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
     expect(fails("SELECT E'\\xC3A';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
     expect(fails("SELECT E'\\777';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);

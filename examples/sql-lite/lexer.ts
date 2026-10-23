@@ -243,8 +243,7 @@ const decodeEscapes = (stream: InputStream, segments: readonly string[], start: 
     try {
       value += utf8.decode(new Uint8Array(bytes));
     } catch {
-      const hex = bytes.map((byte) => `0x${byte.toString(16).padStart(2, "0")}`).join(" ");
-      fail(`Invalid byte sequence for encoding "UTF8": ${hex}`);
+      fail('Invalid byte sequence for encoding "UTF8"');
     }
     bytes = [];
   };
