@@ -275,12 +275,15 @@ const readDigits = (stream: InputStream, isDigit: (char: string) => boolean, lea
 
 // `{decinteger}{identifier}` and its numeric/real/param siblings: PG 15+ rejects
 // an identifier character glued to a number instead of reading `123abc` as
-// `123 AS abc`. The rest of the word is consumed so the error spans it and the
-// lexer resumes after it.
-const rejectJunk = (stream: InputStream, tokenStart: Position, message: string): void => {
-  if (!isIdentStart(stream.peek())) return;
+// `123 AS abc`. `croakJunk` consumes the rest of the word first, so the error
+// spans it and the lexer resumes after it; `rejectJunk` does so only when an
+// identifier actually starts at the cursor.
+const croakJunk = (stream: InputStream, tokenStart: Position, message: string): never => {
   while (isIdentCont(stream.peek())) stream.next();
-  stream.croak(message, tokenStart, stream.position());
+  return stream.croak(message, tokenStart, stream.position());
+};
+const rejectJunk = (stream: InputStream, tokenStart: Position, message: string): void => {
+  if (isIdentStart(stream.peek())) croakJunk(stream, tokenStart, message);
 };
 
 // Integers (decimal, `0x`/`0o`/`0b`), `1.5`, `5.`, `.5`, `1e3`, `1.e3`. The
@@ -315,18 +318,12 @@ const numberReader: Reader<SqlTokenType> = readers.custom("number", {
         // PG's `{hexfail}` (`0x`, `0x_`) wins a tie with `{integer_junk}`, but
         // a longer word after the marker is junk.
         if (stream.peek() === "_") stream.next();
-        if (isIdentCont(stream.peek())) {
-          while (isIdentCont(stream.peek())) stream.next();
-          stream.croak(junk, tokenStart, stream.position());
-        }
+        if (isIdentCont(stream.peek())) croakJunk(stream, tokenStart, junk);
         stream.croak(radix.invalid, tokenStart, stream.position());
       }
       // Any identifier character continues `{integer_junk}` (`0x1g`, `0b12`,
       // `0x1$`), since that pattern's identifier starts at the marker.
-      if (isIdentCont(stream.peek())) {
-        while (isIdentCont(stream.peek())) stream.next();
-        stream.croak(junk, tokenStart, stream.position());
-      }
+      if (isIdentCont(stream.peek())) croakJunk(stream, tokenStart, junk);
       return value + marker + digits;
     }
 
@@ -349,10 +346,7 @@ const numberReader: Reader<SqlTokenType> = readers.custom("number", {
       // an error: `1e` and `1ex` are junk, `1e+` is PG's `{realfail}`.
       const e = stream.next();
       const sign = stream.peek() === "+" || stream.peek() === "-" ? stream.next() : "";
-      if (!isDecDigit(stream.peek())) {
-        while (isIdentCont(stream.peek())) stream.next();
-        stream.croak(junk, tokenStart, stream.position());
-      }
+      if (!isDecDigit(stream.peek())) croakJunk(stream, tokenStart, junk);
       value += e + sign + readDigits(stream, isDecDigit);
     }
 

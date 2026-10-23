@@ -87,8 +87,8 @@ export type Expr =
   // `raw` is the literal's text (its `_` separators dropped, its sign included
   // where the grammar folds one in), present only when `value` can't stand for
   // it: an integer beyond `Number.isSafeInteger`, or a value that overflowed to
-  // ±Infinity (which JSON would write as `null`). PG reads both as `numeric`
-  // and keeps every digit; `raw` lets a caller do the same.
+  // ±Infinity (which JSON would write as `null`). PG keeps every digit of
+  // both (as `bigint` or `numeric`); `raw` lets a caller do the same.
   | { kind: "number"; value: number; raw?: string; span: Span }
   | { kind: "string"; value: string; span: Span }
   | { kind: "bool"; value: boolean; span: Span }

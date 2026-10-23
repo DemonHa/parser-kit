@@ -3437,6 +3437,9 @@ describe("SQL-lite numeric literals and parameters", () => {
       ["1e", /Trailing junk after numeric literal/],
       ["1e+", /Trailing junk after numeric literal/],
       ["1e5x", /Trailing junk after numeric literal/],
+      ["1e5_", /Trailing junk after numeric literal/],
+      // PG counts every non-ASCII character as an identifier character.
+      ["1é", /Trailing junk after numeric literal/],
       ["1_", /Trailing junk after numeric literal/],
       ["1__2", /Trailing junk after numeric literal/],
       ["1._5", /Trailing junk after numeric literal/],
@@ -3451,8 +3454,20 @@ describe("SQL-lite numeric literals and parameters", () => {
       ["0b", /Invalid binary integer/],
     ];
     for (const [src, error] of cases) expect(() => sqlLite.parse(`SELECT ${src};`), src).toThrow(error);
-    // The error spans the whole word, and lexing resumes after it.
-    expect(() => sqlLite.parse("SELECT 123abc FROM t;")).toThrow(/\(1:7\)/);
+    // The error spans the whole word.
+    const error = (() => {
+      try {
+        sqlLite.parse("SELECT 123abc FROM t;");
+      } catch (caught) {
+        return caught as ParseError;
+      }
+      return undefined;
+    })();
+    expect(error).toBeInstanceOf(ParseError);
+    expect([error!.start, error!.end]).toEqual([
+      { row: 1, col: 7 },
+      { row: 1, col: 13 },
+    ]);
   });
 
   it("rejects junk after a positional parameter, keeping `$name`", () => {
@@ -3464,6 +3479,7 @@ describe("SQL-lite numeric literals and parameters", () => {
     expect(() => sqlLite.parse("SELECT $1abc;")).toThrow(/Trailing junk after parameter \(1:7\)/);
     // A positional parameter takes no `_` separators.
     expect(() => sqlLite.parse("SELECT $1_000;")).toThrow(/Trailing junk after parameter/);
+    expect(() => sqlLite.parse("SELECT $1é;")).toThrow(/Trailing junk after parameter/);
   });
 
   it("still rejects junk inside a backtracking position", () => {

@@ -176,6 +176,7 @@ These statements parse without error, but the tree they produce is wrong:
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
 - **Some `E'…'` escapes are left undecoded.** The backslash is dropped and the rest kept as text: `E'\x41'` gives `x41`, `E'\101'` gives `101`, and `E'\u0041'` gives `u0041`, where PostgreSQL gives `A` for all three. `\n`, `\t` and `\'` are decoded.
 - **`DEFAULT 'x' COLLATE "C"` folds the collation into the default expression** instead of applying it to the column.
+- **Non-integer numbers keep only double precision.** `0.1000000000000000055511151231257827` rounds, and an underflow such as `1e-400` reads as `0`. (An integer beyond 2^53, or a value that overflows to infinity, keeps its exact text in the node's `raw` field.)
 
 ### Accepted, but PostgreSQL rejects
 
@@ -189,6 +190,7 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **Subscripting a call without parentheses:** `f(x)[1]`. PostgreSQL requires `(f(x))[1]`.
 - **Impossible type modifiers and interval ranges:** `x::int(4)`, `interval '1' DAY TO YEAR`.
 - **The zero-length identifier `""`.**
+- **Named parameters** such as `$name`. PostgreSQL only has positional ones (`$1`); sql-lite keeps `$name` for templated SQL.
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.
