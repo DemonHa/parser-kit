@@ -9754,7 +9754,9 @@ function copyWordOption(ctx: ParseContext<SqlTokenType>, name: string, word: str
 function copyColumns(ctx: ParseContext<SqlTokenType>): RelationOptionValue {
   const start = ctx.position();
   if (ctx.eat("op", "*") !== null) return { kind: "star", table: null, span: ctx.spanFrom(start) };
-  if (!ctx.is("ident") && !ctx.is("qident")) ctx.croak(`Expected "*" or a name but found ${describeFound(ctx.peek())}`);
+  const first = ctx.peek();
+  if (first?.type !== "qident" && (first?.type !== "ident" || RESERVED.has(first.value)))
+    ctx.croak(`Expected "*" or a name but found ${describeFound(ctx.peek())}`);
   const items: RelationOptionScalar[] = [];
   do {
     const at = ctx.position();

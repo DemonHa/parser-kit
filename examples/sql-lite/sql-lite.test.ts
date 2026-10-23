@@ -10625,6 +10625,14 @@ describe("SQL-lite COPY legacy options", () => {
     expect(bad("COPY t FROM STDIN WITH FORMAT csv;")).toThrow(
       /Expected "\(" or a COPY option but found "format" \(1:23\)/,
     );
+    expect(bad("COPY t TO STDOUT FORCE QUOTE select;")).toThrow(/Expected "\*" or a name but found "select"/);
+    expect(bad("COPY t TO STDOUT FORCE QUOTE a, select;")).toThrow(/Expected a name but found "select"/);
+    expect(bad("COPY t FROM STDIN WITH DELIMITERS ',';")).toThrow(
+      /Expected "\(" or a COPY option but found "delimiters"/,
+    );
+    expect(bad("COPY t FROM STDIN WITH USING DELIMITERS ',';")).toThrow(
+      /Expected "\(" or a COPY option but found "using"/,
+    );
     expect(bad("COPY t TO STDOUT FORCE QUOTE;")).toThrow(/Expected "\*" or a name but found ";"/);
     expect(bad("COPY binary select FROM STDIN;")).toThrow(/Expected "from" or "to" but found "select"/);
     expect(bad("COPY t FROM STDIN WITH 1;")).toThrow(/Expected "\(" or a COPY option but found "1"/);
