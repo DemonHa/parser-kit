@@ -2149,9 +2149,9 @@ export type FromItem =
       ordinality?: boolean;
     }
   // `XMLTABLE([XMLNAMESPACES(…),] row_path PASSING doc COLUMNS …) [alias]`,
-  // optionally LATERAL. `namespaces` is present only when written;
-  // `tableColumns` are the COLUMNS entries, and `columns` the alias's column
-  // list, as on the other items.
+  // optionally LATERAL. `namespaces` is present only when written, and
+  // `lateral` (and true) only for LATERAL; `tableColumns` are the COLUMNS
+  // entries, and `columns` the alias's column list, as on the other items.
   | {
       kind: "xmlTable";
       namespaces?: XmlNamespace[];
@@ -3127,7 +3127,8 @@ function parseXmlExists(ctx: ParseContext<SqlTokenType>, start: Position): Expr 
 }
 
 // XMLATTRIBUTES, XMLNAMESPACES and XMLTABLE have no call form of their own:
-// PG takes each only inside another construct, and so does this grammar.
+// PG takes the first two only inside another construct and XMLTABLE only as a
+// FROM item, and so does this grammar.
 const misplacedXmlCall =
   (what: string, where: string) =>
   (ctx: ParseContext<SqlTokenType>, start: Position): Expr =>

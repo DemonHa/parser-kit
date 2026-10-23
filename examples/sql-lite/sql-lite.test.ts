@@ -15159,6 +15159,13 @@ describe("SQL-lite XML functions", () => {
     expect(table("a")).toThrow(/but found "\)"/);
     expect(table("a FOR")).toThrow(/Expected "ordinality" but found "\)"/);
     expect(bad("SELECT * FROM xmltable('/r' PASSING d);")).toThrow(/Expected "columns" but found "\)"/);
+    // An alias clause only, never a column definition list; a c_expr row path.
+    expect(bad("SELECT * FROM xmltable('/r' PASSING d COLUMNS a int) AS x (a int);")).toThrow(
+      /Expected "\)" but found "int"/,
+    );
+    expect(bad("SELECT * FROM xmltable('/r'::text PASSING d COLUMNS a int);")).toThrow(
+      /Expected "passing" but found "::"/,
+    );
     const namespaces = (list: string) =>
       bad(`SELECT * FROM xmltable(xmlnamespaces(${list}), '/r' PASSING d COLUMNS a int);`);
     expect(namespaces("'u'")).toThrow(/Expected "as" but found "\)"/);
@@ -15197,6 +15204,10 @@ describe("SQL-lite XML functions", () => {
         { kind: "xmlPi", name: "a" },
         { kind: "call", name: "xmlconcat", args: [name("b")] },
       ],
+    });
+    expect(fromItem("xmlforest(a) AS f (x xml)")).toMatchObject({
+      call: { kind: "xmlForest" },
+      columnDefinitions: [{ name: "x", type: ty("xml") }],
     });
     expect(bad("SELECT * FROM xmlattributes(1);")).toThrow(/XMLATTRIBUTES is allowed only as the second argument/);
     expect(bad("SELECT * FROM ROWS FROM (xmltable('/r' PASSING d COLUMNS a int));")).toThrow(
