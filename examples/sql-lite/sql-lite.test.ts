@@ -3866,6 +3866,223 @@ describe("SQL-lite SET / SHOW / RESET", () => {
   });
 });
 
+// --- SET values, as PostgreSQL's var_value ---
+
+describe("SQL-lite SET values", () => {
+  const values = (src: string) => (firstStmt(`SET x = ${src};`) as any).values;
+
+  it("parses the pg_dump header settings, ON included", () => {
+    expect(firstStmt("SET standard_conforming_strings = on;")).toEqual({
+      kind: "set",
+      scope: null,
+      name: "standard_conforming_strings",
+      values: [name("on")],
+    });
+    expect(values("off")).toEqual([name("off")]);
+    expect(values("false")).toEqual([{ kind: "bool", value: false }]);
+    expect(firstStmt("SELECT pg_catalog.set_config('search_path', '', false);").columns[0].expr).toEqual({
+      kind: "call",
+      name: "pg_catalog.set_config",
+      args: [str("search_path"), str(""), { kind: "bool", value: false }],
+    });
+  });
+
+  it("admits the words sql-lite reserves but PostgreSQL does not", () => {
+    expect(values("left, set, values")).toEqual([name("left"), name("set"), name("values")]);
+    expect(() => sqlLite.parse("SET x = system_user;")).toThrow(/Expected a parameter value but found "system_user"/);
+  });
+
+  it("parses lists of words, strings, quoted names and signed numbers", () => {
+    expect(firstStmt("SET x=-1;").values).toEqual([{ kind: "unary", op: "-", operand: num(1) }]);
+    expect(values(`"$user", public, 'a b', 1.5, -1, +2`)).toEqual([
+      name("$user"),
+      name("public"),
+      str("a b"),
+      num(1.5),
+      { kind: "unary", op: "-", operand: num(1) },
+      { kind: "unary", op: "+", operand: num(2) },
+    ]);
+  });
+
+  it("parses SET … FROM CURRENT", () => {
+    expect(firstStmt("SET LOCAL search_path FROM CURRENT;")).toEqual({
+      kind: "set",
+      scope: "local",
+      name: "search_path",
+      values: "fromCurrent",
+    });
+  });
+
+  it("shares the value rule with a routine's SET option", () => {
+    const options = (src: string) =>
+      (firstStmt(`CREATE FUNCTION f() RETURNS int LANGUAGE sql ${src} AS 'SELECT 1';`) as any).options.slice(1, -1);
+    expect(options("SET x = on SET y TO DEFAULT SET TIME ZONE 'UTC' SET z FROM CURRENT")).toEqual([
+      { kind: "set", parameter: "x", value: { kind: "list", values: [name("on")] } },
+      { kind: "set", parameter: "y", value: { kind: "default" } },
+      { kind: "set", parameter: "time zone", value: { kind: "list", values: [str("UTC")] } },
+      { kind: "set", parameter: "z", value: { kind: "fromCurrent" } },
+    ]);
+    expect(() => sqlLite.parse("CREATE FUNCTION f() RETURNS int SET x = 1 + 2 AS 'SELECT 1';")).toThrow(
+      /Expected ";" but found "\+"/,
+    );
+  });
+
+  it("rejects an expression where PostgreSQL takes a single value", () => {
+    expect(() => sqlLite.parse("SET x = 1 + 2;")).toThrow(/Expected ";" but found "\+" \(1:10\)/);
+    expect(() => sqlLite.parse("SET x = a.b;")).toThrow(/Expected ";" but found "\."/);
+    expect(() => sqlLite.parse("SET x = lower('A');")).toThrow(/Expected ";" but found "\("/);
+    expect(() => sqlLite.parse("SET x = null;")).toThrow(/Expected a parameter value but found "null"/);
+    expect(() => sqlLite.parse("SET x TO DEFAULT, 1;")).toThrow(/Expected ";" but found ","/);
+    expect(() => sqlLite.parse("SET x;")).toThrow(/Expected "to" or "=" but found ";"/);
+  });
+});
+
+// --- The special SET forms ---
+
+describe("SQL-lite SET special forms", () => {
+  it("parses SET TRANSACTION and SET SESSION CHARACTERISTICS", () => {
+    expect(firstStmt("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY NOT DEFERRABLE;")).toEqual({
+      kind: "setTransaction",
+      scope: null,
+      characteristics: false,
+      modes: [
+        { kind: "isolation", level: "serializable" },
+        { kind: "readWrite", value: false },
+        { kind: "deferrable", value: false },
+      ],
+    });
+    expect(firstStmt("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE;")).toEqual({
+      kind: "setTransaction",
+      scope: null,
+      characteristics: true,
+      modes: [{ kind: "readWrite", value: true }],
+    });
+    expect(firstStmt("SET LOCAL TRANSACTION DEFERRABLE;")).toMatchObject({ scope: "local", characteristics: false });
+    expect(firstStmt("SET SESSION SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;")).toMatchObject({
+      scope: "session",
+      characteristics: true,
+    });
+    expect(firstStmt("SET TRANSACTION SNAPSHOT '00000003-1';")).toEqual({
+      kind: "set",
+      scope: null,
+      name: "transaction snapshot",
+      values: [str("00000003-1")],
+    });
+    expect(() => sqlLite.parse("SET TRANSACTION;")).toThrow(/Expected "isolation", .* but found ";"/);
+    expect(() => sqlLite.parse("SET TRANSACTION READ ONLY,;")).toThrow(/Expected "isolation", .* but found ";"/);
+    expect(() => sqlLite.parse("BEGIN ISOLATION LEVEL SERIALIZABLE,;")).toThrow(
+      /Expected "isolation", .* but found ";"/,
+    );
+  });
+
+  it("parses SET CONSTRAINTS", () => {
+    expect(firstStmt("SET CONSTRAINTS ALL DEFERRED;")).toEqual({
+      kind: "setConstraints",
+      constraints: "all",
+      mode: "deferred",
+    });
+    expect(firstStmt("SET CONSTRAINTS s.fk_a, fk_b IMMEDIATE;")).toEqual({
+      kind: "setConstraints",
+      constraints: [["s", "fk_a"], ["fk_b"]],
+      mode: "immediate",
+    });
+    expect(() => sqlLite.parse("SET CONSTRAINTS ALL;")).toThrow(/Expected "deferred" or "immediate" but found ";"/);
+    expect(() => sqlLite.parse("SET LOCAL CONSTRAINTS ALL DEFERRED;")).toThrow(/Expected "to" or "=" but found "all"/);
+  });
+
+  it("parses SET [SESSION | LOCAL] SESSION AUTHORIZATION and SET ROLE", () => {
+    const auth = (scope: string | null, values: unknown) => ({
+      kind: "set",
+      scope,
+      name: "session authorization",
+      values,
+    });
+    expect(firstStmt("SET SESSION AUTHORIZATION 'bob';")).toEqual(auth(null, [str("bob")]));
+    expect(firstStmt("SET SESSION SESSION AUTHORIZATION DEFAULT;")).toEqual(auth("session", "default"));
+    expect(firstStmt("SET LOCAL SESSION AUTHORIZATION bob;")).toEqual(auth("local", [name("bob")]));
+    expect(firstStmt("SET ROLE 'admin';")).toEqual({ kind: "set", scope: null, name: "role", values: [str("admin")] });
+    expect(() => sqlLite.parse("SET SESSION AUTHORIZATION 1;")).toThrow(/Expected a name or a string but found "1"/);
+    expect(() => sqlLite.parse("SET ROLE DEFAULT;")).toThrow(/Expected a name or a string but found "default"/);
+  });
+
+  it("reads TIME ZONE LOCAL as DEFAULT, and parses the other zone values", () => {
+    const zone = (src: string) => (firstStmt(`SET TIME ZONE ${src};`) as any).values;
+    expect(zone("LOCAL")).toBe("default");
+    expect(zone("DEFAULT")).toBe("default");
+    expect(zone("-8")).toEqual([{ kind: "unary", op: "-", operand: num(8) }]);
+    expect(zone('"America/New_York"')).toEqual([name("America/New_York")]);
+    expect(zone("INTERVAL '+00:00'")).toEqual([{ kind: "interval", value: "+00:00" }]);
+    expect(zone("INTERVAL '+00:00' HOUR TO MINUTE")).toEqual([
+      { kind: "interval", value: "+00:00", fields: "hour to minute" },
+    ]);
+    expect(() => sqlLite.parse("SET TIME ZONE true;")).toThrow(/Expected a time zone but found "true"/);
+    expect(() => sqlLite.parse("SET TIME ZONE left;")).toThrow(/Expected a time zone but found "left"/);
+    expect(() => sqlLite.parse("SET TIME ZONE INTERVAL '1' DAY;")).toThrow(
+      /A time zone interval must be HOUR or HOUR TO MINUTE, but found DAY \(1:14\)/,
+    );
+  });
+
+  it("parses SCHEMA, NAMES and XML OPTION, whose values PostgreSQL restricts", () => {
+    const set = (src: string) => firstStmt(`SET ${src};`) as any;
+    expect(set("SCHEMA 'app'")).toMatchObject({ name: "schema", values: [str("app")] });
+    expect(set("NAMES 'UTF8'")).toMatchObject({ name: "names", values: [str("UTF8")] });
+    expect(set("NAMES")).toMatchObject({ name: "names", values: "default" });
+    expect(set("XML OPTION CONTENT")).toMatchObject({ name: "xml option", values: [name("content")] });
+    expect(() => sqlLite.parse("SET SCHEMA app;")).toThrow(/Expected a string but found "app"/);
+  });
+
+  it("reads a form word followed by = or TO as a parameter name", () => {
+    const words = ["role", "schema", "names", "constraints", "transaction", "session", "local", "time"];
+    for (const word of words) {
+      expect(firstStmt(`SET ${word} TO 1;`)).toEqual({ kind: "set", scope: null, name: word, values: [num(1)] });
+      expect(firstStmt(`SET ${word}.x = 1;`)).toMatchObject({ scope: null, name: `${word}.x` });
+    }
+    expect(firstStmt("SET session FROM CURRENT;")).toMatchObject({ scope: null, name: "session" });
+    expect(firstStmt("SET SESSION session = 1;")).toMatchObject({ scope: "session", name: "session" });
+  });
+});
+
+// --- Multi-word SHOW / RESET targets ---
+
+describe("SQL-lite SHOW / RESET targets", () => {
+  it("parses TIME ZONE, TRANSACTION ISOLATION LEVEL and SESSION AUTHORIZATION", () => {
+    expect(firstStmt("SHOW TRANSACTION ISOLATION LEVEL;")).toEqual({
+      kind: "show",
+      name: "transaction isolation level",
+    });
+    expect(firstStmt("SHOW TIME ZONE;")).toEqual({ kind: "show", name: "time zone" });
+    expect(firstStmt("SHOW SESSION AUTHORIZATION;")).toEqual({ kind: "show", name: "session authorization" });
+    expect(firstStmt("RESET SESSION AUTHORIZATION;")).toEqual({ kind: "reset", name: "session authorization" });
+    expect(firstStmt("RESET TIME ZONE;")).toEqual({ kind: "reset", name: "time zone" });
+    expect(firstStmt("RESET TRANSACTION ISOLATION LEVEL;")).toEqual({
+      kind: "reset",
+      name: "transaction isolation level",
+    });
+  });
+
+  it("reads a lone lead word as a parameter name", () => {
+    expect(firstStmt("SHOW time;")).toEqual({ kind: "show", name: "time" });
+    expect(firstStmt("SHOW transaction;")).toEqual({ kind: "show", name: "transaction" });
+    expect(firstStmt("RESET session;")).toEqual({ kind: "reset", name: "session" });
+    expect(() => sqlLite.parse("SHOW TRANSACTION ISOLATION;")).toThrow(/Expected "level" but found ";"/);
+  });
+
+  it("keeps the form words unreserved as names and aliases", () => {
+    const words = [
+      ...["session", "authorization", "characteristics", "transaction", "constraints", "snapshot", "zone"],
+      ...["xml", "option", "document", "content", "deferred", "immediate", "isolation", "level"],
+    ];
+    for (const word of words) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [{ expr: name(word), alias: null }],
+        from: [tableFrom([word])],
+      });
+      expect(firstStmt(`SELECT a ${word} FROM t;`).columns[0]).toEqual({ expr: name("a"), alias: word });
+      expect(firstStmt(`SET ${word} = 1;`)).toMatchObject({ name: word });
+    }
+  });
+});
+
 // --- Phase 9: DO / DEALLOCATE ---
 
 describe("SQL-lite DO / DEALLOCATE", () => {
@@ -6445,7 +6662,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
     );
     expect(fails("ALTER FUNCTION f(int) LANGUAGE sql;")).toThrow(/Expected "rename", .* but found "language"/);
     expect(fails("ALTER FUNCTION f NOT NULL;")).toThrow(/Expected "leakproof" but found "null"/);
-    expect(fails("ALTER FUNCTION f IMMUTABLE SET SCHEMA s;")).toThrow(/Expected "to" or "=" but found "s"/);
+    expect(fails("ALTER FUNCTION f IMMUTABLE SET SCHEMA s;")).toThrow(/Expected a string but found "s"/);
     expect(fails("ALTER AGGREGATE a RENAME TO b;")).toThrow(/Expected "\(" but found "rename"/);
     // A signature names an existing routine, as DROP's does: no argument
     // defaults, and no empty aggregate list (a zero-argument one is `(*)`).
