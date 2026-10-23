@@ -208,8 +208,8 @@ describe("SQL-lite comments inside statements", () => {
     expect(() => sqlLite.parse("SELECT /* c */ ;")).toThrow(/but found ";" \(1:15\)/);
     expect(() => sqlLite.parse("SELECT 1 /* c */ 2;")).toThrow(/Expected ";" but found "2"/);
     expect(() => sqlLite.parse("SELECT 1 -- tail")).toThrow(/Expected ";" but found end of input \(1:16\)/);
-    // An unclosed block comment swallows the rest of the input.
-    expect(() => sqlLite.parse("SELECT /* unclosed 1;")).toThrow(/but found end of input/);
+    // An unclosed block comment is a lexer error, as in PG.
+    expect(() => sqlLite.parse("SELECT /* unclosed 1;")).toThrow(/Unterminated \/\* comment \(1:7\)/);
   });
 
   it("resumes after a lexer error hit while skipping comments", () => {
@@ -601,6 +601,143 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
         '"frobnicate"',
       ),
     );
+  });
+});
+
+// --- ONLY on ALTER TABLE and CREATE INDEX ---
+
+describe("SQL-lite ONLY on ALTER TABLE and CREATE INDEX", () => {
+  const addA = {
+    kind: "addColumn",
+    ifNotExists: false,
+    column: { kind: "column", name: "a", dataType: { name: "int", args: [], array: false }, constraints: [] },
+  };
+  const index = (over: Record<string, unknown>) => ({
+    kind: "createIndex",
+    unique: false,
+    concurrently: false,
+    ifNotExists: false,
+    name: "i",
+    table: ["t"],
+    using: null,
+    columns: [{ expr: name("a") }],
+    include: null,
+    where: null,
+    ...over,
+  });
+
+  it("records ONLY on ALTER TABLE, after IF EXISTS and around a parenthesised name", () => {
+    expect(firstStmt("ALTER TABLE ONLY t ADD a int;")).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["t"],
+      only: true,
+      actions: [addA],
+    });
+    expect(firstStmt("ALTER TABLE IF EXISTS ONLY s.t ADD a int;")).toEqual({
+      kind: "alterTable",
+      ifExists: true,
+      name: ["s", "t"],
+      only: true,
+      actions: [addA],
+    });
+    expect(firstStmt("ALTER TABLE ONLY (s.t) ADD a int;")).toEqual(firstStmt("ALTER TABLE ONLY s.t ADD a int;"));
+  });
+
+  it("takes ONLY before every ALTER TABLE action pg_dump writes it with", () => {
+    expect(firstStmt("ALTER TABLE ONLY public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id);")).toMatchObject({
+      name: ["public", "t"],
+      only: true,
+      actions: [{ kind: "addConstraint", name: "t_pkey", constraint: { kind: "primaryKey", columns: ["id"] } }],
+    });
+    expect(
+      firstStmt("ALTER TABLE ONLY public.t ALTER COLUMN id SET DEFAULT nextval('public.t_id_seq'::regclass);"),
+    ).toMatchObject({ only: true, actions: [{ kind: "setDefault", column: "id" }] });
+    expect(firstStmt("ALTER TABLE ONLY public.p ATTACH PARTITION public.c FOR VALUES IN (1);")).toMatchObject({
+      only: true,
+      actions: [{ kind: "attachPartition", partition: ["public", "c"] }],
+    });
+    expect(firstStmt("ALTER TABLE ONLY t RENAME TO u;")).toMatchObject({
+      only: true,
+      actions: [{ kind: "renameTable", to: "u" }],
+    });
+    expect(firstStmt("ALTER TABLE IF EXISTS ONLY (s.t) RENAME TO u;")).toMatchObject({
+      ifExists: true,
+      name: ["s", "t"],
+      only: true,
+      actions: [{ kind: "renameTable", to: "u" }],
+    });
+    expect(firstStmt("ALTER TABLE ONLY t ADD a int, DROP b;")).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["t"],
+      only: true,
+      actions: [addA, { kind: "dropColumn", name: "b" }],
+    });
+  });
+
+  it("accepts the inheritance star, which is the default and not recorded", () => {
+    expect(firstStmt("ALTER TABLE t * ADD a int;")).toEqual(firstStmt("ALTER TABLE t ADD a int;"));
+    expect(firstStmt("ALTER TABLE IF EXISTS t * ADD a int;")).toEqual(firstStmt("ALTER TABLE IF EXISTS t ADD a int;"));
+  });
+
+  it("records ON ONLY on CREATE INDEX, bare or parenthesised, and omits it otherwise", () => {
+    expect(firstStmt("CREATE INDEX i ON ONLY t (a);")).toEqual(index({ only: true }));
+    expect(firstStmt("CREATE INDEX ON ONLY (s.t) USING btree (a);")).toEqual(
+      index({ name: null, table: ["s", "t"], only: true, using: "btree" }),
+    );
+    expect(firstStmt("CREATE INDEX i ON t * (a);")).toEqual(index({}));
+    expect(
+      firstStmt(
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS i ON ONLY t (a) INCLUDE (b) WITH (fillfactor = 70) WHERE a > 0;",
+      ),
+    ).toMatchObject({
+      unique: true,
+      concurrently: true,
+      ifNotExists: true,
+      table: ["t"],
+      only: true,
+      include: ["b"],
+      options: [{ name: "fillfactor" }],
+      where: { kind: "binary", op: ">" },
+    });
+    expect(firstStmt("CREATE INDEX i ON t (a);")).not.toHaveProperty("only");
+    expect(firstStmt("ALTER TABLE t ADD a int;")).not.toHaveProperty("only");
+  });
+
+  it("keeps a quoted only usable as a table name", () => {
+    expect(firstStmt('ALTER TABLE "only" ADD a int;')).toEqual({
+      kind: "alterTable",
+      ifExists: false,
+      name: ["only"],
+      actions: [addA],
+    });
+    expect(firstStmt('CREATE INDEX i ON "only" (a);')).toEqual(index({ table: ["only"] }));
+  });
+
+  it("spans ALTER TABLE ONLY from ALTER and CREATE INDEX ON ONLY from after CREATE", () => {
+    const [alter] = sqlLite.parse("ALTER TABLE ONLY (t) ADD a int;") as Record<string, any>[];
+    expect(alter!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 30 } });
+    const [star] = sqlLite.parse("ALTER TABLE t * ADD a int;") as Record<string, any>[];
+    expect(star!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 25 } });
+    const [idx] = sqlLite.parse("CREATE INDEX i ON ONLY t (a);") as Record<string, any>[];
+    expect(idx!.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 28 } });
+  });
+
+  it("rejects ONLY with a star, IF EXISTS after ONLY, and an unclosed parenthesis", () => {
+    expect(() => sqlLite.parse("ALTER TABLE ONLY t * ADD a int;")).toThrow(
+      /Expected "add", .* but found "\*" \(1:19\)/,
+    );
+    expect(() => sqlLite.parse("ALTER TABLE ONLY (t) * ADD a int;")).toThrow(/but found "\*" \(1:21\)/);
+    expect(() => sqlLite.parse("ALTER TABLE ONLY IF EXISTS t ADD a int;")).toThrow(/but found "exists" \(1:20\)/);
+    expect(() => sqlLite.parse("ALTER TABLE ONLY (t ADD a int;")).toThrow(/Expected "\)" but found "add" \(1:20\)/);
+    expect(() => sqlLite.parse("ALTER TABLE ONLY;")).toThrow(/Expected a name but found ";" \(1:16\)/);
+    expect(() => sqlLite.parse("CREATE INDEX i ON ONLY t * (a);")).toThrow(/Expected "\(" but found "\*" \(1:25\)/);
+    // ALTER INDEX, VIEW and SEQUENCE take a plain name in PG, without ONLY or `*`.
+    expect(() => sqlLite.parse("ALTER INDEX ONLY i RENAME TO j;")).toThrow(/Expected a name but found "only" \(1:12\)/);
+    expect(() => sqlLite.parse("ALTER VIEW v * RENAME TO w;")).toThrow(/but found "\*" \(1:13\)/);
+    expect(() => sqlLite.parse("ALTER SEQUENCE ONLY s RESTART;")).toThrow(/Expected a name but found "only" \(1:15\)/);
+    expect(() => sqlLite.parse("CREATE INDEX i ON ONLY (t (a);")).toThrow(/Expected "\)" but found "\(" \(1:26\)/);
   });
 });
 
@@ -2409,8 +2546,9 @@ describe("SQL-lite FETCH / OFFSET row words", () => {
   it("maps FETCH FIRST … ROWS ONLY onto limit", () => {
     expect(firstStmt("SELECT 1 FETCH FIRST 10 ROWS ONLY;")).toMatchObject({ limit: num(10), offset: null });
     // OFFSET … ROWS then FETCH NEXT … ROWS WITH TIES, standard-SQL spelling.
-    expect(firstStmt("SELECT 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;")).toMatchObject({
+    expect(firstStmt("SELECT 1 ORDER BY 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;")).toMatchObject({
       limit: num(3),
+      withTies: true,
       offset: num(5),
     });
   });
@@ -2435,6 +2573,275 @@ describe("SQL-lite FOR UPDATE / SHARE locking", () => {
     expect((firstStmt("SELECT * FROM t FOR SHARE;") as any).locking).toEqual([
       { strength: "share", of: [], wait: null },
     ]);
+  });
+});
+
+// --- set-operation precedence and query-level tails ---
+
+describe("SQL-lite set-operation precedence and query-level tails", () => {
+  const one = sel({ columns: [col(num(1))] });
+  const two = sel({ columns: [col(num(2))] });
+  const three = sel({ columns: [col(num(3))] });
+  const setOp = (op: string, left: unknown, right: unknown, tail: Record<string, unknown> = {}) => ({
+    kind: "setOp",
+    op,
+    left,
+    right,
+    ...tail,
+  });
+  const values1 = { kind: "values", rows: [[num(1)]], orderBy: null, limit: null, offset: null };
+  const ord = (expr: unknown) => ({ expr, dir: null, nulls: null });
+  const forUpdate = { strength: "update", of: [], wait: null };
+  const forShare = { strength: "share", of: [], wait: null };
+
+  it("binds INTERSECT tighter than UNION and EXCEPT", () => {
+    expect(firstStmt("SELECT 1 UNION SELECT 2 INTERSECT SELECT 3;")).toEqual(
+      setOp("union", one, setOp("intersect", two, three)),
+    );
+    expect(firstStmt("SELECT 1 EXCEPT ALL SELECT 2 INTERSECT ALL SELECT 3;")).toEqual(
+      setOp("exceptAll", one, setOp("intersectAll", two, three)),
+    );
+    expect(firstStmt("SELECT 1 INTERSECT SELECT 2 UNION SELECT 3;")).toEqual(
+      setOp("union", setOp("intersect", one, two), three),
+    );
+    // UNION and EXCEPT share a level and associate to the left, as does INTERSECT.
+    expect(firstStmt("SELECT 1 EXCEPT SELECT 2 UNION SELECT 3;")).toEqual(
+      setOp("union", setOp("except", one, two), three),
+    );
+    expect(firstStmt("SELECT 1 INTERSECT SELECT 2 INTERSECT SELECT 3;")).toEqual(
+      setOp("intersect", setOp("intersect", one, two), three),
+    );
+    // Parentheses override the precedence.
+    expect(firstStmt("(SELECT 1 UNION SELECT 2) INTERSECT SELECT 3;")).toEqual(
+      setOp("intersect", setOp("union", one, two), three),
+    );
+  });
+
+  it("accepts the DISTINCT quantifier, which records nothing", () => {
+    expect(
+      firstStmt("SELECT 1 UNION DISTINCT SELECT 2 INTERSECT DISTINCT SELECT 3 EXCEPT DISTINCT VALUES (1);"),
+    ).toEqual(setOp("except", setOp("union", one, setOp("intersect", two, three)), values1));
+  });
+
+  // Each tail as written, and the fields it sets. A SELECT or VALUES carries
+  // them in its own (null-defaulted) fields; a set operation only when written.
+  const TAILS: [string, Record<string, unknown>][] = [
+    ["ORDER BY 1", { orderBy: [ord(num(1))] }],
+    ["LIMIT 2", { limit: num(2) }],
+    ["LIMIT ALL", {}],
+    ["OFFSET 3", { offset: num(3) }],
+    ["OFFSET 3 ROWS", { offset: num(3) }],
+    ["LIMIT 2 OFFSET 3", { limit: num(2), offset: num(3) }],
+    ["OFFSET 3 LIMIT 2", { limit: num(2), offset: num(3) }],
+    ["FETCH FIRST 2 ROWS ONLY", { limit: num(2) }],
+    ["OFFSET 3 ROW FETCH NEXT 2 ROW ONLY", { limit: num(2), offset: num(3) }],
+    ["ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES", { orderBy: [ord(num(1))], limit: num(2), withTies: true }],
+    [
+      "ORDER BY 1 OFFSET 3 FETCH FIRST 2 ROWS WITH TIES",
+      { orderBy: [ord(num(1))], limit: num(2), withTies: true, offset: num(3) },
+    ],
+    ["FOR UPDATE", { locking: [forUpdate] }],
+    ["FOR UPDATE FOR SHARE", { locking: [forUpdate, forShare] }],
+    ["FOR UPDATE LIMIT 2", { limit: num(2), locking: [forUpdate] }],
+    ["LIMIT 2 FOR UPDATE", { limit: num(2), locking: [forUpdate] }],
+    ["FOR UPDATE OFFSET 3 LIMIT 2", { limit: num(2), offset: num(3), locking: [forUpdate] }],
+    [
+      "ORDER BY 1 LIMIT 2 OFFSET 3 FOR UPDATE",
+      { orderBy: [ord(num(1))], limit: num(2), offset: num(3), locking: [forUpdate] },
+    ],
+    [
+      "ORDER BY 1 FOR UPDATE FETCH FIRST 2 ROWS WITH TIES",
+      { orderBy: [ord(num(1))], limit: num(2), withTies: true, locking: [forUpdate] },
+    ],
+    ["FOR READ ONLY", {}],
+    ["FOR READ ONLY LIMIT 2", { limit: num(2) }],
+    ["ORDER BY 1 LIMIT 2 FOR READ ONLY", { orderBy: [ord(num(1))], limit: num(2) }],
+  ];
+  // The bodies a tail can follow, and the node each one gives untailed.
+  const BODIES: [string, Record<string, unknown>][] = [
+    ["SELECT 1", one],
+    ["VALUES (1)", values1],
+    ["(SELECT 1)", one],
+    ["((SELECT 1))", one],
+    ["SELECT 1 UNION SELECT 2", setOp("union", one, two)],
+    ["(SELECT 1) UNION (SELECT 2)", setOp("union", one, two)],
+    ["(SELECT 1 UNION SELECT 2)", setOp("union", one, two)],
+    ["((SELECT 1) UNION (SELECT 2))", setOp("union", one, two)],
+    ["SELECT 1 UNION SELECT 2 INTERSECT SELECT 3", setOp("union", one, setOp("intersect", two, three))],
+  ];
+
+  it("attaches every tail to the query it follows, never to a set-op arm", () => {
+    for (const [body, node] of BODIES) {
+      for (const [tail, fields] of TAILS) {
+        expect(firstStmt(`${body} ${tail};`), `${body} ${tail}`).toEqual({ ...node, ...fields });
+      }
+    }
+  });
+
+  it("omits withTies unless WITH TIES is written, and the set-op tail fields unless they are", () => {
+    expect("withTies" in firstStmt("SELECT 1 FETCH FIRST 2 ROWS ONLY;")).toBe(false);
+    expect("withTies" in firstStmt("SELECT 1 ORDER BY 1 LIMIT 2;")).toBe(false);
+    expect("withTies" in firstStmt("VALUES (1) ORDER BY 1 FETCH NEXT 2 ROWS ONLY;")).toBe(false);
+    expect(Object.keys(firstStmt("SELECT 1 UNION SELECT 2 FOR READ ONLY;"))).toEqual(["kind", "op", "left", "right"]);
+    expect("locking" in firstStmt("VALUES (1) LIMIT 1;")).toBe(false);
+  });
+
+  it("merges a tail written after the parentheses into the one inside them", () => {
+    // PG's insertSelectOptions: each clause may come from either side, once.
+    expect(firstStmt("(SELECT 1 ORDER BY 1) LIMIT 2;")).toEqual({ ...one, orderBy: [ord(num(1))], limit: num(2) });
+    expect(firstStmt("(SELECT 1 LIMIT 2) ORDER BY 1;")).toEqual({ ...one, orderBy: [ord(num(1))], limit: num(2) });
+    expect(firstStmt("(SELECT 1 OFFSET 3) FETCH FIRST 2 ROWS ONLY;")).toEqual({
+      ...one,
+      limit: num(2),
+      offset: num(3),
+    });
+    expect(firstStmt("(SELECT 1 ORDER BY 1) FETCH FIRST 2 ROWS WITH TIES;")).toEqual({
+      ...one,
+      orderBy: [ord(num(1))],
+      limit: num(2),
+      withTies: true,
+    });
+    expect(firstStmt("((SELECT 1 FOR UPDATE) FOR SHARE) LIMIT 2;")).toEqual({
+      ...one,
+      limit: num(2),
+      locking: [forUpdate, forShare],
+    });
+    expect(firstStmt("((SELECT 1) UNION (SELECT 2) ORDER BY 1) LIMIT 2;")).toEqual(
+      setOp("union", one, two, { orderBy: [ord(num(1))], limit: num(2) }),
+    );
+    expect(firstStmt("(VALUES (1) ORDER BY 1) LIMIT 2;")).toEqual({
+      ...values1,
+      orderBy: [ord(num(1))],
+      limit: num(2),
+    });
+    // A tail inside an arm's parentheses stays on that arm.
+    expect(firstStmt("(SELECT 1 LIMIT 1) UNION (SELECT 2 LIMIT 2) LIMIT 3;")).toEqual(
+      setOp("union", { ...one, limit: num(1) }, { ...two, limit: num(2) }, { limit: num(3) }),
+    );
+  });
+
+  it("attaches the tail the same way inside CTEs, subqueries and INSERT … SELECT", () => {
+    const tailed = setOp("union", one, two, { orderBy: [ord(num(1))], limit: num(1) });
+    const q = "SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1";
+    expect(firstStmt(`WITH c AS (${q}) SELECT * FROM c;`).with_[0].query).toEqual(tailed);
+    expect(firstStmt(`SELECT * FROM (${q}) s;`).from[0].query).toEqual(tailed);
+    expect(firstStmt(`SELECT * FROM t WHERE a IN (${q});`).where.query).toEqual(tailed);
+    expect(firstStmt(`SELECT (${q});`).columns[0].expr.query).toEqual(tailed);
+    expect(firstStmt(`INSERT INTO t ${q};`).source).toEqual({ kind: "select", query: tailed });
+    expect(firstStmt(`INSERT INTO t (a) (SELECT 1) UNION (SELECT 2) ORDER BY 1 LIMIT 1;`).source).toEqual({
+      kind: "select",
+      query: tailed,
+    });
+    // A WITH prefix still binds to the leftmost SELECT, and the tail to the set operation.
+    const withTail = firstStmt(`WITH c AS (SELECT 1) ${q};`);
+    expect(withTail).toMatchObject({ kind: "setOp", orderBy: [ord(num(1))], limit: num(1) });
+    expect(withTail.left.with_).toHaveLength(1);
+  });
+
+  it("ends a SELECT's span at its tail, and a set operation's at the tail after it", () => {
+    const [plain] = sqlLite.parse("SELECT a FROM t ORDER BY a LIMIT 1 FOR UPDATE;");
+    expect(plain!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 45 } });
+    const [union] = sqlLite.parse("SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1;") as any[];
+    expect(union.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 42 } });
+    // The right-hand arm ends at its own last token, before the tail.
+    expect(union.right.span).toEqual({ start: { row: 1, col: 15 }, end: { row: 1, col: 23 } });
+    // A parenthesised query keeps its start and stretches to the tail written after it.
+    const [paren] = sqlLite.parse("(SELECT 1) ORDER BY 1;");
+    expect(paren!.span).toEqual({ start: { row: 1, col: 1 }, end: { row: 1, col: 21 } });
+  });
+
+  it("rejects a repeated LIMIT, OFFSET or ORDER BY, within one tail or across parentheses", () => {
+    const bad = (sql: string) => () => sqlLite.parse(sql);
+    expect(bad("SELECT 1 LIMIT 1 LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed \(1:17\)/);
+    expect(bad("SELECT 1 LIMIT 1 FETCH FIRST 2 ROWS ONLY;")).toThrow(/multiple LIMIT clauses not allowed \(1:17\)/);
+    expect(bad("SELECT 1 FETCH FIRST 2 ROWS ONLY LIMIT 1;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("SELECT 1 LIMIT 1 OFFSET 2 LIMIT 3;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("SELECT 1 OFFSET 1 OFFSET 2;")).toThrow(/multiple OFFSET clauses not allowed \(1:18\)/);
+    expect(bad("SELECT 1 UNION SELECT 2 LIMIT 1 LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("(SELECT 1 LIMIT 1) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed \(1:19\)/);
+    // LIMIT ALL and a count-less FETCH record no value, but are still a LIMIT.
+    expect(bad("(SELECT 1 LIMIT ALL) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("(SELECT 1 FETCH FIRST ROW ONLY) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("((SELECT 1 LIMIT 1)) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+    expect(bad("(SELECT 1 OFFSET 1) OFFSET 2;")).toThrow(/multiple OFFSET clauses not allowed/);
+    expect(bad("(SELECT 1 ORDER BY 1) ORDER BY 1;")).toThrow(/multiple ORDER BY clauses not allowed \(1:22\)/);
+    expect(bad("(SELECT 1 UNION SELECT 2 ORDER BY 1) ORDER BY 1;")).toThrow(/multiple ORDER BY clauses not allowed/);
+    expect(bad("(VALUES (1) LIMIT 1) LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed/);
+  });
+
+  it("rejects WITH TIES without an ORDER BY", () => {
+    const bad = (sql: string) => () => sqlLite.parse(sql);
+    expect(bad("SELECT 1 FETCH FIRST 2 ROWS WITH TIES;")).toThrow(
+      /WITH TIES cannot be specified without ORDER BY clause \(1:9\)/,
+    );
+    expect(bad("SELECT 1 UNION SELECT 2 FETCH FIRST 2 ROWS WITH TIES;")).toThrow(/WITH TIES cannot be specified/);
+    expect(bad("VALUES (1) FETCH FIRST 2 ROWS WITH TIES;")).toThrow(/WITH TIES cannot be specified/);
+    // The ORDER BY must be there when WITH TIES is applied: a later one is too late.
+    expect(bad("(SELECT 1 FETCH FIRST 2 ROWS WITH TIES) ORDER BY 1;")).toThrow(/WITH TIES cannot be specified/);
+    // An ORDER BY on an arm doesn't order the set operation.
+    expect(bad("(SELECT 1 ORDER BY 1) UNION SELECT 2 FETCH FIRST 2 ROWS WITH TIES;")).toThrow(
+      /WITH TIES cannot be specified/,
+    );
+  });
+
+  it("rejects WITH TIES together with SKIP LOCKED", () => {
+    const bad = (sql: string) => () => sqlLite.parse(sql);
+    expect(bad("SELECT 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES FOR UPDATE SKIP LOCKED;")).toThrow(
+      /SKIP LOCKED and WITH TIES options cannot be used together \(1:20\)/,
+    );
+    expect(bad("SELECT 1 ORDER BY 1 FOR SHARE SKIP LOCKED FETCH FIRST 2 ROWS WITH TIES;")).toThrow(
+      /SKIP LOCKED and WITH TIES options cannot be used together/,
+    );
+    expect(bad("(SELECT 1 ORDER BY 1 FOR UPDATE SKIP LOCKED) FETCH FIRST 2 ROWS WITH TIES;")).toThrow(
+      /SKIP LOCKED and WITH TIES options cannot be used together/,
+    );
+    // PG checks only when the WITH TIES is applied, so SKIP LOCKED added after
+    // the parentheses, or NOWAIT anywhere, is accepted.
+    expect(firstStmt("(SELECT 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES) FOR UPDATE SKIP LOCKED;")).toMatchObject({
+      withTies: true,
+      locking: [{ strength: "update", of: [], wait: "skipLocked" }],
+    });
+    expect(firstStmt("SELECT 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES FOR UPDATE NOWAIT;")).toMatchObject({
+      withTies: true,
+      locking: [{ strength: "update", of: [], wait: "nowait" }],
+    });
+  });
+
+  it("rejects a misplaced or malformed tail clause", () => {
+    const bad = (sql: string) => () => sqlLite.parse(sql);
+    // An arm takes no tail of its own: only parentheses give it one.
+    expect(bad("SELECT 1 ORDER BY 1 UNION SELECT 2;")).toThrow(/Expected ";" but found "union"/);
+    expect(bad("SELECT 1 LIMIT 1 UNION SELECT 2;")).toThrow(/Expected ";" but found "union"/);
+    expect(bad("SELECT 1 FOR UPDATE UNION SELECT 2;")).toThrow(/Expected ";" but found "union"/);
+    // Locking goes on one side of the LIMIT / OFFSET pair, and ORDER BY first.
+    expect(bad("SELECT 1 FOR UPDATE LIMIT 1 FOR UPDATE;")).toThrow(/Expected ";" but found "for"/);
+    expect(bad("SELECT 1 LIMIT 1 FOR UPDATE OFFSET 1;")).toThrow(/Expected ";" but found "offset"/);
+    expect(bad("SELECT 1 LIMIT 1 ORDER BY 1;")).toThrow(/Expected ";" but found "order"/);
+    // FOR READ ONLY stands alone.
+    expect(bad("SELECT 1 FOR READ ONLY FOR UPDATE;")).toThrow(/Expected ";" but found "for"/);
+    expect(bad("SELECT 1 FOR UPDATE FOR READ ONLY;")).toThrow(
+      /Expected "update", "share", "no" or "key" but found "read"/,
+    );
+    expect(bad("SELECT 1 FOR READ;")).toThrow(/Expected "only" but found ";"/);
+    // FETCH spells out FIRST | NEXT, ROW | ROWS and ONLY | WITH TIES.
+    expect(bad("SELECT 1 FETCH 2 ROWS ONLY;")).toThrow(/Expected "first" or "next" but found "2"/);
+    expect(bad("SELECT 1 FETCH FIRST 2 ONLY;")).toThrow(/Expected "row" or "rows" but found "only"/);
+    expect(bad("SELECT 1 FETCH FIRST 2 ROWS;")).toThrow(/Expected "only" or "with ties" but found ";"/);
+    expect(bad("SELECT 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH;")).toThrow(/Expected "ties" but found ";"/);
+    expect(bad("SELECT 1 UNION ALL DISTINCT SELECT 2;")).toThrow(/but found "distinct"/);
+  });
+
+  it("keeps the new tail words unreserved as names and aliases", () => {
+    // `read` is matched only after the reserved `for`, the FETCH words only after
+    // `fetch`, so all of them stay ordinary names.
+    const words = ["read", "ties", "first", "next", "row", "rows"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM read;`)).toEqual(
+      sel({ columns: words.map((w) => col(name(w))), from: [tableFrom(["read"])] }),
+    );
+    expect(firstStmt(`SELECT ${words.map((w) => `a ${w}`).join(", ")} FROM t read;`)).toEqual(
+      sel({ columns: words.map((w) => col(name("a"), w)), from: [tableFrom(["t"], "read")] }),
+    );
+    expect(firstStmt("CREATE TABLE read (ties int, first int);").name).toEqual(["read"]);
   });
 });
 
@@ -3459,6 +3866,223 @@ describe("SQL-lite SET / SHOW / RESET", () => {
   });
 });
 
+// --- SET values, as PostgreSQL's var_value ---
+
+describe("SQL-lite SET values", () => {
+  const values = (src: string) => (firstStmt(`SET x = ${src};`) as any).values;
+
+  it("parses the pg_dump header settings, ON included", () => {
+    expect(firstStmt("SET standard_conforming_strings = on;")).toEqual({
+      kind: "set",
+      scope: null,
+      name: "standard_conforming_strings",
+      values: [name("on")],
+    });
+    expect(values("off")).toEqual([name("off")]);
+    expect(values("false")).toEqual([{ kind: "bool", value: false }]);
+    expect(firstStmt("SELECT pg_catalog.set_config('search_path', '', false);").columns[0].expr).toEqual({
+      kind: "call",
+      name: "pg_catalog.set_config",
+      args: [str("search_path"), str(""), { kind: "bool", value: false }],
+    });
+  });
+
+  it("admits the words sql-lite reserves but PostgreSQL does not", () => {
+    expect(values("left, set, values")).toEqual([name("left"), name("set"), name("values")]);
+    expect(() => sqlLite.parse("SET x = system_user;")).toThrow(/Expected a parameter value but found "system_user"/);
+  });
+
+  it("parses lists of words, strings, quoted names and signed numbers", () => {
+    expect(firstStmt("SET x=-1;").values).toEqual([{ kind: "unary", op: "-", operand: num(1) }]);
+    expect(values(`"$user", public, 'a b', 1.5, -1, +2`)).toEqual([
+      name("$user"),
+      name("public"),
+      str("a b"),
+      num(1.5),
+      { kind: "unary", op: "-", operand: num(1) },
+      { kind: "unary", op: "+", operand: num(2) },
+    ]);
+  });
+
+  it("parses SET … FROM CURRENT", () => {
+    expect(firstStmt("SET LOCAL search_path FROM CURRENT;")).toEqual({
+      kind: "set",
+      scope: "local",
+      name: "search_path",
+      values: "fromCurrent",
+    });
+  });
+
+  it("shares the value rule with a routine's SET option", () => {
+    const options = (src: string) =>
+      (firstStmt(`CREATE FUNCTION f() RETURNS int LANGUAGE sql ${src} AS 'SELECT 1';`) as any).options.slice(1, -1);
+    expect(options("SET x = on SET y TO DEFAULT SET TIME ZONE 'UTC' SET z FROM CURRENT")).toEqual([
+      { kind: "set", parameter: "x", value: { kind: "list", values: [name("on")] } },
+      { kind: "set", parameter: "y", value: { kind: "default" } },
+      { kind: "set", parameter: "time zone", value: { kind: "list", values: [str("UTC")] } },
+      { kind: "set", parameter: "z", value: { kind: "fromCurrent" } },
+    ]);
+    expect(() => sqlLite.parse("CREATE FUNCTION f() RETURNS int SET x = 1 + 2 AS 'SELECT 1';")).toThrow(
+      /Expected ";" but found "\+"/,
+    );
+  });
+
+  it("rejects an expression where PostgreSQL takes a single value", () => {
+    expect(() => sqlLite.parse("SET x = 1 + 2;")).toThrow(/Expected ";" but found "\+" \(1:10\)/);
+    expect(() => sqlLite.parse("SET x = a.b;")).toThrow(/Expected ";" but found "\."/);
+    expect(() => sqlLite.parse("SET x = lower('A');")).toThrow(/Expected ";" but found "\("/);
+    expect(() => sqlLite.parse("SET x = null;")).toThrow(/Expected a parameter value but found "null"/);
+    expect(() => sqlLite.parse("SET x TO DEFAULT, 1;")).toThrow(/Expected ";" but found ","/);
+    expect(() => sqlLite.parse("SET x;")).toThrow(/Expected "to" or "=" but found ";"/);
+  });
+});
+
+// --- The special SET forms ---
+
+describe("SQL-lite SET special forms", () => {
+  it("parses SET TRANSACTION and SET SESSION CHARACTERISTICS", () => {
+    expect(firstStmt("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY NOT DEFERRABLE;")).toEqual({
+      kind: "setTransaction",
+      scope: null,
+      characteristics: false,
+      modes: [
+        { kind: "isolation", level: "serializable" },
+        { kind: "readWrite", value: false },
+        { kind: "deferrable", value: false },
+      ],
+    });
+    expect(firstStmt("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE;")).toEqual({
+      kind: "setTransaction",
+      scope: null,
+      characteristics: true,
+      modes: [{ kind: "readWrite", value: true }],
+    });
+    expect(firstStmt("SET LOCAL TRANSACTION DEFERRABLE;")).toMatchObject({ scope: "local", characteristics: false });
+    expect(firstStmt("SET SESSION SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;")).toMatchObject({
+      scope: "session",
+      characteristics: true,
+    });
+    expect(firstStmt("SET TRANSACTION SNAPSHOT '00000003-1';")).toEqual({
+      kind: "set",
+      scope: null,
+      name: "transaction snapshot",
+      values: [str("00000003-1")],
+    });
+    expect(() => sqlLite.parse("SET TRANSACTION;")).toThrow(/Expected "isolation", .* but found ";"/);
+    expect(() => sqlLite.parse("SET TRANSACTION READ ONLY,;")).toThrow(/Expected "isolation", .* but found ";"/);
+    expect(() => sqlLite.parse("BEGIN ISOLATION LEVEL SERIALIZABLE,;")).toThrow(
+      /Expected "isolation", .* but found ";"/,
+    );
+  });
+
+  it("parses SET CONSTRAINTS", () => {
+    expect(firstStmt("SET CONSTRAINTS ALL DEFERRED;")).toEqual({
+      kind: "setConstraints",
+      constraints: "all",
+      mode: "deferred",
+    });
+    expect(firstStmt("SET CONSTRAINTS s.fk_a, fk_b IMMEDIATE;")).toEqual({
+      kind: "setConstraints",
+      constraints: [["s", "fk_a"], ["fk_b"]],
+      mode: "immediate",
+    });
+    expect(() => sqlLite.parse("SET CONSTRAINTS ALL;")).toThrow(/Expected "deferred" or "immediate" but found ";"/);
+    expect(() => sqlLite.parse("SET LOCAL CONSTRAINTS ALL DEFERRED;")).toThrow(/Expected "to" or "=" but found "all"/);
+  });
+
+  it("parses SET [SESSION | LOCAL] SESSION AUTHORIZATION and SET ROLE", () => {
+    const auth = (scope: string | null, values: unknown) => ({
+      kind: "set",
+      scope,
+      name: "session authorization",
+      values,
+    });
+    expect(firstStmt("SET SESSION AUTHORIZATION 'bob';")).toEqual(auth(null, [str("bob")]));
+    expect(firstStmt("SET SESSION SESSION AUTHORIZATION DEFAULT;")).toEqual(auth("session", "default"));
+    expect(firstStmt("SET LOCAL SESSION AUTHORIZATION bob;")).toEqual(auth("local", [name("bob")]));
+    expect(firstStmt("SET ROLE 'admin';")).toEqual({ kind: "set", scope: null, name: "role", values: [str("admin")] });
+    expect(() => sqlLite.parse("SET SESSION AUTHORIZATION 1;")).toThrow(/Expected a name or a string but found "1"/);
+    expect(() => sqlLite.parse("SET ROLE DEFAULT;")).toThrow(/Expected a name or a string but found "default"/);
+  });
+
+  it("reads TIME ZONE LOCAL as DEFAULT, and parses the other zone values", () => {
+    const zone = (src: string) => (firstStmt(`SET TIME ZONE ${src};`) as any).values;
+    expect(zone("LOCAL")).toBe("default");
+    expect(zone("DEFAULT")).toBe("default");
+    expect(zone("-8")).toEqual([{ kind: "unary", op: "-", operand: num(8) }]);
+    expect(zone('"America/New_York"')).toEqual([name("America/New_York")]);
+    expect(zone("INTERVAL '+00:00'")).toEqual([{ kind: "interval", value: "+00:00" }]);
+    expect(zone("INTERVAL '+00:00' HOUR TO MINUTE")).toEqual([
+      { kind: "interval", value: "+00:00", fields: "hour to minute" },
+    ]);
+    expect(() => sqlLite.parse("SET TIME ZONE true;")).toThrow(/Expected a time zone but found "true"/);
+    expect(() => sqlLite.parse("SET TIME ZONE left;")).toThrow(/Expected a time zone but found "left"/);
+    expect(() => sqlLite.parse("SET TIME ZONE INTERVAL '1' DAY;")).toThrow(
+      /A time zone interval must be HOUR or HOUR TO MINUTE, but found DAY \(1:14\)/,
+    );
+  });
+
+  it("parses SCHEMA, NAMES and XML OPTION, whose values PostgreSQL restricts", () => {
+    const set = (src: string) => firstStmt(`SET ${src};`) as any;
+    expect(set("SCHEMA 'app'")).toMatchObject({ name: "schema", values: [str("app")] });
+    expect(set("NAMES 'UTF8'")).toMatchObject({ name: "names", values: [str("UTF8")] });
+    expect(set("NAMES")).toMatchObject({ name: "names", values: "default" });
+    expect(set("XML OPTION CONTENT")).toMatchObject({ name: "xml option", values: [name("content")] });
+    expect(() => sqlLite.parse("SET SCHEMA app;")).toThrow(/Expected a string but found "app"/);
+  });
+
+  it("reads a form word followed by = or TO as a parameter name", () => {
+    const words = ["role", "schema", "names", "constraints", "transaction", "session", "local", "time"];
+    for (const word of words) {
+      expect(firstStmt(`SET ${word} TO 1;`)).toEqual({ kind: "set", scope: null, name: word, values: [num(1)] });
+      expect(firstStmt(`SET ${word}.x = 1;`)).toMatchObject({ scope: null, name: `${word}.x` });
+    }
+    expect(firstStmt("SET session FROM CURRENT;")).toMatchObject({ scope: null, name: "session" });
+    expect(firstStmt("SET SESSION session = 1;")).toMatchObject({ scope: "session", name: "session" });
+  });
+});
+
+// --- Multi-word SHOW / RESET targets ---
+
+describe("SQL-lite SHOW / RESET targets", () => {
+  it("parses TIME ZONE, TRANSACTION ISOLATION LEVEL and SESSION AUTHORIZATION", () => {
+    expect(firstStmt("SHOW TRANSACTION ISOLATION LEVEL;")).toEqual({
+      kind: "show",
+      name: "transaction isolation level",
+    });
+    expect(firstStmt("SHOW TIME ZONE;")).toEqual({ kind: "show", name: "time zone" });
+    expect(firstStmt("SHOW SESSION AUTHORIZATION;")).toEqual({ kind: "show", name: "session authorization" });
+    expect(firstStmt("RESET SESSION AUTHORIZATION;")).toEqual({ kind: "reset", name: "session authorization" });
+    expect(firstStmt("RESET TIME ZONE;")).toEqual({ kind: "reset", name: "time zone" });
+    expect(firstStmt("RESET TRANSACTION ISOLATION LEVEL;")).toEqual({
+      kind: "reset",
+      name: "transaction isolation level",
+    });
+  });
+
+  it("reads a lone lead word as a parameter name", () => {
+    expect(firstStmt("SHOW time;")).toEqual({ kind: "show", name: "time" });
+    expect(firstStmt("SHOW transaction;")).toEqual({ kind: "show", name: "transaction" });
+    expect(firstStmt("RESET session;")).toEqual({ kind: "reset", name: "session" });
+    expect(() => sqlLite.parse("SHOW TRANSACTION ISOLATION;")).toThrow(/Expected "level" but found ";"/);
+  });
+
+  it("keeps the form words unreserved as names and aliases", () => {
+    const words = [
+      ...["session", "authorization", "characteristics", "transaction", "constraints", "snapshot", "zone"],
+      ...["xml", "option", "document", "content", "deferred", "immediate", "isolation", "level"],
+    ];
+    for (const word of words) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [{ expr: name(word), alias: null }],
+        from: [tableFrom([word])],
+      });
+      expect(firstStmt(`SELECT a ${word} FROM t;`).columns[0]).toEqual({ expr: name("a"), alias: word });
+      expect(firstStmt(`SET ${word} = 1;`)).toMatchObject({ name: word });
+    }
+  });
+});
+
 // --- Phase 9: DO / DEALLOCATE ---
 
 describe("SQL-lite DO / DEALLOCATE", () => {
@@ -3518,11 +4142,10 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
   it("rejects a digit outside the literal's base", () => {
     expect(() => sqlLite.parse("SELECT B'12' FROM t;")).toThrow(/Invalid binary digit "2"/);
     expect(() => sqlLite.parse("SELECT X'gg' FROM t;")).toThrow(/Invalid hexadecimal digit "g"/);
-    // A literal that never closed swallowed the rest of the input, so the base
-    // check would blame its first stray character for a missing quote. It is
-    // left to fail where an unterminated `'…'` fails: at the `;` never reached.
-    expect(() => sqlLite.parse("SELECT B'101 FROM t;")).toThrow(/Expected ";"/);
-    expect(() => sqlLite.parse("SELECT 'abc FROM t;")).toThrow(/Expected ";"/);
+    // A literal that never closed is reported as unterminated, not blamed on
+    // its first stray character.
+    expect(() => sqlLite.parse("SELECT B'101 FROM t;")).toThrow(/Unterminated bit string literal/);
+    expect(() => sqlLite.parse("SELECT 'abc FROM t;")).toThrow(/Unterminated quoted string/);
     // Closed by a later quote, though, it is a terminated literal and is checked.
     expect(() => sqlLite.parse("SELECT B'101 FROM t; SELECT 'x';")).toThrow(/Invalid binary digit " "/);
   });
@@ -3538,12 +4161,8 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
     // Only `u&'` with nothing between the characters opens a unicode literal;
     // spaced out it is still an operator between a name and a string.
     expect(lex("u & 'x'")).toEqual([ident("u"), { type: "op", value: "&" }, { type: "string", value: "x" }]);
-    // `U&"…"` — a unicode-escaped *identifier* — is out of scope and unclaimed.
-    expect(lex('U&"MixedCase"')).toEqual([
-      ident("u"),
-      { type: "op", value: "&" },
-      { type: "qident", value: "MixedCase" },
-    ]);
+    // `u&` with no quote after it is `u` and `&`, as in PG.
+    expect(lex("u&x")).toEqual([ident("u"), { type: "op", value: "&" }, ident("x")]);
   });
 
   it("decodes U&'…' into an ordinary string token", () => {
@@ -3626,6 +4245,203 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
     // without the quote that closes it, or it would silently re-point the
     // escape character of the literal in front of it.
     expect(() => sqlLite.parse("SELECT U&'\\0041' UESCAPE '!")).toThrow(/Invalid Unicode escape character/);
+  });
+});
+
+// --- quoted literals ---
+// Every quoted form croaks when the input ends inside it, `E'…'` decodes the
+// full escape set, constants separated by a newline continue one another, and
+// `U&"…"` is a quoted identifier.
+
+describe("SQL-lite quoted literals", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const strTok = (value: string) => ({ type: "string", value });
+  const fails = (src: string) => () => sqlLite.parse(src);
+
+  it("croaks on every quoted form the input ends inside", () => {
+    expect(fails("SELECT 'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
+    expect(fails("SELECT E'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
+    // An escaped quote doesn't close the literal, and a final backslash
+    // escapes nothing.
+    expect(fails("SELECT E'abc\\'")).toThrow(/Unterminated quoted string/);
+    expect(fails("SELECT E'abc\\")).toThrow(/Unterminated quoted string/);
+    expect(fails('SELECT "abc')).toThrow(/Unterminated quoted identifier \(1:7\)/);
+    expect(fails("SELECT B'101")).toThrow(/Unterminated bit string literal \(1:7\)/);
+    expect(fails("SELECT X'ff")).toThrow(/Unterminated hexadecimal string literal \(1:7\)/);
+    expect(fails("SELECT U&'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
+    expect(fails('SELECT U&"abc')).toThrow(/Unterminated quoted identifier \(1:7\)/);
+    expect(fails("SELECT 1; /* note")).toThrow(/Unterminated \/\* comment \(1:10\)/);
+    // Nesting counts: one close for two opens is still open.
+    expect(fails("SELECT 1; /* a /* b */")).toThrow(/Unterminated \/\* comment/);
+  });
+
+  it("still reads the closed forms and the nested comment", () => {
+    expect(lex("'' E'' B'' X'' U&''")).toEqual([
+      strTok(""),
+      strTok(""),
+      { type: "bitstring", value: "" },
+      { type: "hexstring", value: "" },
+      strTok(""),
+    ]);
+    expect(lex("/* a /* b */ c */ x")).toEqual([
+      { type: "comment", value: " a /* b */ c " },
+      { type: "ident", value: "x" },
+    ]);
+  });
+
+  it("rejects the zero-length quoted identifier", () => {
+    expect(fails('SELECT "" FROM t;')).toThrow(/Zero-length delimited identifier \(1:7\)/);
+    expect(fails('SELECT U&"" FROM t;')).toThrow(/Zero-length delimited identifier/);
+    // A doubled quote is a one-character name, not an empty one.
+    expect(lex('""""')).toEqual([{ type: "qident", value: '"' }]);
+  });
+
+  it("decodes every E'…' escape", () => {
+    expect(lex("E'\\b\\f\\n\\r\\t\\v'")).toEqual([strTok("\b\f\n\r\t\v")]);
+    // Any other escaped character stands for itself, quotes and backslash too.
+    expect(lex("E'\\q\\\\\\''''")).toEqual([strTok("q\\''")]);
+    // Hex, octal and both unicode widths.
+    expect(colExpr("E'\\x41\\101\\u0041\\U00000041'")).toEqual(str("AAAA"));
+    // One or two hex digits, one to three octal digits; `\x` with no hex digit
+    // is just `x`.
+    expect(lex("E'\\x4g\\1011\\xg'")).toEqual([strTok("\x04gA1xg")]);
+    // In a standard string a backslash is an ordinary character.
+    expect(lex("'a\\nb'")).toEqual([strTok("a\\nb")]);
+  });
+
+  it("assembles octal and hex escapes into UTF-8", () => {
+    expect(lex("E'\\303\\251'")).toEqual([strTok("é")]);
+    expect(lex("E'\\xe2\\x82\\xac \\xC3\\xA9'")).toEqual([strTok("€ é")]);
+    expect(lex("E'\\xF0\\x9F\\x98\\x80'")).toEqual([strTok("😀")]);
+    // U+FEFF is an ordinary character here, never a byte-order mark to drop.
+    expect(lex("E'\\xEF\\xBB\\xBF' E'a\\357\\273\\277b'")).toEqual([strTok("\uFEFF"), strTok("a\uFEFFb")]);
+    // A byte run that isn't UTF-8 is rejected, as PG's encoding check does:
+    // a lone lead byte, a lone continuation byte, a run cut short by a
+    // character, and `\777` (whose low byte is 0xFF).
+    expect(fails("SELECT E'\\xC3';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
+    expect(fails("SELECT E'\\251';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
+    expect(fails("SELECT E'\\xC3A';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
+    expect(fails("SELECT E'\\777';")).toThrow(/Invalid byte sequence for encoding "UTF8"/);
+  });
+
+  it("rejects NUL however it is spelled", () => {
+    expect(fails("SELECT E'a\\0b';")).toThrow(/Invalid byte sequence for encoding "UTF8": 0x00/);
+    expect(fails("SELECT E'\\x00';")).toThrow(/Invalid byte sequence for encoding "UTF8": 0x00/);
+    expect(fails("SELECT E'\\u0000';")).toThrow(/Invalid Unicode escape value/);
+  });
+
+  it("pairs UTF-16 surrogates in \\u escapes and rejects the unpaired ones", () => {
+    expect(colExpr("E'\\uD83D\\uDE00'")).toEqual(str("😀"));
+    expect(colExpr("E'\\U0001F600'")).toEqual(str("😀"));
+    expect(fails("SELECT E'\\uD83D';")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(fails("SELECT E'\\uDE00';")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(fails("SELECT E'\\uD83Dx';")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(fails("SELECT E'\\uD83D\\x41';")).toThrow(/Invalid Unicode surrogate pair/);
+    // A pair never spans two continued constants.
+    expect(fails("SELECT E'\\uD83D'\n'\\uDE00';")).toThrow(/Invalid Unicode surrogate pair/);
+    // A short escape is an error, not a pass-through, and so is one past the
+    // last code point.
+    expect(fails("SELECT E'\\u12';")).toThrow(/Invalid Unicode escape: use \\uXXXX or \\UXXXXXXXX/);
+    expect(fails("SELECT E'\\U0041';")).toThrow(/Invalid Unicode escape: use/);
+    expect(fails("SELECT E'\\U00110000';")).toThrow(/Invalid Unicode escape value/);
+  });
+
+  it("joins string constants separated by a newline", () => {
+    expect(colExpr("'foo'\n'bar'")).toEqual(str("foobar"));
+    expect(colExpr("'foo'  \r\n\t 'bar'\n\n'baz'")).toEqual(str("foobarbaz"));
+    // A `--` comment counts as whitespace on either side of the newline.
+    expect(colExpr("'foo' -- one\n-- two\n'bar'")).toEqual(str("foobar"));
+    // Every quoted string form continues, each under its own escape rules.
+    expect(colExpr("E'a\\t'\n'\\x41'")).toEqual(str("a\tA"));
+    expect(colExpr("B'10'\n'01'")).toEqual({ kind: "bitString", value: "1001", hex: false });
+    expect(colExpr("U&'\\0041'\n'\\0042'")).toEqual(str("AB"));
+    // A byte run may span the constants, and so may a U& escape (PG joins
+    // those before decoding); form feed and vertical tab count as whitespace.
+    expect(colExpr("E'\\303'\n'\\251'")).toEqual(str("é"));
+    expect(colExpr("U&'\\00'\n'41'")).toEqual(str("A"));
+    expect(colExpr("'a' \f\n\v'b'")).toEqual(str("ab"));
+    // The span runs from the first body to the end of the last.
+    const token = sqlLexer.tokenize(createInputStream("'ab'\n'cd'")).next()!;
+    expect(token.position).toEqual({ start: { row: 1, col: 1 }, end: { row: 2, col: 3 } });
+  });
+
+  it("keeps constants apart without a newline, or across a block comment or operator", () => {
+    expect(lex("'foo' 'bar'")).toEqual([strTok("foo"), strTok("bar")]);
+    expect(fails("SELECT 'foo' 'bar';")).toThrow(/found "bar"/);
+    expect(lex("'a'\n/* c */'b'")).toEqual([strTok("a"), { type: "comment", value: " c " }, strTok("b")]);
+    expect(lex("'a'\n-'b'")).toEqual([strTok("a"), { type: "op", value: "-" }, strTok("b")]);
+    // Identifiers never continue.
+    expect(lex('"a"\n"b"')).toEqual([
+      { type: "qident", value: "a" },
+      { type: "qident", value: "b" },
+    ]);
+  });
+
+  it('reads U&"…" as a quoted identifier', () => {
+    expect(lex('U&"d\\0061t\\+000061" u&"x"')).toEqual([
+      { type: "qident", value: "data" },
+      { type: "qident", value: "x" },
+    ]);
+    expect(colExpr('U&"d\\0061t"')).toEqual(name("dat"));
+    expect((firstStmt('CREATE TABLE U&"T\\0061b" (U&"\\0063ol" int);') as any).name).toEqual(["Tab"]);
+    expect(colExpr("U&\"d!0061t\" UESCAPE '!'")).toEqual(name("dat"));
+    expect(fails('SELECT U&"\\00" FROM t;')).toThrow(/Invalid Unicode escape value/);
+    expect(fails("SELECT U&\"x\" UESCAPE '+' FROM t;")).toThrow(/Invalid Unicode escape character/);
+    // One character, but not one byte.
+    expect(fails("SELECT U&'x' UESCAPE 'é' FROM t;")).toThrow(/Invalid Unicode escape character/);
+  });
+
+  it("reads a UESCAPE clause across comments", () => {
+    expect(colExpr("U&'d!0061t' /* why */ UESCAPE '!'")).toEqual(str("dat"));
+    expect(colExpr("U&'d!0061t' -- why\n UESCAPE -- and\n '!'")).toEqual(str("dat"));
+    expect(colExpr("U&\"d!0061t\" /* a /* b */ */ UESCAPE /**/ '!'")).toEqual(name("dat"));
+    // A comment that never closes declines the tail, and then croaks itself.
+    expect(fails("SELECT U&'x' /* open")).toThrow(/Unterminated \/\* comment/);
+    // A lone `-` or `/` is an operator, so the clause isn't there.
+    expect(lex("U&'x' / uescape")).toEqual([
+      strTok("x"),
+      { type: "op", value: "/" },
+      { type: "ident", value: "uescape" },
+    ]);
+  });
+
+  it("treats form feed and vertical tab as whitespace", () => {
+    expect(lex("a\fb\vc")).toEqual([
+      { type: "ident", value: "a" },
+      { type: "ident", value: "b" },
+      { type: "ident", value: "c" },
+    ]);
+    expect(firstStmt("SELECT\f1\v;")).toMatchObject({ kind: "select", columns: [col(num(1))] });
+  });
+
+  it("keeps e usable as a name and alias — the prefix only claims a quote right after it", () => {
+    expect(lex("e E e.x")).toEqual([
+      { type: "ident", value: "e" },
+      { type: "ident", value: "e" },
+      { type: "ident", value: "e" },
+      { type: "punc", value: "." },
+      { type: "ident", value: "x" },
+    ]);
+    expect((firstStmt("SELECT e FROM e;") as any).columns).toEqual([col(name("e"))]);
+    expect((firstStmt("SELECT 1 e FROM t e;") as any).columns).toEqual([col(num(1), "e")]);
+  });
+
+  it("diagnose() resumes after a literal error, keeping later statements", () => {
+    for (const bad of ["SELECT E'\\xC3';", 'SELECT "" FROM t;', "SELECT U&'x' UESCAPE '!!';", "SELECT B'12';"]) {
+      const { ast, errors } = sqlLite.diagnose(`${bad}\nSELECT 1;`);
+      expect(errors).toHaveLength(1);
+      expect(stripSpans(ast).at(-1)).toMatchObject({ kind: "select", columns: [col(num(1))] });
+    }
+  });
+
+  it("surfaces the lexer's own error from inside a backtracking position", () => {
+    // The INSERT target's column list and alias are parsed speculatively; a
+    // literal error inside them must not turn into a parser error about
+    // whatever comes next.
+    expect(fails('INSERT INTO t (a, "") VALUES (1);')).toThrow(/Zero-length delimited identifier/);
+    expect(fails('INSERT INTO t (a, "b) VALUES (1);')).toThrow(/Unterminated quoted identifier/);
+    expect(fails('INSERT INTO t AS "" VALUES (1);')).toThrow(/Zero-length delimited identifier/);
+    expect(fails('INSERT INTO t AS U&"\\00" VALUES (1);')).toThrow(/Invalid Unicode escape value/);
   });
 });
 
@@ -5460,9 +6276,15 @@ describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
     expect(() => sqlLite.parse("SELECT * FROM ((TABLE t)) x;")).toThrow(
       /Expected "select" or "values" or "\(" but found "table"/,
     );
-    // A trailing query clause continues a query, which sql-lite reads no ORDER
-    // BY after when parenthesised; the run still takes the query reading.
-    expect(() => sqlLite.parse("SELECT * FROM ((SELECT 1) ORDER BY 1) x;")).toThrow(/Expected "\)" but found "order"/);
+    // A trailing query clause continues a query, so the run still takes the
+    // query reading — and a parenthesised query takes an ORDER BY after its `)`.
+    expect(from("SELECT * FROM ((SELECT 1) ORDER BY 1) x;")).toEqual([
+      {
+        kind: "subquery",
+        query: sel({ columns: [col(num(1))], orderBy: [{ expr: num(1), dir: null, nulls: null }] }),
+        alias: "x",
+      },
+    ]);
     // LATERAL takes no parenthesised join, as in PG: its `(` is a subquery.
     expect(() => sqlLite.parse("SELECT * FROM LATERAL (a JOIN b ON true);")).toThrow(/Expected "select"/);
     expect(() => sqlLite.parse("SELECT * FROM ROWS FROM ();")).toThrow(/Expected a name but found "\)"/);
@@ -6032,7 +6854,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
     );
     expect(fails("ALTER FUNCTION f(int) LANGUAGE sql;")).toThrow(/Expected "rename", .* but found "language"/);
     expect(fails("ALTER FUNCTION f NOT NULL;")).toThrow(/Expected "leakproof" but found "null"/);
-    expect(fails("ALTER FUNCTION f IMMUTABLE SET SCHEMA s;")).toThrow(/Expected "to" or "=" but found "s"/);
+    expect(fails("ALTER FUNCTION f IMMUTABLE SET SCHEMA s;")).toThrow(/Expected a string but found "s"/);
     expect(fails("ALTER AGGREGATE a RENAME TO b;")).toThrow(/Expected "\(" but found "rename"/);
     // A signature names an existing routine, as DROP's does: no argument
     // defaults, and no empty aggregate list (a zero-argument one is `(*)`).
@@ -6407,8 +7229,8 @@ describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDIN
     expect(() => sqlLite.parse("INSERT INTO t (VALUES (DEFAULT));")).toThrow(/Expected a name but found "default"/);
     // The alias needs its AS, and AS needs a name.
     expect(parse("t x VALUES (1)")).toThrow(/found "x" \(1:14\)/);
-    // (An empty quoted alias is still an alias, not a missing one.)
-    expect(insert('t AS "" VALUES (1)')).toHaveProperty("alias", "");
+    // An empty quoted alias is no name at all: PG's scanner rejects `""`.
+    expect(parse('t AS "" VALUES (1)')).toThrow(/Zero-length delimited identifier/);
     expect(parse("t AS VALUES (1)")).toThrow(/Expected a name but found "values"/);
     expect(parse("t OVERRIDING frob VALUE VALUES (1)")).toThrow(/Expected "system" or "user" but found "frob"/);
     expect(parse("t OVERRIDING USER VALUES (1)")).toThrow(/Expected "value" but found "values"/);
@@ -6508,6 +7330,135 @@ describe("SQL-lite PREPARE and EXECUTE", () => {
   });
 });
 
+// --- column and domain DEFAULT as a b-expression ---
+
+describe("SQL-lite column and domain DEFAULT as a b-expression", () => {
+  const colConstraints = (type: string, src: string) =>
+    (firstStmt(`CREATE TABLE t (c ${type} ${src});`) as any).items[0].constraints as Record<string, unknown>[];
+  const domainConstraints = (src: string) =>
+    (firstStmt(`CREATE DOMAIN d AS int ${src};`) as any).constraints as Record<string, unknown>[];
+  const bad = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int ${src});`);
+  const NOT_NULL = { kind: "notNull" };
+  const typ = (n: string, over: Record<string, unknown> = {}) => ({ name: n, args: [], array: false, ...over });
+
+  it("ends the default before NOT NULL, as pg_dump writes it", () => {
+    expect(colConstraints("integer", "DEFAULT nextval('public.t_id_seq'::regclass) NOT NULL")).toEqual([
+      {
+        kind: "default",
+        expr: {
+          kind: "call",
+          name: "nextval",
+          args: [{ kind: "cast", expr: str("public.t_id_seq"), type: typ("regclass") }],
+        },
+      },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("int", "DEFAULT 0 NOT NULL")).toEqual([{ kind: "default", expr: num(0) }, NOT_NULL]);
+    expect(colConstraints("int", "DEFAULT -1 NOT NULL")).toEqual([
+      { kind: "default", expr: { kind: "unary", op: "-", operand: num(1) } },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("int[]", "DEFAULT ARRAY[]::integer[] NOT NULL")).toEqual([
+      {
+        kind: "default",
+        expr: { kind: "cast", expr: { kind: "array", elements: [] }, type: typ("integer", { array: true }) },
+      },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("text", "DEFAULT 'a'::text || 'b' NOT NULL")).toEqual([
+      { kind: "default", expr: bin("||", { kind: "cast", expr: str("a"), type: typ("text") }, str("b")) },
+      NOT_NULL,
+    ]);
+    // The span of the DEFAULT constraint stops at its operand.
+    const [stmt] = sqlLite.parse("CREATE TABLE t (c int DEFAULT 0 NOT NULL);") as any[];
+    expect(stmt.items[0].constraints[0].span).toEqual({ start: { row: 1, col: 22 }, end: { row: 1, col: 31 } });
+  });
+
+  it("takes comparisons, IS [NOT] DISTINCT FROM and casts, as PG's b_expr does", () => {
+    expect(colConstraints("boolean", "DEFAULT 1 + 1 = 2 NOT NULL")).toEqual([
+      { kind: "default", expr: bin("=", bin("+", num(1), num(1)), num(2)) },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("boolean", "DEFAULT a IS NOT DISTINCT FROM b NOT NULL")).toEqual([
+      { kind: "default", expr: { kind: "isDistinct", expr: name("a"), from: name("b"), negated: true } },
+      NOT_NULL,
+    ]);
+    expect(colConstraints("boolean", "DEFAULT a IS DISTINCT FROM b = c")).toEqual([
+      {
+        kind: "default",
+        expr: { kind: "isDistinct", expr: name("a"), from: bin("=", name("b"), name("c")), negated: false },
+      },
+    ]);
+    expect(colConstraints("text", "DEFAULT (a + 1)::text CHECK (c <> '')")).toEqual([
+      { kind: "default", expr: { kind: "cast", expr: bin("+", name("a"), num(1)), type: typ("text") } },
+      { kind: "check", expr: bin("<>", name("c"), str("")) },
+    ]);
+  });
+
+  it("takes any expression inside parentheses", () => {
+    expect(colConstraints("text", `DEFAULT ('x' COLLATE "C")`)).toEqual([
+      { kind: "default", expr: { kind: "collate", expr: str("x"), collation: ["C"] } },
+    ]);
+    expect(colConstraints("timestamp", "DEFAULT (now() AT TIME ZONE 'utc') NOT NULL")).toEqual([
+      {
+        kind: "default",
+        expr: { kind: "atTimeZone", expr: { kind: "call", name: "now", args: [] }, zone: str("utc") },
+      },
+      NOT_NULL,
+    ]);
+  });
+
+  it("applies to domains, where a COLLATE after the default is the domain's", () => {
+    expect(domainConstraints("DEFAULT 0 NOT NULL CHECK (VALUE >= 0)")).toEqual([
+      { kind: "default", expr: num(0) },
+      { kind: "notNull", name: null },
+      { kind: "check", name: null, expr: bin(">=", name("value"), num(0)) },
+    ]);
+    expect(domainConstraints(`DEFAULT 'x' COLLATE "C"`)).toEqual([
+      { kind: "default", expr: str("x") },
+      { kind: "collate", collation: ["C"] },
+    ]);
+  });
+
+  it("leaves SET DEFAULT and argument defaults a full expression", () => {
+    // PG's ALTER COLUMN / ALTER DOMAIN SET DEFAULT and a routine argument's
+    // DEFAULT take a_expr, unlike the column and domain constraint.
+    expect(firstStmt("ALTER TABLE t ALTER c SET DEFAULT now() AT TIME ZONE 'utc';").actions[0]).toMatchObject({
+      kind: "setDefault",
+      expr: { kind: "atTimeZone" },
+    });
+    expect(firstStmt("ALTER DOMAIN d SET DEFAULT 5 IS NULL;")).toMatchObject({
+      action: { kind: "setDefault", expr: { kind: "is" } },
+    });
+    expect(
+      firstStmt("CREATE FUNCTION f(a boolean DEFAULT 1 IS NULL) RETURNS int LANGUAGE sql AS 'SELECT 1';").args[0],
+    ).toMatchObject({ defaultValue: { kind: "is" } });
+  });
+
+  it("reads POSITION's first operand as the same b-expression", () => {
+    expect(exprOf("POSITION(a = b IN c)")).toEqual({
+      kind: "position",
+      substring: bin("=", name("a"), name("b")),
+      string: name("c"),
+    });
+  });
+
+  it("rejects what PG's DEFAULT b_expr rejects", () => {
+    expect(bad("DEFAULT 5 IS NULL")).toThrow(/Expected "distinct from" but found "null" \(1:35\)/);
+    expect(() => sqlLite.parse("CREATE DOMAIN d AS int DEFAULT 5 IS NULL;")).toThrow(
+      /Expected "distinct from" but found "null"/,
+    );
+    expect(bad("DEFAULT now() AT TIME ZONE 'utc'")).toThrow(/but found "at" \(1:36\)/);
+    expect(bad("DEFAULT NOT true")).toThrow(/but found "not" \(1:30\)/);
+    expect(bad("DEFAULT a AND b")).toThrow(/but found "and"/);
+    expect(bad("DEFAULT a LIKE 'x'")).toThrow(/but found "like"/);
+    expect(bad("DEFAULT a IN (1)")).toThrow(/but found "in"/);
+    expect(bad("DEFAULT a BETWEEN 1 AND 2")).toThrow(/but found "between"/);
+    expect(bad("DEFAULT a = ANY (b)")).toThrow(/but found "any"/);
+    expect(bad("DEFAULT 1 < 2 < 3")).toThrow(/Operator "<" is non-associative/);
+  });
+});
+
 // --- generated identity and stored columns and column collation ---
 
 describe("SQL-lite generated identity and stored columns and column collation", () => {
@@ -6566,9 +7517,10 @@ describe("SQL-lite generated identity and stored columns and column collation", 
       { kind: "collate", collation: ["app", "german"] },
       { kind: "default", expr: str("a") },
     ]);
-    // After a DEFAULT, the expression's COLLATE postfix takes the clause.
+    // After a DEFAULT too: its operand has no COLLATE, so the clause is the column's.
     expect(colConstraints(`DEFAULT 'a' COLLATE "C"`)).toEqual([
-      { kind: "default", expr: { kind: "collate", expr: str("a"), collation: ["C"] } },
+      { kind: "default", expr: str("a") },
+      { kind: "collate", collation: ["C"] },
     ]);
   });
 
@@ -7074,7 +8026,7 @@ describe("SQL-lite cursors", () => {
     expect(firstStmt("SELECT a FROM t FETCH FIRST 3 ROWS ONLY;")).toEqual(
       sel({ columns: [col(name("a"))], from: [tableFrom(["t"])], limit: num(3) }),
     );
-    expect(firstStmt("SELECT a FROM t OFFSET 1 ROWS FETCH NEXT ROW WITH TIES;").offset).toEqual(num(1));
+    expect(firstStmt("SELECT a FROM t ORDER BY a OFFSET 1 ROWS FETCH NEXT ROW WITH TIES;").offset).toEqual(num(1));
   });
 
   it("keeps the cursor words unreserved", () => {
