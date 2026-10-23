@@ -14981,6 +14981,11 @@ describe("SQL-lite SQL/JSON functions", () => {
     );
     expect(bad("SELECT JSON_OBJECTAGG(k::text VALUE y) FROM t;")).toThrow(/but found "value"/);
     expect(colExpr("JSON_OBJECTAGG((k::text) VALUE y)")).toMatchObject({ key: { kind: "cast" } });
+    // CAST(…) is a function call to PG, and so a c_expr; a `::` after it is not.
+    expect(colExpr("JSON_OBJECT('a' VALUE 1, CAST(k AS text) VALUE 2)")).toMatchObject({
+      entries: [{ key: str("a") }, { key: { kind: "cast", expr: name("k") } }],
+    });
+    expect(bad("SELECT JSON_OBJECT(CAST(k AS int)::text VALUE 1) FROM t;")).toThrow(/but found "value"/);
   });
 
   it("parses JSON_ARRAY's value and query forms", () => {

@@ -3081,7 +3081,9 @@ function parseJsonConstructorTail(
 // PG reads the key before VALUE as a c_expr, so an operator expression there
 // must be parenthesised (`(a || b) VALUE c`); before `:` it may be any
 // expression. The operator forms' nodes are these; a parenthesised one is
-// told apart by the `)` read after its span ends.
+// told apart by the `)` read after its span ends. A `cast` node is a `::`
+// only when its operand starts where it does: `CAST(k AS text)` is a
+// function call to PG, and a c_expr (see isBareFuncExpr).
 const JSON_OPERATOR_KEYS: ReadonlySet<Expr["kind"]> = new Set<Expr["kind"]>([
   "unary",
   "binary",
@@ -3103,6 +3105,7 @@ const JSON_OPERATOR_KEYS: ReadonlySet<Expr["kind"]> = new Set<Expr["kind"]>([
   "anyAll",
   "overlaps",
 ]);
+const samePosition = (a: Position, b: Position): boolean => a.row === b.row && a.col === b.col;
 const atJsonKeySeparator = (ctx: ParseContext<SqlTokenType>): boolean =>
   ctx.is("ident", "value") || ctx.is("punc", ":");
 function finishJsonKeyValue(ctx: ParseContext<SqlTokenType>, key: Expr): JsonKeyValue {
@@ -3111,8 +3114,8 @@ function finishJsonKeyValue(ctx: ParseContext<SqlTokenType>, key: Expr): JsonKey
   if (
     ctx.is("ident", "value") &&
     JSON_OPERATOR_KEYS.has(key.kind) &&
-    end.row === key.span.end.row &&
-    end.col === key.span.end.col
+    (key.kind !== "cast" || samePosition(key.expr.span.start, key.span.start)) &&
+    samePosition(end, key.span.end)
   ) {
     ctx.croak('Expected ":" after an unparenthesised operator expression but found "value"');
   }
