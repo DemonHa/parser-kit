@@ -1107,18 +1107,41 @@ export type Stmt =
 export type SetOpKind = "union" | "unionAll" | "intersect" | "intersectAll" | "except" | "exceptAll";
 
 // `VALUES (…), (…)` as a query — usable standalone, as a set-op term, and as a
-// parenthesised FROM source. Carries the same trailing ORDER BY / LIMIT / OFFSET
-// tail a SELECT does (parsed by the shared clause rules).
+// parenthesised FROM source. Carries the same query-level ORDER BY / LIMIT /
+// OFFSET / locking tail a SELECT does when one is written after it. `locking`
+// is present only when written: PG's grammar admits it on VALUES and rejects it
+// in parse analysis, so it is recorded rather than refused.
 export type ValuesQuery = {
   kind: "values";
   rows: Expr[][];
   orderBy: OrderItem[] | null;
   limit: Expr | null;
+  // `FETCH … WITH TIES`; present (and true) only when written.
+  withTies?: true;
   offset: Expr | null;
+  locking?: LockingClause[];
   span: Span;
 };
 
-export type Query = SelectStmt | ValuesQuery | { kind: "setOp"; op: SetOpKind; left: Query; right: Query; span: Span };
+// `left op right`. INTERSECT binds tighter than UNION and EXCEPT, which are
+// left-associative among themselves, as in PG. An ORDER BY / LIMIT / OFFSET /
+// FETCH / locking tail written after the whole set operation belongs to this
+// node, never to the right-hand arm; each tail field is present only when
+// written (a `LIMIT ALL` records nothing, as it does on a SELECT).
+export type SetOperation = {
+  kind: "setOp";
+  op: SetOpKind;
+  left: Query;
+  right: Query;
+  orderBy?: OrderItem[];
+  limit?: Expr;
+  withTies?: true;
+  offset?: Expr;
+  locking?: LockingClause[];
+  span: Span;
+};
+
+export type Query = SelectStmt | ValuesQuery | SetOperation;
 
 // `FOR UPDATE|SHARE|NO KEY UPDATE|KEY SHARE [OF t, …] [NOWAIT|SKIP LOCKED]` — a
 // row-locking clause. A SELECT may carry several (each locks its listed tables).
@@ -1160,8 +1183,12 @@ export type SelectStmt = {
   window: NamedWindow[] | null;
   orderBy: OrderItem[] | null;
   limit: Expr | null;
+  // `FETCH … WITH TIES`; present (and true) only when written.
+  withTies?: true;
   offset: Expr | null;
-  // Row-locking clauses (`FOR UPDATE …`), after LIMIT/OFFSET; null when absent.
+  // Row-locking clauses (`FOR UPDATE …`), before or after LIMIT/OFFSET; null
+  // when absent, and for `FOR READ ONLY`, which PG's grammar also reduces to no
+  // clause at all.
   locking: LockingClause[] | null;
   span: Span;
 };
@@ -6307,50 +6334,17 @@ const distinctClause = custom<boolean | Expr[], SqlTokenType>(
   },
 );
 
-// LIMIT / OFFSET / FETCH, in any order. `LIMIT ALL` is a null limit; the
-// SQL-standard `FETCH { FIRST | NEXT } [count] { ROW | ROWS } { ONLY | WITH
-// TIES }` sets `limit` to its count (the ROW/ROWS/ONLY/WITH-TIES noise words are
-// consumed and dropped), and `OFFSET n [ROW | ROWS]` accepts the standard
-// trailing row word. `first`/`next`/`row`/`rows`/`only`/`ties` stay unreserved.
-const limitOffset = custom<{ limit: Expr | null; offset: Expr | null }, SqlTokenType>(
-  (ctx) => {
-    let limit: Expr | null = null;
-    let offset: Expr | null = null;
-    for (let i = 0; i < 3; i++) {
-      if (ctx.eat("ident", "limit") !== null) {
-        limit = ctx.eat("ident", "all") !== null ? null : ctx.parse(expression);
-      } else if (ctx.eat("ident", "offset") !== null) {
-        offset = ctx.parse(expression);
-        ctx.eat("ident", ["row", "rows"]); // optional trailing ROW / ROWS
-      } else if (ctx.eat("ident", "fetch") !== null) {
-        ctx.eat("ident", ["first", "next"]); // FIRST | NEXT
-        // The count is optional (`FETCH FIRST ROW ONLY` ≡ 1); when omitted the
-        // next token is the ROW/ROWS word, so only read a count before it.
-        if (!ctx.is("ident", ["row", "rows"])) limit = ctx.parse(expression);
-        ctx.eat("ident", ["row", "rows"]); // ROW | ROWS
-        if (ctx.eat("ident", "with") !== null) ctx.parse(kw("ties"));
-        else ctx.eat("ident", "only"); // ONLY (optional)
-      } else {
-        break;
-      }
-    }
-    return { limit, offset };
-  },
-  {
-    expected: '"limit", "offset" or "fetch"',
-    first: [
-      { type: "ident", value: "limit" },
-      { type: "ident", value: "offset" },
-      { type: "ident", value: "fetch" },
-    ],
-  },
-);
-
 // `FOR { UPDATE | SHARE | NO KEY UPDATE | KEY SHARE } [OF table, …]
-// [NOWAIT | SKIP LOCKED]`, repeatable. `for` is reserved (so it never reads as an
-// alias); the strength / wait words are matched by value.
+// [NOWAIT | SKIP LOCKED]`, repeatable, or PG's lone `FOR READ ONLY`, which its
+// grammar reduces to no clause at all (an empty list here). `for` is reserved
+// (so it never reads as an alias); the strength / wait words are matched by
+// value.
 const lockingClause = custom<LockingClause[], SqlTokenType>(
   (ctx) => {
+    if (ctx.peekAhead(1)?.type === "ident" && ctx.peekAhead(1)?.value === "read") {
+      ctx.parse(kwseq("for", "read", "only"));
+      return [];
+    }
     const clauses: LockingClause[] = [];
     do {
       ctx.parse(kw("for"));
@@ -6382,6 +6376,165 @@ const lockingClause = custom<LockingClause[], SqlTokenType>(
   },
   { expected: '"for"', first: [{ type: "ident", value: "for" }] },
 );
+
+// A query-level tail as written, before it is merged into the query it
+// follows. Each clause keeps its span, so a merge conflict can point at it.
+type QueryTail = {
+  orderBy: { items: OrderItem[]; span: Span } | null;
+  // `value` is null for `LIMIT ALL` and a count-less FETCH.
+  limit: { value: Expr | null; withTies: boolean; span: Span } | null;
+  offset: { value: Expr; span: Span } | null;
+  locking: LockingClause[] | null;
+};
+
+// `LIMIT { n | ALL }` or the SQL-standard `FETCH { FIRST | NEXT } [count]
+// { ROW | ROWS } { ONLY | WITH TIES }`, positioned on its lead word. The FETCH
+// count is optional (`FETCH FIRST ROW ONLY` ≡ 1); when omitted, the next token
+// is the ROW/ROWS word, so a count is read only before one.
+// `first`/`next`/`row`/`rows`/`only`/`ties` stay unreserved.
+function parseLimitClause(ctx: ParseContext<SqlTokenType>): NonNullable<QueryTail["limit"]> {
+  const start = ctx.position();
+  if (ctx.eat("ident", "limit") !== null) {
+    const value = ctx.eat("ident", "all") !== null ? null : ctx.parse(expression);
+    return { value, withTies: false, span: ctx.spanFrom(start) };
+  }
+  ctx.parse(kw("fetch"));
+  if (ctx.eat("ident", ["first", "next"]) === null) {
+    ctx.croak(`Expected "first" or "next" but found ${describeFound(ctx.peek())}`);
+  }
+  const value = ctx.is("ident", ["row", "rows"]) ? null : ctx.parse(expression);
+  if (ctx.eat("ident", ["row", "rows"]) === null) {
+    ctx.croak(`Expected "row" or "rows" but found ${describeFound(ctx.peek())}`);
+  }
+  let withTies = false;
+  if (ctx.is("ident", "with")) {
+    ctx.parse(kwseq("with", "ties"));
+    withTies = true;
+  } else if (ctx.eat("ident", "only") === null) {
+    ctx.croak(`Expected "only" or "with ties" but found ${describeFound(ctx.peek())}`);
+  }
+  return { value, withTies, span: ctx.spanFrom(start) };
+}
+
+// PG's `select_no_parens` tail: `[ORDER BY …]`, then at most one LIMIT (or
+// FETCH) and one OFFSET in either order, with the locking clauses before or
+// after that pair but not on both sides of it. `OFFSET n [ROW | ROWS]` takes the
+// standard trailing row word. A second LIMIT or OFFSET is refused here, with
+// the wording insertSelectOptions uses for one repeated across parentheses (PG
+// itself reports a plain syntax error within one tail); anything else out of
+// place just ends the tail, and fails where the query was meant to stop. Null
+// when no tail is written.
+function parseQueryTail(ctx: ParseContext<SqlTokenType>): QueryTail | null {
+  if (!ctx.is("ident", ["order", "limit", "offset", "fetch", "for"])) return null;
+  const tail: QueryTail = { orderBy: null, limit: null, offset: null, locking: null };
+  if (ctx.is("ident", "order")) {
+    const start = ctx.position();
+    const items = ctx.parse(orderByClause);
+    tail.orderBy = { items, span: ctx.spanFrom(start) };
+  }
+  const lockingFirst = ctx.is("ident", "for");
+  if (lockingFirst) tail.locking = ctx.parse(lockingClause);
+  while (ctx.is("ident", ["limit", "fetch", "offset"])) {
+    if (!ctx.is("ident", "offset")) {
+      if (tail.limit !== null) ctx.croak("multiple LIMIT clauses not allowed");
+      tail.limit = parseLimitClause(ctx);
+    } else {
+      if (tail.offset !== null) ctx.croak("multiple OFFSET clauses not allowed");
+      const start = ctx.position();
+      ctx.next(); // offset
+      const value = ctx.parse(expression);
+      ctx.eat("ident", ["row", "rows"]); // optional trailing ROW / ROWS
+      tail.offset = { value, span: ctx.spanFrom(start) };
+    }
+  }
+  if (!lockingFirst && ctx.is("ident", "for")) tail.locking = ctx.parse(lockingClause);
+  if (tail.locking?.length === 0) tail.locking = null; // FOR READ ONLY
+  return tail;
+}
+
+// Queries whose LIMIT was written, `LIMIT ALL` and a count-less FETCH included
+// — the AST alone can't tell those from no LIMIT, but PG's duplicate check can.
+const writtenLimit = new WeakSet<Query>();
+
+// Merge a query-level tail into the query it follows, as PG's
+// `insertSelectOptions` does: onto the SELECT or VALUES itself when the query is
+// one, and onto the set-operation node otherwise — so in `(SELECT 1) UNION
+// SELECT 2 ORDER BY 1` the ORDER BY sorts the union, not the right-hand arm. A
+// parenthesised query takes the tail written after its `)` the same way, and a
+// clause it already carries can't be given twice. Locking clauses accumulate.
+// PG's other checks here are mirrored too: WITH TIES needs an ORDER BY and
+// can't be combined with SKIP LOCKED.
+// The node's span is stretched to the tail's end, keeping its start.
+function insertQueryTail(ctx: ParseContext<SqlTokenType>, node: Query, tail: QueryTail): Query {
+  let orderBy = node.orderBy ?? null;
+  let limit = node.limit ?? null;
+  let withTies = node.withTies === true;
+  let offset = node.offset ?? null;
+  let locking = node.locking ?? null;
+  const limitWritten = writtenLimit.has(node);
+  if (tail.orderBy !== null) {
+    if (orderBy !== null) {
+      ctx.croak("multiple ORDER BY clauses not allowed", tail.orderBy.span.start, tail.orderBy.span.end);
+    }
+    orderBy = tail.orderBy.items;
+  }
+  if (tail.locking !== null) locking = locking === null ? tail.locking : [...locking, ...tail.locking];
+  if (tail.offset !== null) {
+    if (offset !== null) ctx.croak("multiple OFFSET clauses not allowed", tail.offset.span.start, tail.offset.span.end);
+    offset = tail.offset.value;
+  }
+  if (tail.limit !== null) {
+    if (limitWritten) ctx.croak("multiple LIMIT clauses not allowed", tail.limit.span.start, tail.limit.span.end);
+    if (tail.limit.withTies && orderBy === null) {
+      ctx.croak("WITH TIES cannot be specified without ORDER BY clause", tail.limit.span.start, tail.limit.span.end);
+    }
+    // Checked against every locking clause merged so far, but only when this
+    // tail brings the WITH TIES, as PG does.
+    if (tail.limit.withTies && locking?.some((clause) => clause.wait === "skipLocked")) {
+      ctx.croak(
+        "SKIP LOCKED and WITH TIES options cannot be used together",
+        tail.limit.span.start,
+        tail.limit.span.end,
+      );
+    }
+    limit = tail.limit.value;
+    withTies = tail.limit.withTies;
+  }
+  const span: Span = { start: node.span.start, end: ctx.lastEnd() };
+  let out: Query;
+  if (node.kind === "select") {
+    const { orderBy: _o, limit: _l, withTies: _w, offset: _f, locking: _k, span: _s, ...head } = node;
+    out = { ...head, orderBy, limit, ...(withTies && { withTies: true }), offset, locking, span };
+  } else if (node.kind === "values") {
+    const { kind, rows } = node;
+    out = {
+      kind,
+      rows,
+      orderBy,
+      limit,
+      ...(withTies && { withTies: true }),
+      offset,
+      ...(locking !== null && { locking }),
+      span,
+    };
+  } else {
+    const { kind, op, left, right } = node;
+    out = {
+      kind,
+      op,
+      left,
+      right,
+      ...(orderBy !== null && { orderBy }),
+      ...(limit !== null && { limit }),
+      ...(withTies && { withTies: true }),
+      ...(offset !== null && { offset }),
+      ...(locking !== null && { locking }),
+      span,
+    };
+  }
+  if (limitWritten || tail.limit !== null) writtenLimit.add(out);
+  return out;
+}
 
 const selectItem = oneOf(
   bareStar.map((expr): SelectItem => ({ expr, alias: null })),
@@ -6758,6 +6911,10 @@ const intoClause = custom<SelectInto, SqlTokenType>(
   { expected: '"into"', first: [{ type: "ident", value: "into" }] },
 );
 
+// PG's `simple_select` SELECT: everything up to the WINDOW clause. The ORDER BY
+// / LIMIT / OFFSET / FETCH / locking tail is a query-level clause — read once
+// after the set operations (see setOpQuery) — so that a set-op arm never takes
+// it. The tail fields start out empty and are filled in by insertQueryTail.
 const selectCore = seq(
   skip(kw("select")),
   field("distinct", distinctClause),
@@ -6768,14 +6925,8 @@ const selectCore = seq(
   field("groupBy", optional(groupByClause)),
   field("having", optional(havingClause)),
   field("window", optional(windowClause)),
-  field("orderBy", optional(orderByClause)),
-  field("limitOffset", limitOffset),
-  field("locking", optional(lockingClause)),
 ).map(
-  (
-    { distinct, columns, into, from, where, groupBy, having, window: windowDefs, orderBy, limitOffset: lo, locking },
-    span,
-  ): SelectStmt => ({
+  ({ distinct, columns, into, from, where, groupBy, having, window: windowDefs }, span): SelectStmt => ({
     kind: "select",
     with_: null,
     recursive: false,
@@ -6788,10 +6939,10 @@ const selectCore = seq(
     ...(groupBy?.distinct && { groupByDistinct: true }),
     having: having ?? null,
     window: windowDefs ?? null,
-    orderBy: orderBy ?? null,
-    limit: lo.limit,
-    offset: lo.offset,
-    locking: locking ?? null,
+    orderBy: null,
+    limit: null,
+    offset: null,
+    locking: null,
     span,
   }),
 );
@@ -6904,57 +7055,74 @@ const attachWith = (
   target.recursive = w.recursive;
 };
 
-// `VALUES (…), (…) [ORDER BY …] [LIMIT/OFFSET …]` as a query — a peer of the
-// SELECT core. Reuses the same row list as INSERT … VALUES plus the shared
-// trailing clauses, so it slots straight into a set-op term or a FROM subquery.
-const valuesQuery = seq(
-  skip(kw("values")),
-  field("rows", sepBy(exprList, P(","))),
-  field("orderBy", optional(orderByClause)),
-  field("limitOffset", limitOffset),
-).map(
-  ({ rows, orderBy, limitOffset: lo }, span): ValuesQuery => ({
+// `VALUES (…), (…)` as a query — a peer of the SELECT core. Reuses the same row
+// list as INSERT … VALUES, so it slots straight into a set-op term or a FROM
+// subquery; like the SELECT core it takes no tail of its own.
+const valuesQuery = seq(skip(kw("values")), field("rows", sepBy(exprList, P(",")))).map(
+  ({ rows }, span): ValuesQuery => ({
     kind: "values",
     rows,
-    orderBy: orderBy ?? null,
-    limit: lo.limit,
-    offset: lo.offset,
+    orderBy: null,
+    limit: null,
+    offset: null,
     span,
   }),
 );
 
-// A set-op term: a plain SELECT core, a VALUES query, or a parenthesised query.
+// A set-op term: a plain SELECT core, a VALUES query, or a parenthesised query
+// (which, being a full query, may carry a tail of its own inside the parens).
 const selectTerm: Rule<Query, SqlTokenType> = oneOf(
   selectCore,
   valuesQuery,
   seq(skip(punc("(")), field("q", query), skip(punc(")"))).map((s) => s.q),
 );
 
-// The set-op layer (left-assoc) over select-terms. Keeping it here — rather than
+// The set-operation word at the cursor, when it is one of `words`, consumed
+// together with its optional ALL / DISTINCT quantifier. DISTINCT is the default
+// spelling and records nothing.
+const SET_OP_KINDS: Record<string, [SetOpKind, SetOpKind]> = {
+  union: ["union", "unionAll"],
+  intersect: ["intersect", "intersectAll"],
+  except: ["except", "exceptAll"],
+};
+function eatSetOp(ctx: ParseContext<SqlTokenType>, words: readonly string[]): SetOpKind | null {
+  const t = ctx.peek();
+  if (t === null || t.type !== "ident" || !words.includes(t.value)) return null;
+  ctx.next();
+  const [plain, all] = SET_OP_KINDS[t.value]!;
+  if (ctx.eat("ident", "all") !== null) return all;
+  ctx.eat("ident", "distinct");
+  return plain;
+}
+
+// One left-associative level of set operations over `operand`. Each node spans
+// from its left operand's start to the end of its right one.
+function parseSetOpLevel(
+  ctx: ParseContext<SqlTokenType>,
+  words: readonly string[],
+  operand: (ctx: ParseContext<SqlTokenType>) => Query,
+): Query {
+  let left = operand(ctx);
+  for (let op = eatSetOp(ctx, words); op !== null; op = eatSetOp(ctx, words)) {
+    const right = operand(ctx);
+    left = { kind: "setOp", op, left, right, span: { start: left.span.start, end: ctx.lastEnd() } };
+  }
+  return left;
+}
+const INTERSECT_WORDS = ["intersect"] as const;
+const UNION_EXCEPT_WORDS = ["union", "except"] as const;
+const intersectLevel = (ctx: ParseContext<SqlTokenType>): Query =>
+  parseSetOpLevel(ctx, INTERSECT_WORDS, (c) => c.parse(selectTerm));
+
+// A query without its WITH prefix: the set operations over select-terms —
+// INTERSECT binding tighter than UNION / EXCEPT, per PG's precedences — then
+// the query-level tail, merged into the result. Keeping it here — rather than
 // as a separate statement — leaves the `(`-dispatch in exactly one place.
 const setOpQuery = custom<Query, SqlTokenType>(
   (ctx) => {
-    let left = ctx.parse(selectTerm);
-    while (true) {
-      const t = ctx.peek();
-      if (t === null || t.type !== "ident") break;
-      let op: SetOpKind;
-      if (t.value === "union") {
-        ctx.next();
-        op = ctx.eat("ident", "all") !== null ? "unionAll" : "union";
-      } else if (t.value === "intersect") {
-        ctx.next();
-        op = ctx.eat("ident", "all") !== null ? "intersectAll" : "intersect";
-      } else if (t.value === "except") {
-        ctx.next();
-        op = ctx.eat("ident", "all") !== null ? "exceptAll" : "except";
-      } else {
-        break;
-      }
-      const right = ctx.parse(selectTerm);
-      left = { kind: "setOp", op, left, right, span: { start: left.span.start, end: ctx.lastEnd() } };
-    }
-    return left;
+    const body = parseSetOpLevel(ctx, UNION_EXCEPT_WORDS, intersectLevel);
+    const tail = parseQueryTail(ctx);
+    return tail === null ? body : insertQueryTail(ctx, body, tail);
   },
   {
     expected: "a query",

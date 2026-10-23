@@ -44,7 +44,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 | `sql-lite.test.ts` | Unit tests, one `describe` per feature |
 | `corpus.ts` | The statements the benchmark measures and the parity golden pins |
 | `parity.test.ts` + `parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus a supplemental list |
-| `pg-coverage.ts` + `pg-coverage.test.ts` | The PostgreSQL coverage battery: 599 statements with the bucket each one lands in |
+| `pg-coverage.ts` + `pg-coverage.test.ts` | The PostgreSQL coverage battery: 605 statements with the bucket each one lands in |
 | `sql-lite.bench.ts` | Throughput over the corpus, per category |
 | `sql-lite.large.bench.ts` | Throughput on 64 KB / 256 KB / 1 MB multi-statement files |
 | `sql-lite.workloads.bench.ts` | Throughput on real-world workloads |
@@ -53,7 +53,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 ### What's supported
 
-- **Queries.** `SELECT` with `DISTINCT [ON]`, every join type (`NATURAL`, `USING`, `LATERAL`, parenthesised joins), subqueries and derived tables, `ONLY`, alias column lists, `TABLESAMPLE … REPEATABLE`, `ROWS FROM (…)` and `WITH ORDINALITY`. Also: `GROUP BY [DISTINCT | ALL]` with `ROLLUP` / `CUBE` / `GROUPING SETS`, `HAVING`, `WINDOW`, `ORDER BY … USING` and `NULLS FIRST/LAST`, `LIMIT` / `OFFSET` / `FETCH FIRST … ROWS ONLY | WITH TIES`, every locking clause (`FOR [NO KEY] UPDATE`, `FOR [KEY] SHARE`, `OF`, `NOWAIT`, `SKIP LOCKED`), `UNION` / `INTERSECT` / `EXCEPT [ALL]`, standalone `VALUES`, `SELECT INTO`. CTEs can be `RECURSIVE`, `[NOT] MATERIALIZED`, use `SEARCH` and `CYCLE`, and be data-modifying.
+- **Queries.** `SELECT` with `DISTINCT [ON]`, every join type (`NATURAL`, `USING`, `LATERAL`, parenthesised joins), subqueries and derived tables, `ONLY`, alias column lists, `TABLESAMPLE … REPEATABLE`, `ROWS FROM (…)` and `WITH ORDINALITY`. Also: `GROUP BY [DISTINCT | ALL]` with `ROLLUP` / `CUBE` / `GROUPING SETS`, `HAVING`, `WINDOW`, `ORDER BY … USING` and `NULLS FIRST/LAST`, `LIMIT` / `OFFSET` / `FETCH FIRST … ROWS ONLY | WITH TIES`, every locking clause (`FOR [NO KEY] UPDATE`, `FOR [KEY] SHARE`, `OF`, `NOWAIT`, `SKIP LOCKED`, and `FOR READ ONLY`) before or after the limit, `UNION` / `INTERSECT` / `EXCEPT [ALL | DISTINCT]` with PostgreSQL's precedence (`INTERSECT` binds tighter). The `ORDER BY` / `LIMIT` / locking tail after a set operation or a parenthesised query applies to the whole query, as in PostgreSQL (see below for the scalar-subquery exception). Standalone `VALUES` and `SELECT INTO` work too. CTEs can be `RECURSIVE`, `[NOT] MATERIALIZED`, use `SEARCH` and `CYCLE`, and be data-modifying.
 - **Expressions.** The full operator precedence table: arithmetic, bitwise, `||`, comparison, `LIKE` / `ILIKE` / `SIMILAR TO` with `ESCAPE`, regex `~` operators, `IS [NOT] DISTINCT FROM`, `IS [NOT] NULL / TRUE / UNKNOWN`, `IS JSON [OBJECT | ARRAY | SCALAR] [WITH UNIQUE KEYS]`, `BETWEEN [SYMMETRIC]`, `IN`, `ANY` / `SOME` / `ALL`, `EXISTS`, `OVERLAPS`, `AT TIME ZONE`, `COLLATE`. JSON and jsonpath operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`, `?&`, `@?`, `@@`, `#-`), `::` casts and `CAST`, `CASE`, `ROW(…)`, `ARRAY[…]`, subscripts and slices. Special-syntax functions: `EXTRACT`, `POSITION`, `SUBSTRING … FROM … FOR`, `TRIM`, `OVERLAY`, the niladic `CURRENT_DATE` / `CURRENT_TIMESTAMP(p)` / `LOCALTIME` / `CURRENT_USER` family. Aggregate modifiers: `DISTINCT`, `ORDER BY` inside the call, `FILTER (WHERE …)`, `WITHIN GROUP`, `=>` named arguments, `OVER` with `ROWS` / `RANGE` / `GROUPS` frames and `EXCLUDE`.
 - **Types and literals.** Multi-word types (`double precision`, `character varying(n)`, `timestamp(p) with time zone`, `bit varying`, `interval day to second`), array types, schema-qualified types, typed literals (`DATE '…'`, `TIMESTAMP '…'`, `INTERVAL '…' HOUR TO MINUTE`), dollar-quoted strings, bit / hex / Unicode-escape strings with `UESCAPE`.
 - **DML.** `INSERT` with `DEFAULT VALUES`, `DEFAULT` row items, `OVERRIDING`, `ON CONFLICT (cols) | ON CONSTRAINT … DO NOTHING | DO UPDATE … WHERE`, a target alias, and `RETURNING`. `UPDATE … FROM` with multi-column `(a, b) = (…)` / `= (SELECT …)` assignments. `DELETE … USING`. `MERGE` with every `WHEN [NOT] MATCHED [BY SOURCE | TARGET]` form, plus `RETURNING`. `COPY` to and from a file, `STDIN` / `STDOUT` or a `PROGRAM`, with a parenthesised option list and `WHERE`. `TRUNCATE`.
@@ -68,11 +68,11 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 ### Compared with node-sql-parser
 
-The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically valid in PostgreSQL 17 (a few need 17 rather than 16). They cover the command reference and the query and expression chapters, from everyday idioms (upserts, pagination, `date_trunc` reports, pg_dump-style DDL) to the long tail. Each statement goes through `sqlLite.parse(sql)` and node-sql-parser 5.1.0's `new Parser().astify(sql, { database: "PostgreSQL" })`:
+The battery in `pg-coverage.ts` has 605 distinct statements, all syntactically valid in PostgreSQL 17 (a few need 17 rather than 16). They cover the command reference and the query and expression chapters, from everyday idioms (upserts, pagination, `date_trunc` reports, pg_dump-style DDL) to the long tail. Each statement goes through `sqlLite.parse(sql)` and node-sql-parser 5.1.0's `new Parser().astify(sql, { database: "PostgreSQL" })`:
 
 | Area | Statements | Both | sql-lite only | node-sql-parser only | Neither |
 |---|---:|---:|---:|---:|---:|
-| Queries | 93 | 58 | 30 | 2 | 3 |
+| Queries | 99 | 62 | 32 | 2 | 3 |
 | Expressions | 87 | 47 | 21 | 4 | 15 |
 | Types and lexical | 34 | 16 | 11 | 4 | 3 |
 | DML | 77 | 32 | 35 | 6 | 4 |
@@ -81,9 +81,9 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **208** | **234** | **21** | **136** |
+| **Total** | **605** | **212** | **236** | **21** | **136** |
 
-So sql-lite accepts 442 of the 599 statements (74%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 448 of the 605 statements (74%) and node-sql-parser accepts 233 (39%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -145,6 +145,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - `GRANT` / `REVOKE … ON FUNCTION f(argtypes)`. It works without the argument list. Also missing: `GRANTED BY`, and the PostgreSQL 16 `WITH INHERIT / SET` role options.
 - **Routine bodies and triggers:** SQL-standard function bodies (`RETURN expr`, `BEGIN ATOMIC … END`), trigger `REFERENCING OLD / NEW TABLE`, `CREATE CONSTRAINT TRIGGER`.
 - **Views:** `CREATE RECURSIVE VIEW`, `CREATE TEMP VIEW`.
+- A scalar, `IN` or `ANY` subquery whose query starts with a nested `(`, such as `SELECT ((SELECT 1) LIMIT 1)` or `x IN ((SELECT 1) UNION SELECT 2)`. The same query works in `FROM`, `EXISTS`, a CTE or at the top level.
 - Column definition lists for record-returning functions (`FROM json_to_record(…) AS x(a int, b text)`).
 - `JOIN … USING (…) AS alias`, the legacy inheritance `*` after a table name, and the empty select list `SELECT;`.
 
@@ -172,11 +173,11 @@ These statements parse without error, but the tree they produce is wrong:
 
 - **`-2 ^ 2` parses as `-(2 ^ 2)`.** In PostgreSQL, unary minus binds tighter than `^`, so the value is 4, not -4.
 - **`NATURAL` is dropped.** `a NATURAL JOIN b` yields the same node as `a JOIN b` with no condition.
-- **`WITH TIES` is dropped.** `FETCH FIRST 3 ROWS WITH TIES` yields the same `limit` as `FETCH FIRST 3 ROWS ONLY`.
 - **`SELECT a ISNULL FROM t` reads `isnull` as a column alias.** PostgreSQL reads it as the null test.
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
 - **Some `E'…'` escapes are left undecoded.** The backslash is dropped and the rest kept as text: `E'\x41'` gives `x41`, `E'\101'` gives `101`, and `E'\u0041'` gives `u0041`, where PostgreSQL gives `A` for all three. `\n`, `\t` and `\'` are decoded.
 - **`DEFAULT 'x' COLLATE "C"` folds the collation into the default expression** instead of applying it to the column.
+- **A `FETCH` with no count records no `limit`.** `FETCH FIRST ROW ONLY` gives `limit: null`, the same as no limit at all. PostgreSQL reads it as a count of 1.
 - **Numeric literals become JavaScript numbers,** so integers beyond 2^53 lose precision (`12345678901234567890`).
 
 ### Accepted, but PostgreSQL rejects
@@ -185,7 +186,6 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 
 - **`DEFAULT` accepts a full expression.** PostgreSQL's restricted form doesn't allow `DEFAULT 5 IS NULL`, `DEFAULT a = 1 AND b`, and so on.
 - **Joins with no condition:** `a JOIN b` without `ON` / `USING`, and `NATURAL CROSS JOIN`.
-- **Repeated or conflicting row limits:** `LIMIT 1 LIMIT 2`, `LIMIT … FETCH FIRST …`. Also `WITH TIES` with no `ORDER BY`.
 - **Window frames PostgreSQL rejects:** `ROWS BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING`, `ROWS 1 FOLLOWING`.
 - **Empty lists:** `IN ()`, `USING ()`, `VALUES ()`.
 - **Subscripting a call without parentheses:** `f(x)[1]`. PostgreSQL requires `(f(x))[1]`.
@@ -194,7 +194,22 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **The zero-length identifier `""`.**
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
 
-Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.
+Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, a locking clause on `VALUES` or on a set operation (`VALUES (1) FOR UPDATE`, `SELECT 1 UNION SELECT 2 FOR UPDATE`), `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.
+
+### Behaviour changes
+
+Set operations and their tails now follow PostgreSQL:
+
+- `INTERSECT` binds tighter than `UNION` and `EXCEPT`. `SELECT 1 UNION SELECT 2 INTERSECT SELECT 3` used to parse as `(1 UNION 2) INTERSECT 3`.
+- An `ORDER BY` / `LIMIT` / `OFFSET` / `FETCH` / locking tail after a set operation is stored on the `setOp` node, as optional fields. It used to be stored on the right-hand arm.
+- `WITH TIES` is recorded as `withTies: true` beside `limit`.
+
+These inputs used to parse and are now rejected, because PostgreSQL rejects them too:
+
+- A second `LIMIT` or `OFFSET` (`LIMIT 1 LIMIT 2`, `LIMIT … FETCH FIRST …`). The last one used to win silently. A parenthesised query that already has a clause can't be given it again after the `)` either: `(SELECT 1 LIMIT 1) LIMIT 2`.
+- `FETCH … WITH TIES` with no `ORDER BY`, or together with `SKIP LOCKED`.
+- An `ORDER BY`, `LIMIT` or locking clause on an unparenthesised set-operation arm, such as `SELECT 1 ORDER BY 1 UNION SELECT 2`. These used to attach to that arm. Parenthesise the arm instead: `(SELECT 1 ORDER BY 1) UNION SELECT 2`.
+- A `FETCH` missing `FIRST` / `NEXT`, `ROW` / `ROWS`, or `ONLY` / `WITH TIES`, such as `FETCH 5 ROWS ONLY` or `FETCH FIRST 5 ROWS`.
 
 ## Benchmarks
 
