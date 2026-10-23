@@ -73,7 +73,22 @@ import { type SqlTokenType, sqlParseLexer } from "./lexer";
 // Recursive nodes (Expr) are declared by hand, exactly as js-lite does; the
 // rules below still produce every value.
 
-export type ColType = { name: string; args: number[]; array: boolean; span: Span };
+// `setof` and `quoted` are omitted when absent. `setof` is PG's `SETOF type`,
+// which its Typename takes wherever a type is written (whether a cast or a
+// column can use one is decided after parsing). `quoted` marks a quoted name
+// that would be a keyword spelling of a built-in type unquoted (see
+// KEYWORD_TYPE_NAMES): `char` is bpchar and `int` is int4, while `"char"` is
+// the one-byte internal type and `"int"` is looked up as written. Any other
+// name means the same quoted or not, as does every qualified one
+// (`pg_catalog.char` is `"char"`), so it carries no flag.
+export type ColType = {
+  name: string;
+  args: number[];
+  array: boolean;
+  setof?: true;
+  quoted?: true;
+  span: Span;
+};
 
 // A row constructor: the explicit `ROW(…)` (which may be empty, or hold a single
 // item) and the implicit `(a, b, …)` (always two items or more — a lone `(a)` is
@@ -162,7 +177,10 @@ export type Expr =
   | { kind: "subscript"; base: Expr; index: Expr | null; upper?: Expr | null; span: Span }
   // `INTERVAL 'literal' [field]` — `fields` is the trailing unit spec (e.g.
   // "day", "hour to minute"), absent when only the literal is given.
-  | { kind: "interval"; value: string; fields?: string; span: Span }
+  // `precision` is the fractional-seconds precision, written either before the
+  // literal (`INTERVAL(3) '1 s'`) or on a trailing SECOND field (`SECOND(3)`,
+  // `DAY TO SECOND(3)`), and omitted when none is written.
+  | { kind: "interval"; value: string; fields?: string; precision?: number; span: Span }
   // `EXTRACT(field FROM source)` — `field` is the unit keyword/string.
   | { kind: "extract"; field: string; source: Expr; span: Span }
   // `SUBSTRING(value FROM from FOR for_)`; either keyword tail may be null.
@@ -204,18 +222,17 @@ export type Expr =
   // value. The third new literal form, `U&'\0041'`, needs no node: it decodes
   // in the lexer to an ordinary `string` token, exactly as an E-string does.
   | { kind: "bitString"; value: string; hex: boolean; span: Span }
-  // --- niladic keyword functions, typed datetime literals and OVERLAY ---
+  // --- niladic keyword functions, typed literals and OVERLAY ---
   // `CURRENT_DATE`, `CURRENT_TIMESTAMP(3)`, `USER`, … — the reserved keywords PG
   // evaluates as functions without an argument list (its SQLValueFunction).
   // `precision` is the optional fractional-seconds precision that the four
   // time-valued ones take, omitted when none is written.
   | { kind: "sqlValueFunction"; name: SqlValueFunctionName; precision?: number; span: Span }
-  // `DATE '2024-01-01'`, `TIMESTAMP(3) WITH TIME ZONE '…'` — a string literal
-  // prefixed by the type it is read as. `type` is the full typeRef node, so the
-  // multi-word spellings and the hoisted precision come out exactly as they do
-  // in a cast. `N'…'` is one too, typed `bpchar` (PG's unconstrained NCHAR)
-  // and spanning the `N`. INTERVAL keeps its own node: its field spec trails
-  // the literal.
+  // `DATE '2024-01-01'`, `TIMESTAMP(3) WITH TIME ZONE '…'`, `jsonb '{}'`,
+  // `varchar(3) 'abc'` — a string literal prefixed by the type it is read as,
+  // which may be any type name. `type` is a typeRef node, so the multi-word
+  // spellings and the hoisted precision come out exactly as they do in a cast.
+  // INTERVAL keeps its own node: its field spec trails the literal.
   | { kind: "typedLiteral"; type: ColType; value: string; span: Span }
   // `OVERLAY(value PLACING placing FROM from [FOR for_])`. The comma spelling,
   // `overlay(a, b, 1)`, stays an ordinary call node.
@@ -2345,39 +2362,32 @@ function applyCallModifiers(ctx: ParseContext<SqlTokenType>, fn: Expr, start: Po
 // custom rule (no attempt): walk the `name (. name)*` chain, then dispatch on
 // whether `.*` / `(` follows. Subsumes the old nameOrCall — `s.t.c`, `foo(a,b)`,
 // `now()`, and now `t.*`, `count(*)`, `count(distinct x)`. Also the entry point
-// for `INTERVAL 'literal' [field]` and `DATE / TIME / TIMESTAMP 'literal'`
-// (unreserved words that lead a literal), the keyword-argument functions in
+// for `INTERVAL 'literal' [field]` and `type 'literal'` (any type name
+// leading a string literal), the keyword-argument functions in
 // SPECIAL_CALLS, and OVERLAY's PLACING form.
 const columnRef = custom<Expr, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
-    // INTERVAL 'literal' [field] — only when a string literal follows; otherwise
-    // `interval` is an ordinary (unreserved) name and falls through below.
+    // INTERVAL 'literal' [field] — only when a string literal follows;
+    // otherwise `interval` is an ordinary (unreserved) name and falls through
+    // below. The INTERVAL(p) 'literal' form is picked up on the call path.
     if (ctx.is("ident", "interval") && ctx.peekAhead(1)?.type === "string") {
       ctx.next(); // interval
-      const value = ctx.next()!.value; // the string literal
-      const units: string[] = [];
-      while (ctx.peek()?.type === "ident" && INTERVAL_FIELDS.has(ctx.peek()!.value)) {
-        units.push(ctx.next()!.value);
-      }
-      return {
-        kind: "interval",
-        value,
-        ...(units.length > 0 && { fields: units.join(" ") }),
-        span: ctx.spanFrom(start),
-      };
+      return parseIntervalLiteral(ctx, start, null);
     }
-    // DATE / TIME / TIMESTAMP 'literal' — the same idiom, for the same reason:
-    // all three words are unreserved, so they lead a literal only when the
-    // whole type spelling is followed by a string, and are names otherwise.
-    if (startsTypedLiteral(ctx)) {
+    // A multi-word or pre-tail-precision type spelling followed by a string.
+    // No type word is reserved, so it leads a literal only when the whole
+    // spelling is followed by one; a one-word or dotted type name is handled
+    // once it has been read (typeNameLiteral, below).
+    if (startsMultiWordTypedLiteral(ctx)) {
       const type = ctx.parse(typeRef);
       const value = ctx.next()!.value; // the string literal
       return { kind: "typedLiteral", type, value, span: ctx.spanFrom(start) };
     }
     // Only a bare OVERLAY has the PLACING form; a quoted `"overlay"` is an
     // ordinary function name to PG.
-    const bareLead = ctx.peek()?.type === "ident";
+    const lead = ctx.peek()!;
+    const bareLead = lead.type === "ident";
     const parts: string[] = [ctx.parse(nameWord)];
     while (ctx.is("punc", ".")) {
       ctx.next(); // "."
@@ -2404,7 +2414,12 @@ const columnRef = custom<Expr, SqlTokenType>(
       const distinct = ctx.eat("ident", "distinct") !== null;
       const args: Expr[] = [];
       let orderBy: OrderItem[] = [];
+      // Whether every argument so far opened on an integer constant: with each
+      // one a plain number node, the list could be a typmod (see below). Only
+      // the token an argument starts on is checked, which it peeks anyway.
+      let integerArgs = true;
       if (!ctx.is("punc", ")")) {
+        integerArgs &&= isIntegerConstant(ctx.peek());
         args.push(ctx.parse(functionArg));
         // OVERLAY's keyword form is told apart from its comma form only by a
         // PLACING after the first argument, so unlike the SPECIAL_CALLS it
@@ -2431,12 +2446,27 @@ const columnRef = custom<Expr, SqlTokenType>(
         }
         while (ctx.is("punc", ",")) {
           ctx.next(); // ","
+          integerArgs &&= isIntegerConstant(ctx.peek());
           args.push(ctx.parse(functionArg));
         }
         if (ctx.is("ident", "order")) orderBy = ctx.parse(orderByClause);
       }
       if (!ctx.is("punc", ")")) ctx.croak(`Expected ")" but found ${describeFound(ctx.peek())}`);
       ctx.next(); // ")"
+      // `INTERVAL(3) '…'` and `varchar(3) 'abc'`: the call was a type's
+      // precision or typmod after all.
+      const typmod =
+        integerArgs && args.length > 0 && !distinct && orderBy.length === 0
+          ? args.map((arg) => (arg.kind === "number" ? arg.value : null))
+          : null;
+      if (typmod !== null && !typmod.includes(null) && ctx.is("string")) {
+        const integers = typmod as number[];
+        if (bareLead && parts.length === 1 && parts[0] === "interval" && integers.length === 1) {
+          return parseIntervalLiteral(ctx, start, integers[0]!);
+        }
+        const literal = typeNameLiteral(ctx, start, lead, parts, integers);
+        if (literal !== null) return literal;
+      }
       const call: Expr = {
         kind: "call",
         name: parts.join("."),
@@ -2448,7 +2478,7 @@ const columnRef = custom<Expr, SqlTokenType>(
       // Trailing WITHIN GROUP / IGNORE|RESPECT NULLS / FILTER / OVER modifiers.
       return applyCallModifiers(ctx, call, start);
     }
-    return { kind: "name", parts, span: ctx.spanFrom(start) };
+    return typeNameLiteral(ctx, start, lead, parts, null) ?? { kind: "name", parts, span: ctx.spanFrom(start) };
   },
   { expected: "a name", first: [{ type: "ident" }, { type: "qident" }] },
 );
@@ -2588,12 +2618,31 @@ const atom = oneOf(
 
 // --- data types ---
 // A type name with optional `(args)` (varchar(10), numeric(10,2)) and an array
-// suffix (`int[]`, `text[][]`). Array dims are collapsed to a boolean. The name
-// may be several words (`double precision`, `timestamp with time zone`) — see
-// MULTI_WORD_TYPES below.
+// suffix (`int[]`, `text[][]`, `int ARRAY`). Array dims are collapsed to a
+// boolean. The name may be several words (`double precision`, `timestamp with
+// time zone`) — see MULTI_WORD_TYPES below.
 const typeArg = token("number").map((node) => Number(node.value));
+// Either PG spelling: any run of `[]` / `[n]`, or the SQL-standard `ARRAY` with
+// at most one `[n]`, whose bound PG requires (`int ARRAY[]` is a syntax error).
+// The two do not combine. `array` is reserved, so it can follow a type nowhere
+// else, and is matched with ctx.is like the other reserved words.
 const arraySuffix = custom<boolean, SqlTokenType>(
   (ctx) => {
+    if (ctx.is("ident", "array")) {
+      ctx.next(); // array
+      if (ctx.is("punc", "[")) {
+        ctx.next(); // "["
+        const tok = ctx.peek();
+        if (!isIntegerConstant(tok)) ctx.croak(`Expected an integer array bound but found ${describeFound(tok)}`);
+        ctx.next(); // the bound
+        if (!ctx.is("punc", "]")) ctx.croak(`Expected "]" but found ${describeFound(ctx.peek())}`);
+        ctx.next(); // "]"
+        // Refused here rather than left for the caller, where a cast would
+        // take it for a subscript of the cast and pass a 2-D-looking type.
+        if (ctx.is("punc", "[")) ctx.croak(`Expected one array bound after ARRAY but found "["`);
+      }
+      return true;
+    }
     let seen = false;
     while (ctx.is("punc", "[")) {
       ctx.next(); // "["
@@ -2604,7 +2653,13 @@ const arraySuffix = custom<boolean, SqlTokenType>(
     }
     return seen;
   },
-  { expected: '"["', first: [{ type: "punc", value: "[" }] },
+  {
+    expected: '"[" or "array"',
+    first: [
+      { type: "punc", value: "[" },
+      { type: "ident", value: "array" },
+    ],
+  },
 );
 const typeArgs = delimited(P("("), P(")"), P(","), typeArg, { interleaved: true });
 
@@ -2631,6 +2686,8 @@ const INTERVAL_TAILS: readonly (readonly string[])[] = [
   ["minute"],
   ["second"],
 ];
+// The same thirteen, as the strings an INTERVAL literal's `fields` holds.
+const INTERVAL_FIELD_SPECS: ReadonlySet<string> = new Set(INTERVAL_TAILS.map((tail) => tail.join(" ")));
 
 // A Map, not an object literal: identifiers fold to lowercase, so a column of
 // type `constructor` or `__proto__` would otherwise find a tail list on
@@ -2717,42 +2774,200 @@ function findTypeTail(ctx: ParseContext<SqlTokenType>, lead: string, offset: num
 const startsMultiWordType = (ctx: ParseContext<SqlTokenType>, lead: Token<SqlTokenType> | null): boolean =>
   lead !== null && lead.type === "ident" && findTypeTail(ctx, lead.value, 1) !== null;
 
-// The type words that may prefix a string literal (`DATE '2024-01-01'`).
-// INTERVAL is the fourth, but has its own branch and node — its unit spec
-// trails the literal rather than leading it.
-const TYPED_LITERAL_LEADS: ReadonlySet<string> = new Set(["date", "time", "timestamp"]);
+// The offset just past a `(n, …)` list of integer constants that opens at
+// `offset`, `offset` itself when no `(` is there, or -1 when one is but does
+// not hold such a list.
+function skipTypmod(ctx: ParseContext<SqlTokenType>, offset: number): number {
+  if (!isPuncToken(peekOrReport(ctx, offset), "(")) return offset;
+  let index = offset + 1;
+  for (;;) {
+    if (!isIntegerConstant(peekOrReport(ctx, index))) return -1;
+    index++;
+    if (isPuncToken(peekOrReport(ctx, index), ")")) return index + 1;
+    if (!isPuncToken(peekOrReport(ctx, index), ",")) return -1;
+    index++;
+  }
+}
 
-// True when the cursor sits on a typed datetime literal: a bare lead word, the
-// pre-tail precision and the multi-word tail where its type has them, then a
-// string. Every token is checked before columnRef commits, and nothing else
-// may sit between them — so `date(x)` and `timestamp(3)` stay calls, and a
-// type with an array suffix or a trailing arg list is never a literal's.
+// True when the cursor sits on a typed literal whose type is a multi-word
+// spelling (`double precision '1'`, `character varying(3) 'abc'`) or carries
+// its precision before the tail (`timestamp(3) with time zone '…'`, and
+// `time(3) '…'` too): the lead word, the pre-tail precision and the tail where
+// its type has them, at most one trailing `(n, …)` where it does not, then a
+// string. Every token is checked before columnRef commits, and nothing else may
+// sit between them. A one-word or dotted type name needs none of this: columnRef
+// reads it as a name or a call, as it would anyway, and only then looks for the
+// string (see typeNameLiteral).
 //
-// The token straight after the lead is peeked plainly, as INTERVAL's is, and so
-// is a `(n)` behind it together with the two tokens past its `)`: the name or
-// call these otherwise become peeks all of them anyway (a call's modifier checks
-// read two past its `)`), so a lex error there surfaces exactly as it always
-// did. Everything further out is lookahead the old parse need not have done,
-// and goes through peekOrReport — under diagnose() the syntax error that
-// follows (`SELECT time with time zone \;` still reports `with`) is kept.
-function startsTypedLiteral(ctx: ParseContext<SqlTokenType>): boolean {
+// The token straight after the lead is peeked plainly, as a name peeks it, and
+// so is a pre-tail `(n)` together with the two tokens past its `)`: the call it
+// otherwise becomes peeks them anyway, so a lex error there surfaces exactly as
+// it always did. Lookahead into and past a tail is lookahead the old parse need
+// not have done, and goes through peekOrReport — under diagnose() the syntax
+// error that follows (`SELECT time with time zone \;` still reports `with`) is
+// kept.
+function startsMultiWordTypedLiteral(ctx: ParseContext<SqlTokenType>): boolean {
   const lead = ctx.peek();
-  if (lead === null || lead.type !== "ident" || !TYPED_LITERAL_LEADS.has(lead.value)) return false;
-  const isPunc = (ahead: Token<SqlTokenType> | null, value: string) =>
-    ahead !== null && ahead.type === "punc" && ahead.value === value;
-  const next = ctx.peekAhead(1);
+  // Only a MULTI_WORD_TYPES key has a tail or a pre-tail precision, and none is
+  // reserved: a reserved lead is croaked by nameWord with nothing past it read.
+  if (lead === null || lead.type !== "ident" || lead.value === "interval" || !MULTI_WORD_TYPES.has(lead.value)) {
+    return false;
+  }
+  ctx.peekAhead(1); // plainly, before findTypeTail's reporting peek reaches it
   let offset = 1;
+  let preTail = false;
   if (
     ARGS_BEFORE_TAIL.has(lead.value) &&
-    isPunc(next, "(") &&
+    isPuncToken(ctx.peekAhead(1), "(") &&
     isIntegerConstant(ctx.peekAhead(2)) &&
-    isPunc(ctx.peekAhead(3), ")")
+    isPuncToken(ctx.peekAhead(3), ")")
   ) {
     ctx.peekAhead(5);
     offset = 4;
+    preTail = true;
   }
-  offset += findTypeTail(ctx, lead.value, offset)?.length ?? 0;
-  return peekOrReport(ctx, offset)?.type === "string";
+  const tail = findTypeTail(ctx, lead.value, offset);
+  if (tail === null) {
+    if (!preTail) return false;
+  } else {
+    offset += tail.length;
+    // TIME and TIMESTAMP spell their precision before the tail or not at all.
+    if (!ARGS_BEFORE_TAIL.has(lead.value)) offset = skipTypmod(ctx, offset);
+  }
+  return offset !== -1 && peekOrReport(ctx, offset)?.type === "string";
+}
+
+// The column-name keywords PG's grammar never reads as a type name on their
+// own: its col_name_keyword list less the ConstTypename words. A bare,
+// undotted one of these is no `func_name`, so it cannot lead `name 'string'`
+// (`coalesce 'x'`, `setof 'x'`); `national` and `precision` still can as part
+// of a multi-word spelling, and any of them can as part of a dotted name.
+const NON_TYPE_NAME_KEYWORDS: ReadonlySet<string> = new Set([
+  "between",
+  "coalesce",
+  "exists",
+  "extract",
+  "greatest",
+  "grouping",
+  "inout",
+  "json_array",
+  "json_arrayagg",
+  "json_exists",
+  "json_object",
+  "json_objectagg",
+  "json_query",
+  "json_scalar",
+  "json_serialize",
+  "json_table",
+  "json_value",
+  "least",
+  "merge_action",
+  "national",
+  "none",
+  "normalize",
+  "nullif",
+  "out",
+  "overlay",
+  "position",
+  "precision",
+  "row",
+  "setof",
+  "substring",
+  "treat",
+  "trim",
+  "values",
+  "xmlattributes",
+  "xmlconcat",
+  "xmlelement",
+  "xmlexists",
+  "xmlforest",
+  "xmlnamespaces",
+  "xmlparse",
+  "xmlpi",
+  "xmlroot",
+  "xmlserialize",
+  "xmltable",
+]);
+
+// When columnRef has read a name (`typmod` null) or a call whose arguments are
+// all integer constants (`typmod` their values), and a string follows, the
+// typed literal they make — PG's `func_name 'string'` and `func_name (args)
+// 'string'`, a qualified or quoted name included (`s.t 'x'`, `"char" 'a'`,
+// `varchar(3) 'abc'`) — or null when the name cannot lead one. Deciding after
+// the fact needs no lookahead: the name and the call both peek the token past
+// their end anyway.
+//
+// The typmod is narrower than PG's, which takes any expression list here:
+// this grammar's type node holds integers only. INTERVAL's precision form has
+// its own node, and TIME / TIMESTAMP have theirs read by
+// startsMultiWordTypedLiteral, so a bare `timestamp(1.5) 'x'` is left to fail.
+// Only a plain string follows the type: `N'…'` lexes as a token of its own,
+// and PG reads a type before one as a syntax error. CURRENT_CATALOG and
+// SYSTEM_USER are reserved to PG, though not in RESERVED here (they read as
+// plain names), so a bare one is refused as well, alone or at the head of a
+// dotted name.
+function typeNameLiteral(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  lead: Token<SqlTokenType>,
+  parts: string[],
+  typmod: number[] | null,
+): Expr | null {
+  const literal = ctx.peek();
+  if (literal === null || literal.type !== "string") return null;
+  const bare = lead.type === "ident";
+  if (bare && (parts[0] === "current_catalog" || parts[0] === "system_user")) return null;
+  if (bare && parts.length === 1) {
+    const word = parts[0]!;
+    if (NON_TYPE_NAME_KEYWORDS.has(word)) return null;
+    if (typmod !== null && (word === "interval" || ARGS_BEFORE_TAIL.has(word))) return null;
+  }
+  const type: ColType = {
+    name: parts.join("."),
+    args: typmod ?? [],
+    array: false,
+    ...(!bare && parts.length === 1 && KEYWORD_TYPE_NAMES.has(parts[0]!) && { quoted: true }),
+    span: ctx.spanFrom(start),
+  };
+  ctx.next(); // the string literal
+  return { kind: "typedLiteral", type, value: literal.value, span: ctx.spanFrom(start) };
+}
+
+// Entered on an INTERVAL literal's string, `precision` already read when it
+// was written before the literal (`INTERVAL(3) '…'`, from columnRef's call
+// path). PG takes either that leading precision or a trailing field spec,
+// never both: after `INTERVAL(3) '…'` a unit word is not a field (this grammar
+// takes it for an alias, as it does after `x::interval(3)`; PG rejects both).
+// A field spec must be one of INTERVAL_TAILS — `day to year` is a syntax error
+// to PG — and only a trailing SECOND takes a precision.
+function parseIntervalLiteral(ctx: ParseContext<SqlTokenType>, start: Position, leading: number | null): Expr {
+  let precision = leading;
+  const value = ctx.next()!.value; // the string literal
+  const units: string[] = [];
+  const fieldsStart = ctx.position();
+  if (leading === null) {
+    while (ctx.peek()?.type === "ident" && INTERVAL_FIELDS.has(ctx.peek()!.value)) {
+      units.push(ctx.next()!.value);
+    }
+  }
+  const fields = units.join(" ");
+  if (units.length > 0 && !INTERVAL_FIELD_SPECS.has(fields)) {
+    ctx.croak(`Expected an interval field spec like "day to second" but found "${fields}"`, fieldsStart);
+  }
+  if (units.at(-1) === "second" && ctx.is("punc", "(")) {
+    ctx.next(); // "("
+    const tok = ctx.peek();
+    if (!isIntegerConstant(tok)) ctx.croak(`Expected an integer precision but found ${describeFound(tok)}`);
+    precision = Number(ctx.next()!.value);
+    expectClose(ctx);
+  }
+  return {
+    kind: "interval",
+    value,
+    ...(units.length > 0 && { fields }),
+    ...(precision !== null && { precision }),
+    span: ctx.spanFrom(start),
+  };
 }
 
 // Consume the longest continuation of `lead` that is present, or nothing. The
@@ -2766,12 +2981,50 @@ function eatTypeTail(ctx: ParseContext<SqlTokenType>, lead: string): readonly st
   return tail;
 }
 
+// The keyword type spellings whose quoted form means something else: PG reads
+// each bare word as a built-in of another name (`int` is int4, `boolean` is
+// bool, `char` is bpchar) or with a default length (`bit` is bit(1)), while the
+// quoted word is looked up as written. `numeric`, `varchar`, `time`,
+// `timestamp` and `interval` are not among them — each names its own type, so
+// quoting changes nothing — and neither are `double` and `national`, which are
+// no type without their tail.
+const KEYWORD_TYPE_NAMES: ReadonlySet<string> = new Set([
+  "int",
+  "integer",
+  "smallint",
+  "bigint",
+  "real",
+  "float",
+  "decimal",
+  "dec",
+  "boolean",
+  "bit",
+  "character",
+  "char",
+  "nchar",
+]);
+
 // The args are hoisted out of wherever PG puts them, so the name is always the
 // words alone: `timestamp(3) with time zone` is
 // `{ name: "timestamp with time zone", args: [3] }`.
+//
+// A leading SETOF is taken whenever a non-reserved word or a quoted name follows
+// it (`c setof generated …` is a SETOF of `generated` now, which PG rejects
+// either way). Otherwise `setof` is read as the type name itself, as it was
+// before SETOF was recognised here — more lenient than PG, where SETOF is a
+// column-name keyword and so no type name on its own (`x::setof` is a syntax
+// error there).
 const typeRef = custom<ColType, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
+    let setof = false;
+    if (ctx.is("ident", "setof")) {
+      const after = ctx.peekAhead(1);
+      if (after !== null && (after.type === "qident" || (after.type === "ident" && !RESERVED.has(after.value)))) {
+        ctx.next(); // setof
+        setof = true;
+      }
+    }
     // Only a bare, unqualified lead word can open a multi-word spelling: a
     // quoted `"double"` or a dotted `pg_catalog.double` is an ordinary name.
     const bare = ctx.peek()?.type === "ident";
@@ -2785,7 +3038,14 @@ const typeRef = custom<ColType, SqlTokenType>(
     }
     if (args === null && ctx.is("punc", "(")) args = ctx.parse(typeArgs);
     const array = ctx.parse(arraySuffix);
-    return { name: words.join(" "), args: args ?? [], array, span: ctx.spanFrom(start) };
+    return {
+      name: words.join(" "),
+      args: args ?? [],
+      array,
+      ...(setof && { setof: true }),
+      ...(!bare && parts.length === 1 && KEYWORD_TYPE_NAMES.has(parts[0]!) && { quoted: true }),
+      span: ctx.spanFrom(start),
+    };
   },
   { expected: "a name", first: qualName.first() },
 );
@@ -5008,7 +5268,9 @@ function parseFunctionArg(ctx: ParseContext<SqlTokenType>, allowDefault = true):
   // precision)` is one unnamed argument, not a `double` of type `precision`.
   // Keyed on the word pair rather than a `tryParse(typeRef)`, which cannot
   // decide it: typeRef succeeds on any bare identifier, so `f(a integer)` would
-  // take `a` for the type and then croak on `integer`.
+  // take `a` for the type and then croak on `integer`. A leading SETOF is never
+  // a name either: PG's argument names exclude its column-name keywords, so
+  // `f(setof int)` is one unnamed argument of type `setof int`.
   let name: string | null = null;
   const c2 = ctx.peek();
   const n2 = ctx.peekAhead(1);
@@ -5017,6 +5279,7 @@ function parseFunctionArg(ctx: ParseContext<SqlTokenType>, allowDefault = true):
     (c2.type === "ident" || c2.type === "qident") &&
     n2 !== null &&
     (n2.type === "ident" || n2.type === "qident") &&
+    !(c2.type === "ident" && c2.value === "setof") &&
     !startsMultiWordType(ctx, c2)
   ) {
     name = ctx.parse(nameWord);
@@ -5055,6 +5318,14 @@ function parseFunctionReturns(ctx: ParseContext<SqlTokenType>): FunctionReturns 
     return { kind: "table", columns: ctx.parse(compositeAttrs) };
   }
   const setof = ctx.eat("ident", "setof") !== null;
+  // typeRef takes a SETOF of its own, but PG's Typename has room for one; a
+  // second is refused before typeRef reads it (peeking only what it would).
+  if (setof && ctx.is("ident", "setof")) {
+    const after = ctx.peekAhead(1);
+    if (after !== null && (after.type === "qident" || (after.type === "ident" && !RESERVED.has(after.value)))) {
+      ctx.croak(`Expected a type name but found "setof"`);
+    }
+  }
   return { kind: "type", setof, type: ctx.parse(typeRef) };
 }
 
