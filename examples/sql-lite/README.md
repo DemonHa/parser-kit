@@ -53,7 +53,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 ### What's supported
 
-- **Queries.** `SELECT` with `DISTINCT [ON]`, every join type (`NATURAL`, `USING`, `LATERAL`, parenthesised joins), subqueries and derived tables, `ONLY`, alias column lists, `TABLESAMPLE … REPEATABLE`, `ROWS FROM (…)` and `WITH ORDINALITY`. Also: `GROUP BY [DISTINCT | ALL]` with `ROLLUP` / `CUBE` / `GROUPING SETS`, `HAVING`, `WINDOW`, `ORDER BY … USING` and `NULLS FIRST/LAST`, `LIMIT` / `OFFSET` / `FETCH FIRST … ROWS ONLY | WITH TIES`, every locking clause (`FOR [NO KEY] UPDATE`, `FOR [KEY] SHARE`, `OF`, `NOWAIT`, `SKIP LOCKED`), `UNION` / `INTERSECT` / `EXCEPT [ALL]`, standalone `VALUES`, `SELECT INTO`. CTEs can be `RECURSIVE`, `[NOT] MATERIALIZED`, use `SEARCH` and `CYCLE`, and be data-modifying.
+- **Queries.** `SELECT` with `DISTINCT [ON]`, every join type (`NATURAL`, `USING [AS alias]`, `LATERAL`, parenthesised and right-nested joins), subqueries and derived tables, `ONLY` and the inheritance `*`, alias column lists, column definition lists for record-returning functions, `TABLESAMPLE … REPEATABLE`, `ROWS FROM (…)` and `WITH ORDINALITY`. Also: `GROUP BY [DISTINCT | ALL]` with `ROLLUP` / `CUBE` / `GROUPING SETS`, `HAVING`, `WINDOW`, `ORDER BY … USING` and `NULLS FIRST/LAST`, `LIMIT` / `OFFSET` / `FETCH FIRST … ROWS ONLY | WITH TIES`, every locking clause (`FOR [NO KEY] UPDATE`, `FOR [KEY] SHARE`, `OF`, `NOWAIT`, `SKIP LOCKED`), `UNION` / `INTERSECT` / `EXCEPT [ALL]`, standalone `VALUES`, `SELECT INTO`. CTEs can be `RECURSIVE`, `[NOT] MATERIALIZED`, use `SEARCH` and `CYCLE`, and be data-modifying.
 - **Expressions.** The full operator precedence table: arithmetic, bitwise, `||`, comparison, `LIKE` / `ILIKE` / `SIMILAR TO` with `ESCAPE`, regex `~` operators, `IS [NOT] DISTINCT FROM`, `IS [NOT] NULL / TRUE / UNKNOWN`, `IS JSON [OBJECT | ARRAY | SCALAR] [WITH UNIQUE KEYS]`, `BETWEEN [SYMMETRIC]`, `IN`, `ANY` / `SOME` / `ALL`, `EXISTS`, `OVERLAPS`, `AT TIME ZONE`, `COLLATE`. JSON and jsonpath operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`, `?&`, `@?`, `@@`, `#-`), `::` casts and `CAST`, `CASE`, `ROW(…)`, `ARRAY[…]`, subscripts and slices. Special-syntax functions: `EXTRACT`, `POSITION`, `SUBSTRING … FROM … FOR`, `TRIM`, `OVERLAY`, the niladic `CURRENT_DATE` / `CURRENT_TIMESTAMP(p)` / `LOCALTIME` / `CURRENT_USER` family. Aggregate modifiers: `DISTINCT`, `ORDER BY` inside the call, `FILTER (WHERE …)`, `WITHIN GROUP`, `=>` named arguments, `OVER` with `ROWS` / `RANGE` / `GROUPS` frames and `EXCLUDE`.
 - **Types and literals.** Multi-word types (`double precision`, `character varying(n)`, `timestamp(p) with time zone`, `bit varying`, `interval day to second`), array types, schema-qualified types, typed literals (`DATE '…'`, `TIMESTAMP '…'`, `INTERVAL '…' HOUR TO MINUTE`), dollar-quoted strings, bit / hex / Unicode-escape strings with `UESCAPE`.
 - **DML.** `INSERT` with `DEFAULT VALUES`, `DEFAULT` row items, `OVERRIDING`, `ON CONFLICT (cols) | ON CONSTRAINT … DO NOTHING | DO UPDATE … WHERE`, a target alias, and `RETURNING`. `UPDATE … FROM` with multi-column `(a, b) = (…)` / `= (SELECT …)` assignments. `SET col = DEFAULT` (also in `ON CONFLICT DO UPDATE` and `MERGE … UPDATE SET`). `DELETE … USING`. `UPDATE` / `DELETE` with `WHERE CURRENT OF cursor`. `MERGE` with every `WHEN [NOT] MATCHED [BY SOURCE | TARGET]` form, plus `RETURNING`. `COPY` to and from a file, `STDIN` / `STDOUT` or a `PROGRAM`, with a parenthesised option list and `WHERE`. `TRUNCATE` with `RESTART | CONTINUE IDENTITY` and `CASCADE | RESTRICT`. `UPDATE`, `DELETE` and `TRUNCATE` take `ONLY` / `name *` targets.
@@ -72,7 +72,7 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 
 | Area | Statements | Both | sql-lite only | node-sql-parser only | Neither |
 |---|---:|---:|---:|---:|---:|
-| Queries | 93 | 58 | 30 | 2 | 3 |
+| Queries | 93 | 59 | 32 | 1 | 1 |
 | Expressions | 87 | 47 | 21 | 4 | 15 |
 | Types and lexical | 34 | 18 | 11 | 2 | 3 |
 | DML | 77 | 37 | 37 | 1 | 2 |
@@ -81,9 +81,9 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **215** | **236** | **14** | **134** |
+| **Total** | **599** | **216** | **238** | **13** | **132** |
 
-So sql-lite accepts 451 of the 599 statements (75%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 454 of the 599 statements (76%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -144,8 +144,7 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 - `GRANT` / `REVOKE … ON FUNCTION f(argtypes)`. It works without the argument list. Also missing: `GRANTED BY`, and the PostgreSQL 16 `WITH INHERIT / SET` role options.
 - **Routine bodies and triggers:** SQL-standard function bodies (`RETURN expr`, `BEGIN ATOMIC … END`), trigger `REFERENCING OLD / NEW TABLE`, `CREATE CONSTRAINT TRIGGER`.
 - **Views:** `CREATE RECURSIVE VIEW`, `CREATE TEMP VIEW`.
-- Column definition lists for record-returning functions (`FROM json_to_record(…) AS x(a int, b text)`).
-- `JOIN … USING (…) AS alias`, the legacy inheritance `*` after a table name, and the empty select list `SELECT;`.
+- The empty select list `SELECT;`.
 
 **Expressions**
 
@@ -169,7 +168,6 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 
 These statements parse without error, but the tree they produce is wrong:
 
-- **`NATURAL` is dropped.** `a NATURAL JOIN b` yields the same node as `a JOIN b` with no condition.
 - **`WITH TIES` is dropped.** `FETCH FIRST 3 ROWS WITH TIES` yields the same `limit` as `FETCH FIRST 3 ROWS ONLY`.
 - **`SELECT a ISNULL FROM t` reads `isnull` as a column alias.** PostgreSQL reads it as the null test.
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
@@ -182,7 +180,6 @@ These statements parse without error, but the tree they produce is wrong:
 The grammar is deliberately more permissive than PostgreSQL in places. These inputs are syntax errors in PostgreSQL but parse here:
 
 - **`DEFAULT` accepts a full expression.** PostgreSQL's restricted form doesn't allow `DEFAULT 5 IS NULL`, `DEFAULT a = 1 AND b`, and so on.
-- **Joins with no condition:** `a JOIN b` without `ON` / `USING`, and `NATURAL CROSS JOIN`.
 - **Repeated or conflicting row limits:** `LIMIT 1 LIMIT 2`, `LIMIT … FETCH FIRST …`. Also `WITH TIES` with no `ORDER BY`.
 - **Window frames PostgreSQL rejects:** `ROWS BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING`, `ROWS 1 FOLLOWING`.
 - **Empty lists:** `IN ()`, `USING ()`, `VALUES ()`.
@@ -193,6 +190,13 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.
+
+### Behaviour changes
+
+Inputs that used to parse and are now rejected, because PostgreSQL's grammar rejects them:
+
+- A join other than `CROSS` or `NATURAL` with no `ON` / `USING` qualifier: `a JOIN b`, `a LEFT JOIN b`, and `a JOIN b JOIN c ON p` (the inner join takes the only `ON`, leaving the outer one without a qualifier).
+- `NATURAL CROSS JOIN`.
 
 ## Benchmarks
 
@@ -253,4 +257,4 @@ The repo-wide workflow is in [CONTRIBUTING.md](../../CONTRIBUTING.md). Specific 
 - **Tests first, at the level the change lives.** New syntax gets a `describe` block in `sql-lite.test.ts` asserting the span-stripped AST with `toEqual`, plus the error message for the nearest malformed input.
 - **Prove new keywords stay unreserved.** PostgreSQL leaves most keywords usable as names, and so does this grammar: only the words in `RESERVED` are refused as bare names. Every feature that matches a new word by value comes with a "keeps … unreserved as names and aliases" test showing the word still works as a column, table and alias (for example `SELECT rows, ordinality FROM t AS rows;`). Don't add to `RESERVED` to make a parse work.
 - **Pin observable output in the parity golden.** `parity.test.ts` serialises the full AST, spans included, for every `corpus.ts` row and its own `SUPPLEMENTAL` / `MULTI_LINE` / `LEXER_EDGE_CASES` lists, plus `diagnose()` output for `MALFORMED`. New node shapes go in `SUPPLEMENTAL`, not `corpus.ts`: the benchmark's group names count the corpus's shared rows, `bench-baseline.json` keys on those names, and a new `pg: true` corpus row renames them, which silently disconnects `pnpm bench:compare`. When output is *meant* to move, regenerate with `pnpm test -- -u` (the `--` matters) and call the diff out in review. Never regenerate to make a refactor pass.
-- **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README. Update the "Not yet supported", "Known wrong ASTs" and "Accepted, but PostgreSQL rejects" lists too: they aren't pinned by any test.
+- **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README. Update the "Not yet supported", "Known wrong ASTs" and "Accepted, but PostgreSQL rejects" lists too, and add any input that stops parsing to "Behaviour changes": they aren't pinned by any test.
