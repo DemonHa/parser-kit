@@ -4867,6 +4867,150 @@ describe("SQL-lite numeric literals and parameters", () => {
   });
 });
 
+// --- non-ASCII identifiers and national strings ---
+// PG's scanner takes every character from U+0080 up as an identifier character
+// and folds only ASCII letters; `N'…'` is a `bpchar`-typed string constant.
+
+describe("SQL-lite non-ASCII identifiers and national strings", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const bpchar = (value: string) => ({
+    kind: "typedLiteral",
+    type: { name: "bpchar", args: [], array: false },
+    value,
+  });
+
+  it("reads non-ASCII identifiers as columns, tables, aliases and functions", () => {
+    expect(firstStmt("SELECT café, ñ.größe AS über, naïve(ß) résumé FROM schéma.tàble ŧ;")).toEqual(
+      sel({
+        columns: [
+          col(name("café")),
+          col(name("ñ", "größe"), "über"),
+          col({ kind: "call", name: "naïve", args: [name("ß")] }, "résumé"),
+        ],
+        from: [tableFrom(["schéma", "tàble"], "ŧ")],
+      }),
+    );
+    expect(firstStmt("CREATE TABLE données (clé int, 名前 text);")).toMatchObject({
+      name: ["données"],
+      items: [{ name: "clé" }, { name: "名前" }],
+    });
+  });
+
+  it("continues an identifier with digits, $ and characters outside the BMP", () => {
+    expect(lex("é1$ a€ 🐘x _é")).toEqual([
+      { type: "ident", value: "é1$" },
+      { type: "ident", value: "a€" },
+      { type: "ident", value: "🐘x" },
+      { type: "ident", value: "_é" },
+    ]);
+    // Non-ASCII whitespace is an identifier character to PG too, so a
+    // no-break space joins the words around it.
+    expect(lex("a b")).toEqual([{ type: "ident", value: "a b" }]);
+    // A keyword with a non-ASCII letter glued on is one word, not the keyword.
+    expect(lex("fromé")).toEqual([{ type: "ident", value: "fromé" }]);
+  });
+
+  it("folds only the ASCII letters of an unquoted identifier", () => {
+    expect(lex("CAFÉ Straße ΣΑΣ İD Kelvin")).toEqual([
+      { type: "ident", value: "cafÉ" },
+      { type: "ident", value: "straße" },
+      { type: "ident", value: "ΣΑΣ" },
+      { type: "ident", value: "İd" },
+      // The Kelvin sign lowercases to an ASCII `k` under Unicode rules.
+      { type: "ident", value: "Kelvin" },
+    ]);
+    // So `CAFÉ` names `"cafÉ"`, not `"café"`.
+    expect(colExpr("CAFÉ")).toEqual(colExpr('"cafÉ"'));
+    expect(colExpr("CAFÉ")).not.toEqual(colExpr('"café"'));
+    // Keywords are ASCII, so they still match in any case next to non-ASCII names.
+    expect(firstStmt("SeLeCt Ä FrOm Ö WhErE Ü;")).toEqual(
+      sel({ columns: [col(name("Ä"))], from: [tableFrom(["Ö"])], where: name("Ü") }),
+    );
+  });
+
+  it("reads non-ASCII dollar-quote tags, as PG does", () => {
+    expect(lex("$é$a;b$é$ $tag_ü1$x$tag_ü1$")).toEqual([
+      { type: "string", value: "a;b" },
+      { type: "string", value: "x" },
+    ]);
+    // Only the exact closer ends it; `$É$` is a different tag.
+    expect(lex("$é$a$É$b$é$")).toEqual([{ type: "string", value: "a$É$b" }]);
+    // A tag outside the BMP closes too.
+    expect(lex("$🐘$x$🐘$ $a🐘$y$a🐘$")).toEqual([
+      { type: "string", value: "x" },
+      { type: "string", value: "y" },
+    ]);
+    expect(() => sqlLite.parse("SELECT $é$abc;")).toThrow(/Unterminated dollar-quoted string/);
+    // A `$` with no tag-closing `$` is not a dollar quote.
+    expect(lex("$1")).toEqual([{ type: "param", value: "1" }]);
+    // A named parameter takes the same characters, so none is split off as an alias.
+    expect(lex("$café")).toEqual([{ type: "param", value: "café" }]);
+  });
+
+  it("keeps quoted non-ASCII identifiers exactly as written", () => {
+    expect(lex('"Café" "ÉTÉ" U&"caf\\00E9"')).toEqual([
+      { type: "qident", value: "Café" },
+      { type: "qident", value: "ÉTÉ" },
+      { type: "qident", value: "café" },
+    ]);
+  });
+
+  it("reads N'…' as a bpchar-typed literal", () => {
+    expect(colExpr("N'abc'")).toEqual(bpchar("abc"));
+    expect(colExpr("n'it''s'")).toEqual(bpchar("it's"));
+    expect(colExpr("N''")).toEqual(bpchar(""));
+    // The body is a standard string: backslash is ordinary, and a newline
+    // continues it.
+    expect(colExpr("N'a\\b'")).toEqual(bpchar("a\\b"));
+    expect(colExpr("N'foo'\n'bar'")).toEqual(bpchar("foobar"));
+    expect(colExpr("N'a'::text")).toEqual({
+      kind: "cast",
+      expr: bpchar("a"),
+      type: { name: "text", args: [], array: false },
+    });
+    expect(firstStmt("CREATE TABLE t (c char(3) DEFAULT N'x');")).toMatchObject({
+      items: [{ constraints: [{ kind: "default", expr: bpchar("x") }] }],
+    });
+  });
+
+  it("spans N'…' from the N, with the N as its type", () => {
+    const [stmt] = sqlLite.parse("SELECT N'abc';") as any[];
+    const literal = stmt.columns[0].expr;
+    expect(literal.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 12 } });
+    expect(literal.type.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 8 } });
+    // A continued literal ends where its last constant's body does.
+    const [continued] = sqlLite.parse("SELECT N'foo'\n  'bar';") as any[];
+    expect(continued.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 2, col: 6 } });
+  });
+
+  it("keeps n and the words it starts usable as names", () => {
+    expect(firstStmt("SELECT n, name, nulls n FROM n;")).toEqual(
+      sel({ columns: [col(name("n")), col(name("name")), col(name("nulls"), "n")], from: [tableFrom(["n"])] }),
+    );
+    // A space between the N and the quote leaves a name followed by a string.
+    expect(() => sqlLite.parse("SELECT N 'abc';")).toThrow(/Expected ";" but found "abc"/);
+  });
+
+  it("accepts N'…' only where an expression goes, as PG does", () => {
+    expect(() => sqlLite.parse("COMMENT ON TABLE t IS N'x';")).toThrow(/Expected a string or "null" but found "x"/);
+    expect(() => sqlLite.parse("SELECT * FROM f() AS N'x';")).toThrow(/Expected an alias but found "x"/);
+    // Nor does it follow a type word as a typed literal's string.
+    expect(() => sqlLite.parse("SELECT date N'2024-01-01';")).toThrow(/Expected ";" but found "2024-01-01"/);
+  });
+
+  it("croaks on an unterminated N'…', also inside a backtracking position", () => {
+    expect(() => sqlLite.parse("SELECT N'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
+    expect(() => sqlLite.parse("INSERT INTO t (a, N'x) VALUES (1);")).toThrow(/Unterminated quoted string \(1:18\)/);
+    expect(() => sqlLite.parse("SELECT * FROM f() x (a N'abc);")).toThrow(/Unterminated quoted string \(1:23\)/);
+  });
+
+  it("still rejects characters that start no token", () => {
+    expect(() => sqlLite.parse("SELECT \\ FROM t;")).toThrow(/Unexpected character "\\" \(1:7\)/);
+    expect(() => sqlLite.parse("SELECT { FROM t;")).toThrow(/Unexpected character "\{" \(1:7\)/);
+    expect(() => sqlLite.parse("SELECT café\\ FROM t;")).toThrow(/Unexpected character "\\" \(1:11\)/);
+  });
+});
+
 // --- keyword dispatch maps ---
 // The CREATE / ALTER / constraint rules derive their "Expected …" strings from
 // keyword-keyed dispatch maps rather than restating them. What follows pins the
@@ -5071,9 +5215,9 @@ describe("SQL-lite multi-word type names", () => {
     // error cannot simply be discarded with the failed candidate: `interval day`
     // is a complete tail, and the rest of the statement parses, so nothing else
     // would ever report it. Under `parse` there is no collector to report to.
-    expect(() => sqlLite.parse("CREATE TABLE t (c interval day é);")).toThrow(/Unexpected character "é"/);
-    expect(sqlLite.diagnose("CREATE TABLE t (c interval day é);").errors.map((e) => e.message)).toEqual([
-      'Unexpected character "é" (1:31)',
+    expect(() => sqlLite.parse("CREATE TABLE t (c interval day \\);")).toThrow(/Unexpected character "\\"/);
+    expect(sqlLite.diagnose("CREATE TABLE t (c interval day \\);").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "\\" (1:31)',
     ]);
   });
 
@@ -5262,16 +5406,16 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     expect(() => sqlLite.parse("SELECT timestamp with time zone FROM t;")).toThrow(/Expected ";" but found "with"/);
     // A lex error in the lookahead past the lead word must not cost the syntax
     // error the statement already had.
-    expect(sqlLite.diagnose("SELECT time with time zone é;").errors.map((e) => e.message)).toEqual([
-      'Unexpected character "é" (1:27)',
+    expect(sqlLite.diagnose("SELECT time with time zone \\;").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "\\" (1:27)',
       'Expected ";" but found "with" (1:12)',
     ]);
     // The token after a bare lead is read exactly as a name reads it, so a lex
     // error there costs the statement as it always did, for every lead.
-    expect(sqlLite.diagnose("SELECT date é FROM;").errors.map((e) => e.message)).toEqual([
-      'Unexpected character "é" (1:12)',
+    expect(sqlLite.diagnose("SELECT date \\ FROM;").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "\\" (1:12)',
     ]);
-    expect(sqlLite.diagnose("SELECT a FROM t WHERE date é;\nSELECT 1;").ast).toHaveLength(1);
+    expect(sqlLite.diagnose("SELECT a FROM t WHERE date \\;\nSELECT 1;").ast).toHaveLength(1);
     // PG writes the precision before the tail, never after it.
     expect(() => sqlLite.parse("SELECT timestamp with time zone(3) 'x';")).toThrow(/Expected ";" but found "with"/);
     // Nor does it take anything but an integer one.
@@ -6739,11 +6883,11 @@ describe("SQL-lite EXCLUDE table constraints", () => {
   });
 
   it("reports a bad character after exclude as after any column name", () => {
-    const { ast, errors } = sqlLite.diagnose("CREATE TABLE t (id int, exclude é, ok text);");
-    expect(errors.map((e) => e.message)).toEqual(['Unexpected character "é" (1:32)']);
+    const { ast, errors } = sqlLite.diagnose("CREATE TABLE t (id int, exclude \\, ok text);");
+    expect(errors.map((e) => e.message)).toEqual(['Unexpected character "\\" (1:32)']);
     expect((stripSpans(ast) as any)[0].items.map((i: any) => i.name)).toEqual(["id", "ok"]);
-    expect(sqlLite.diagnose("CREATE TABLE t (EXCLUDE (a WITH é));").errors[0]!.message).toBe(
-      'Unexpected character "é" (1:32)',
+    expect(sqlLite.diagnose("CREATE TABLE t (EXCLUDE (a WITH \\));").errors[0]!.message).toBe(
+      'Unexpected character "\\" (1:32)',
     );
   });
 
@@ -7163,20 +7307,20 @@ describe("SQL-lite NATURAL joins, join qualifiers and FROM-item extras", () => {
   });
 
   it("reports a lex error met by the column definition lookahead", () => {
-    expect(() => sqlLite.parse("SELECT * FROM f() x (a é);")).toThrow(/Unexpected character "é"/);
-    const { ast, errors } = sqlLite.diagnose("SELECT * FROM f() x (a é);\nSELECT 1;");
-    expect(errors.map((e) => e.message)).toEqual(['Unexpected character "é" (1:23)']);
+    expect(() => sqlLite.parse("SELECT * FROM f() x (a \\);")).toThrow(/Unexpected character "\\"/);
+    const { ast, errors } = sqlLite.diagnose("SELECT * FROM f() x (a \\);\nSELECT 1;");
+    expect(errors.map((e) => e.message)).toEqual(['Unexpected character "\\" (1:23)']);
     expect(ast).toHaveLength(2);
     // The other two lookahead points report it too: past a bare AS, where the
     // alias is then missing, and on the first name inside the parenthesis.
-    expect(() => sqlLite.parse("SELECT * FROM f() AS é;")).toThrow(/Unexpected character "é"/);
-    expect(sqlLite.diagnose("SELECT * FROM f() AS é;").errors.map((e) => e.message)).toEqual([
-      'Unexpected character "é" (1:21)',
+    expect(() => sqlLite.parse("SELECT * FROM f() AS \\;")).toThrow(/Unexpected character "\\"/);
+    expect(sqlLite.diagnose("SELECT * FROM f() AS \\;").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "\\" (1:21)',
       'Expected an alias but found ";" (1:22)',
     ]);
-    expect(() => sqlLite.parse("SELECT * FROM f() x (é int);")).toThrow(/Unexpected character "é"/);
-    expect(sqlLite.diagnose("SELECT * FROM f() x (é int);").errors.map((e) => e.message)).toEqual([
-      'Unexpected character "é" (1:21)',
+    expect(() => sqlLite.parse("SELECT * FROM f() x (\\ int);")).toThrow(/Unexpected character "\\"/);
+    expect(sqlLite.diagnose("SELECT * FROM f() x (\\ int);").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "\\" (1:21)',
     ]);
   });
 });
@@ -9807,9 +9951,9 @@ describe("SQL-lite ONLY targets, WHERE CURRENT OF and SET col = DEFAULT", () => 
   });
 
   it("reports a bad character after WHERE current", () => {
-    expect(() => sqlLite.parse("DELETE FROM t WHERE current é;")).toThrow(/Unexpected character "é"/);
-    expect(sqlLite.diagnose("DELETE FROM t WHERE current é;").errors.map((e) => e.message)).toEqual([
-      'Unexpected character "é" (1:28)',
+    expect(() => sqlLite.parse("DELETE FROM t WHERE current \\;")).toThrow(/Unexpected character "\\"/);
+    expect(sqlLite.diagnose("DELETE FROM t WHERE current \\;").errors.map((e) => e.message)).toEqual([
+      'Unexpected character "\\" (1:28)',
     ]);
   });
 

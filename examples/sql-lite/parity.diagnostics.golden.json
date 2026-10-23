@@ -526,13 +526,13 @@
     ]
   },
   {
-    "source": "SELECT é FROM t;\nSELECT 6;",
+    "source": "SELECT é \\ FROM t;\nSELECT 6;",
     "errors": [
       {
-        "message": "Unexpected character \"é\" (1:7)",
+        "message": "Unexpected character \"\\\" (1:9)",
         "end": {
           "row": 1,
-          "col": 8
+          "col": 10
         }
       }
     ],
@@ -771,10 +771,10 @@
     "ast": []
   },
   {
-    "source": "CREATE TABLE t (c timestamp with é);\nSELECT 7;",
+    "source": "CREATE TABLE t (c timestamp with \\);\nSELECT 7;",
     "errors": [
       {
-        "message": "Unexpected character \"é\" (1:33)",
+        "message": "Unexpected character \"\\\" (1:33)",
         "end": {
           "row": 1,
           "col": 34
@@ -836,10 +836,10 @@
     ]
   },
   {
-    "source": "CREATE TABLE t (c interval day é);\nSELECT 8;",
+    "source": "CREATE TABLE t (c interval day \\);\nSELECT 8;",
     "errors": [
       {
-        "message": "Unexpected character \"é\" (1:31)",
+        "message": "Unexpected character \"\\\" (1:31)",
         "end": {
           "row": 1,
           "col": 32
@@ -943,10 +943,10 @@
     ]
   },
   {
-    "source": "CREATE TABLE t (a int UNIQUE, é int);\nSELECT 9;",
+    "source": "CREATE TABLE t (a int UNIQUE, \\ int);\nSELECT 9;",
     "errors": [
       {
-        "message": "Unexpected character \"é\" (1:30)",
+        "message": "Unexpected character \"\\\" (1:30)",
         "end": {
           "row": 1,
           "col": 31
@@ -1064,10 +1064,10 @@
     ]
   },
   {
-    "source": "CREATE TABLE t (a int UNIQUE NOT é);\nSELECT 10;",
+    "source": "CREATE TABLE t (a int UNIQUE NOT \\);\nSELECT 10;",
     "errors": [
       {
-        "message": "Unexpected character \"é\" (1:33)",
+        "message": "Unexpected character \"\\\" (1:33)",
         "end": {
           "row": 1,
           "col": 34
@@ -1140,10 +1140,10 @@
     ]
   },
   {
-    "source": "CREATE TABLE t (a int, UNIQUE (a) é, b int);\nSELECT 11;",
+    "source": "CREATE TABLE t (a int, UNIQUE (a) \\, b int);\nSELECT 11;",
     "errors": [
       {
-        "message": "Unexpected character \"é\" (1:34)",
+        "message": "Unexpected character \"\\\" (1:34)",
         "end": {
           "row": 1,
           "col": 35
@@ -1581,10 +1581,10 @@
     ]
   },
   {
-    "source": "CREATE TABLE p PARTITION OF m (é a NOT NULL, b DEFAULT 1) DEFAULT;\nSELECT 14;",
+    "source": "CREATE TABLE p PARTITION OF m (\\ a NOT NULL, b DEFAULT 1) DEFAULT;\nSELECT 14;",
     "errors": [
       {
-        "message": "Unexpected character \"é\" (1:31)",
+        "message": "Unexpected character \"\\\" (1:31)",
         "end": {
           "row": 1,
           "col": 32

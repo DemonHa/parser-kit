@@ -331,9 +331,9 @@ const MULTI_LINE = [
 // since the prefix is case-insensitive by default and a dispatch keyed on the
 // literal prefix character would silently disable the lowercase form; doubled
 // quotes; dollar quoting; non-ASCII *inside* string and quoted-identifier
-// bodies, which pins column counting across a multi-byte run (a non-ASCII
-// character can never *start* a token in this grammar, so that path is in
-// MALFORMED below); the operator / punctuation-trie partition; and the three
+// bodies, which pins column counting across a multi-byte run (the non-ASCII
+// token-start path is in MALFORMED below, where an identifier `é` precedes a
+// bad character); the operator / punctuation-trie partition; and the three
 // letter-prefixed literal forms, whose prefixes are case-insensitive for the
 // same reason the E-string's is, and whose bodies are decoded (unicode) or
 // validated (bit / hex) before the parser ever sees them.
@@ -370,9 +370,10 @@ const MALFORMED = [
   "SELECT * FROM;\nSELECT * FRUM u;\nSELECT 4;",
   "CREATE TABLE a (id int, 42 bad);\nSELECT * FROM;\nSELECT 5;",
   // A non-ASCII character at a *token start* — the only input here that drives
-  // the out-of-range path of an ASCII-indexed dispatch or char-class table. It
-  // is a lex error in this grammar, which is why it belongs in this list.
-  "SELECT é FROM t;\nSELECT 6;",
+  // the out-of-range path of an ASCII-indexed dispatch or char-class table —
+  // followed by a character no reader claims. The `é` is an identifier, as
+  // every character from U+0080 up is to PG; the backslash is the lex error.
+  "SELECT é \\ FROM t;\nSELECT 6;",
   // The three croak sites in the letter-prefixed literal readers. A lexer
   // croak has to leave the cursor somewhere recovery can resync from, and the
   // only way to see that is to pin what `diagnose` salvages: the first two
@@ -393,23 +394,23 @@ const MALFORMED = [
   // it rather than discard it along with the failed tail. Both errors survive,
   // but this is the one row here whose list is not in source order: the
   // lookahead runs, and reports, before the syntax error it declines to cause.
-  "CREATE TABLE t (c timestamp with é);\nSELECT 7;",
+  "CREATE TABLE t (c timestamp with \\);\nSELECT 7;",
   // The same mechanism with the tail completing rather than failing, which is
   // the more surprising outcome and so pinned separately: `interval day` is a
   // type, the bad character is the statement's only error, and the column
   // definition around it recovers into the AST whole.
-  "CREATE TABLE t (c interval day é);\nSELECT 8;",
+  "CREATE TABLE t (c interval day \\);\nSELECT 8;",
   // The constraint-attribute tail after UNIQUE / PRIMARY KEY / REFERENCES peeks
   // a second token only past a `not`. Peeking unconditionally, the bad
   // character after the comma would fail inside the UNIQUE handler and take
   // column `a` down with it. The second row is the peek it does take: the
   // column is lost, exactly as NOT NULL's own `null` lookup would lose it.
-  "CREATE TABLE t (a int UNIQUE, é int);\nSELECT 9;",
-  "CREATE TABLE t (a int UNIQUE NOT é);\nSELECT 10;",
+  "CREATE TABLE t (a int UNIQUE, \\ int);\nSELECT 9;",
+  "CREATE TABLE t (a int UNIQUE NOT \\);\nSELECT 10;",
   // At table level the tail's peek meets the bad character inside the UNIQUE
   // item, so recovery resyncs at the next comma and the table survives with
   // both columns.
-  "CREATE TABLE t (a int, UNIQUE (a) é, b int);\nSELECT 11;",
+  "CREATE TABLE t (a int, UNIQUE (a) \\, b int);\nSELECT 11;",
   // A failure inside a LIKE item recovers like one inside a column: the
   // element-list siblings around it survive.
   "CREATE TABLE t (id int, LIKE src INCLUDING everything, ok text);\nSELECT 12;",
@@ -418,7 +419,7 @@ const MALFORMED = [
   "CREATE TABLE p PARTITION OF m (a NOT NULL, b DEFAULT, c DEFAULT 0) DEFAULT;\nSELECT 13;",
   // The empty-list check peeks past the `(`, which must report a lex error on
   // the first item rather than throw it past recovery: the table survives.
-  "CREATE TABLE p PARTITION OF m (é a NOT NULL, b DEFAULT 1) DEFAULT;\nSELECT 14;",
+  "CREATE TABLE p PARTITION OF m (\\ a NOT NULL, b DEFAULT 1) DEFAULT;\nSELECT 14;",
   // A `(` in FROM ahead of no query word is read as a parenthesised join, so a
   // lone table in parentheses fails at its `)`.
   "SELECT * FROM (a);\nSELECT 15;",
