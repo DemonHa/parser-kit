@@ -167,7 +167,7 @@ Transitions carry `on` (the token pattern that fires it), optional `inMode` (onl
 | `identifierLike(type, { exclude })` | Any `type` token whose value is not in `exclude` — the "identifier that isn't a reserved word" position. Type-only first set, so it loses to every `word()`/`phrase()` branch in `oneOf` |
 | `bindTokens<TT>()` | Returns `token`/`match`/`word`/`phrase` pre-bound to your token union so call sites don't repeat the generic |
 
-`ParseContext` (what `custom()` sees) offers `peek/next/eof/is/eat`, `peekAhead(n)` (arbitrary lookahead; `peekAhead(0) === peek()`; raw tokens, no trivia skipping), `parse(rule)`, `tryParse(rule)` (snapshot + rollback), `position()`, `croak(msg)`, plus engine surface: `spanFrom(start)`, `skipTrivia()`, `newlineBefore()` (was the current token separated from the previous significant one by a newline — for ASI-style rules), `label(type)`, `recover(error)` (record + resync), `report(error)` (record only), `farthestError()`, `consumed()`.
+`ParseContext` (what `custom()` sees) offers `peek/next/eof/is/eat`, `peekAhead(n)` (arbitrary lookahead; `peekAhead(0) === peek()`; raw tokens, no trivia skipping), `parse(rule)`, `tryParse(rule)` (snapshot + rollback; see `propagateLexerErrors` below), `position()`, `croak(msg)`, plus engine surface: `spanFrom(start)`, `skipTrivia()`, `newlineBefore()` (was the current token separated from the previous significant one by a newline — for ASI-style rules), `label(type)`, `recover(error)` (record + resync), `report(error)` (record only), `farthestError()`, `consumed()`.
 
 ## Expressions: `pratt()`
 
@@ -222,6 +222,8 @@ Every grammar exposes:
 - `parseValue(rule, text)` — run any sub-rule standalone against fresh input (tests, tooling).
 
 **Farthest-failure error reporting** — `defineGrammar({ ..., errorReporting: { preferFarthest: true } })` reports the failure that consumed the most tokens instead of the one that happened to propagate, so a deep failure inside a discarded `attempt()` branch beats the shallow "wrong branch" message. Standard PEG tradeoff: the reported error may point into an abandoned attempt — usually the better message, and the flag is off by default so existing grammars' messages are byte-identical.
+
+**Lexer error propagation** — `defineGrammar({ ..., errorReporting: { propagateLexerErrors: true } })` stops backtracking from swallowing lexer errors. Lexing is lazy, so a bad character can be hit while an `attempt()` branch (or any `ctx.tryParse`) is running. By default that error rolls the branch back like any other failure. But the lexer has already consumed the offending characters, so the next branch trips over whatever follows them and reports a misleading parser error, or even parses cleanly with the characters silently dropped. With the flag on, errors thrown by the token stream are stamped `fromLexer: true` and pass through `tryParse` (nested ones included) and `describe()` relabelling unchanged. `parse` throws them, and in `diagnose` they reach recovery like any other error. The cursor stays where the lexer stopped instead of rolling back. Lexer errors carry no `consumed` stamp, so `preferFarthest` never replaces one with a croak from an abandoned branch. The flag is off by default, and with it off errors are neither tagged nor rethrown.
 
 ## The examples
 
