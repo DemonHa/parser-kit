@@ -1,6 +1,6 @@
 import { createInputStream, ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
-import { type Stmt, sqlLexer, sqlLite } from "./index";
+import { type Stmt, sqlLexer, sqlLite, sqlParseLexer } from "./index";
 
 // --- helpers ---
 
@@ -14,8 +14,8 @@ const exprOf = (src: string) => {
   return (stmt as any).items[0].constraints[0].expr;
 };
 
-const lex = (text: string) => {
-  const stream = sqlLexer.tokenize(createInputStream(text));
+const lex = (text: string, lexer = sqlLexer) => {
+  const stream = lexer.tokenize(createInputStream(text));
   const out: { type: string; value: string }[] = [];
   let tok = stream.next();
   while (tok !== null) {
@@ -105,6 +105,122 @@ describe("SQL-lite lexer", () => {
       { type: "op", value: "@>" },
       { type: "ident", value: "other" },
     ]);
+  });
+});
+
+// --- comments inside statements ---
+
+describe("SQL-lite comments inside statements", () => {
+  // Each input must parse to exactly the tree of the same text with its
+  // comments removed: the grammar never sees them.
+  const sameAs = (withComments: string, without: string) => expect(parse(withComments)).toEqual(parse(without));
+
+  it("drops comments from the parser's token stream but not from sqlLexer's", () => {
+    const text = "a /* b /* nested */ c */ -- d\n e";
+    expect(lex(text, sqlParseLexer)).toEqual([
+      { type: "ident", value: "a" },
+      { type: "ident", value: "e" },
+    ]);
+    expect(lex(text).map((t) => t.type)).toEqual(["ident", "comment", "comment", "ident"]);
+  });
+
+  it("parses a comment between keywords, inside an expression and before the ;", () => {
+    expect(firstStmt("SELECT /* x */ 1;")).toEqual(sel({ columns: [col(num(1))] }));
+    expect(firstStmt("SELECT a + -- plus\n b FROM t /* c */ ;")).toEqual(
+      sel({ columns: [col(bin("+", name("a"), name("b")))], from: [tableFrom(["t"])] }),
+    );
+    sameAs("SELECT id, -- primary key\n name FROM users;", "SELECT id, name FROM users;");
+    sameAs("SELECT a /* /* nested */ still */ FROM t WHERE /**/ a = 1 -- trailing\n;", "SELECT a FROM t WHERE a = 1;");
+  });
+
+  it("parses comments inside ARRAY[, between a function name and (, and after ::", () => {
+    sameAs("SELECT ARRAY[ /* c */ 1, -- c\n 2 /* c */];", "SELECT ARRAY[1, 2];");
+    sameAs("SELECT count /* c */ (/* c */ *) FROM t;", "SELECT count(*) FROM t;");
+    sameAs("SELECT lower -- c\n (name) FROM t;", "SELECT lower(name) FROM t;");
+    sameAs("SELECT x:: /* c */ int, y -- c\n :: text FROM t;", "SELECT x::int, y::text FROM t;");
+  });
+
+  it("parses comments inside multi-word type names", () => {
+    sameAs(
+      "SELECT x::double /* c */ precision, CAST(y AS timestamp -- c\n with /* c */ time zone) FROM t;",
+      "SELECT x::double precision, CAST(y AS timestamp with time zone) FROM t;",
+    );
+    sameAs("CREATE TABLE t (c character /* c */ varying(10));", "CREATE TABLE t (c character varying(10));");
+  });
+
+  it("parses comments where the grammar looks ahead before committing", () => {
+    sameAs("CREATE TABLE IF /* c */ NOT -- c\n EXISTS t (id int);", "CREATE TABLE IF NOT EXISTS t (id int);");
+    sameAs("CREATE TABLE t (id int NOT /* c */ NULL);", "CREATE TABLE t (id int NOT NULL);");
+    sameAs(
+      "SELECT a FROM t WHERE a IS /* c */ NOT /* c */ DISTINCT FROM b;",
+      "SELECT a FROM t WHERE a IS NOT DISTINCT FROM b;",
+    );
+    sameAs("SELECT a FROM t ORDER BY a /* c */ DESC NULLS -- c\n LAST;", "SELECT a FROM t ORDER BY a DESC NULLS LAST;");
+    sameAs(
+      "SELECT ( /* c */ SELECT 1), ( -- c\n WITH q AS (SELECT 1) SELECT * FROM q);",
+      "SELECT (SELECT 1), (WITH q AS (SELECT 1) SELECT * FROM q);",
+    );
+    sameAs(
+      "SELECT count(*) FILTER /* c */ (WHERE x) OVER /* c */ () FROM t;",
+      "SELECT count(*) FILTER (WHERE x) OVER () FROM t;",
+    );
+    sameAs("ALTER TABLE t /* c */ ADD /* c */ COLUMN c int;", "ALTER TABLE t ADD COLUMN c int;");
+  });
+
+  it("parses comments at the start and end of input, and input that is only comments", () => {
+    sameAs("-- lead\n/* lead */ SELECT 1; -- tail", "SELECT 1;");
+    sameAs("SELECT 1; /* tail */", "SELECT 1;");
+    expect(parse("-- nothing here\n/* or here */")).toEqual([]);
+  });
+
+  it("keeps comment-like text inside strings and still splits -- off an operator", () => {
+    expect(firstStmt("SELECT '/* not */ -- a comment';")).toEqual(
+      sel({ columns: [col(str("/* not */ -- a comment"))] }),
+    );
+    sameAs("SELECT 1-- c\n- 2;", "SELECT 1 - 2;");
+    // The operator scan that starts at `+` must stop at `--`.
+    sameAs("SELECT 1 +-- c\n 2;", "SELECT 1 + 2;");
+  });
+
+  it("ends spans at the last real token, not at a following comment", () => {
+    const [stmt] = sqlLite.parse("SELECT a /* c */ FROM t WHERE b /* tail */;") as any[];
+    expect(stmt.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 31 } });
+    expect(stmt.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 8 } });
+    expect(stmt.where.span).toEqual({ start: { row: 1, col: 30 }, end: { row: 1, col: 31 } });
+    // A list-shaped tail (the action list) ends at its last action too.
+    const [alter] = sqlLite.parse("ALTER TABLE t DROP COLUMN a, DROP COLUMN b /* c */ -- c\n;") as any[];
+    expect(alter.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 42 } });
+    const [lead] = sqlLite.parse("/* lead */ SELECT 1 -- tail\n;") as any[];
+    expect(lead.span).toEqual({ start: { row: 1, col: 11 }, end: { row: 1, col: 19 } });
+  });
+
+  it("points errors at the token after a comment", () => {
+    expect(() => sqlLite.parse("SELECT /* c */ ;")).toThrow(/but found ";" \(1:15\)/);
+    expect(() => sqlLite.parse("SELECT 1 /* c */ 2;")).toThrow(/Expected ";" but found "2"/);
+    expect(() => sqlLite.parse("SELECT 1 -- tail")).toThrow(/Expected ";" but found end of input \(1:16\)/);
+    // An unclosed block comment swallows the rest of the input.
+    expect(() => sqlLite.parse("SELECT /* unclosed 1;")).toThrow(/but found end of input/);
+  });
+
+  it("resumes after a lexer error hit while skipping comments", () => {
+    const stream = sqlParseLexer.tokenize(createInputStream("a /* c */ $ b -- t"));
+    expect(stream.next()?.value).toBe("a");
+    expect(() => stream.peek()).toThrow(/Unexpected character "\$" \(1:10\)/);
+    expect(stream.peek()?.value).toBe("b");
+    expect(stream.next()?.value).toBe("b");
+    expect(stream.eof()).toBe(true);
+    const { ast, errors } = sqlLite.diagnose("SELECT /* a */ $ /* b */ $ ; SELECT 2;");
+    expect(errors.map((e) => e.message)).toEqual([
+      'Unexpected character "$" (1:15)',
+      'Unexpected character "$" (1:25)',
+    ]);
+    expect(stripSpans(ast)).toEqual([sel({ columns: [col(num(2))] })]);
+  });
+
+  it("diagnose() recovers past a bad statement that contains comments", () => {
+    const { ast, errors } = sqlLite.diagnose("SELECT /* c */ FROM; -- next\nSELECT /* ok */ 1;");
+    expect(errors).toHaveLength(1);
+    expect(stripSpans(ast)).toEqual([sel({ columns: [col(num(1))] })]);
   });
 });
 

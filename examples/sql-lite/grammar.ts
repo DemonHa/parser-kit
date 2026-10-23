@@ -26,7 +26,7 @@ import {
   skip,
   type Token,
 } from "@parser-kit/core";
-import { type SqlTokenType, sqlLexer } from "./lexer";
+import { type SqlTokenType, sqlParseLexer } from "./lexer";
 
 // SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
@@ -1555,7 +1555,8 @@ const bareStar = token("op", { values: ["*"] }).map((_node, span): Expr => ({ ki
 
 // `(` opens both `(expr)` and `(SELECT …)`; they share the first token, so the
 // atom peeks one token past it — a `select`/`with` there means a subquery. No
-// attempt() cost. (`peekAhead` gives raw tokens, which is what we want here.)
+// attempt() cost. (`peekAhead` doesn't skip trivia, but `sqlParseLexer` has
+// already dropped comments, so `( /* c */ SELECT` is still a subquery.)
 const startsQuery = (ctx: ParseContext<SqlTokenType>): boolean => {
   const after = ctx.peekAhead(1);
   return after !== null && after.type === "ident" && (after.value === "select" || after.value === "with");
@@ -7745,9 +7746,8 @@ const statement = seq(field("stmt", statementBody), skip(punc(";"))).map(({ stmt
 // --- grammar ---
 
 export const sqlLite = defineGrammar({
-  lexer: sqlLexer,
+  lexer: sqlParseLexer,
   root: repeat(statement),
-  trivia: { between: [{ type: "comment" }] },
   recovery: { sync: [{ type: "punc", value: ";", consume: true }] },
   // Opt into PG-style farthest-failure reporting: when a discarded backtracking
   // branch (a mistyped IF NOT EXISTS) got deeper than the error that surfaced,
