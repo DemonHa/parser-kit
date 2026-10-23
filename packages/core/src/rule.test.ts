@@ -97,6 +97,46 @@ describe("croak() / farthestError()", () => {
   });
 });
 
+describe("tryParse() with propagateLexerErrors", () => {
+  // Pulls tokens until the stream runs dry; `@` makes the lexer croak.
+  const drain = makeRule<null, TT>({
+    parse: (ctx) => {
+      while (ctx.next() !== null);
+      return null;
+    },
+    first: () => [],
+    expected: () => "anything",
+  });
+  const nested = makeRule<string, TT>({
+    parse: (ctx) => {
+      ctx.next();
+      return ctx.tryParse(drain) === null ? "inner rolled back" : "drained";
+    },
+    first: () => [],
+    expected: () => "anything",
+  });
+
+  it("off (default): rolls the lexer error back like any failed alternative", () => {
+    const ctx = contextFor("a b @ c");
+    expect(ctx.tryParse(nested)).toBe("inner rolled back");
+    // The inner attempt rewound to `b`; the `@` it lexed past is gone.
+    expect(ctx.consumed()).toBe(1);
+    expect(ctx.next()?.value).toBe("b");
+    expect(ctx.next()?.value).toBe("c");
+  });
+
+  it("on: tags the error and rethrows it through nested tryParse calls", () => {
+    const ctx = contextFor("a b @ c", { propagateLexerErrors: true });
+    expect(() => ctx.tryParse(nested)).toThrow(
+      expect.objectContaining({ msg: 'Unexpected character "@"', fromLexer: true }),
+    );
+    // No rollback: the cursor stays where the lexer stopped, as it would
+    // without any tryParse around it.
+    expect(ctx.consumed()).toBe(2);
+    expect(ctx.next()?.value).toBe("c");
+  });
+});
+
 describe("report()", () => {
   const shallowError = (ctx: ReturnType<typeof contextFor>) => {
     try {

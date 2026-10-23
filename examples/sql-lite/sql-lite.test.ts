@@ -2532,6 +2532,25 @@ describe("SQL-lite robustness", () => {
   });
 });
 
+// --- lexer errors inside backtracking ---
+
+describe("SQL-lite lexer errors inside backtracking", () => {
+  // The INSERT column list is tried with backtracking. The lexer consumes
+  // `X'G1` before croaking, so a rollback used to resurface as a parser error
+  // on the `)` that followed. sql-lite opts into lexer error propagation.
+  it("reports a bad literal in an attempted branch as the lexer error", () => {
+    expect(() => sqlLite.parse("INSERT INTO t (a, X'G1') VALUES (1);")).toThrow(
+      /^Invalid hexadecimal digit "G" \(1:18\)$/,
+    );
+  });
+
+  it("diagnose() records the lexer error once and resumes at the next statement", () => {
+    const { ast, errors } = sqlLite.diagnose("SELECT 1;\nINSERT INTO t (a, X'G1') VALUES (1);\nSELECT 2;");
+    expect(errors.map((error) => error.message)).toEqual(['Invalid hexadecimal digit "G" (2:18)']);
+    expect((ast as Stmt[]).map((stmt) => stmt.kind)).toEqual(["select", "select"]);
+  });
+});
+
 // --- SELECT ---
 
 describe("SQL-lite SELECT", () => {

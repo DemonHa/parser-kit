@@ -7751,6 +7751,8 @@ export const sqlLite = defineGrammar({
   recovery: { sync: [{ type: "punc", value: ";", consume: true }] },
   // Opt into PG-style farthest-failure reporting: when a discarded backtracking
   // branch (a mistyped IF NOT EXISTS) got deeper than the error that surfaced,
-  // report the deeper one.
-  errorReporting: { preferFarthest: true },
+  // report the deeper one. Lexer errors propagate: a bad literal inside a
+  // backtracking branch (`INSERT INTO t (a, X'G1')`) reports itself rather
+  // than whatever the rolled-back parse trips over next.
+  errorReporting: { preferFarthest: true, propagateLexerErrors: true },
 });
