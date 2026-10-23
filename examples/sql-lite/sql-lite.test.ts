@@ -1764,7 +1764,9 @@ describe("SQL-lite precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts 
   });
 
   it("rejects an AT with no TIME ZONE or no zone after it", () => {
-    expect(() => sqlLite.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected "time"/);
+    // `at` with neither TIME ZONE nor LOCAL after it is a bare alias, as in PG,
+    // so the error falls on the zone that follows it.
+    expect(() => sqlLite.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected ";" but found "z"/);
     expect(() => sqlLite.parse("SELECT a AT TIME ZONE FROM t;")).toThrow(/Expected a name but found "from"/);
   });
 });
@@ -13293,6 +13295,213 @@ describe("SQL-lite composite and array access, and call-argument forms", () => {
     expect(bad("SELECT overlay(VARIADIC a PLACING b FROM 1) FROM t;")).toThrow(/Expected "\)" but found "placing"/);
     expect(bad("SELECT overlay(ALL a PLACING b FROM 1) FROM t;")).toThrow(/Expected "\)" but found "placing"/);
     expect(colExpr("overlay(a PLACING b FROM 1)")).toMatchObject({ kind: "overlay" });
+  });
+});
+
+// --- special predicates and calls, and non-empty lists ---
+
+describe("SQL-lite special predicates and calls", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const x = name("x");
+
+  it("parses IS [NOT] [form] NORMALIZED", () => {
+    const isNorm = (form: string | null, negated: boolean) => ({ kind: "isNormalized", expr: x, form, negated });
+    expect(colExpr("x IS NORMALIZED")).toEqual(isNorm(null, false));
+    expect(colExpr("x IS NOT NORMALIZED")).toEqual(isNorm(null, true));
+    expect(colExpr("x IS NFC NORMALIZED")).toEqual(isNorm("nfc", false));
+    expect(colExpr("x IS NOT NFD NORMALIZED")).toEqual(isNorm("nfd", true));
+    expect(colExpr("x IS NFKC NORMALIZED")).toEqual(isNorm("nfkc", false));
+    expect(colExpr("x IS NOT NFKD NORMALIZED")).toEqual(isNorm("nfkd", true));
+    // At IS's precedence: below the concatenation, above AND.
+    expect(exprOf("a || b IS NORMALIZED AND c")).toEqual({
+      kind: "binary",
+      op: "and",
+      left: { kind: "isNormalized", expr: bin("||", name("a"), name("b")), form: null, negated: false },
+      right: name("c"),
+    });
+    expect(bad("SELECT x IS NFC FROM t;")).toThrow(/Expected "normalized" but found "from"/);
+    expect(bad("SELECT x IS NFC NFD NORMALIZED FROM t;")).toThrow(/Expected "normalized" but found "nfd"/);
+    // Anything else after IS still reports the NULL it most likely meant.
+    expect(bad("SELECT x IS foo FROM t;")).toThrow(/Expected "null" but found "foo"/);
+  });
+
+  it("parses IS [NOT] DOCUMENT", () => {
+    expect(colExpr("x IS DOCUMENT")).toEqual({ kind: "isDocument", expr: x, negated: false });
+    expect(exprOf("x IS NOT DOCUMENT OR y")).toEqual({
+      kind: "binary",
+      op: "or",
+      left: { kind: "isDocument", expr: x, negated: true },
+      right: name("y"),
+    });
+  });
+
+  it("parses NORMALIZE with and without a normal form", () => {
+    expect(colExpr("normalize(x, NFC)")).toEqual({ kind: "normalize", value: x, form: "nfc" });
+    expect(colExpr("normalize(x || 'a', nfkd)")).toEqual({
+      kind: "normalize",
+      value: bin("||", x, str("a")),
+      form: "nfkd",
+    });
+    expect(colExpr("normalize(x)")).toEqual({ kind: "call", name: "normalize", args: [x] });
+    // The form is a keyword: no string, column or expression takes its place.
+    expect(bad("SELECT normalize(x, 'NFC') FROM t;")).toThrow(
+      /Expected "nfc", "nfd", "nfkc" or "nfkd" but found "NFC"/,
+    );
+    expect(bad("SELECT normalize(x, y) FROM t;")).toThrow(/Expected "nfc", "nfd", "nfkc" or "nfkd" but found "y"/);
+    expect(bad("SELECT normalize(x, NFC, NFD) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    // Quoted or qualified, it is an ordinary function.
+    expect(colExpr("\"normalize\"(x, 'NFC')")).toEqual({ kind: "call", name: "normalize", args: [x, str("NFC")] });
+    expect(colExpr("pg_catalog.normalize(x, 'NFC')")).toEqual({
+      kind: "call",
+      name: "pg_catalog.normalize",
+      args: [x, str("NFC")],
+    });
+  });
+
+  it("parses COLLATION FOR in a select list and a WHERE", () => {
+    const collationFor = (expr: unknown) => ({ kind: "collationFor", expr });
+    expect(colExpr("COLLATION FOR (x)")).toEqual(collationFor(x));
+    expect(firstStmt("SELECT collation for ('a' COLLATE \"C\") AS c;").columns).toEqual([
+      col(collationFor({ kind: "collate", expr: str("a"), collation: ["C"] }), "c"),
+    ]);
+    expect(firstStmt("SELECT a FROM t WHERE COLLATION FOR (b) = '\"default\"';").where).toEqual(
+      bin("=", collationFor(name("b")), str('"default"')),
+    );
+    // Without a `(` after FOR, `collation` is a column and FOR a locking clause.
+    expect(firstStmt("SELECT collation FROM t FOR UPDATE;")).toMatchObject({
+      columns: [col(name("collation"))],
+      locking: [{ strength: "update" }],
+    });
+    expect(bad("SELECT COLLATION FOR x FROM t;")).toThrow(/Expected "update", "share", "no" or "key" but found "x"/);
+    expect(bad("SELECT COLLATION FOR () FROM t;")).toThrow(/but found "\)"/);
+  });
+
+  it("parses SUBSTRING's SIMILAR form beside its FROM / FOR form", () => {
+    expect(colExpr("substring(x SIMILAR '%#\"o_b#\"%' ESCAPE '#')")).toEqual({
+      kind: "substringSimilar",
+      value: x,
+      pattern: str('%#"o_b#"%'),
+      escape: str("#"),
+    });
+    expect(colExpr("substring(x FROM 2 FOR 3)")).toEqual({ kind: "substring", value: x, from: num(2), for_: num(3) });
+    // SIMILAR TO inside the value is still the operator.
+    expect(colExpr("substring(x SIMILAR TO 'a' FROM 2)")).toEqual({
+      kind: "substring",
+      value: { kind: "similarTo", expr: x, pattern: str("a"), negated: false },
+      from: num(2),
+      for_: null,
+    });
+    // PG requires the ESCAPE.
+    expect(bad("SELECT substring(x SIMILAR 'a') FROM t;")).toThrow(/Expected "escape" but found "\)"/);
+  });
+
+  it("parses AT LOCAL next to AT TIME ZONE", () => {
+    const atLocal = (expr: unknown) => ({ kind: "atLocal", expr });
+    expect(colExpr("x AT LOCAL")).toEqual(atLocal(x));
+    // Below the sign and COLLATE, like AT TIME ZONE, and chaining to the left.
+    expect(colExpr("-x AT LOCAL")).toEqual(atLocal({ kind: "unary", op: "-", operand: x }));
+    expect(colExpr("x AT TIME ZONE 'UTC' AT LOCAL")).toEqual(
+      atLocal({ kind: "atTimeZone", expr: x, zone: str("UTC") }),
+    );
+    expect(colExpr("x AT LOCAL AT TIME ZONE 'UTC'")).toEqual({
+      kind: "atTimeZone",
+      expr: atLocal(x),
+      zone: str("UTC"),
+    });
+    expect(colExpr("x AT LOCAL + y")).toEqual(bin("+", atLocal(x), name("y")));
+    expect(firstStmt("SELECT x AT LOCAL AS l FROM t;").columns).toEqual([col(atLocal(x), "l")]);
+  });
+
+  it("keeps a bare AT, SIMILAR, NORMALIZED and DOCUMENT as aliases", () => {
+    // PG's BARE_LABEL words: AT without TIME ZONE or LOCAL after it, and
+    // SIMILAR without TO, are no operators.
+    expect(firstStmt("SELECT x at FROM t;").columns).toEqual([col(x, "at")]);
+    expect(firstStmt("SELECT x at, y similar FROM t;").columns).toEqual([col(x, "at"), col(name("y"), "similar")]);
+    expect(firstStmt("SELECT x normalized, y document, z local FROM t;").columns).toEqual([
+      col(x, "normalized"),
+      col(name("y"), "document"),
+      col(name("z"), "local"),
+    ]);
+    expect(bad("SELECT x AT TIME FROM t;")).toThrow(/Expected ";" but found "time"/);
+  });
+
+  it("keeps the new keywords unreserved as names and aliases", () => {
+    for (const word of [
+      "normalized",
+      "document",
+      "nfc",
+      "nfd",
+      "nfkc",
+      "nfkd",
+      "local",
+      "at",
+      "collation",
+      "normalize",
+    ]) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [col(name(word))],
+        from: [{ kind: "table", name: [word], alias: null }],
+      });
+      expect(firstStmt(`SELECT a AS ${word} FROM t ${word};`)).toMatchObject({
+        columns: [col(name("a"), word)],
+        from: [{ kind: "table", name: ["t"], alias: word }],
+      });
+      expect(firstStmt(`CREATE TABLE t (${word} int);`)).toMatchObject({ items: [{ name: word }] });
+    }
+    // A column named like a normal form is an operand, not the form, before IS.
+    expect(colExpr("nfc IS NORMALIZED")).toEqual({
+      kind: "isNormalized",
+      expr: name("nfc"),
+      form: null,
+      negated: false,
+    });
+  });
+});
+
+describe("SQL-lite rejects empty parenthesised lists", () => {
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const emptyList = /but found "\)"/;
+
+  it("rejects the empty forms PG rejects", () => {
+    expect(bad("SELECT x IN () FROM t;")).toThrow(emptyList);
+    expect(bad("SELECT x NOT IN () FROM t;")).toThrow(emptyList);
+    expect(bad("VALUES ();")).toThrow(emptyList);
+    expect(bad("VALUES (1), ();")).toThrow(emptyList);
+    expect(bad("INSERT INTO t VALUES ();")).toThrow(emptyList);
+    expect(bad("INSERT INTO t VALUES (1), ();")).toThrow(emptyList);
+    expect(bad("MERGE INTO t USING s ON t.a = s.a WHEN NOT MATCHED THEN INSERT VALUES ();")).toThrow(emptyList);
+    expect(bad("SELECT DISTINCT ON () a FROM t;")).toThrow(emptyList);
+    expect(bad("EXECUTE p();")).toThrow(emptyList);
+  });
+
+  it("still reads non-empty lists", () => {
+    expect(firstStmt("SELECT x IN (1) FROM t;").columns[0].expr).toEqual({
+      kind: "in",
+      expr: name("x"),
+      list: [num(1)],
+      negated: false,
+    });
+    expect(firstStmt("VALUES (1, 2), (3, 4);")).toMatchObject({
+      rows: [
+        [num(1), num(2)],
+        [num(3), num(4)],
+      ],
+    });
+    expect(firstStmt("SELECT DISTINCT ON (a, b) a FROM t;").distinct).toEqual([name("a"), name("b")]);
+    expect(firstStmt("EXECUTE p(1);")).toMatchObject({ args: [num(1)] });
+  });
+
+  it("keeps the empty lists PG allows", () => {
+    // A call, a ROW constructor and a trigger's function arguments may be empty.
+    expect(firstStmt("SELECT now() FROM t;").columns[0].expr).toEqual({ kind: "call", name: "now", args: [] });
+    expect(firstStmt("SELECT ROW() FROM t;").columns[0].expr).toEqual({ kind: "row", items: [] });
+    expect(firstStmt("EXECUTE p;")).toMatchObject({ args: null });
+    const trigger = (args: string) =>
+      firstStmt(`CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION f(${args});`).execute;
+    expect(trigger("")).toEqual({ routine: "function", name: ["f"], args: [] });
+    expect(trigger("1, 'a'")).toEqual({ routine: "function", name: ["f"], args: [num(1), str("a")] });
+    expect(bad("CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION f(1,);")).toThrow(emptyList);
   });
 });
 
