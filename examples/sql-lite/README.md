@@ -54,7 +54,7 @@ The statements are read by the same rules as `sqlLite`'s, so a script differs fr
 
 - **Spans.** Statements, expressions, column definitions and constraints have a `span: { start, end }`. Structural parts such as select items, FROM items, CTE entries, `ORDER BY` items, locking clauses and assignments don't. Each end is a `{ row, col }`, with a 1-based `row` and a 0-based `col` (the `(1:26)` in error messages). A span starts and ends at real tokens, so a comment after a node is outside its span. `stripSpans` from `@parser-kit/core` removes them recursively, and the unit tests compare span-stripped trees.
 - **Absent fields.** The fields of the original node shapes are always present, with `null` (or `false`) when the clause isn't written: `alias: null`, `where: null`, `ifExists: false`. Fields added since are optional, and they are **left out** when the clause is absent, never `null`. A flag typed `?: true` (`natural?: true` on a join, `withTies?: true` beside `limit`, `only?: true` on a target, `notValid?: true` on a constraint, `variadic?: true` on a call) is either `true` or missing. A `?: boolean` field is present only when the clause is written, and is `false` when its negative spelling is (`NOT MATERIALIZED`, `NOT DEFERRABLE`, `NO INDENT`, `ASYMMETRIC`). Test such a field with `in` or `=== true`/`=== false`, not by comparing to `null`.
-- **Numbers.** A number is `{ kind: "number", value: number }`. It gets a `raw?: string` holding the literal's text (`_` separators dropped, and the sign included where the grammar folds one in) only when `value` can't stand for it. That is a whole number beyond `Number.isSafeInteger` (`9007199254740993`, `1.5e300`), or a value that overflows to ±Infinity (`1e400`, which JSON would write as `null`). Other numbers keep double precision only: `0.1000000000000000055511151231257827` rounds, and `1e-400` reads as `0`.
+- **Numbers.** A number is `{ kind: "number", value: number }`. It gets a `raw?: string` holding the literal's text (`_` separators dropped, and the sign included where the grammar folds one in) when the value's magnitude is 2^53 or more (`9007199254740993`, `1e16`, `1.5e300`), where a double may not hold every digit, or when it overflows to ±Infinity (`1e400`, which JSON would write as `null`). Other numbers keep double precision only: `0.1000000000000000055511151231257827` rounds, and `1e-400` reads as `0`.
 - **Comments** are dropped from the token stream the grammar sees (`sqlParseLexer`). The exported `sqlLexer` still emits `comment` tokens, for highlighters and formatters that tokenize directly.
 - **Strings** are decoded. `E'\x41'`, `U&'\0041'` and `'A'` all give `{ kind: "string", value: "A" }`, and `'foo'` + newline + `'bar'` gives `"foobar"`. `N'…'` is a `typedLiteral` of type `bpchar`, as PostgreSQL reads it.
 - **Script items.** `sqlLiteScript` returns `ScriptItem[]` (`Stmt | PsqlMeta`) in source order:
@@ -131,7 +131,7 @@ The target is PostgreSQL 17's `gram.y`. The lists below are grouped the way the 
 **Transactions and session**
 
 - `BEGIN` / `START TRANSACTION` with isolation modes, `COMMIT` / `ROLLBACK` / `END` / `ABORT` with `AND [NO] CHAIN`, savepoints, two-phase commit (`PREPARE TRANSACTION`, `COMMIT PREPARED`, `ROLLBACK PREPARED`).
-- `SET` / `SHOW` / `RESET`, including `SET TRANSACTION`, `SET SESSION CHARACTERISTICS`, `SET CONSTRAINTS`, `SET [LOCAL] TIME ZONE`, `SET SESSION AUTHORIZATION`, `SET … FROM CURRENT` and the multi-word `SHOW` / `RESET` targets. A `SET` value is a single value, as in PostgreSQL (`on`, a word, a string or a number).
+- `SET` / `SHOW` / `RESET`, including `SET TRANSACTION`, `SET SESSION CHARACTERISTICS`, `SET CONSTRAINTS`, `SET [LOCAL] TIME ZONE`, `SET SESSION AUTHORIZATION`, `SET … FROM CURRENT` and the multi-word `SHOW` / `RESET` targets. Each `SET` value is a simple token, as in PostgreSQL (`on`, a word, a string or a number), not an expression. A comma list (`SET search_path = a, b`) works.
 - `PREPARE` / `EXECUTE` / `DEALLOCATE`, cursors (`DECLARE` / `FETCH` / `MOVE` / `CLOSE`), `LISTEN` / `NOTIFY` / `UNLISTEN`, `DISCARD`, `LOAD`, `LOCK`, `CALL`, `DO`.
 
 **Utility and maintenance**
@@ -186,8 +186,8 @@ The target is PostgreSQL 17's `gram.y`. The lists below are grouped the way the 
 - Aggregates: `JSON_OBJECTAGG(k VALUE v …)` and `JSON_ARRAYAGG(v [ORDER BY …] …)`, with `FILTER` and `OVER`.
 - Query functions: `JSON_VALUE`, `JSON_QUERY` and `JSON_EXISTS`, with `PASSING`, `RETURNING`, the wrapper and `QUOTES` clauses, and `ON EMPTY` / `ON ERROR`, each taking only the clauses PostgreSQL gives it.
 - `JSON_TABLE` as a FROM item, with `FOR ORDINALITY`, regular, `EXISTS` and `NESTED [PATH] … COLUMNS (…)` columns.
-- `JSON(v [WITH | WITHOUT UNIQUE [KEYS]])`, `JSON_SERIALIZE(v [RETURNING t])` and `JSON_SCALAR(x)`.
-- The callee names stay unreserved. A call with none of the clauses (`json_object(k, v)`, `json_array(1, 2)`) is a plain `call` node, and so is a quoted or qualified name.
+- `JSON(v [WITH | WITHOUT UNIQUE [KEYS]])` and `JSON_SERIALIZE(v [RETURNING t])`. `JSON_SCALAR(x)` takes no clause and is a plain `call` node.
+- The callee names stay unreserved. A call written with none of its clauses is a plain `call` node (see [Known wrong ASTs](#known-wrong-asts)), and so is a quoted or qualified name.
 
 **XML**
 
@@ -225,7 +225,7 @@ So sql-lite accepts 604 of the 609 statements (99.2%), and node-sql-parser accep
 - `ALTER SYSTEM`.
 - `CREATE RULE` and `CREATE TRANSFORM`.
 
-"Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known case where sql-lite parses a statement into the wrong tree is listed [below](#known-wrong-asts).
+"Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -306,9 +306,10 @@ Every item here was checked against the current grammar and fails to parse.
 
 ### Known wrong ASTs
 
-This statement parses without error, but the tree it produces is wrong:
+These parse without error, but the tree they produce is wrong:
 
 - **A `FETCH` with no count records no `limit`.** `FETCH FIRST ROW ONLY` and `FETCH NEXT ROWS WITH TIES` give `limit: null`, the same as no limit at all. PostgreSQL reads a count of 1.
+- **A SQL/JSON function written with none of its clauses is a plain `call` node.** `json_array(1, 2)`, `JSON_OBJECT()`, `json_arrayagg(v)`, `JSON_VALUE(j, '$')`, `JSON(j)` and `JSON_SERIALIZE(j)` give `{ kind: "call" }`, where PostgreSQL parses each as the SQL/JSON construct. The new node kind appears only once a clause (`VALUE`, `RETURNING`, `ON NULL`, …) is written. `JSON_SCALAR(x)` is always a `call`. The exception is the two-argument `json_object(k, v)`, which PostgreSQL also reads as an ordinary call.
 
 Numbers below 2^53 in magnitude keep only double precision (see [AST conventions](#ast-conventions)). That is a documented limitation of the number node, not a wrong tree.
 
@@ -334,6 +335,7 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
   - `SET TIME ZONE` with a non-reserved keyword as the zone (`SET TIME ZONE zone`);
   - configuration parameter names that are `type_func_name` keywords (`SET outer = 1`, `SHOW authorization`);
   - `COPY binary FROM stdin` copies a table named `binary`, where `BINARY` is a `type_func_name` keyword in PostgreSQL.
+- **SQL/JSON names in call shapes PostgreSQL forbids.** `json_array`, `json_arrayagg`, `json_object`, `json_objectagg` (and in PostgreSQL 17 also `json_scalar`, `json_serialize`, `json_value`, `json_query`, `json_exists`) can't be ordinary function names there. Here they still parse as calls: `json_objectagg(k, v)`, `json_arrayagg(DISTINCT a)`, `json_array(a => 1)`, `json_value(a)`.
 - **`CREATE INDEX IF NOT EXISTS ON t (…)`** with no index name.
 - **`CREATE OR REPLACE MATERIALIZED VIEW`.**
 - **Publication and subscription `WITH (…)` lists** take the general option shape, so `ns.name` keys and parenthesised values parse. PostgreSQL's `definition` has neither.
@@ -354,7 +356,7 @@ Two smaller divergences: quoted identifiers longer than 63 bytes are not truncat
 
 sql-lite isn't published yet, so these breaks come before any 0.x release. They are listed for anyone tracking the grammar in this repo.
 
-**Inputs that used to parse and are now rejected**, because PostgreSQL rejects them, almost all in its grammar. A few (`GRANT r TO u WITH GRANT OPTION`, `ALTER COLUMN … SET RESTART`, `SEQUENCE NAME` in `CREATE SEQUENCE`) are analysis-time errors there, refused here because the check is local:
+**Inputs that used to parse and are now rejected**, because PostgreSQL rejects them, almost all in its grammar. Two (`GRANT r TO u WITH GRANT OPTION`, `SEQUENCE NAME` in `CREATE SEQUENCE`) are post-parse errors there, refused here because the check is local:
 
 - **Literals and lexing:**
   - unterminated `'…'`, `E'…'`, `"…"`, `B'…'`, `X'…'`, `U&'…'`, `U&"…"` or `/* …` at end of input;
