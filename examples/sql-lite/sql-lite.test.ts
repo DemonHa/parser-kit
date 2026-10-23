@@ -10495,6 +10495,10 @@ describe("SQL-lite COPY legacy options", () => {
       opt("format", word("csv")),
       opt("force_quote", star()),
     ]);
+    expect(firstStmt('COPY t TO STDOUT CSV FORCE QUOTE "A", b;').options).toEqual([
+      opt("format", word("csv")),
+      opt("force_quote", list("A", "b")),
+    ]);
     expect(optionsOf("CSV FORCE NOT NULL * FORCE NULL *")).toEqual([
       opt("format", word("csv")),
       opt("force_not_null", star()),
@@ -10555,6 +10559,10 @@ describe("SQL-lite COPY legacy options", () => {
       opt("delimiter", str("|")),
       opt("format", word("csv")),
     ]);
+    expect(firstStmt("COPY BINARY t FROM STDIN WITH CSV;")).toMatchObject({
+      options: [opt("format", word("binary")), opt("format", word("csv"))],
+      legacy: true,
+    });
     // PG collects the prefix, then DELIMITERS, then the list.
     expect(firstStmt("COPY BINARY t FROM STDIN USING DELIMITERS ',' WITH (HEADER);")).toMatchObject({
       options: [opt("format", word("binary")), opt("delimiter", str(",")), opt("header")],
@@ -10617,10 +10625,12 @@ describe("SQL-lite COPY legacy options", () => {
     expect(bad("COPY t FROM STDIN WITH FORMAT csv;")).toThrow(
       /Expected "\(" or a COPY option but found "format" \(1:23\)/,
     );
+    expect(bad("COPY t TO STDOUT FORCE QUOTE;")).toThrow(/Expected "\*" or a name but found ";"/);
+    expect(bad("COPY binary select FROM STDIN;")).toThrow(/Expected "from" or "to" but found "select"/);
     expect(bad("COPY t FROM STDIN WITH 1;")).toThrow(/Expected "\(" or a COPY option but found "1"/);
     // The BINARY lookahead reports what does not lex rather than dropping it.
     expect(sqlLite.diagnose("COPY binary 'x").errors[0]?.message).toMatch(/Unterminated/);
-    expect(bad("COPY t TO STDOUT FORCE QUOTE (a);")).toThrow(/Expected a name but found "\("/);
+    expect(bad("COPY t TO STDOUT FORCE QUOTE (a);")).toThrow(/Expected "\*" or a name but found "\("/);
     expect(bad("COPY t FROM STDIN DELIMITER ,;")).toThrow(/Expected a string but found ","/);
     expect(bad("COPY t FROM STDIN ENCODING AS 'UTF8';")).toThrow(/Expected a string but found "as"/);
     expect(bad("COPY t FROM STDIN HEADER true;")).toThrow(/Expected ";" but found "true"/);

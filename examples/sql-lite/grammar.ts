@@ -1160,7 +1160,8 @@ export type CopyLocation =
 // bare-word options (`WITH CSV HEADER`, `FORCE QUOTE *`) — lands in `options`
 // under the names the parenthesised list gives the same settings (`CSV` is
 // `format csv`, `FORCE NOT NULL a` is `force_not_null (a)`), in the order PG
-// collects them. `legacy` is present only when any of that spelling is written.
+// collects them. `legacy` is present only when any of that spelling is written,
+// a bare `WITH` with no option after it included.
 export type Copy = {
   kind: "copy";
   table: string[] | null;
@@ -9753,6 +9754,7 @@ function copyWordOption(ctx: ParseContext<SqlTokenType>, name: string, word: str
 function copyColumns(ctx: ParseContext<SqlTokenType>): RelationOptionValue {
   const start = ctx.position();
   if (ctx.eat("op", "*") !== null) return { kind: "star", table: null, span: ctx.spanFrom(start) };
+  if (!ctx.is("ident") && !ctx.is("qident")) ctx.croak(`Expected "*" or a name but found ${describeFound(ctx.peek())}`);
   const items: RelationOptionScalar[] = [];
   do {
     const at = ctx.position();
@@ -9799,7 +9801,7 @@ const copyStmt = custom<Stmt, SqlTokenType>(
     // `COPY binary t` — but `COPY binary FROM …` copies a table named binary.
     if (ctx.is("ident", "binary")) {
       const next = peekOrReport(ctx, 1);
-      if (next?.type === "qident" || (next?.type === "ident" && next.value !== "from" && next.value !== "to")) {
+      if (next?.type === "qident" || (next?.type === "ident" && !RESERVED.has(next.value))) {
         options.push(copyWordOption(ctx, "format", "binary"));
         legacy = true;
       }
