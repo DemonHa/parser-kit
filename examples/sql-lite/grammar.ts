@@ -648,9 +648,17 @@ export type RoleOption =
   | { kind: "validUntil"; timestamp: string }
   | { kind: "inRole" | "role" | "admin"; roles: string[] };
 
-// `CREATE {ROLE|USER} name [[WITH] option …]`. `user` marks the USER spelling,
-// which PG reads as ROLE with LOGIN defaulted on.
-export type CreateRole = { kind: "createRole"; user: boolean; name: string; options: RoleOption[]; span: Span };
+// `CREATE {ROLE|USER|GROUP} name [[WITH] option …]`. `user` marks the USER
+// spelling, which PG reads as ROLE with LOGIN defaulted on; `group` marks the
+// GROUP one, a plain ROLE to PG, and is omitted otherwise.
+export type CreateRole = {
+  kind: "createRole";
+  user: boolean;
+  group?: true;
+  name: string;
+  options: RoleOption[];
+  span: Span;
+};
 
 // `CREATE TABLE [IF NOT EXISTS] name [(cols)] AS query [WITH [NO] DATA]` — the
 // query-backed table. Distinct kind from `createTable` so its `query` payload is
@@ -822,38 +830,95 @@ export type CreateTrigger = {
 // --- Phase 9: DCL / TCL / session ---
 
 // A single privilege in GRANT/REVOKE: a keyword like SELECT/INSERT/USAGE with an
-// optional column list (`UPDATE (a, b)`). For a role grant the same shape carries
-// the granted role name (columns null).
+// optional column list (`UPDATE (a, b)`), or the two-word `"alter system"`. For a
+// role grant the same shape carries the granted role name (columns null).
 export type Privilege = { name: string; columns: string[] | null };
 
 // The `ON objectType name[, …]` target of an object-privilege grant. `objectType`
-// is the folded object keyword (default "table"); `names` lists the objects — or
-// is empty for the `ALL {TABLES|SEQUENCES|FUNCTIONS} IN SCHEMA s[, …]` form, whose
-// schemas live in `inSchema` (null otherwise).
-export type GrantObject = { objectType: string; names: string[][]; inSchema: string[][] | null };
+// is the folded object keyword(s) (default "table"; `"foreign data wrapper"`,
+// `"foreign server"`, `"large object"`); `names` lists the objects — or is empty
+// for the `ALL {TABLES|SEQUENCES|FUNCTIONS|PROCEDURES|ROUTINES} IN SCHEMA s[, …]`
+// form, whose schemas live in `inSchema` (null otherwise), and for a LARGE
+// OBJECT, whose numbers live in `oids`. Two keys belong to a few kinds each and
+// are omitted elsewhere:
+// - `signatures` (FUNCTION / PROCEDURE / ROUTINE): one entry per name, null
+//   where a name carries no argument list, present when one does;
+// - `oids` (LARGE OBJECT): the objects' numbers.
+export type GrantObject = {
+  objectType: string;
+  names: string[][];
+  inSchema: string[][] | null;
+  signatures?: (DropSignature | null)[];
+  oids?: number[];
+};
 
-// `GRANT { privilege[, …] | ALL [PRIVILEGES] } ON … TO grantee[, …] [WITH GRANT
-// OPTION]`, or the role form `GRANT role[, …] TO grantee[, …] [WITH ADMIN
-// OPTION]`. `on` is null for a role grant; then `privileges` carries the granted
-// role names (each with columns null). `"all"` = ALL PRIVILEGES.
+// One entry of a role grant's `WITH` list: `ADMIN`, `INHERIT` or `SET`, each
+// `OPTION` / `TRUE` (true) or `FALSE`.
+export type RoleGrantOption = { name: "admin" | "inherit" | "set"; value: boolean };
+
+// `GRANT { privilege[, …] | ALL [PRIVILEGES] [(col, …)] } ON … TO grantee[, …]
+// [WITH GRANT OPTION] [GRANTED BY role]`, or the role form `GRANT role[, …] TO
+// role[, …] [WITH option[, …]] [GRANTED BY role]`. `on` is null for a role
+// grant; then `privileges` carries the granted role names (each with columns
+// null). `"all"` = ALL PRIVILEGES, and `allColumns` its column list, omitted
+// when none is written. `withGrantOption` is WITH GRANT OPTION on an object, and
+// on a role whether the WITH list grants ADMIN. `options` is that list, omitted
+// when it is a lone `ADMIN OPTION` / `ADMIN TRUE` (or absent); `grantedBy` is
+// omitted when absent.
 export type Grant = {
   kind: "grant";
   privileges: Privilege[] | "all";
+  allColumns?: string[];
   on: GrantObject | null;
   grantees: string[];
-  withGrantOption: boolean; // WITH GRANT OPTION (object) or WITH ADMIN OPTION (role)
+  withGrantOption: boolean;
+  options?: RoleGrantOption[];
+  grantedBy?: string;
   span: Span;
 };
 
+// `REVOKE [GRANT OPTION FOR] … ON … FROM …` or the role form `REVOKE [{ADMIN |
+// INHERIT | SET} OPTION FOR] role[, …] FROM …`, then `[GRANTED BY role]
+// [CASCADE | RESTRICT]`. `grantOptionFor` marks GRANT / ADMIN OPTION FOR;
+// `option` names INHERIT or SET OPTION FOR and is omitted otherwise.
 export type Revoke = {
   kind: "revoke";
   grantOptionFor: boolean; // GRANT OPTION FOR / ADMIN OPTION FOR
+  option?: "inherit" | "set";
   privileges: Privilege[] | "all";
+  allColumns?: string[];
   on: GrantObject | null;
   grantees: string[];
+  grantedBy?: string;
   behavior: "cascade" | "restrict" | null;
   span: Span;
 };
+
+// One `FOR {ROLE | USER} role[, …]` or `IN SCHEMA schema[, …]` clause of ALTER
+// DEFAULT PRIVILEGES, in the order written (PG lets each appear more than once
+// and only refuses that at execution).
+export type DefaultPrivilegesOption = { kind: "forRole"; roles: string[] } | { kind: "inSchema"; schemas: string[] };
+
+// The GRANT or REVOKE an ALTER DEFAULT PRIVILEGES applies: a `grant` / `revoke`
+// node's fields bar GRANTED BY, which PG takes none of here, and a role grant's
+// options; in place of `on`, `objectType` is the singular of TABLES / SEQUENCES
+// / FUNCTIONS / ROUTINES / TYPES / SCHEMAS.
+export type DefaultPrivilegesAction =
+  | (Omit<Grant, "on" | "options" | "grantedBy" | "span"> & { objectType: string })
+  | (Omit<Revoke, "on" | "option" | "grantedBy" | "span"> & { objectType: string });
+
+// `ALTER DEFAULT PRIVILEGES [option …] {GRANT | REVOKE} … ON {TABLES | …} …`.
+export type AlterDefaultPrivileges = {
+  kind: "alterDefaultPrivileges";
+  options: DefaultPrivilegesOption[];
+  action: DefaultPrivilegesAction;
+  span: Span;
+};
+
+// `DROP OWNED BY role[, …] [CASCADE | RESTRICT]` and `REASSIGN OWNED BY role[,
+// …] TO role`.
+export type DropOwned = { kind: "dropOwned"; roles: string[]; behavior: "cascade" | "restrict" | null; span: Span };
+export type ReassignOwned = { kind: "reassignOwned"; roles: string[]; newRole: string; span: Span };
 
 export type TransactionMode =
   | { kind: "isolation"; level: "serializable" | "repeatableRead" | "readCommitted" | "readUncommitted" }
@@ -1162,6 +1227,9 @@ export type Stmt =
   // DCL / TCL / session (Phase 9).
   | Grant
   | Revoke
+  | AlterDefaultPrivileges
+  | DropOwned
+  | ReassignOwned
   | Transaction
   | SetStmt
   | SetTransaction
@@ -4508,17 +4576,21 @@ function parseRoleOption(ctx: ParseContext<SqlTokenType>): RoleOption | null {
   }
 }
 
-// `CREATE {ROLE|USER} name [[WITH] option …]` — the lead word is consumed here,
-// as every PLAIN_CREATE handler's is.
-function createRoleRest(ctx: ParseContext<SqlTokenType>, user: boolean): Stmt {
+// `CREATE {ROLE|USER|GROUP} name [[WITH] option …]` — the lead word is consumed
+// here, as every PLAIN_CREATE handler's is.
+function createRoleRest(ctx: ParseContext<SqlTokenType>, lead: "role" | "user" | "group"): Stmt {
   const start = ctx.position();
-  ctx.parse(kw(user ? "user" : "role"));
+  ctx.parse(kw(lead));
   const name = ctx.parse(nameWord);
   // `with` is reserved, so it can only open the list.
   ctx.eat("ident", "with");
   const options: RoleOption[] = [];
   for (let option = parseRoleOption(ctx); option !== null; option = parseRoleOption(ctx)) options.push(option);
-  return { kind: "createRole", user, name, options, span: ctx.spanFrom(start) };
+  const user = lead === "user";
+  const span = ctx.spanFrom(start);
+  return lead === "group"
+    ? { kind: "createRole", user, group: true, name, options, span }
+    : { kind: "createRole", user, name, options, span };
 }
 
 // `WITH [CASCADED | LOCAL] CHECK OPTION` after a plain view's query, or null.
@@ -5198,8 +5270,9 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   schema: { parse: createSchemaRest },
   extension: { parse: createExtensionRest },
   tablespace: { parse: createTablespaceRest },
-  role: { parse: (ctx) => createRoleRest(ctx, false) },
-  user: { parse: (ctx) => createRoleRest(ctx, true) },
+  role: { parse: (ctx) => createRoleRest(ctx, "role") },
+  user: { parse: (ctx) => createRoleRest(ctx, "user") },
+  group: { parse: (ctx) => createRoleRest(ctx, "group") },
 };
 
 // REPLACEABLE_CREATE dispatch CONSUMES the lead word: these bodies are entered
@@ -5980,10 +6053,13 @@ const OBJECT_KINDS: readonly ObjectKind[] = [
 // `next` keyed by the word that may follow, and the croak over `next`'s keys.
 type ObjectKindTrie = { kind?: ObjectKind; next: Map<string, ObjectKindTrie>; expected: string };
 
-// The trie over the kinds `take` keeps, in OBJECT_KINDS order.
-function objectKindTrie(take: (kind: ObjectKind) => boolean): ObjectKindTrie {
+// The trie over the kinds `take` keeps, in `kinds` order.
+function objectKindTrie(
+  take: (kind: ObjectKind) => boolean,
+  kinds: readonly ObjectKind[] = OBJECT_KINDS,
+): ObjectKindTrie {
   const root: ObjectKindTrie = { next: new Map(), expected: "" };
-  for (const kind of OBJECT_KINDS) {
+  for (const kind of kinds) {
     if (!take(kind)) continue;
     let node = root;
     for (const w of kind.words ?? kind.objectType.split(" ")) {
@@ -6252,6 +6328,7 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
       return { kind: "alterExtension", name, action, span: ctx.spanFrom(start) };
     },
   },
+  default: { parse: alterDefaultPrivilegesRest },
 };
 // Every other kind the generic ALTER takes leads it here. A dedicated target
 // that takes one of these lead words must hand that word's generic kinds to
@@ -6373,6 +6450,14 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
       }
       const fields = { concurrently: false, ifExists, names: [[name]], behavior: null };
       return dropNode(ctx, start, "database", fields, force ? { force } : {});
+    },
+  },
+  // `DROP OWNED BY role[, …] [CASCADE|RESTRICT]` — the objects the roles own.
+  owned: {
+    parse: (ctx, start) => {
+      ctx.parse(kwseq("owned", "by"));
+      const roles = commaList(ctx, parseRoleSpec);
+      return { kind: "dropOwned", roles, behavior: ctx.parse(dropBehavior), span: ctx.spanFrom(start) };
     },
   },
   role: listDrop("role", unqualName, { behavior: false }),
@@ -6517,22 +6602,33 @@ const PRIVILEGE_WORDS: ReadonlySet<string> = new Set([
   "temp",
   "execute",
   "maintain",
+  // A parameter's privilege; reserved here, though not in PG.
+  "set",
 ]);
 
-// Object kinds a privilege may target (default TABLE when omitted).
-const GRANT_OBJECT_TYPES: ReadonlySet<string> = new Set([
-  "table",
-  "sequence",
-  "database",
-  "schema",
-  "function",
-  "procedure",
-  "routine",
-  "type",
-  "domain",
-  "language",
-  "tablespace",
-]);
+// The kinds a privilege may name ahead of its objects (PG's privilege_target),
+// read through the same kind trie and reference shapes as OBJECT_KINDS. Order
+// is gram.y's. TABLE is also the kind when none is written.
+const GRANT_KINDS: readonly ObjectKind[] = [
+  { objectType: "table", shape: "qualName" },
+  { objectType: "sequence", shape: "qualName" },
+  { objectType: "foreign data wrapper", shape: "name" },
+  { objectType: "foreign server", shape: "name" },
+  { objectType: "function", shape: "routine" },
+  { objectType: "procedure", shape: "routine" },
+  { objectType: "routine", shape: "routine" },
+  { objectType: "database", shape: "name" },
+  { objectType: "domain", shape: "qualName" },
+  { objectType: "language", shape: "name" },
+  { objectType: "large object", shape: "largeObject" },
+  // A dotted name: an extension's parameters are `ext.name`.
+  { objectType: "parameter", shape: "qualName" },
+  { objectType: "schema", shape: "name" },
+  { objectType: "tablespace", shape: "name" },
+  { objectType: "type", shape: "qualName" },
+];
+const GRANT_TABLE = GRANT_KINDS[0]!;
+const GRANT_OBJECTS = objectKindTrie(() => true, GRANT_KINDS);
 
 // Plural → singular for the `ALL {TABLES|…} IN SCHEMA` object form.
 const ALL_IN_SCHEMA: Record<string, string> = {
@@ -6543,11 +6639,26 @@ const ALL_IN_SCHEMA: Record<string, string> = {
   routines: "routine",
 };
 
+// Plural → singular for the `ON {TABLES|…}` of ALTER DEFAULT PRIVILEGES.
+const DEFAULT_PRIVILEGE_OBJECTS: Record<string, string> = {
+  tables: "table",
+  functions: "function",
+  routines: "routine",
+  sequences: "sequence",
+  types: "type",
+  schemas: "schema",
+};
+
 // One privilege keyword (or, in a role grant, a role name) with an optional
-// `(col, …)` column list. `nameWord` excludes reserved words, so privilege
-// keywords — several of which are reserved — are matched by value first.
+// `(col, …)` column list, or the two-word ALTER SYSTEM. `nameWord` excludes
+// reserved words, so privilege keywords — several of which are reserved — are
+// matched by value first.
 function parsePrivilege(ctx: ParseContext<SqlTokenType>): Privilege {
   const cur = ctx.peek();
+  if (ctx.is("ident", "alter") && ctx.peekAhead(1)?.value === "system") {
+    ctx.parse(kwseq("alter", "system"));
+    return { name: "alter system", columns: null };
+  }
   let n: string;
   if (cur !== null && cur.type === "ident" && PRIVILEGE_WORDS.has(cur.value)) {
     n = cur.value;
@@ -6557,6 +6668,18 @@ function parsePrivilege(ctx: ParseContext<SqlTokenType>): Privilege {
   }
   const columns = ctx.is("punc", "(") ? ctx.parse(columnList) : null;
   return { name: n, columns };
+}
+
+// `privilege[, …]`, or `ALL [PRIVILEGES] [(col, …)]` where `allowAll` admits
+// it; elsewhere the reserved ALL croaks as no name.
+function parsePrivileges(
+  ctx: ParseContext<SqlTokenType>,
+  allowAll: boolean,
+): { privileges: Privilege[] | "all"; allColumns?: string[] } {
+  if (!allowAll || !ctx.is("ident", "all")) return { privileges: commaList(ctx, parsePrivilege) };
+  ctx.next(); // ALL
+  ctx.eat("ident", "privileges"); // optional PRIVILEGES
+  return ctx.is("punc", "(") ? { privileges: "all", allColumns: ctx.parse(columnList) } : { privileges: "all" };
 }
 
 // The `ON …` object target (the `ON` keyword already consumed by the caller).
@@ -6569,16 +6692,29 @@ function parseGrantObject(ctx: ParseContext<SqlTokenType>): GrantObject {
     ctx.next(); // ALL
     const plural = ctx.next()!.value; // tables / sequences / …
     ctx.parse(kwseq("in", "schema"));
-    return { objectType: ALL_IN_SCHEMA[plural]!, names: [], inSchema: commaList(ctx, (c) => c.parse(qualName)) };
+    return { objectType: ALL_IN_SCHEMA[plural]!, names: [], inSchema: commaList(ctx, (c) => [c.parse(nameWord)]) };
   }
-  // `[objectType] name[, …]` — objectType defaults to TABLE when omitted.
-  let objectType = "table";
-  const cur = ctx.peek();
-  if (cur !== null && cur.type === "ident" && GRANT_OBJECT_TYPES.has(cur.value)) {
-    objectType = cur.value;
-    ctx.next();
-  }
-  return { objectType, names: commaList(ctx, (c) => c.parse(qualName)), inSchema: null };
+  // `[kind] object[, …]`. An unreserved kind word is the kind only when a name
+  // follows it, as in PG, so `ON function TO u` grants on a table called
+  // `function`; TABLE and FOREIGN, reserved, can be nothing else.
+  const tok = ctx.peek();
+  const kind =
+    tok?.type === "ident" &&
+    GRANT_OBJECTS.next.has(tok.value) &&
+    (RESERVED.has(tok.value) || isNameToken(ctx.peekAhead(1)))
+      ? parseObjectKind(ctx, GRANT_OBJECTS)
+      : GRANT_TABLE;
+  const refs = commaList<Omit<ObjectRef, "objectType">>(ctx, OBJECT_REF_SHAPES[kind.shape]);
+  const object: GrantObject = {
+    objectType: kind.objectType,
+    names: refs.flatMap((r) => (r.name === undefined ? [] : [r.name])),
+    inSchema: null,
+  };
+  // Only when some routine writes its argument list, so a name-only grant keeps
+  // the shape it always had.
+  if (refs.some((r) => r.signature !== undefined)) object.signatures = refs.map((r) => r.signature ?? null);
+  if (kind.shape === "largeObject") object.oids = refs.map((r) => r.oid!);
+  return object;
 }
 
 // A single grantee: `[GROUP] role`, PUBLIC, or a role spec (see parseRoleSpec).
@@ -6588,59 +6724,120 @@ function parseGrantee(ctx: ParseContext<SqlTokenType>): string {
   return parseRoleSpec(ctx);
 }
 
-// The shared `{privileges | ALL} [ON object] {TO|FROM} grantees` middle of
-// GRANT and REVOKE. `granteeKw` is "to" for GRANT, "from" for REVOKE.
+// The shared `privileges [ON object] {TO|FROM} grantees` middle of GRANT and
+// REVOKE. `granteeKw` is "to" for GRANT, "from" for REVOKE. `on` says whether
+// an `ON object` is optional (a privilege or a role grant), required (after
+// REVOKE GRANT OPTION FOR) or refused (after REVOKE {ADMIN|INHERIT|SET} OPTION
+// FOR); ALL is only ever an object's, so it requires ON too. A role grant's
+// grantees are plain roles, with no GROUP noise word.
 function parseGrantBody(
   ctx: ParseContext<SqlTokenType>,
   granteeKw: string,
-): { privileges: Privilege[] | "all"; on: GrantObject | null; grantees: string[] } {
-  let privileges: Privilege[] | "all";
-  if (ctx.is("ident", "all")) {
-    ctx.next(); // ALL
-    ctx.eat("ident", "privileges"); // optional PRIVILEGES
-    privileges = "all";
-  } else {
-    privileges = commaList(ctx, parsePrivilege);
+  on: "optional" | "required" | "refused",
+): { privileges: Privilege[] | "all"; allColumns?: string[]; on: GrantObject | null; grantees: string[] } {
+  const privileges = parsePrivileges(ctx, on !== "refused");
+  let object: GrantObject | null = null;
+  if (on === "required" || privileges.privileges === "all") {
+    ctx.parse(kw("on"));
+    object = parseGrantObject(ctx);
+  } else if (on === "optional" && ctx.eat("ident", "on") !== null) {
+    object = parseGrantObject(ctx);
   }
-  const on = ctx.eat("ident", "on") !== null ? parseGrantObject(ctx) : null;
   ctx.parse(kw(granteeKw));
-  return { privileges, on, grantees: commaList(ctx, parseGrantee) };
+  const grantees = commaList(ctx, object === null ? parseRoleSpec : parseGrantee);
+  return { ...privileges, on: object, grantees };
 }
+
+// `GRANTED BY role`, or undefined when absent.
+function parseGrantedBy(ctx: ParseContext<SqlTokenType>): string | undefined {
+  if (!ctx.is("ident", "granted")) return undefined;
+  ctx.parse(kwseq("granted", "by"));
+  return parseRoleSpec(ctx);
+}
+
+// One `{ADMIN | INHERIT | SET} {OPTION | TRUE | FALSE}` entry of a role grant's
+// WITH list. PG's grammar takes any word for the name and refuses the others
+// only when it runs the grant; these three, quoted or not, are all it knows.
+const ROLE_GRANT_OPTIONS = ["admin", "inherit", "set"] as const;
+function parseRoleGrantOption(ctx: ParseContext<SqlTokenType>): RoleGrantOption {
+  const tok = ctx.peek();
+  const name = ROLE_GRANT_OPTIONS.find((n) => (tok?.type === "ident" || tok?.type === "qident") && tok.value === n);
+  if (name === undefined) return ctx.croak(`Expected ${quoteList(ROLE_GRANT_OPTIONS)} but found ${describeFound(tok)}`);
+  ctx.next();
+  if (ctx.eat("ident", "option") !== null || ctx.eat("ident", "true") !== null) return { name, value: true };
+  if (ctx.eat("ident", "false") !== null) return { name, value: false };
+  return ctx.croak(`Expected ${quoteList(["option", "true", "false"])} but found ${describeFound(ctx.peek())}`);
+}
+
+// The words a REVOKE's `word OPTION FOR` may open with: GRANT for an object's
+// privileges, the rest for a role's.
+const REVOKE_OPTION_WORDS: ReadonlySet<string> = new Set(["grant", "admin", "inherit", "set"]);
 
 const grantStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
     const revoke = ctx.eat("ident", "revoke") !== null;
     if (!revoke) ctx.parse(kw("grant"));
-    // REVOKE [{GRANT|ADMIN} OPTION FOR] …
-    let grantOptionFor = false;
     if (revoke) {
+      // REVOKE [{GRANT|ADMIN|INHERIT|SET} OPTION FOR] …
       const w = ctx.peek();
-      if (
+      // A role option's name may be quoted, as any ColId may; GRANT, reserved,
+      // only bare.
+      const optionFor =
         w !== null &&
-        w.type === "ident" &&
-        (w.value === "grant" || w.value === "admin") &&
+        (w.type === "ident" || (w.type === "qident" && w.value !== "grant")) &&
+        REVOKE_OPTION_WORDS.has(w.value) &&
+        ctx.peekAhead(1)?.type === "ident" &&
         ctx.peekAhead(1)?.value === "option"
-      ) {
-        ctx.next(); // GRANT / ADMIN
-        ctx.next(); // OPTION
-        ctx.parse(kw("for"));
-        grantOptionFor = true;
+          ? w.value
+          : null;
+      if (optionFor !== null) {
+        ctx.next(); // the option name
+        ctx.parse(kwseq("option", "for"));
+      }
+      const on = optionFor === null ? "optional" : optionFor === "grant" ? "required" : "refused";
+      const body = parseGrantBody(ctx, "from", on);
+      const grantedBy = parseGrantedBy(ctx);
+      return {
+        kind: "revoke",
+        grantOptionFor: optionFor === "grant" || optionFor === "admin",
+        ...(optionFor === "inherit" || optionFor === "set" ? { option: optionFor } : {}),
+        privileges: body.privileges,
+        ...(body.allColumns !== undefined ? { allColumns: body.allColumns } : {}),
+        on: body.on,
+        grantees: body.grantees,
+        ...(grantedBy !== undefined ? { grantedBy } : {}),
+        behavior: ctx.parse(dropBehavior),
+        span: ctx.spanFrom(start),
+      };
+    }
+    const body = parseGrantBody(ctx, "to", "optional");
+    // An object grant's WITH is GRANT OPTION; a role grant's a list of options.
+    let withGrantOption = false;
+    let options: RoleGrantOption[] | undefined;
+    if (ctx.eat("ident", "with") !== null) {
+      if (body.on !== null) {
+        ctx.parse(kwseq("grant", "option"));
+        withGrantOption = true;
+      } else {
+        options = commaList(ctx, parseRoleGrantOption);
+        for (const o of options) if (o.name === "admin") withGrantOption = o.value;
+        // The lone ADMIN grant is what `withGrantOption` already says.
+        if (options.length === 1 && options[0]!.name === "admin" && options[0]!.value) options = undefined;
       }
     }
-    const { privileges, on, grantees } = parseGrantBody(ctx, revoke ? "from" : "to");
-    if (revoke) {
-      const behavior = ctx.parse(dropBehavior);
-      return { kind: "revoke", grantOptionFor, privileges, on, grantees, behavior, span: ctx.spanFrom(start) };
-    }
-    // GRANT: WITH GRANT OPTION (object) or WITH ADMIN OPTION (role).
-    let withGrantOption = false;
-    if (ctx.eat("ident", "with") !== null) {
-      if (ctx.eat("ident", "grant") === null) ctx.parse(kw("admin"));
-      ctx.parse(kw("option"));
-      withGrantOption = true;
-    }
-    return { kind: "grant", privileges, on, grantees, withGrantOption, span: ctx.spanFrom(start) };
+    const grantedBy = parseGrantedBy(ctx);
+    return {
+      kind: "grant",
+      privileges: body.privileges,
+      ...(body.allColumns !== undefined ? { allColumns: body.allColumns } : {}),
+      on: body.on,
+      grantees: body.grantees,
+      withGrantOption,
+      ...(options !== undefined ? { options } : {}),
+      ...(grantedBy !== undefined ? { grantedBy } : {}),
+      span: ctx.spanFrom(start),
+    };
   },
   {
     expected: '"grant" or "revoke"',
@@ -6649,6 +6846,65 @@ const grantStmt = custom<Stmt, SqlTokenType>(
       { type: "ident", value: "revoke" },
     ],
   },
+);
+
+// `ALTER DEFAULT PRIVILEGES [FOR {ROLE|USER} role[, …] | IN SCHEMA s[, …]]…
+// {GRANT | REVOKE [GRANT OPTION FOR]} privileges ON {TABLES | …} {TO|FROM}
+// grantee[, …] …`, entered at DEFAULT.
+function alterDefaultPrivilegesRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.parse(kwseq("default", "privileges"));
+  const options: DefaultPrivilegesOption[] = [];
+  for (;;) {
+    if (ctx.eat("ident", "for") !== null) {
+      if (ctx.eat("ident", "role") === null && ctx.eat("ident", "user") === null) {
+        ctx.croak(`Expected ${quoteList(["role", "user"])} but found ${describeFound(ctx.peek())}`);
+      }
+      options.push({ kind: "forRole", roles: commaList(ctx, parseRoleSpec) });
+    } else if (ctx.is("ident", "in")) {
+      ctx.parse(kwseq("in", "schema"));
+      options.push({ kind: "inSchema", schemas: commaList(ctx, (c) => c.parse(nameWord)) });
+    } else {
+      break;
+    }
+  }
+  const revoke = ctx.eat("ident", "revoke") !== null;
+  if (!revoke && ctx.eat("ident", "grant") === null) {
+    ctx.croak(`Expected ${quoteList(["for", "in", "grant", "revoke"])} but found ${describeFound(ctx.peek())}`);
+  }
+  const grantOptionFor = revoke && ctx.is("ident", "grant") && ctx.peekAhead(1)?.value === "option";
+  if (grantOptionFor) ctx.parse(kwseq("grant", "option", "for"));
+  const privileges = parsePrivileges(ctx, true);
+  ctx.parse(kw("on"));
+  const plural = ctx.peek();
+  if (plural?.type !== "ident" || !Object.hasOwn(DEFAULT_PRIVILEGE_OBJECTS, plural.value)) {
+    ctx.croak(`Expected ${keyList(DEFAULT_PRIVILEGE_OBJECTS)} but found ${describeFound(plural)}`);
+  }
+  ctx.next();
+  const objectType = DEFAULT_PRIVILEGE_OBJECTS[plural!.value]!;
+  ctx.parse(kw(revoke ? "from" : "to"));
+  const grantees = commaList(ctx, parseGrantee);
+  let action: DefaultPrivilegesAction;
+  if (revoke) {
+    action = { kind: "revoke", grantOptionFor, ...privileges, objectType, grantees, behavior: ctx.parse(dropBehavior) };
+  } else {
+    const withGrantOption = ctx.eat("ident", "with") !== null;
+    if (withGrantOption) ctx.parse(kwseq("grant", "option"));
+    action = { kind: "grant", ...privileges, objectType, grantees, withGrantOption };
+  }
+  return { kind: "alterDefaultPrivileges", options, action, span: ctx.spanFrom(start) };
+}
+
+// `REASSIGN OWNED BY role[, …] TO role`. REASSIGN stays unreserved; nothing
+// else opens a statement with it.
+const reassignStmt = custom<Stmt, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    ctx.parse(kwseq("reassign", "owned", "by"));
+    const roles = commaList(ctx, parseRoleSpec);
+    ctx.parse(kw("to"));
+    return { kind: "reassignOwned", roles, newRole: parseRoleSpec(ctx), span: ctx.spanFrom(start) };
+  },
+  { expected: '"reassign"', first: [{ type: "ident", value: "reassign" }] },
 );
 
 // One transaction characteristic: ISOLATION LEVEL …, READ WRITE|ONLY,
@@ -8904,6 +9160,7 @@ const utilityStmt = oneOf(
   moveStmt,
   closeStmt,
   copyStmt,
+  reassignStmt,
 );
 const statementBody = oneOf(ddlStmt, utilityStmt, dmlStatement).describe("a statement");
 // Each statement owns its trailing `;`; `;` is also the recovery sync point.

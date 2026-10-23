@@ -3794,6 +3794,521 @@ describe("SQL-lite GRANT / REVOKE", () => {
   });
 });
 
+// --- GRANT / REVOKE: object kinds, role grant options, GRANTED BY ---
+
+describe("SQL-lite GRANT / REVOKE object kinds and options", () => {
+  const type = (n: string) => ({ name: n, args: [], array: false });
+  const arg = (typeName: string, argName: string | null = null, mode: string | null = null) => ({
+    mode,
+    name: argName,
+    type: type(typeName),
+    defaultValue: null,
+  });
+  const grant = (over: Record<string, unknown>) => ({ kind: "grant", withGrantOption: false, ...over });
+  const usage = [{ name: "usage", columns: null }];
+
+  it("names routines with their argument types, the way pg_dump writes them", () => {
+    expect(firstStmt("GRANT ALL ON PROCEDURE app.archive(IN p_id integer), cleanup TO u;")).toEqual(
+      grant({
+        privileges: "all",
+        on: {
+          objectType: "procedure",
+          names: [["app", "archive"], ["cleanup"]],
+          inSchema: null,
+          signatures: [{ star: false, args: [arg("integer", "p_id", "in")] }, null],
+        },
+        grantees: ["u"],
+      }),
+    );
+    expect(firstStmt("REVOKE EXECUTE ON FUNCTION f(), g(text, int) FROM PUBLIC;")).toEqual({
+      kind: "revoke",
+      grantOptionFor: false,
+      privileges: [{ name: "execute", columns: null }],
+      on: {
+        objectType: "function",
+        names: [["f"], ["g"]],
+        inSchema: null,
+        signatures: [
+          { star: false, args: [] },
+          { star: false, args: [arg("text"), arg("int")] },
+        ],
+      },
+      grantees: ["public"],
+      behavior: null,
+    });
+    // With no argument list anywhere, the object keeps its plain shape.
+    expect((firstStmt("GRANT EXECUTE ON ROUTINE r, s TO u;") as any).on).toEqual({
+      objectType: "routine",
+      names: [["r"], ["s"]],
+      inSchema: null,
+    });
+    // A routine reference takes no argument defaults, as on DROP.
+    expect(() => sqlLite.parse("GRANT EXECUTE ON FUNCTION f(a int = 1) TO u;")).toThrow(/takes no argument defaults/);
+  });
+
+  it("parses ALL … IN SCHEMA for every plural PG allows", () => {
+    expect(firstStmt("GRANT EXECUTE ON ALL ROUTINES IN SCHEMA a, b TO u;")).toEqual(
+      grant({
+        privileges: [{ name: "execute", columns: null }],
+        on: { objectType: "routine", names: [], inSchema: [["a"], ["b"]] },
+        grantees: ["u"],
+      }),
+    );
+    for (const [plural, objectType] of [
+      ["TABLES", "table"],
+      ["SEQUENCES", "sequence"],
+      ["FUNCTIONS", "function"],
+      ["PROCEDURES", "procedure"],
+    ]) {
+      expect((firstStmt(`GRANT ALL ON ALL ${plural} IN SCHEMA s TO u;`) as any).on).toEqual({
+        objectType,
+        names: [],
+        inSchema: [["s"]],
+      });
+    }
+    // A schema name has one part.
+    expect(() => sqlLite.parse("GRANT ALL ON ALL TABLES IN SCHEMA a.b TO u;")).toThrow(/Expected "to" but found "\."/);
+  });
+
+  it("parses the foreign-data, large-object and parameter kinds", () => {
+    const on = (sql: string) => (firstStmt(sql) as any).on;
+    expect(on("GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw, w2 TO u;")).toEqual({
+      objectType: "foreign data wrapper",
+      names: [["postgres_fdw"], ["w2"]],
+      inSchema: null,
+    });
+    expect(on("GRANT USAGE ON FOREIGN SERVER remote TO u;")).toEqual({
+      objectType: "foreign server",
+      names: [["remote"]],
+      inSchema: null,
+    });
+    expect(firstStmt("GRANT SELECT, UPDATE ON LARGE OBJECT 16401, -5 TO u;")).toEqual(
+      grant({
+        privileges: [
+          { name: "select", columns: null },
+          { name: "update", columns: null },
+        ],
+        on: { objectType: "large object", names: [], inSchema: null, oids: [16401, -5] },
+        grantees: ["u"],
+      }),
+    );
+    expect(firstStmt("GRANT SET, ALTER SYSTEM ON PARAMETER work_mem, plpgsql.extra_warnings TO u;")).toEqual(
+      grant({
+        privileges: [
+          { name: "set", columns: null },
+          { name: "alter system", columns: null },
+        ],
+        on: { objectType: "parameter", names: [["work_mem"], ["plpgsql", "extra_warnings"]], inSchema: null },
+        grantees: ["u"],
+      }),
+    );
+    expect(firstStmt("GRANT SELECT ON LARGE OBJECT +7 TO u;")).toEqual(
+      grant({
+        privileges: [{ name: "select", columns: null }],
+        on: { objectType: "large object", names: [], inSchema: null, oids: [7] },
+        grantees: ["u"],
+      }),
+    );
+    expect(() => sqlLite.parse("GRANT SELECT ON LARGE OBJECT lo TO u;")).toThrow(/Expected a number but found "lo"/);
+    expect(() => sqlLite.parse("GRANT USAGE ON FOREIGN TABLE t TO u;")).toThrow(
+      /Expected "data" or "server" but found "table"/,
+    );
+  });
+
+  it("parses the remaining named kinds, single-part where PG takes a plain name", () => {
+    const kinds: [string, string, string[]][] = [
+      ["SEQUENCE s.q", "sequence", ["s", "q"]],
+      ["DATABASE appdb", "database", ["appdb"]],
+      ["DOMAIN s.d", "domain", ["s", "d"]],
+      ["LANGUAGE plpgsql", "language", ["plpgsql"]],
+      ["SCHEMA app", "schema", ["app"]],
+      ["TABLESPACE fast", "tablespace", ["fast"]],
+      ["TYPE s.mood", "type", ["s", "mood"]],
+    ];
+    for (const [target, objectType, name] of kinds) {
+      expect((firstStmt(`GRANT USAGE ON ${target} TO u;`) as any).on).toEqual({
+        objectType,
+        names: [name],
+        inSchema: null,
+      });
+    }
+    for (const target of ["SCHEMA a.b", "DATABASE a.b", "LANGUAGE a.b", "TABLESPACE a.b"]) {
+      expect(() => sqlLite.parse(`GRANT USAGE ON ${target} TO u;`)).toThrow(/Expected "to" but found "\."/);
+    }
+  });
+
+  it("reads a kind word with no name after it as a table's name", () => {
+    expect((firstStmt("GRANT SELECT ON function, parameter, type.t TO u;") as any).on).toEqual({
+      objectType: "table",
+      names: [["function"], ["parameter"], ["type", "t"]],
+      inSchema: null,
+    });
+    expect((firstStmt("GRANT SELECT ON large TO u;") as any).on).toEqual({
+      objectType: "table",
+      names: [["large"]],
+      inSchema: null,
+    });
+  });
+
+  it("parses ALL with a column list", () => {
+    expect(firstStmt("GRANT ALL PRIVILEGES (a, b) ON t TO u;")).toEqual(
+      grant({
+        privileges: "all",
+        allColumns: ["a", "b"],
+        on: { objectType: "table", names: [["t"]], inSchema: null },
+        grantees: ["u"],
+      }),
+    );
+    expect(firstStmt("REVOKE ALL (a) ON t FROM u;")).toEqual({
+      kind: "revoke",
+      grantOptionFor: false,
+      privileges: "all",
+      allColumns: ["a"],
+      on: { objectType: "table", names: [["t"]], inSchema: null },
+      grantees: ["u"],
+      behavior: null,
+    });
+  });
+
+  it("parses GRANTED BY on object grants and revokes", () => {
+    expect(
+      firstStmt("GRANT USAGE ON SCHEMA s TO GROUP g, CURRENT_ROLE WITH GRANT OPTION GRANTED BY SESSION_USER;"),
+    ).toEqual(
+      grant({
+        privileges: usage,
+        on: { objectType: "schema", names: [["s"]], inSchema: null },
+        grantees: ["g", "current_role"],
+        withGrantOption: true,
+        grantedBy: "session_user",
+      }),
+    );
+    expect(firstStmt("REVOKE GRANT OPTION FOR USAGE ON SCHEMA s FROM u GRANTED BY CURRENT_USER RESTRICT;")).toEqual({
+      kind: "revoke",
+      grantOptionFor: true,
+      privileges: usage,
+      on: { objectType: "schema", names: [["s"]], inSchema: null },
+      grantees: ["u"],
+      grantedBy: "current_user",
+      behavior: "restrict",
+    });
+  });
+
+  it("takes the new object forms as CREATE SCHEMA elements", () => {
+    const stmt = firstStmt(
+      "CREATE SCHEMA s GRANT EXECUTE ON FUNCTION f(int) TO u GRANTED BY x CREATE TABLE t (a int);",
+    ) as any;
+    expect(stmt.elements.map((e: any) => e.kind)).toEqual(["grant", "createTable"]);
+    expect(stmt.elements[0]).toEqual(
+      grant({
+        privileges: [{ name: "execute", columns: null }],
+        on: {
+          objectType: "function",
+          names: [["f"]],
+          inSchema: null,
+          signatures: [{ star: false, args: [arg("int")] }],
+        },
+        grantees: ["u"],
+        grantedBy: "x",
+      }),
+    );
+  });
+
+  it("parses a role grant's WITH options and GRANTED BY", () => {
+    expect(firstStmt("GRANT app_reader TO app_owner WITH INHERIT TRUE GRANTED BY postgres;")).toEqual(
+      grant({
+        privileges: [{ name: "app_reader", columns: null }],
+        on: null,
+        grantees: ["app_owner"],
+        options: [{ name: "inherit", value: true }],
+        grantedBy: "postgres",
+      }),
+    );
+    expect(firstStmt("GRANT a, b TO c, CURRENT_USER WITH ADMIN OPTION, INHERIT FALSE, SET TRUE;")).toEqual(
+      grant({
+        privileges: [
+          { name: "a", columns: null },
+          { name: "b", columns: null },
+        ],
+        on: null,
+        grantees: ["c", "current_user"],
+        withGrantOption: true,
+        options: [
+          { name: "admin", value: true },
+          { name: "inherit", value: false },
+          { name: "set", value: true },
+        ],
+      }),
+    );
+    // `withGrantOption` follows ADMIN; the lone ADMIN grant needs no options.
+    expect(firstStmt('GRANT r TO u WITH ADMIN FALSE, "set" OPTION;')).toEqual(
+      grant({
+        privileges: [{ name: "r", columns: null }],
+        on: null,
+        grantees: ["u"],
+        options: [
+          { name: "admin", value: false },
+          { name: "set", value: true },
+        ],
+      }),
+    );
+    expect(firstStmt("GRANT r TO u WITH ADMIN TRUE;")).toEqual(
+      grant({ privileges: [{ name: "r", columns: null }], on: null, grantees: ["u"], withGrantOption: true }),
+    );
+  });
+
+  it("parses REVOKE {ADMIN | INHERIT | SET} OPTION FOR on a role", () => {
+    expect(firstStmt("REVOKE INHERIT OPTION FOR r FROM u GRANTED BY x CASCADE;")).toEqual({
+      kind: "revoke",
+      grantOptionFor: false,
+      option: "inherit",
+      privileges: [{ name: "r", columns: null }],
+      on: null,
+      grantees: ["u"],
+      grantedBy: "x",
+      behavior: "cascade",
+    });
+    expect(firstStmt("REVOKE SET OPTION FOR r FROM u;")).toEqual({
+      kind: "revoke",
+      grantOptionFor: false,
+      option: "set",
+      privileges: [{ name: "r", columns: null }],
+      on: null,
+      grantees: ["u"],
+      behavior: null,
+    });
+    // The option's name may be quoted, as any name may.
+    expect(firstStmt('REVOKE "set" OPTION FOR r FROM u;')).toEqual({
+      kind: "revoke",
+      grantOptionFor: false,
+      option: "set",
+      privileges: [{ name: "r", columns: null }],
+      on: null,
+      grantees: ["u"],
+      behavior: null,
+    });
+    expect(firstStmt("REVOKE ADMIN OPTION FOR r FROM u;")).toEqual({
+      kind: "revoke",
+      grantOptionFor: true,
+      privileges: [{ name: "r", columns: null }],
+      on: null,
+      grantees: ["u"],
+      behavior: null,
+    });
+  });
+
+  it("rejects what PG's grammar refuses", () => {
+    const fails = (text: string) => () => sqlLite.parse(text);
+    // ALL is an object's; a role grant names roles, and its grantees take no GROUP.
+    expect(fails("GRANT ALL TO u;")).toThrow(/Expected "on" but found "to"/);
+    expect(fails("GRANT r TO GROUP u;")).toThrow(/Expected a name but found "group"/);
+    expect(fails("REVOKE r FROM GROUP u;")).toThrow(/Expected a name but found "group"/);
+    // Each kind of grant has its own WITH.
+    expect(fails("GRANT SELECT ON t TO u WITH ADMIN OPTION;")).toThrow(/Expected "grant option" but found "admin"/);
+    expect(fails("GRANT r TO u WITH GRANT OPTION;")).toThrow(/Expected "admin", "inherit" or "set" but found "grant"/);
+    expect(fails("GRANT r TO u WITH INHERIT;")).toThrow(/Expected "option", "true" or "false" but found ";"/);
+    expect(fails("GRANT r TO u WITH ADMIN OPTION, ;")).toThrow(/Expected "admin", "inherit" or "set" but found ";"/);
+    // GRANT OPTION FOR revokes an object's privileges, the others a role's.
+    expect(fails("REVOKE GRANT OPTION FOR r FROM u;")).toThrow(/Expected "on" but found "from"/);
+    expect(fails("REVOKE ADMIN OPTION FOR SELECT ON t FROM u;")).toThrow(/Expected "from" but found "on"/);
+    expect(fails("REVOKE ADMIN OPTION FOR ALL ON t FROM u;")).toThrow(/Expected a name but found "all"/);
+    expect(fails("REVOKE SELECT ON t FROM u CASCADE GRANTED BY x;")).toThrow(ParseError);
+    expect(fails("GRANT SELECT ON t TO u GRANTED x;")).toThrow(/Expected "by" but found "x"/);
+  });
+});
+
+// --- ALTER DEFAULT PRIVILEGES ---
+
+describe("SQL-lite ALTER DEFAULT PRIVILEGES", () => {
+  it("parses FOR ROLE / IN SCHEMA options and a GRANT", () => {
+    expect(
+      firstStmt("ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA app GRANT SELECT ON TABLES TO app_reader;"),
+    ).toEqual({
+      kind: "alterDefaultPrivileges",
+      options: [
+        { kind: "forRole", roles: ["app_owner"] },
+        { kind: "inSchema", schemas: ["app"] },
+      ],
+      action: {
+        kind: "grant",
+        privileges: [{ name: "select", columns: null }],
+        objectType: "table",
+        grantees: ["app_reader"],
+        withGrantOption: false,
+      },
+    });
+  });
+
+  it("parses a REVOKE, repeated options and every object plural", () => {
+    expect(
+      firstStmt(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA a, b FOR USER x, CURRENT_USER IN SCHEMA c REVOKE GRANT OPTION FOR ALL PRIVILEGES ON FUNCTIONS FROM PUBLIC, GROUP g CASCADE;",
+      ),
+    ).toEqual({
+      kind: "alterDefaultPrivileges",
+      options: [
+        { kind: "inSchema", schemas: ["a", "b"] },
+        { kind: "forRole", roles: ["x", "current_user"] },
+        { kind: "inSchema", schemas: ["c"] },
+      ],
+      action: {
+        kind: "revoke",
+        grantOptionFor: true,
+        privileges: "all",
+        objectType: "function",
+        grantees: ["public", "g"],
+        behavior: "cascade",
+      },
+    });
+    for (const [plural, objectType] of [
+      ["TABLES", "table"],
+      ["FUNCTIONS", "function"],
+      ["ROUTINES", "routine"],
+      ["SEQUENCES", "sequence"],
+      ["TYPES", "type"],
+      ["SCHEMAS", "schema"],
+    ]) {
+      const stmt = firstStmt(`ALTER DEFAULT PRIVILEGES GRANT ALL ON ${plural} TO u WITH GRANT OPTION;`) as any;
+      expect(stmt.options).toEqual([]);
+      expect(stmt.action).toEqual({
+        kind: "grant",
+        privileges: "all",
+        objectType,
+        grantees: ["u"],
+        withGrantOption: true,
+      });
+    }
+  });
+
+  it("parses ALL with a column list", () => {
+    expect(firstStmt("ALTER DEFAULT PRIVILEGES GRANT ALL (c) ON TABLES TO u;")).toEqual({
+      kind: "alterDefaultPrivileges",
+      options: [],
+      action: {
+        kind: "grant",
+        privileges: "all",
+        allColumns: ["c"],
+        objectType: "table",
+        grantees: ["u"],
+        withGrantOption: false,
+      },
+    });
+  });
+
+  it("rejects malformed ALTER DEFAULT PRIVILEGES", () => {
+    const fails = (text: string) => () => sqlLite.parse(text);
+    expect(fails("ALTER DEFAULT PRIVILEGES GRANT SELECT ON PROCEDURES TO u;")).toThrow(
+      /Expected "tables", "functions", "routines", "sequences", "types" or "schemas" but found "procedures"/,
+    );
+    expect(fails("ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLE t TO u;")).toThrow(/but found "table"/);
+    expect(fails("ALTER DEFAULT PRIVILEGES SET x;")).toThrow(
+      /Expected "for", "in", "grant" or "revoke" but found "set"/,
+    );
+    expect(fails("ALTER DEFAULT PRIVILEGES FOR GROUP g GRANT ALL ON TABLES TO u;")).toThrow(
+      /Expected "role" or "user" but found "group"/,
+    );
+    expect(fails("ALTER DEFAULT PRIVILEGES IN SCHEMA a.b GRANT ALL ON TABLES TO u;")).toThrow(ParseError);
+    // PG takes no GRANTED BY here.
+    expect(fails("ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO u GRANTED BY x;")).toThrow(ParseError);
+    expect(fails("ALTER DEFAULT PRIVILEGES REVOKE ALL ON TABLES FROM u GRANTED BY x;")).toThrow(ParseError);
+    expect(fails("ALTER DEFAULT GRANT ALL ON TABLES TO u;")).toThrow(/Expected "privileges" but found "grant"/);
+  });
+});
+
+// --- DROP OWNED / REASSIGN OWNED / CREATE GROUP ---
+
+describe("SQL-lite DROP OWNED", () => {
+  it("parses DROP OWNED BY with an optional behavior", () => {
+    expect(firstStmt("DROP OWNED BY old_role, CURRENT_USER CASCADE;")).toEqual({
+      kind: "dropOwned",
+      roles: ["old_role", "current_user"],
+      behavior: "cascade",
+    });
+    expect(firstStmt("DROP OWNED BY r;")).toEqual({ kind: "dropOwned", roles: ["r"], behavior: null });
+    expect(firstStmt("DROP OWNED BY r RESTRICT;")).toEqual({ kind: "dropOwned", roles: ["r"], behavior: "restrict" });
+    expect(() => sqlLite.parse("DROP OWNED r;")).toThrow(/Expected "by" but found "r"/);
+  });
+});
+
+describe("SQL-lite REASSIGN OWNED", () => {
+  it("parses REASSIGN OWNED BY … TO", () => {
+    expect(firstStmt("REASSIGN OWNED BY a, SESSION_USER TO CURRENT_ROLE;")).toEqual({
+      kind: "reassignOwned",
+      roles: ["a", "session_user"],
+      newRole: "current_role",
+    });
+    expect(() => sqlLite.parse("REASSIGN OWNED BY a;")).toThrow(/Expected "to" but found ";"/);
+    expect(() => sqlLite.parse("REASSIGN OWNED BY a TO b, c;")).toThrow(ParseError);
+  });
+});
+
+describe("SQL-lite CREATE GROUP", () => {
+  it("parses CREATE GROUP with the role options", () => {
+    expect(firstStmt("CREATE GROUP devs;")).toEqual({
+      kind: "createRole",
+      user: false,
+      group: true,
+      name: "devs",
+      options: [],
+    });
+    expect(firstStmt("CREATE GROUP g WITH USER a, b IN ROLE parent;")).toEqual({
+      kind: "createRole",
+      user: false,
+      group: true,
+      name: "g",
+      options: [
+        { kind: "role", roles: ["a", "b"] },
+        { kind: "inRole", roles: ["parent"] },
+      ],
+    });
+    expect(firstStmt("CREATE ROLE r;")).not.toHaveProperty("group");
+    expect(() => sqlLite.parse("CREATE GROUP;")).toThrow(/Expected a name but found ";"/);
+  });
+});
+
+describe("SQL-lite privilege words", () => {
+  it("keeps the privilege words unreserved as names and aliases", () => {
+    const words = [
+      ...["owned", "reassign", "privileges", "admin", "inherit", "granted", "parameter", "wrapper"],
+      ...["server", "large", "object", "system", "types", "schemas", "tables", "routines"],
+    ];
+    expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(name(w))));
+    expect(firstStmt("CREATE TABLE types (schemas int);")).toMatchObject({ name: ["types"] });
+    expect(
+      (firstStmt("SELECT 1 AS owned, 2 granted, 3 reassign FROM reassign AS privileges;") as any).columns,
+    ).toHaveLength(3);
+    expect(firstStmt("CREATE TABLE reassign (owned int, granted int, parameter int);")).toMatchObject({
+      name: ["reassign"],
+    });
+    expect(firstStmt("DROP OWNED BY owned;")).toMatchObject({ roles: ["owned"] });
+    expect(firstStmt("REASSIGN OWNED BY reassign TO granted;")).toMatchObject({
+      roles: ["reassign"],
+      newRole: "granted",
+    });
+    expect(firstStmt("GRANT admin, inherit TO granted WITH INHERIT OPTION;")).toMatchObject({
+      privileges: [
+        { name: "admin", columns: null },
+        { name: "inherit", columns: null },
+      ],
+      grantees: ["granted"],
+    });
+    expect(firstStmt("GRANT SELECT (owned, granted) ON privileges TO admin GRANTED BY inherit;")).toMatchObject({
+      privileges: [{ name: "select", columns: ["owned", "granted"] }],
+      on: { names: [["privileges"]] },
+      grantees: ["admin"],
+      grantedBy: "inherit",
+    });
+    expect(
+      firstStmt("ALTER DEFAULT PRIVILEGES FOR ROLE owned IN SCHEMA granted GRANT ALL ON TABLES TO admin;"),
+    ).toMatchObject({
+      options: [
+        { kind: "forRole", roles: ["owned"] },
+        { kind: "inSchema", schemas: ["granted"] },
+      ],
+    });
+    expect(firstStmt("DROP TABLE owned;")).toMatchObject({ kind: "drop", names: [["owned"]] });
+  });
+});
+
 // --- Phase 9: transaction control ---
 
 describe("SQL-lite transaction control", () => {
