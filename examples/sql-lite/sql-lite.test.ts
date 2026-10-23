@@ -5135,12 +5135,10 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
   });
 
   it("reads a typed literal only when the whole spelling is followed by a string", () => {
-    // A quoted lead is an ordinary name, as it is in typeRef. That is a
-    // deliberate narrowing: PG's general `type 'string'` form also takes a
-    // quoted or qualified type name (`"char" 'a'`), which this grammar does not
-    // implement — only the three bare datetime words lead a literal here.
-    expect(() => sqlLite.parse(`SELECT "date" 'x';`)).toThrow(/Expected ";" but found "x"/);
-    // So is a lead whose tail is not followed by a string — no word is taken.
+    // A quoted lead is a type name like any other, and leads a literal as PG's
+    // general `type 'string'` form has it.
+    expect(colExpr(`"date" 'x'`)).toEqual(typed(ct("date"), "x"));
+    // A lead whose tail is not followed by a string is a name — no word is taken.
     expect(() => sqlLite.parse("SELECT timestamp with time zone FROM t;")).toThrow(/Expected ";" but found "with"/);
     // A lex error in the lookahead past the lead word must not cost the syntax
     // error the statement already had.
@@ -5158,8 +5156,9 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     expect(() => sqlLite.parse("SELECT timestamp with time zone(3) 'x';")).toThrow(/Expected ";" but found "with"/);
     // Nor does it take anything but an integer one.
     expect(() => sqlLite.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
-    // DATE takes no precision, so `date(3)` is a call and the string a stray.
-    expect(() => sqlLite.parse("SELECT date(3) 'x';")).toThrow(/Expected ";" but found "x"/);
+    // `date` is no keyword to PG, so `date(3) 'x'` is its generic
+    // `name(typmod) 'string'` form, as `varchar(3) 'abc'` is.
+    expect(colExpr("date(3) 'x'")).toEqual(typed(ct("date", { args: [3] }), "x"));
   });
 
   it("keeps date / time / timestamp unreserved as names, calls and aliases", () => {
@@ -5241,6 +5240,268 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
       col(name("overlay")),
       col(name("a"), "overlay"),
     ]);
+  });
+});
+
+// --- typed literals for any type, ARRAY type spelling and interval precision ---
+
+describe("SQL-lite typed literals, ARRAY type spelling and interval precision", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const colType = (type: string) => (firstStmt(`CREATE TABLE t (c ${type});`) as any).items[0].dataType;
+  const castType = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr.type;
+  const typed = (type: unknown, value: string) => ({ kind: "typedLiteral", type, value });
+  const interval = (value: string, over: Record<string, unknown> = {}) => ({ kind: "interval", value, ...over });
+
+  it("reads a string after any type name as a typed literal", () => {
+    expect(colExpr("jsonb '{}'")).toEqual(typed(ct("jsonb"), "{}"));
+    expect(colExpr("timestamptz '2024-01-01'")).toEqual(typed(ct("timestamptz"), "2024-01-01"));
+    expect(colExpr("int4 '42'")).toEqual(typed(ct("int4"), "42"));
+    // Qualified and quoted names, as PG's `func_name 'string'` takes them.
+    expect(colExpr("s.t 'x'")).toEqual(typed(ct("s.t"), "x"));
+    expect(colExpr("pg_catalog.int4 '1'")).toEqual(typed(ct("pg_catalog.int4"), "1"));
+    expect(colExpr(`"MyType" 'x'`)).toEqual(typed(ct("MyType"), "x"));
+    expect(colExpr(`"char" 'a'`)).toEqual(typed(ct("char", { quoted: true }), "a"));
+    // A typmod of integer constants, on a generic or a multi-word name.
+    expect(colExpr("varchar(3) 'abc'")).toEqual(typed(ct("varchar", { args: [3] }), "abc"));
+    expect(colExpr("numeric(10, 2) '1.5'")).toEqual(typed(ct("numeric", { args: [10, 2] }), "1.5"));
+    expect(colExpr("character varying(3) 'abc'")).toEqual(typed(ct("character varying", { args: [3] }), "abc"));
+    expect(colExpr("double precision '1'")).toEqual(typed(ct("double precision"), "1"));
+    // It is an atom, so operators bind around it.
+    expect(colExpr("jsonb '{}' || x")).toEqual(bin("||", typed(ct("jsonb"), "{}"), name("x")));
+    expect((firstStmt("SELECT a FROM t WHERE ts > timestamptz '2024-01-01';") as any).where).toEqual(
+      bin(">", name("ts"), typed(ct("timestamptz"), "2024-01-01")),
+    );
+  });
+
+  it("spans a qualified typed literal from its first name to its string", () => {
+    const expr = (sqlLite.parse("SELECT s.t(3) 'x';")[0] as any).columns[0].expr;
+    expect(expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 16 } });
+    expect(expr.type.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 13 } });
+  });
+
+  it("rejects the spellings PG's typed-literal forms do not take", () => {
+    // No array type, either spelling, and no SETOF.
+    expect(() => sqlLite.parse("SELECT jsonb[] '{}';")).toThrow(/Expected an expression or ":" but found "\]"/);
+    expect(() => sqlLite.parse("SELECT int ARRAY '{}';")).toThrow(/Expected ";" but found "array"/);
+    expect(() => sqlLite.parse("SELECT setof int '1';")).toThrow(/Expected ";" but found "1"/);
+    // Nothing after a `.*`, and no call that is not a typmod.
+    expect(() => sqlLite.parse("SELECT t.* 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(() => sqlLite.parse("SELECT foo() 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(() => sqlLite.parse("SELECT foo(DISTINCT 1) 'x';")).toThrow(/Expected ";" but found "x"/);
+    // A column-name keyword that is no type on its own is no `func_name`
+    // either, though it may be part of a dotted one.
+    for (const word of [
+      "coalesce",
+      "setof",
+      "national",
+      "precision",
+      "trim",
+      "between",
+      "system_user",
+      "current_catalog",
+    ]) {
+      expect(() => sqlLite.parse(`SELECT ${word} 'x';`)).toThrow(/Expected ";" but found "x"/);
+    }
+    expect(colExpr("trim.x 'y'")).toEqual(typed(ct("trim.x"), "y"));
+    expect(() => sqlLite.parse("SELECT system_user.x 'y';")).toThrow(/Expected ";" but found "y"/);
+    expect(colExpr("national character 'x'")).toEqual(typed(ct("national character"), "x"));
+  });
+
+  it("narrows the typmod to integer constants", () => {
+    // PG's `func_name (args) 'string'` takes any expression list; this
+    // grammar's type node holds integers only, so anything else stays a call.
+    expect(() => sqlLite.parse("SELECT varchar(x) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => sqlLite.parse("SELECT varchar(1.5) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    // An integer constant as PG lexes one: no float spelling of a whole number,
+    // nothing past int4, and no expression that merely starts with one.
+    expect(() => sqlLite.parse("SELECT varchar(10.) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => sqlLite.parse("SELECT varchar(4294967296) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => sqlLite.parse("SELECT varchar(1 + 2) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => sqlLite.parse("SELECT interval(3.0) '1';")).toThrow(/Expected ";" but found "1"/);
+    expect(() => sqlLite.parse("SELECT interval(1e0) '1';")).toThrow(/Expected ";" but found "1"/);
+    // A call that is not followed by a string is still a call.
+    expect(colExpr("foo(1, 2)")).toEqual({ kind: "call", name: "foo", args: [num(1), num(2)] });
+    // The TIME / TIMESTAMP precision is read by the type spelling, which takes
+    // an integer only; a dotted name is an ordinary one.
+    expect(() => sqlLite.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(colExpr("timestamp.x(3) 'y'")).toEqual(typed(ct("timestamp.x", { args: [3] }), "y"));
+    expect(colExpr("interval.x 'y'")).toEqual(typed(ct("interval.x"), "y"));
+    // A quoted or qualified `interval` is an ordinary type name with a typmod,
+    // not the INTERVAL precision form.
+    expect(colExpr(`"interval"(3) '1'`)).toEqual(typed(ct("interval", { args: [3] }), "1"));
+    expect(colExpr("pg_catalog.interval(3) '1'")).toEqual(typed(ct("pg_catalog.interval", { args: [3] }), "1"));
+  });
+
+  it("does not take N'…' for a type named n", () => {
+    // PG's national-character literal, which the lexer does not read yet. A
+    // spaced `n 'x'` is an ordinary typed literal, to PG as well.
+    expect(() => sqlLite.parse("SELECT N'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(colExpr("n 'abc'")).toEqual(typed(ct("n"), "abc"));
+  });
+
+  it("decides a one-word typed literal without lookahead past the name or call", () => {
+    // A lex error inside a call's arguments is reported from where the call
+    // reads it, so recovery and the errors after it are unchanged.
+    const errors = (src: string) => sqlLite.diagnose(src).errors.map((e) => e.message);
+    expect(errors("CREATE TABLE t (c int DEFAULT foo(1, é), d int); SELECT 2;")).toEqual([
+      'Unexpected character "é" (1:37)',
+      'Expected ";" but found "," (1:39)',
+    ]);
+    expect(errors("CREATE TABLE t (c int DEFAULT interval(é), d int); SELECT 2;")).toEqual([
+      'Unexpected character "é" (1:39)',
+      'Expected ";" but found "," (1:41)',
+    ]);
+    // Nor does a multi-word lead's tail lookahead swallow a lex error straight
+    // after the lead: the statement is lost to it, as before. (One past a
+    // complete tail, `double precision é`, is reported from the lookahead, and
+    // the statement is kept without it — as for `c interval day é` in a type.)
+    for (const src of ["SELECT double é FROM t; SELECT 2;", "SELECT char é; SELECT 2;"]) {
+      expect(sqlLite.diagnose(src).ast).toHaveLength(1);
+    }
+    // And a reserved word, which no type spelling starts, is croaked before
+    // anything past it is read.
+    expect(errors("SELECT like é FROM t; SELECT 2;")).toEqual([
+      'Expected a name but found "like" (1:7)',
+      'Unexpected character "é" (1:12)',
+    ]);
+  });
+
+  it("parses the INTERVAL precision forms", () => {
+    expect(colExpr("interval(3) '1 s'")).toEqual(interval("1 s", { precision: 3 }));
+    expect(colExpr("INTERVAL '1' SECOND(3)")).toEqual(interval("1", { fields: "second", precision: 3 }));
+    expect(colExpr("INTERVAL '1' DAY TO SECOND(3)")).toEqual(interval("1", { fields: "day to second", precision: 3 }));
+    // Without one the key is omitted, not null.
+    expect(colExpr("INTERVAL '1' MINUTE TO SECOND")).toEqual(interval("1", { fields: "minute to second" }));
+    // PG takes a leading precision or a field spec, not both: after
+    // `INTERVAL(3) '…'` a unit word is no field. This grammar reads it as the
+    // alias, as it does after `x::interval(3)`; PG rejects both.
+    expect((firstStmt("SELECT interval(3) '1' day FROM t;") as any).columns).toEqual([
+      col(interval("1", { precision: 3 }), "day"),
+    ]);
+    // Without a string, `interval(3)` is still an ordinary call.
+    expect(colExpr("interval(3)")).toEqual({ kind: "call", name: "interval", args: [num(3)] });
+  });
+
+  it("rejects the INTERVAL field specs PG does not list", () => {
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' DAY TO YEAR;")).toThrow(
+      /Expected an interval field spec like "day to second" but found "day to year" \(1:20\)/,
+    );
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' MONTH TO DAY;")).toThrow(/but found "month to day"/);
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' TO SECOND;")).toThrow(/but found "to second"/);
+    // Two fields in a row are no spec either (they used to give `"day hour"`).
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' DAY HOUR;")).toThrow(/but found "day hour"/);
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' SECOND SECOND;")).toThrow(/but found "second second"/);
+    // Only SECOND takes a precision, and only an integer one.
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' DAY(3);")).toThrow(/Expected ";" but found "\("/);
+    expect(() => sqlLite.parse("SELECT INTERVAL '1' SECOND(x);")).toThrow(
+      /Expected an integer precision but found "x"/,
+    );
+    // The type spelling was already limited to the same thirteen specs.
+    expect(() => sqlLite.parse("SELECT x::interval day to year;")).toThrow(/Expected ";" but found "to"/);
+  });
+
+  it("parses the SQL-standard ARRAY type spelling", () => {
+    expect(colType("int ARRAY")).toEqual(ct("int", { array: true }));
+    expect(colType("integer ARRAY[3]")).toEqual(ct("integer", { array: true }));
+    expect(colType("varchar(10) ARRAY")).toEqual(ct("varchar", { args: [10], array: true }));
+    expect(castType("'{}'::int ARRAY")).toEqual(ct("int", { array: true }));
+    expect(castType("CAST(x AS text ARRAY)")).toEqual(ct("text", { array: true }));
+    // Column constraints follow it as they follow any type.
+    expect((firstStmt("CREATE TABLE t (a int ARRAY NOT NULL, b text ARRAY[2] DEFAULT '{}');") as any).items).toEqual([
+      { kind: "column", name: "a", dataType: ct("int", { array: true }), constraints: [{ kind: "notNull" }] },
+      {
+        kind: "column",
+        name: "b",
+        dataType: ct("text", { array: true }),
+        constraints: [{ kind: "default", expr: str("{}") }],
+      },
+    ]);
+  });
+
+  it("rejects the ARRAY spellings PG does not take", () => {
+    // ARRAY's bound is required when brackets follow, and there is one at most.
+    expect(() => sqlLite.parse("CREATE TABLE t (a int ARRAY[]);")).toThrow(
+      /Expected an integer array bound but found "\]"/,
+    );
+    expect(() => sqlLite.parse("CREATE TABLE t (a int ARRAY[3][4]);")).toThrow(
+      /Expected one array bound after ARRAY but found "\["/,
+    );
+    expect(() => sqlLite.parse("SELECT x::int ARRAY[3][4];")).toThrow(/Expected one array bound after ARRAY/);
+    // The two spellings do not combine.
+    expect(() => sqlLite.parse("CREATE TABLE t (a int[] ARRAY);")).toThrow(/Expected "," but found "array"/);
+    // An ARRAY constructor is no bound.
+    expect(() => sqlLite.parse("SELECT x::int ARRAY[1, 2];")).toThrow(/Expected "\]" but found ","/);
+  });
+
+  it("records SETOF on the type instead of reading the type as an alias", () => {
+    // `x::setof int` used to cast to a type named `setof`, aliased `int`.
+    expect(firstStmt("SELECT x::setof int FROM t;")).toEqual(
+      sel({
+        columns: [col({ kind: "cast", expr: name("x"), type: ct("int", { setof: true }) })],
+        from: [tableFrom(["t"])],
+      }),
+    );
+    expect(castType("x::setof int[]")).toEqual(ct("int", { array: true, setof: true }));
+    // PG's Typename takes SETOF wherever a type is written; whether it means
+    // anything there is decided after parsing.
+    expect(colType("setof int")).toEqual(ct("int", { setof: true }));
+    // Without a type name after it, `setof` is read as the type name, as it
+    // was before SETOF was recognised — PG rejects that.
+    expect(castType("x::setof")).toEqual(ct("setof"));
+    expect((firstStmt("SELECT x::setof FROM t;") as any).columns).toEqual([
+      col({ kind: "cast", expr: name("x"), type: ct("setof") }),
+    ]);
+    // RETURNS SETOF keeps its own flag, and PG's Typename takes one SETOF only.
+    expect(() => sqlLite.parse("CREATE FUNCTION f() RETURNS SETOF SETOF int LANGUAGE sql AS $$SELECT 1$$;")).toThrow(
+      /Expected a type name but found "setof"/,
+    );
+    // A routine argument too: SETOF is no argument name to PG.
+    expect((firstStmt("CREATE FUNCTION f(setof int) RETURNS int LANGUAGE sql AS $$SELECT 1$$;") as any).args).toEqual([
+      { mode: null, name: null, type: ct("int", { setof: true }), defaultValue: null },
+    ]);
+  });
+
+  it("keeps a quoted keyword type name apart from the keyword", () => {
+    // `"char"` is PG's one-byte internal type; a bare `char` is bpchar.
+    expect(castType(`1::"char"`)).toEqual(ct("char", { quoted: true }));
+    expect(castType("1::char")).toEqual(ct("char"));
+    expect(castType(`1::"int"`)).toEqual(ct("int", { quoted: true }));
+    // Quoting that changes nothing carries no flag: an ordinary name, or a
+    // qualified one, which PG never reads as a keyword spelling.
+    expect(castType(`1::"MyType"`)).toEqual(ct("MyType"));
+    expect(castType(`1::"double"`)).toEqual(ct("double"));
+    expect(castType(`1::"numeric"`)).toEqual(ct("numeric"));
+    expect(castType(`1::"timestamp"`)).toEqual(ct("timestamp"));
+    expect(castType(`1::pg_catalog."char"`)).toEqual(ct("pg_catalog.char"));
+  });
+
+  it("keeps type names and setof unreserved as names, calls and aliases", () => {
+    expect((firstStmt("SELECT jsonb, int4, timestamptz, setof, s.t FROM s;") as any).columns).toEqual([
+      col(name("jsonb")),
+      col(name("int4")),
+      col(name("timestamptz")),
+      col(name("setof")),
+      col(name("s", "t")),
+    ]);
+    expect((firstStmt("SELECT int4(x), jsonb(y), a jsonb, b AS setof FROM t;") as any).columns).toEqual([
+      col({ kind: "call", name: "int4", args: [name("x")] }),
+      col({ kind: "call", name: "jsonb", args: [name("y")] }),
+      col(name("a"), "jsonb"),
+      col(name("b"), "setof"),
+    ]);
+    expect((firstStmt("CREATE TABLE jsonb (int4 int, setof setof);") as any).items).toEqual([
+      { kind: "column", name: "int4", dataType: ct("int"), constraints: [] },
+      { kind: "column", name: "setof", dataType: ct("setof"), constraints: [] },
+    ]);
+    // A string after a name that does not start an operand is not a literal's.
+    expect((firstStmt("SELECT a FROM t WHERE a LIKE b ESCAPE '!';") as any).where).toEqual({
+      kind: "like",
+      expr: name("a"),
+      pattern: name("b"),
+      negated: false,
+      ci: false,
+      escape: str("!"),
+    });
   });
 });
 
