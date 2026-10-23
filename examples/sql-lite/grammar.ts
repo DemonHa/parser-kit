@@ -2117,7 +2117,8 @@ export type FromItem =
   // `lateral` is present (and true) only for a `LATERAL (subquery)`.
   | { kind: "subquery"; query: Query; alias: string | null; columns?: string[]; lateral?: boolean }
   // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
-  // is the underlying `call` expression node. `ordinality` is present (and
+  // is the underlying `call` expression node, or the node of an XML function's
+  // keyword form (`xmlElement`, …), which PG takes here too. `ordinality` is present (and
   // true) only for `WITH ORDINALITY`, as on a `rowsFrom` item.
   // `columnDefinitions` is present only for a column definition list
   // (`f() AS x (a int)`, `f() AS (a int)`), which takes the place of `columns`.
@@ -3156,7 +3157,9 @@ function parseXmlNamespace(ctx: ParseContext<SqlTokenType>): XmlNamespace {
 // One XMLTABLE column. The options may come in any order, but each at most
 // once — PG's grammar action rejects a repeat, and so does this one, over the
 // repeated option. PATH and DEFAULT take a b_expr, so a NOT NULL after either
-// is the option, never an operator.
+// is the option, never an operator. PG also reads any other identifier there as
+// an option name (its `IDENT b_expr`), so a quoted `"path"` or `"default"` is
+// that option too, and any other word is an unrecognized option.
 function parseXmlTableColumn(ctx: ParseContext<SqlTokenType>): XmlTableColumn {
   const name = ctx.parse(nameWord);
   if (ctx.is("ident", "for")) {
@@ -3169,11 +3172,18 @@ function parseXmlTableColumn(ctx: ParseContext<SqlTokenType>): XmlTableColumn {
   let notNull: boolean | null = null;
   for (;;) {
     const optStart = ctx.position();
-    if (ctx.eat("ident", "path") !== null) {
+    const tok = ctx.peek();
+    const word = tok?.type === "qident" || (tok?.type === "ident" && !RESERVED.has(tok.value)) ? tok.value : null;
+    if (word !== null && word !== "path" && word !== "default") {
+      ctx.croak(`unrecognized column option "${word}"`);
+    }
+    if (word === "path") {
+      ctx.next(); // path
       const value = ctx.parse(bExpression);
       if (path !== null) ctx.croak("only one PATH value per column is allowed", optStart, ctx.lastEnd());
       path = value;
-    } else if (ctx.eat("ident", "default") !== null) {
+    } else if (word === "default" || ctx.is("ident", "default")) {
+      ctx.next(); // default
       const value = ctx.parse(bExpression);
       if (default_ !== null) ctx.croak("only one DEFAULT value is allowed", optStart, ctx.lastEnd());
       default_ = value;
@@ -5746,7 +5756,7 @@ function partitionStrategy(ctx: ParseContext<SqlTokenType>): PartitionSpec["stra
 
 // The expression forms PG's `part_elem` takes unparenthesised: a column (its
 // ColId, so one part) or a function call, the special-syntax ones (EXTRACT,
-// CURRENT_DATE, …) included, as PG's func_expr_windowless includes them. CAST
+// CURRENT_DATE, the XML functions, …) included, as PG's func_expr_windowless includes them. CAST
 // is one of those too, but its node is a `::` cast's as well, so
 // isBareFuncExpr tells the two apart by the lead word instead.
 const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
@@ -5758,6 +5768,13 @@ const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "trim",
   "overlay",
   "sqlValueFunction",
+  "xmlElement",
+  "xmlForest",
+  "xmlPi",
+  "xmlRoot",
+  "xmlParse",
+  "xmlSerialize",
+  "xmlExists",
 ]);
 
 // Whether `expr`, read unparenthesised, is one of the forms BARE_PARTITION_KEYS
@@ -11574,13 +11591,21 @@ function tableTail(ctx: ParseContext<SqlTokenType>, name: string[], only: boolea
 // A table-function call in FROM — `name(arg, …)`, positioned on the name.
 function parseFromCall(ctx: ParseContext<SqlTokenType>): Expr {
   const start = ctx.position();
+  const bare = ctx.peek()?.type === "ident";
   const nameParts = ctx.parse(qualName);
-  return parseFromCallArgs(ctx, nameParts, start);
+  return parseFromCallArgs(ctx, nameParts, bare, start);
 }
 // The argument list of a FROM call whose name is read. The call's span runs
 // from `start`, which tableRef passes so a plain item's span keeps covering a
-// leading LATERAL.
-function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[], start: Position): Expr {
+// leading LATERAL. `bare` says the name was one unquoted word, which makes an
+// XML function name the keyword form (see XML_CALLS), as in an expression —
+// XMLTABLE included, which is no table function inside ROWS FROM.
+function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[], bare: boolean, start: Position): Expr {
+  const xml = bare && nameParts.length === 1 && Object.hasOwn(XML_CALLS, nameParts[0]!);
+  if (xml && ctx.is("punc", "(")) {
+    ctx.next(); // "("
+    return XML_CALLS[nameParts[0]!]!(ctx, start);
+  }
   const { args, variadic } = parseCallArgList(ctx);
   return {
     kind: "call",
@@ -11787,9 +11812,10 @@ const tableRef = custom<FromItem, SqlTokenType>(
     }
     if (startsRowsFrom(ctx)) return parseRowsFrom(ctx, lateral);
     if (startsXmlCall(ctx, "xmltable")) return parseXmlTable(ctx, lateral);
+    const bare = ctx.peek()?.type === "ident";
     const nameParts = ctx.parse(qualName);
     if (ctx.is("punc", "(")) {
-      const call = parseFromCallArgs(ctx, nameParts, start);
+      const call = parseFromCallArgs(ctx, nameParts, bare, start);
       const ordinality = eatOrdinality(ctx);
       const { alias, columns, columnDefinitions } = parseFuncAliasClause(ctx);
       return {

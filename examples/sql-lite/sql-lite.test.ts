@@ -15133,6 +15133,21 @@ describe("SQL-lite XML functions", () => {
     ).toMatchObject({ kind: "join", right: { kind: "xmlTable", alias: "x" } });
   });
 
+  it("parses XMLTABLE's quoted option names and trailing passing mechanism", () => {
+    // PG reads an identifier there as an option name, so a quoted one works.
+    expect(fromItem(`xmltable('/r' PASSING d BY VALUE COLUMNS a int "path" 'p' "default" 0)`)).toEqual({
+      kind: "xmlTable",
+      rowPath: str("/r"),
+      passing: { expr: name("d"), byAfter: "value" },
+      tableColumns: [{ name: "a", type: ty("int"), path: str("p"), default: num(0) }],
+      alias: null,
+    });
+    const table = (cols: string) => bad(`SELECT * FROM xmltable('/r' PASSING d COLUMNS ${cols});`);
+    expect(table("a int foo 'x'")).toThrow(/unrecognized column option "foo"/);
+    expect(table(`a int "PATH" 'x'`)).toThrow(/unrecognized column option "PATH"/);
+    expect(table(`a int PATH 'x' "path" 'y'`)).toThrow(/only one PATH value per column is allowed/);
+  });
+
   it("rejects malformed XMLTABLE forms", () => {
     const table = (cols: string) => bad(`SELECT * FROM xmltable('/r' PASSING d COLUMNS ${cols});`);
     expect(table("a int PATH 'a' PATH 'b'")).toThrow(/only one PATH value per column is allowed/);
@@ -15144,6 +15159,11 @@ describe("SQL-lite XML functions", () => {
     expect(table("a")).toThrow(/but found "\)"/);
     expect(table("a FOR")).toThrow(/Expected "ordinality" but found "\)"/);
     expect(bad("SELECT * FROM xmltable('/r' PASSING d);")).toThrow(/Expected "columns" but found "\)"/);
+    const namespaces = (list: string) =>
+      bad(`SELECT * FROM xmltable(xmlnamespaces(${list}), '/r' PASSING d COLUMNS a int);`);
+    expect(namespaces("'u'")).toThrow(/Expected "as" but found "\)"/);
+    expect(namespaces("DEFAULT 'u' AS a")).toThrow(/Expected "\)" but found "as"/);
+    expect(namespaces("")).toThrow(/but found "\)"/);
     expect(bad("SELECT * FROM xmltable(xmlnamespaces('u' AS a) '/r' PASSING d COLUMNS a int);")).toThrow(
       /Expected "," but found "\/r"/,
     );
@@ -15155,6 +15175,40 @@ describe("SQL-lite XML functions", () => {
     expect(bad("SELECT xmlnamespaces('u' AS a) FROM t;")).toThrow(
       /XMLNAMESPACES is allowed only as the first argument of XMLTABLE/,
     );
+  });
+
+  it("parses the XML functions as table functions and bare keys", () => {
+    // PG's func_table takes every keyword form but XMLTABLE's (its own item).
+    expect(fromItem("xmlelement(name a) e")).toEqual({
+      kind: "function",
+      call: { kind: "xmlElement", name: "a" },
+      alias: "e",
+    });
+    expect(fromItem("LATERAL xmlparse(content 'x') WITH ORDINALITY p")).toEqual({
+      kind: "function",
+      call: { kind: "xmlParse", option: "content", expr: str("x") },
+      alias: "p",
+      lateral: true,
+      ordinality: true,
+    });
+    expect(fromItem("ROWS FROM (xmlpi(name a), xmlconcat(b))")).toMatchObject({
+      kind: "rowsFrom",
+      calls: [
+        { kind: "xmlPi", name: "a" },
+        { kind: "call", name: "xmlconcat", args: [name("b")] },
+      ],
+    });
+    expect(bad("SELECT * FROM xmlattributes(1);")).toThrow(/XMLATTRIBUTES is allowed only as the second argument/);
+    expect(bad("SELECT * FROM ROWS FROM (xmltable('/r' PASSING d COLUMNS a int));")).toThrow(
+      /XMLTABLE is allowed only as a FROM item/,
+    );
+    // And, as func_expr_windowless, unparenthesised partition and statistics keys.
+    expect(firstStmt("CREATE TABLE p (a xml) PARTITION BY LIST (xmlelement(name a));").partitionBy).toMatchObject({
+      keys: [{ expr: { kind: "xmlElement", name: "a" } }],
+    });
+    expect(firstStmt("CREATE STATISTICS s ON xmlexists('a' PASSING b), c FROM t;")).toMatchObject({
+      kind: "createStatistics",
+    });
   });
 
   it("keeps quoted and qualified XML function names ordinary calls", () => {
