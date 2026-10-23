@@ -38,7 +38,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 | File | What it is |
 |---|---|
-| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, PostgreSQL numbers (`1e5`, `.5`, `0xff`, `1_000`), `$1` parameters, comments, and the operator reader |
+| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, PostgreSQL numbers (`1e5`, `.5`, `5.`, `0xff`, `0o17`, `0b101`, `1_000`, with PostgreSQL 15+'s rejection of `123abc`), `$1` parameters, comments, and the operator reader |
 | `grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, and one rule per statement |
 | `index.ts` | Re-exports both |
 | `sql-lite.test.ts` | Unit tests, one `describe` per feature |
@@ -74,16 +74,16 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 |---|---:|---:|---:|---:|---:|
 | Queries | 93 | 58 | 30 | 2 | 3 |
 | Expressions | 87 | 47 | 21 | 4 | 15 |
-| Types and lexical | 34 | 16 | 11 | 4 | 3 |
+| Types and lexical | 34 | 16 | 12 | 4 | 2 |
 | DML | 77 | 32 | 35 | 6 | 4 |
 | Transactions and session | 70 | 17 | 33 | 0 | 20 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **208** | **234** | **21** | **136** |
+| **Total** | **599** | **208** | **235** | **21** | **135** |
 
-So sql-lite accepts 442 of the 599 statements (74%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 443 of the 599 statements (74%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -99,7 +99,6 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 
 - **Comments inside a statement.** Comments are only trivia *between* statements: `SELECT id, -- primary key` followed by a line break fails, as does `SELECT /* note */ 1;`. This is the most common real-world failure.
 - String constants continued across a line break (`'foo'` newline `'bar'`).
-- Numbers with a trailing dot (`5.`, `1.e3`).
 - `U&"…"` Unicode-escaped identifiers. These parse, but into the wrong tree (see below).
 
 **Statements**
@@ -177,7 +176,6 @@ These statements parse without error, but the tree they produce is wrong:
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
 - **Some `E'…'` escapes are left undecoded.** The backslash is dropped and the rest kept as text: `E'\x41'` gives `x41`, `E'\101'` gives `101`, and `E'\u0041'` gives `u0041`, where PostgreSQL gives `A` for all three. `\n`, `\t` and `\'` are decoded.
 - **`DEFAULT 'x' COLLATE "C"` folds the collation into the default expression** instead of applying it to the column.
-- **Numeric literals become JavaScript numbers,** so integers beyond 2^53 lose precision (`12345678901234567890`).
 
 ### Accepted, but PostgreSQL rejects
 
@@ -190,7 +188,6 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **Empty lists:** `IN ()`, `USING ()`, `VALUES ()`.
 - **Subscripting a call without parentheses:** `f(x)[1]`. PostgreSQL requires `(f(x))[1]`.
 - **Impossible type modifiers and interval ranges:** `x::int(4)`, `interval '1' DAY TO YEAR`.
-- **Junk after a number:** `SELECT 123abc` reads as `123 AS abc`. PostgreSQL 15+ rejects it.
 - **The zero-length identifier `""`.**
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
 

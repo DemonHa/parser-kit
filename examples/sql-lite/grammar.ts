@@ -84,7 +84,12 @@ export type ColType = { name: string; args: number[]; array: boolean; span: Span
 export type RowExpr = { kind: "row"; items: Expr[]; implicit?: true; span: Span };
 
 export type Expr =
-  | { kind: "number"; value: number; span: Span }
+  // `raw` is the literal's text (its `_` separators dropped, its sign included
+  // where the grammar folds one in), present only when `value` can't stand for
+  // it: an integer beyond `Number.isSafeInteger`, or a value that overflowed to
+  // ±Infinity (which JSON would write as `null`). PG reads both as `numeric`
+  // and keeps every digit; `raw` lets a caller do the same.
+  | { kind: "number"; value: number; raw?: string; span: Span }
   | { kind: "string"; value: string; span: Span }
   | { kind: "bool"; value: boolean; span: Span }
   | { kind: "null"; span: Span }
@@ -1563,7 +1568,16 @@ const startsQuery = (ctx: ParseContext<SqlTokenType>): boolean => {
 const isSubqueryParen = (ctx: ParseContext<SqlTokenType>): boolean => ctx.is("punc", "(") && startsQuery(ctx);
 const parenQuery = seq(skip(punc("(")), field("q", query), skip(punc(")"))).map((s) => s.q);
 
-const numberLit = token("number").map((node, span): Expr => ({ kind: "number", value: Number(node.value), span }));
+// The number node for a literal's text and any sign the grammar folds into it,
+// `raw` attached only when `value` loses the text (see the `number` member of
+// `Expr`). The sign is applied after decoding: `Number("-0x10")` is NaN.
+const numberNode = (text: string, span: Span, sign = ""): Extract<Expr, { kind: "number" }> => {
+  const magnitude = Number(text);
+  const value = sign === "-" ? -magnitude : magnitude;
+  const lossy = !Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value));
+  return { kind: "number", value, ...(lossy && { raw: sign + text }), span };
+};
+const numberLit = token("number").map((node, span): Expr => numberNode(node.value, span));
 const stringLit = token("string").map((node, span): Expr => ({ kind: "string", value: node.value, span }));
 // `B'1011'` and `X'ff'` lex as token types of their own, which is what lets the
 // node record the spelling without re-reading the source. Any literal that
@@ -2124,15 +2138,15 @@ const PRECISION_FUNCTIONS: ReadonlySet<string> = new Set([
   "localtime",
   "localtimestamp",
 ]);
-// An integer constant, as PG lexes one: decimal or hex digits (the lexer has
-// already dropped any `_` separators) that fit in an int4 — PG lexes `1.5` and
-// `3e0` as floats, and a wider integer as a numeric, and its precision slots take
-// neither. The value itself is not range-checked: PG only warns above 6, and
-// clamps.
+// An integer constant, as PG lexes one: decimal, hex, octal or binary digits
+// (the lexer has already dropped any `_` separators) that fit in an int4 — PG
+// lexes `1.5`, `5.` and `3e0` as floats, and a wider integer as a numeric, and
+// its precision slots take neither. The value itself is not range-checked: PG
+// only warns above 6, and clamps.
 const isIntegerConstant = (tok: Token<SqlTokenType> | null): boolean =>
   tok !== null &&
   tok.type === "number" &&
-  /^(?:[0-9]+|0[xX][0-9a-fA-F]+)$/.test(tok.value) &&
+  /^(?:[0-9]+|0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+)$/.test(tok.value) &&
   Number(tok.value) <= 2147483647;
 
 const sqlValueFunction = custom<Expr, SqlTokenType>(
@@ -3348,10 +3362,10 @@ function optionScalar(ctx: ParseContext<SqlTokenType>): RelationOptionScalar {
   const sign = tok?.type === "op" && (tok.value === "-" || tok.value === "+") ? tok.value : null;
   if (sign !== null && ctx.peekAhead(1)?.type === "number") {
     ctx.next(); // the sign
-    const value = Number(ctx.next()!.value);
-    return { kind: "number", value: sign === "-" ? -value : value, span: ctx.spanFrom(start) };
+    const text = ctx.next()!.value;
+    return numberNode(text, ctx.spanFrom(start), sign);
   }
-  if (tok?.type === "number") return { kind: "number", value: Number(ctx.next()!.value), span: ctx.spanFrom(start) };
+  if (tok?.type === "number") return numberNode(ctx.next()!.value, ctx.spanFrom(start));
   if (tok?.type === "string") return { kind: "string", value: ctx.next()!.value, span: ctx.spanFrom(start) };
   if (tok?.type === "ident" && (tok.value === "true" || tok.value === "false")) {
     ctx.next();
