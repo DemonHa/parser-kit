@@ -100,6 +100,9 @@ export type ColType = {
 // one composite value. Named on its own so OVERLAPS can require it on both sides.
 export type RowExpr = { kind: "row"; items: Expr[]; implicit?: true; span: Span };
 
+// A Unicode normalization form, as NORMALIZE and IS NORMALIZED spell it.
+export type NormalForm = "nfc" | "nfd" | "nfkc" | "nfkd";
+
 export type Expr =
   // `raw` is the literal's text (its `_` separators dropped, its sign included
   // where the grammar folds one in), present only when `value` can't stand for
@@ -141,6 +144,11 @@ export type Expr =
   // the plain `is` node (IS [NOT] NULL), each carrying its own negation flag.
   | { kind: "isDistinct"; expr: Expr; from: Expr; negated: boolean; span: Span }
   | { kind: "isTest"; expr: Expr; test: "true" | "false" | "unknown"; negated: boolean; span: Span }
+  // `IS [NOT] [NFC | NFD | NFKC | NFKD] NORMALIZED`; `form` is null when no
+  // normal form is written (PG then tests NFC).
+  | { kind: "isNormalized"; expr: Expr; form: NormalForm | null; negated: boolean; span: Span }
+  // `IS [NOT] DOCUMENT`, the XML test.
+  | { kind: "isDocument"; expr: Expr; negated: boolean; span: Span }
   // `IS [NOT] JSON [VALUE | SCALAR | ARRAY | OBJECT] [{WITH | WITHOUT} UNIQUE [KEYS]]`.
   // `itemType` is the item-type word as written (null when there is none, which
   // means the same as VALUE); `uniqueKeys` is true for WITH UNIQUE, false for
@@ -224,6 +232,12 @@ export type Expr =
   | { kind: "extract"; field: string; source: Expr; span: Span }
   // `SUBSTRING(value FROM from FOR for_)`; either keyword tail may be null.
   | { kind: "substring"; value: Expr; from: Expr | null; for_: Expr | null; span: Span }
+  // `SUBSTRING(value SIMILAR pattern ESCAPE escape)`, the SQL-standard regex form.
+  | { kind: "substringSimilar"; value: Expr; pattern: Expr; escape: Expr; span: Span }
+  // `NORMALIZE(value, form)`. Without a form it is an ordinary call node.
+  | { kind: "normalize"; value: Expr; form: NormalForm; span: Span }
+  // `COLLATION FOR (expr)`: the collation of an expression.
+  | { kind: "collationFor"; expr: Expr; span: Span }
   // `POSITION(substring IN string)`.
   | { kind: "position"; substring: Expr; string: Expr; span: Span }
   // `TRIM([LEADING|TRAILING|BOTH] [characters] FROM source)`.
@@ -232,6 +246,8 @@ export type Expr =
   | { kind: "collate"; expr: Expr; collation: string[]; span: Span }
   // `x AT TIME ZONE zone`.
   | { kind: "atTimeZone"; expr: Expr; zone: Expr; span: Span }
+  // `x AT LOCAL`: x in the session time zone.
+  | { kind: "atLocal"; expr: Expr; span: Span }
   // --- Phase 3: window functions & aggregate modifiers ---
   // `fn(…) OVER (…)` / `fn(…) OVER name`. The spec is inlined onto the node (the
   // plan's flat shape): `name` is the referenced base window (a bare `OVER w`, or
@@ -2334,17 +2350,36 @@ function many<T>(rule: Rule<T, SqlTokenType>): Rule<T[], SqlTokenType> {
 
 const expression: Rule<Expr, SqlTokenType> = lazy(() => expressionRule);
 // A "b-expression" (PG's `b_expr`): the same operator sublanguage minus NOT,
-// AND / OR, IN, LIKE, BETWEEN, ANY / ALL, COLLATE, AT TIME ZONE and the IS tests
-// other than DISTINCT FROM. PG uses it where a keyword that one of those forms
-// would swallow marks the operand's end: the `IN` inside `POSITION(sub IN
-// str)`, and the `NOT NULL` or `COLLATE` after a column or domain DEFAULT.
+// AND / OR, IN, LIKE, BETWEEN, ANY / ALL, COLLATE, AT TIME ZONE / LOCAL and the
+// IS tests other than DISTINCT FROM and DOCUMENT. PG uses it where a keyword
+// that one of those forms would swallow marks the operand's end: the `IN`
+// inside `POSITION(sub IN str)`, and the `NOT NULL` or `COLLATE` after a column
+// or domain DEFAULT.
 const bExpression: Rule<Expr, SqlTokenType> = lazy(() => bExprRule);
 // The expr↔query cycle: exactly one Rule<Query> annotation, resolved lazily —
 // the same one-boundary rule js-lite's expr/statement cycle follows. Declared
 // here because the expression atom (scalar subquery, EXISTS, IN (SELECT …))
 // reaches into it.
 const query: Rule<Query, SqlTokenType> = lazy(() => queryRule);
-const exprList = delimited(P("("), P(")"), P(","), expression, { interleaved: true });
+// A parenthesised, comma-separated list of one item or more. An empty `()` is
+// rejected by reading the item at its `)`, so the error is the one a missing
+// item reports anywhere else in the list. That relies on `item` never matching
+// a `)`, which holds for an expression and an INSERT value.
+const nonEmptyList = <T>(item: Rule<T, SqlTokenType>): Rule<T[], SqlTokenType> => {
+  const list = delimited(P("("), P(")"), P(","), item, { interleaved: true });
+  return custom<T[], SqlTokenType>(
+    (ctx) => {
+      if (ctx.is("punc", "(") && isPuncToken(ctx.peekAhead(1), ")")) {
+        ctx.next(); // "("
+        ctx.parse(item); // croaks on the ")"
+      }
+      return ctx.parse(list);
+    },
+    { expected: list.expected(), first: list.first() },
+  );
+};
+// PG has no empty `()` in any of its users (IN, VALUES, DISTINCT ON).
+const exprList = nonEmptyList(expression);
 
 // `*` lexes as an operator token; introduced only in select-list / function-arg
 // positions, so the pratt `*` multiply is untouched.
@@ -2641,10 +2676,19 @@ function parseOverlaps(ctx: ParseContext<SqlTokenType>, left: RowExpr): Expr {
   return { kind: "overlaps", left, right, span: ctx.spanFrom(left.span.start) };
 }
 
-// SUBSTRING(value FROM from FOR for_) — or the ordinary comma form
-// SUBSTRING(x, y, z), which falls through to a plain call node.
+// SUBSTRING(value FROM from FOR for_), SUBSTRING(value SIMILAR pattern ESCAPE
+// escape) — or the ordinary comma form SUBSTRING(x, y, z), which falls through
+// to a plain call node. A `similar` after the value is never SIMILAR TO's: the
+// infix declines unless TO follows it.
 function parseSubstring(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
   const value = ctx.parse(expression);
+  if (ctx.eat("ident", "similar") !== null) {
+    const pattern = ctx.parse(expression);
+    ctx.parse(kw("escape"));
+    const esc = ctx.parse(expression);
+    expectClose(ctx);
+    return { kind: "substringSimilar", value, pattern, escape: esc, span: ctx.spanFrom(start) };
+  }
   if (ctx.is("ident", "from") || ctx.is("ident", "for")) {
     const from = ctx.eat("ident", "from") !== null ? ctx.parse(expression) : null;
     const for_ = ctx.eat("ident", "for") !== null ? ctx.parse(expression) : null;
@@ -2673,12 +2717,34 @@ function parseOverlay(ctx: ParseContext<SqlTokenType>, value: Expr, start: Posit
   return { kind: "overlay", value, placing, from, for_, span: ctx.spanFrom(start) };
 }
 
+const NORMAL_FORMS: readonly NormalForm[] = ["nfc", "nfd", "nfkc", "nfkd"];
+
+// NORMALIZE(value [, form]). The form is one of the four keywords, never an
+// expression, so PG takes no other second argument. Without one this gives the
+// plain call node it always did, but only for that one-argument form: as PG's
+// col_name_keyword, NORMALIZE takes no OVER, FILTER, DISTINCT, VARIADIC or
+// named argument.
+function parseNormalize(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const value = ctx.parse(expression);
+  if (ctx.eat("punc", ",") === null) {
+    expectClose(ctx);
+    return { kind: "call", name: "normalize", args: [value], span: ctx.spanFrom(start) };
+  }
+  const form = ctx.eat("ident", NORMAL_FORMS);
+  if (form === null) ctx.croak(`Expected "nfc", "nfd", "nfkc" or "nfkd" but found ${describeFound(ctx.peek())}`);
+  expectClose(ctx);
+  return { kind: "normalize", value, form: form.value as NormalForm, span: ctx.spanFrom(start) };
+}
+
+// The keyword-argument functions columnRef's call branch hands a single-part
+// callee over to, entered just past the `(`.
 const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Position) => Expr> = {
   extract: parseExtract,
   position: parsePosition,
   trim: parseTrim,
   row: parseRow,
   substring: parseSubstring,
+  normalize: parseNormalize,
 };
 
 // --- window functions ---
@@ -2851,6 +2917,14 @@ const columnRef = custom<Expr, SqlTokenType>(
       const value = ctx.next()!.value; // the string literal
       return { kind: "typedLiteral", type, value, span: ctx.spanFrom(start) };
     }
+    // COLLATION FOR (expr). Only a `(` after FOR makes it one, so a column
+    // named `collation` still ends a select item before `FOR UPDATE`.
+    if (ctx.is("ident", "collation") && isWordAhead(ctx, 1, "for") && isPuncToken(ctx.peekAhead(2), "(")) {
+      ctx.next(); // collation
+      ctx.next(); // for
+      const expr = ctx.parse(parenExpr);
+      return { kind: "collationFor", expr, span: ctx.spanFrom(start) };
+    }
     // Only a bare OVERLAY has the PLACING form; a quoted `"overlay"` is an
     // ordinary function name to PG.
     const lead = ctx.peek()!;
@@ -2866,12 +2940,17 @@ const columnRef = custom<Expr, SqlTokenType>(
     }
     if (ctx.is("punc", "(")) {
       ctx.next(); // "("
-      // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW / SUBSTRING)
-      // owns the rest of the call; a plain name falls through to a normal call.
+      // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW /
+      // SUBSTRING / NORMALIZE) owns the rest of the call; a plain name falls
+      // through to a normal call.
       // `Object.hasOwn` for the reason `lookup` gives: `constructor(1)` and
       // `__proto__(1)` would otherwise find an inherited "handler".
+      // NORMALIZE is a keyword only when bare: a quoted `"normalize"(x, 'NFC')`
+      // is an ordinary call to PG.
       const special =
-        parts.length === 1 && Object.hasOwn(SPECIAL_CALLS, parts[0]!) ? SPECIAL_CALLS[parts[0]!] : undefined;
+        parts.length === 1 && Object.hasOwn(SPECIAL_CALLS, parts[0]!) && (bareLead || parts[0] !== "normalize")
+          ? SPECIAL_CALLS[parts[0]!]
+          : undefined;
       if (special !== undefined) return special(ctx, start);
       // OVERLAY's keyword form is told apart from its comma form only by a
       // PLACING after the first argument, so unlike the SPECIAL_CALLS it cannot
@@ -3918,10 +3997,13 @@ function parseIndirection(ctx: ParseContext<SqlTokenType>, base: Expr, start: Po
   }
 }
 
-// `x COLLATE collation` (bp 17) and `x AT TIME ZONE zone` (bp 16) sit below the
-// unary sign, so `-x COLLATE "C"` is `(-x) COLLATE "C"`, and above `^`. The zone
-// is read at bp 17: it takes a COLLATE but not another AT, so a chain of AT TIME
-// ZONE nests to the left as PG's `%left AT` does.
+// `x COLLATE collation` (bp 17) and `x AT TIME ZONE zone` / `x AT LOCAL` (bp 16)
+// sit below the unary sign, so `-x COLLATE "C"` is `(-x) COLLATE "C"`, and above
+// `^`. The zone is read at bp 17: it takes a COLLATE but not another AT, so a
+// chain of AT TIME ZONE nests to the left as PG's `%left AT` does. `at` is a
+// bare label in PG, so the postfix declines unless TIME or LOCAL follows it,
+// and `SELECT x at FROM t` keeps `at` as the alias. AT TIME commits to the
+// zone, as in PG, where no alias is followed by TIME.
 const collatePostfix = {
   match: kw("collate"),
   bp: 17,
@@ -3934,7 +4016,12 @@ const collatePostfix = {
 const atTimeZonePostfix = {
   match: kw("at"),
   bp: 16,
+  when: (ctx: ParseContext<SqlTokenType>): boolean => isWordAhead(ctx, 1, "local") || isWordAhead(ctx, 1, "time"),
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
+    if (isWordAhead(ctx, 1, "local")) {
+      ctx.parse(kwseq("at", "local"));
+      return { kind: "atLocal", expr: left, span: closeSpan(left, ctx.lastEnd()) };
+    }
     ctx.parse(kwseq("at", "time", "zone"));
     const zone = h.parseRhs(17);
     return { kind: "atTimeZone", expr: left, zone, span: closeSpan(left, ctx.lastEnd()) };
@@ -3980,6 +4067,9 @@ const expressionTable: PrattTable = {
       // the pattern is quantified (`LIKE ANY (…)`, which takes no ESCAPE).
       match: token("ident", { values: ["like", "ilike", "similar"] }),
       bp: 10,
+      // `similar` is a bare label in PG, and SUBSTRING's SIMILAR form follows
+      // its value with one: without TO it is no operator here.
+      when: (ctx) => ctx.peek()!.value !== "similar" || isWordAhead(ctx, 1, "to"),
       parse: (ctx, left, h): Expr => {
         const op = ctx.next()!.value;
         if (op === "similar") {
@@ -4130,6 +4220,16 @@ const expressionTable: PrattTable = {
           }
           return { kind: "isJson", expr: left, itemType, uniqueKeys, negated, span: closeSpan(left, ctx.lastEnd()) };
         }
+        // IS [NOT] DOCUMENT and IS [NOT] [form] NORMALIZED. Like JSON, none of
+        // these words may otherwise follow IS, so they need no guard.
+        if (ctx.eat("ident", "document") !== null) {
+          return { kind: "isDocument", expr: left, negated, span: closeSpan(left, ctx.lastEnd()) };
+        }
+        if (ctx.is("ident", ["normalized", ...NORMAL_FORMS])) {
+          const form = (ctx.eat("ident", NORMAL_FORMS)?.value ?? null) as NormalForm | null;
+          ctx.parse(kw("normalized"));
+          return { kind: "isNormalized", expr: left, form, negated, span: closeSpan(left, ctx.lastEnd()) };
+        }
         // IS [NOT] TRUE / FALSE / UNKNOWN.
         if (ctx.is("ident", ["true", "false", "unknown"])) {
           const test = ctx.next()!.value as "true" | "false" | "unknown";
@@ -4181,11 +4281,12 @@ const notOperandExpression = pratt<Expr, SqlTokenType>({ atom: expressionAtom, .
 const expressionRule = pratt<Expr, SqlTokenType>({ atom: expressionAtom, ...expressionTable });
 
 // The b-expression, PG's `b_expr`: the tight sublanguage (arithmetic / concat /
-// JSON / cast / subscript), the plain comparisons and `IS [NOT] DISTINCT FROM`,
-// with none of NOT, AND / OR, IN, LIKE, BETWEEN, COLLATE, AT TIME ZONE, ANY /
-// ALL or the other IS tests — see `bExpression` above. (OVERLAPS lives in the
-// shared atom, so it is the one predicate that still reaches it.) A
-// parenthesised operand is a full expression again, as in PG.
+// JSON / cast / subscript), the plain comparisons, `IS [NOT] DISTINCT FROM` and
+// `IS [NOT] DOCUMENT`, with none of NOT, AND / OR, IN, LIKE, BETWEEN, COLLATE,
+// AT TIME ZONE / LOCAL, ANY / ALL or the other IS tests — see `bExpression`
+// above. (OVERLAPS lives in the shared atom, so it is the one predicate that
+// still reaches it.) A parenthesised operand is a full expression again, as in
+// PG.
 const bExprTable: PrattTable = {
   prefix: [unarySignPrefix, genericPrefix],
   infix: [
@@ -4205,13 +4306,16 @@ const bExprTable: PrattTable = {
     castPostfix,
     subscriptPostfix,
     {
-      // IS takes only DISTINCT FROM here, so `5 IS NULL` stops at NULL with an
-      // error, as PG's grammar does.
+      // IS takes only DISTINCT FROM and DOCUMENT here, so `5 IS NULL` stops at
+      // NULL with an error, as PG's grammar does.
       match: kw("is"),
       bp: 8,
       parse: (ctx, left, h): Expr => {
         ctx.parse(kw("is"));
         const negated = ctx.eat("ident", "not") !== null;
+        if (ctx.eat("ident", "document") !== null) {
+          return { kind: "isDocument", expr: left, negated, span: closeSpan(left, ctx.lastEnd()) };
+        }
         return isDistinctTail(ctx, left, h, negated);
       },
     },
@@ -6612,7 +6716,14 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
   else if (ctx.eat("ident", "procedure") !== null) routine = "procedure";
   else return ctx.croak(`Expected "function" or "procedure" but found ${describeFound(ctx.peek())}`);
   const execName = ctx.parse(qualName);
-  const execArgs = ctx.parse(exprList);
+  // PG's TriggerFuncArgs may be empty, unlike exprList's other users.
+  let execArgs: Expr[] = [];
+  if (ctx.is("punc", "(") && isPuncToken(ctx.peekAhead(1), ")")) {
+    ctx.next(); // "("
+    ctx.next(); // ")"
+  } else {
+    execArgs = ctx.parse(exprList);
+  }
   return {
     kind: "createTrigger",
     orReplace,
@@ -11254,7 +11365,8 @@ const queryRule = custom<Query, SqlTokenType>(
 
 // --- INSERT / UPDATE / DELETE ---
 
-const insertValuesRow = delimited(P("("), P(")"), P(","), insertValue, { interleaved: true });
+// One `( … )` row of INSERT's or MERGE's VALUES, holding one item or more.
+const insertValuesRow = nonEmptyList(insertValue);
 const valuesSource = seq(skip(kw("values")), field("rows", sepBy(insertValuesRow, P(",")))).map(({ rows }) => ({
   kind: "values" as const,
   rows,
@@ -11594,8 +11706,8 @@ const dmlStatement = custom<Stmt, SqlTokenType>(
 // --- PREPARE / EXECUTE ---
 //
 // Both lead words stay UNRESERVED, matched by value like the Phase 9 utility
-// words. The list rules are local rather than exprList, which accepts the empty
-// `()` a function call needs: in PG a written list here must hold at least one item.
+// words. In PG a written list here must hold at least one item: PREPARE's
+// holds types, and EXECUTE's is optional, so each reads its own list.
 const prepareTypes = sepBy(typeRef, P(","));
 const executeArgs = sepBy(expression, P(","));
 // An optional `( list )`: null when no `(` follows; the list itself is non-empty.
