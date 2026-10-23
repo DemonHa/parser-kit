@@ -13328,6 +13328,11 @@ describe("SQL-lite special predicates and calls", () => {
 
   it("parses IS [NOT] DOCUMENT", () => {
     expect(colExpr("x IS DOCUMENT")).toEqual({ kind: "isDocument", expr: x, negated: false });
+    // PG's b_expr takes it too, so a DEFAULT may end in it.
+    expect(firstStmt("CREATE TABLE t (c bool DEFAULT x IS NOT DOCUMENT NOT NULL);").items[0].constraints).toEqual([
+      { kind: "default", expr: { kind: "isDocument", expr: x, negated: true } },
+      { kind: "notNull" },
+    ]);
     expect(exprOf("x IS NOT DOCUMENT OR y")).toEqual({
       kind: "binary",
       op: "or",
@@ -13350,6 +13355,7 @@ describe("SQL-lite special predicates and calls", () => {
     );
     expect(bad("SELECT normalize(x, y) FROM t;")).toThrow(/Expected "nfc", "nfd", "nfkc" or "nfkd" but found "y"/);
     expect(bad("SELECT normalize(x, NFC, NFD) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT normalize() FROM t;")).toThrow(/but found "\)"/);
     // Quoted or qualified, it is an ordinary function.
     expect(colExpr("\"normalize\"(x, 'NFC')")).toEqual({ kind: "call", name: "normalize", args: [x, str("NFC")] });
     expect(colExpr("pg_catalog.normalize(x, 'NFC')")).toEqual({
@@ -13369,6 +13375,8 @@ describe("SQL-lite special predicates and calls", () => {
       bin("=", collationFor(name("b")), str('"default"')),
     );
     // Without a `(` after FOR, `collation` is a column and FOR a locking clause.
+    // (PG makes `collation` a type_func_name keyword and no column name; this
+    // grammar is looser there.)
     expect(firstStmt("SELECT collation FROM t FOR UPDATE;")).toMatchObject({
       columns: [col(name("collation"))],
       locking: [{ strength: "update" }],
@@ -13394,6 +13402,8 @@ describe("SQL-lite special predicates and calls", () => {
     });
     // PG requires the ESCAPE.
     expect(bad("SELECT substring(x SIMILAR 'a') FROM t;")).toThrow(/Expected "escape" but found "\)"/);
+    // Outside SUBSTRING, a SIMILAR with no TO is a bare alias, as in PG.
+    expect(bad("SELECT x SIMILAR 'a' FROM t;")).toThrow(/Expected ";" but found "a"/);
   });
 
   it("parses AT LOCAL next to AT TIME ZONE", () => {
@@ -13411,6 +13421,8 @@ describe("SQL-lite special predicates and calls", () => {
     });
     expect(colExpr("x AT LOCAL + y")).toEqual(bin("+", atLocal(x), name("y")));
     expect(firstStmt("SELECT x AT LOCAL AS l FROM t;").columns).toEqual([col(atLocal(x), "l")]);
+    // Not a b_expr form, like AT TIME ZONE: a DEFAULT does not take it.
+    expect(bad("CREATE TABLE t (c timestamp DEFAULT x AT LOCAL);")).toThrow(/but found "at"/);
   });
 
   it("keeps a bare AT, SIMILAR, NORMALIZED and DOCUMENT as aliases", () => {
@@ -13427,6 +13439,9 @@ describe("SQL-lite special predicates and calls", () => {
   });
 
   it("keeps the new keywords unreserved as names and aliases", () => {
+    // All but `collation` and `normalize` are unreserved in PG too; those two
+    // are its type_func_name / col_name keywords, which this grammar does not
+    // reserve.
     for (const word of [
       "normalized",
       "document",
@@ -13501,7 +13516,10 @@ describe("SQL-lite rejects empty parenthesised lists", () => {
       firstStmt(`CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION f(${args});`).execute;
     expect(trigger("")).toEqual({ routine: "function", name: ["f"], args: [] });
     expect(trigger("1, 'a'")).toEqual({ routine: "function", name: ["f"], args: [num(1), str("a")] });
-    expect(bad("CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION f(1,);")).toThrow(emptyList);
+    const trig = "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION f";
+    expect(bad(`${trig}(1,);`)).toThrow(emptyList);
+    expect(bad(`${trig}(1 2);`)).toThrow(/Expected "," but found "2"/);
+    expect(bad(`${trig}(`)).toThrow(/Expected "\)" but found end of input/);
   });
 });
 

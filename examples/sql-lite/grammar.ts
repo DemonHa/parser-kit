@@ -2341,8 +2341,8 @@ function many<T>(rule: Rule<T, SqlTokenType>): Rule<T[], SqlTokenType> {
 
 const expression: Rule<Expr, SqlTokenType> = lazy(() => expressionRule);
 // A "b-expression" (PG's `b_expr`): the same operator sublanguage minus NOT,
-// AND / OR, IN, LIKE, BETWEEN, ANY / ALL, COLLATE, AT TIME ZONE and the IS tests
-// other than DISTINCT FROM. PG uses it where a keyword that one of those forms
+// AND / OR, IN, LIKE, BETWEEN, ANY / ALL, COLLATE, AT TIME ZONE / LOCAL and the
+// IS tests other than DISTINCT FROM and DOCUMENT. PG uses it where a keyword that one of those forms
 // would swallow marks the operand's end: the `IN` inside `POSITION(sub IN
 // str)`, and the `NOT NULL` or `COLLATE` after a column or domain DEFAULT.
 const bExpression: Rule<Expr, SqlTokenType> = lazy(() => bExprRule);
@@ -2353,12 +2353,13 @@ const bExpression: Rule<Expr, SqlTokenType> = lazy(() => bExprRule);
 const query: Rule<Query, SqlTokenType> = lazy(() => queryRule);
 // A parenthesised, comma-separated list of one item or more. An empty `()` is
 // rejected by reading the item at its `)`, so the error is the one a missing
-// item reports anywhere else in the list.
+// item reports anywhere else in the list. That relies on `item` never matching
+// a `)`, which holds for an expression and an INSERT value.
 const nonEmptyList = <T>(item: Rule<T, SqlTokenType>): Rule<T[], SqlTokenType> => {
   const list = delimited(P("("), P(")"), P(","), item, { interleaved: true });
   return custom<T[], SqlTokenType>(
     (ctx) => {
-      if (ctx.is("punc", "(") && ctx.peekAhead(1)?.type === "punc" && ctx.peekAhead(1)?.value === ")") {
+      if (ctx.is("punc", "(") && isPuncToken(ctx.peekAhead(1), ")")) {
         ctx.next(); // "("
         ctx.parse(item); // croaks on the ")"
       }
@@ -2906,7 +2907,7 @@ const columnRef = custom<Expr, SqlTokenType>(
     }
     // COLLATION FOR (expr). Only a `(` after FOR makes it one, so a column
     // named `collation` still ends a select item before `FOR UPDATE`.
-    if (ctx.is("ident", "collation") && isWordAhead(ctx, 1, "for") && ctx.peekAhead(2)?.value === "(") {
+    if (ctx.is("ident", "collation") && isWordAhead(ctx, 1, "for") && isPuncToken(ctx.peekAhead(2), "(")) {
       ctx.next(); // collation
       ctx.next(); // for
       const expr = ctx.parse(parenExpr);
@@ -2927,7 +2928,8 @@ const columnRef = custom<Expr, SqlTokenType>(
     }
     if (ctx.is("punc", "(")) {
       ctx.next(); // "("
-      // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW / SUBSTRING)
+      // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW / SUBSTRING /
+      // NORMALIZE)
       // owns the rest of the call; a plain name falls through to a normal call.
       // `Object.hasOwn` for the reason `lookup` gives: `constructor(1)` and
       // `__proto__(1)` would otherwise find an inherited "handler".
@@ -4267,9 +4269,9 @@ const notOperandExpression = pratt<Expr, SqlTokenType>({ atom: expressionAtom, .
 const expressionRule = pratt<Expr, SqlTokenType>({ atom: expressionAtom, ...expressionTable });
 
 // The b-expression, PG's `b_expr`: the tight sublanguage (arithmetic / concat /
-// JSON / cast / subscript), the plain comparisons and `IS [NOT] DISTINCT FROM`,
-// with none of NOT, AND / OR, IN, LIKE, BETWEEN, COLLATE, AT TIME ZONE, ANY /
-// ALL or the other IS tests — see `bExpression` above. (OVERLAPS lives in the
+// JSON / cast / subscript), the plain comparisons, `IS [NOT] DISTINCT FROM` and
+// `IS [NOT] DOCUMENT`, with none of NOT, AND / OR, IN, LIKE, BETWEEN, COLLATE,
+// AT TIME ZONE / LOCAL, ANY / ALL or the other IS tests — see `bExpression` above. (OVERLAPS lives in the
 // shared atom, so it is the one predicate that still reaches it.) A
 // parenthesised operand is a full expression again, as in PG.
 const bExprTable: PrattTable = {
@@ -4291,13 +4293,16 @@ const bExprTable: PrattTable = {
     castPostfix,
     subscriptPostfix,
     {
-      // IS takes only DISTINCT FROM here, so `5 IS NULL` stops at NULL with an
-      // error, as PG's grammar does.
+      // IS takes only DISTINCT FROM and DOCUMENT here, so `5 IS NULL` stops at
+      // NULL with an error, as PG's grammar does.
       match: kw("is"),
       bp: 8,
       parse: (ctx, left, h): Expr => {
         ctx.parse(kw("is"));
         const negated = ctx.eat("ident", "not") !== null;
+        if (ctx.eat("ident", "document") !== null) {
+          return { kind: "isDocument", expr: left, negated, span: closeSpan(left, ctx.lastEnd()) };
+        }
         return isDistinctTail(ctx, left, h, negated);
       },
     },
@@ -6699,9 +6704,13 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
   else return ctx.croak(`Expected "function" or "procedure" but found ${describeFound(ctx.peek())}`);
   const execName = ctx.parse(qualName);
   // PG's TriggerFuncArgs may be empty, unlike exprList's other users.
-  ctx.parse(punc("("));
-  const execArgs = ctx.is("punc", ")") ? [] : ctx.parse(sepBy(expression, P(",")));
-  expectClose(ctx);
+  let execArgs: Expr[] = [];
+  if (ctx.is("punc", "(") && isPuncToken(ctx.peekAhead(1), ")")) {
+    ctx.next(); // "("
+    ctx.next(); // ")"
+  } else {
+    execArgs = ctx.parse(exprList);
+  }
   return {
     kind: "createTrigger",
     orReplace,
@@ -11684,8 +11693,8 @@ const dmlStatement = custom<Stmt, SqlTokenType>(
 // --- PREPARE / EXECUTE ---
 //
 // Both lead words stay UNRESERVED, matched by value like the Phase 9 utility
-// words. The list rules are local rather than exprList, which accepts the empty
-// `()` a function call needs: in PG a written list here must hold at least one item.
+// words. In PG a written list here must hold at least one item; the list
+// rules are local because EXECUTE's `( list )` is optional.
 const prepareTypes = sepBy(typeRef, P(","));
 const executeArgs = sepBy(expression, P(","));
 // An optional `( list )`: null when no `(` follows; the list itself is non-empty.
