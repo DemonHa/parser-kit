@@ -28,7 +28,7 @@ import {
   skip,
   type Token,
 } from "@parser-kit/core";
-import { type SqlTokenType, sqlParseLexer } from "./lexer";
+import { copyDataError, type SqlTokenType, sqlParseLexer, sqlScriptParseLexer } from "./lexer";
 
 // SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
@@ -1464,6 +1464,10 @@ export type CopyLocation =
 // `where` unless a FROM writes one. The query is any statement PREPARE takes;
 // PG requires RETURNING on a DML query only in analysis, so without RETURNING it
 // is accepted here, as ON COMMIT on a permanent table is.
+//
+// `data` is set by `sqlLiteScript` alone, on a `FROM STDIN` copy whose rows
+// follow it in the script: the lines up to the `\.` terminator, verbatim and
+// undecoded. The span stays the statement's own; it doesn't cover the rows.
 export type Copy = {
   kind: "copy";
   table: string[] | null;
@@ -1473,8 +1477,24 @@ export type Copy = {
   location: CopyLocation;
   options: RelationOption[] | null;
   where: Expr | null;
+  data?: string;
   span: Span;
 };
+
+// A psql meta-command line in a script (`\connect db`, `\restrict key`), as
+// `sqlLiteScript` returns it. `command` is the name without its backslash, up
+// to the first space or backslash as psql reads it (`connect`, `.`, `dt+`);
+// `args` is the rest of the line, trimmed and unparsed — psql's own argument
+// syntax (quoting, `:var` interpolation, backticks) is not modelled.
+export type PsqlMeta = {
+  kind: "psqlMeta";
+  command: string;
+  args: string;
+  span: Span;
+};
+
+/** What `sqlLiteScript` returns, in source order. */
+export type ScriptItem = Stmt | PsqlMeta;
 
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
@@ -12002,6 +12022,84 @@ const script = custom<Stmt[], SqlTokenType>((ctx) => ctx.parse(statements).filte
   first: statements.first(),
 });
 
+// --- psql scripts ---
+//
+// `sqlLiteScript` parses a whole file as psql would run it: statements, the
+// meta-command lines between them, and each `COPY … FROM STDIN`'s rows (the
+// script lexer reads those, see `sqlScriptParseLexer`). Statements are read by
+// the same rule as `sqlLite`'s, so a script differs from plain SQL only in what
+// sits between statements.
+
+// psql ends a command name at whitespace or another backslash, so `\\` is the
+// one name that is a backslash. A line with no name after its backslash is
+// psql's own `invalid command \`; the lexer leaves that error to this rule.
+const psqlMetaNode = (ctx: ParseContext<SqlTokenType>, token: Token<SqlTokenType>): PsqlMeta | null => {
+  const match = /^\\(\\|[^\s\\]+)(.*)$/s.exec(token.value);
+  if (match !== null) return { kind: "psqlMeta", command: match[1]!, args: match[2]!.trim(), span: token.position };
+  const error = new ParseError('Invalid psql meta-command "\\"', token.position.start, token.position.end);
+  if (!ctx.report(error)) throw error;
+  return null;
+};
+
+// A COPY data block's error, reported (diagnose) or thrown (parse). Recording
+// it rather than throwing keeps the COPY's node, and the rows are behind the
+// cursor either way.
+const reportCopyData = (ctx: ParseContext<SqlTokenType>, token: Token<SqlTokenType>) => {
+  const error = copyDataError(token);
+  if (error !== undefined && !ctx.report(error)) throw error;
+};
+
+const scriptItem = custom<ScriptItem | null, SqlTokenType>(
+  (ctx) => {
+    const meta = ctx.eat("psqlmeta");
+    if (meta !== null) return psqlMetaNode(ctx, meta);
+    // Rows whose COPY failed to parse: diagnose() has reported the statement,
+    // and the rows are no statement of their own.
+    const orphan = ctx.eat("copydata");
+    if (orphan !== null) {
+      reportCopyData(ctx, orphan);
+      return null;
+    }
+    const stmt = ctx.parse(statement);
+    const data = stmt?.kind === "copy" ? ctx.eat("copydata") : null;
+    if (data !== null) {
+      (stmt as Copy).data = data.value;
+      reportCopyData(ctx, data);
+    }
+    return stmt;
+  },
+  {
+    expected: `${statement.expected()} or a psql meta-command`,
+    first: [...statement.first(), { type: "psqlmeta" }, { type: "copydata" }],
+  },
+);
+// repeat(scriptItem), but recovery may stop on a meta-command line without
+// losing it. repeat() consumes the token it resynchronised on when recovery
+// made no progress; a meta-command is an item of its own, so the next round
+// takes it instead.
+const scriptRoot = custom<ScriptItem[], SqlTokenType>(
+  (ctx) => {
+    const items: ScriptItem[] = [];
+    for (;;) {
+      try {
+        if (ctx.eof()) break;
+        if (!matchesFirst(ctx.peek(), scriptItem.first())) {
+          ctx.croak(`Expected ${scriptItem.expected()} but found ${describeFound(ctx.peek())}`);
+        }
+        const item = ctx.parse(scriptItem);
+        if (item !== null) items.push(item);
+      } catch (error) {
+        if (!(error instanceof ParseError)) throw error;
+        const before = ctx.consumed();
+        if (!ctx.recover(error)) throw error;
+        if (ctx.consumed() === before && !ctx.eof() && !ctx.is("psqlmeta")) ctx.next();
+      }
+    }
+    return items;
+  },
+  { expected: scriptItem.expected(), first: scriptItem.first() },
+);
+
 // --- grammar ---
 
 export const sqlLite = defineGrammar({
@@ -12016,5 +12114,22 @@ export const sqlLite = defineGrammar({
   errorReporting: { preferFarthest: true, propagateLexerErrors: true },
   // The last statement needs no `;`, so a list still open at end of input
   // (`INSERT INTO t VALUES (1`) must fail rather than close there.
+  strictDelimited: true,
+});
+
+// `sqlLite` for whole psql scripts, pg_dump output included: the same
+// statements and options, plus meta-command lines (`psqlMeta` items) and COPY
+// rows (`Copy.data`). Recovery also resumes at a meta-command line, which ends
+// a statement left unfinished before it.
+export const sqlLiteScript = defineGrammar({
+  lexer: sqlScriptParseLexer,
+  root: scriptRoot,
+  recovery: {
+    sync: [
+      { type: "punc", value: ";", consume: true },
+      { type: "psqlmeta", consume: false },
+    ],
+  },
+  errorReporting: { preferFarthest: true, propagateLexerErrors: true },
   strictDelimited: true,
 });

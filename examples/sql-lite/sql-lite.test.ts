@@ -1,6 +1,14 @@
 import { createInputStream, ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
-import { type Stmt, sqlLexer, sqlLite, sqlParseLexer } from "./index";
+import {
+  type Stmt,
+  sqlLexer,
+  sqlLite,
+  sqlLiteScript,
+  sqlParseLexer,
+  sqlScriptLexer,
+  sqlScriptParseLexer,
+} from "./index";
 
 // --- helpers ---
 
@@ -13578,5 +13586,225 @@ describe("SQL-lite long-tail objects with definition lists", () => {
       objectType: "operator",
       names: [["family", "+"]],
     });
+  });
+});
+
+// --- psql scripts: sqlLiteScript ---
+
+describe("SQL-lite psql scripts", () => {
+  const script = (text: string) => stripSpans(sqlLiteScript.parse(text)) as Record<string, any>[];
+  const bad = (src: string) => () => sqlLiteScript.parse(src);
+  const meta = (command: string, args = "") => ({ kind: "psqlMeta", command, args });
+  const copyIn = (table: string, data?: string) => ({
+    kind: "copy",
+    table: [table],
+    columns: null,
+    query: null,
+    direction: "from",
+    location: { kind: "stdin" },
+    options: null,
+    where: null,
+    ...(data === undefined ? {} : { data }),
+  });
+  const one = firstStmt("SELECT 1;");
+  const two = firstStmt("SELECT 2;");
+
+  it("attaches the rows after COPY … FROM STDIN as data, verbatim", () => {
+    const rows = "1\tit's; -- not a comment\n2\t\\N\n\n";
+    expect(script(`COPY t FROM stdin;\n${rows}\\.\nSELECT 1;`)).toEqual([copyIn("t", rows), one]);
+    expect(script('COPY t FROM STDIN (FORMAT csv);\na,"b;c"\n\\.\n')).toEqual([
+      { ...copyIn("t", 'a,"b;c"\n'), options: [{ name: "format", value: { kind: "name", parts: ["csv"] } }] },
+    ]);
+    // A row is data even when it looks like a terminator or a meta-command.
+    expect(script("COPY t FROM stdin;\n \\.\n\\.x\n\\connect db\n\\.")).toEqual([
+      copyIn("t", " \\.\n\\.x\n\\connect db\n"),
+    ]);
+  });
+
+  it("gives an empty block empty data, and reads CRLF line ends", () => {
+    expect(script("COPY t FROM stdin;\n\\.\nSELECT 1;")).toEqual([copyIn("t", ""), one]);
+    expect(script("COPY t FROM stdin;\r\n1\r\n\\.\r\nSELECT 1;\r\n")).toEqual([copyIn("t", "1\r\n"), one]);
+    // Whitespace or a comment may follow the COPY's `;` on its line.
+    expect(script("COPY t FROM stdin;  -- rows follow\n1\n\\.")).toEqual([copyIn("t", "1\n")]);
+  });
+
+  it("reads the rows once, whatever lookahead the COPY's parse does", () => {
+    const sql = "COPY t (a, b) FROM stdin WITH (FORMAT csv, HEADER) WHERE a IN (SELECT x FROM u) AND (b, a) > (1, 2);";
+    expect(script(`${sql}\na,b\n1,2\n\\.\n${sql}\n\\.\nSELECT 1;`)).toEqual([
+      { ...firstStmt(sql), data: "a,b\n1,2\n" },
+      { ...firstStmt(sql), data: "" },
+      one,
+    ]);
+  });
+
+  it("keeps spans true across the data block", () => {
+    const dataSpan = (text: string) => {
+      const tokens = sqlScriptParseLexer.tokenize(createInputStream(text));
+      for (let token = tokens.next(); token !== null; token = tokens.next()) {
+        if (token.type === "copydata") return token.position;
+      }
+      return null;
+    };
+    // From the first row through the `\.`, a CRLF line's `\r` aside.
+    for (const eol of ["\n", "\r\n"]) {
+      expect(dataSpan(`COPY t FROM stdin;${eol}1${eol}\\.${eol}x`)).toEqual({
+        start: { row: 2, col: 0 },
+        end: { row: 3, col: 2 },
+      });
+    }
+    expect(sqlLiteScript.diagnose("COPY t FROM stdin; ab cd   \n1\n\\.").errors[0]!.end).toEqual({ row: 1, col: 24 });
+    expect(() => sqlLiteScript.parse("COPY t FROM stdin; x \r\n1\n\\.")).toThrow(
+      expect.objectContaining({ end: { row: 1, col: 20 } }),
+    );
+    expect((sqlLiteScript.parse("\\x\r\nSELECT 1;")[0] as any).span).toEqual({
+      start: { row: 1, col: 0 },
+      end: { row: 1, col: 2 },
+    });
+    const [copy, select] = sqlLiteScript.parse("COPY t FROM stdin;\n1\n2\n\\.\nSELECT 1;") as any[];
+    expect(copy.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 17 } });
+    expect(select.span).toEqual({ start: { row: 5, col: 0 }, end: { row: 5, col: 8 } });
+    expect(bad("COPY t FROM stdin;\n1\n\\.\nSELECT 1 +;")).toThrow(/\(4:10\)/);
+  });
+
+  it("reads data only after a COPY from STDIN", () => {
+    const toStdout = { ...copyIn("t"), direction: "to", location: { kind: "stdout" } };
+    expect(script("COPY t TO stdout;\n\\.\n")).toEqual([toStdout, meta(".")]);
+    expect(script("SELECT * FROM stdin;\nSELECT 1;")).toEqual([firstStmt("SELECT * FROM stdin;"), one]);
+    expect(script("COPY t (stdin) FROM 'f';\nSELECT 1;")).toEqual([
+      { ...copyIn("t"), columns: ["stdin"], location: { kind: "file", path: "f" } },
+      one,
+    ]);
+    expect(script("COPY (SELECT 'from stdin') TO STDOUT;\nSELECT 1;")).toHaveLength(2);
+    expect(script("COPY t FROM 'f' WHERE a IS DISTINCT FROM stdin;\nSELECT 1;")).toHaveLength(2);
+    // Rows are read for a statement the grammar rejects, a qualified name included.
+    expect(sqlLiteScript.diagnose("COPY s.from FROM stdin;\n1\n\\.\nSELECT 1;").ast).toHaveLength(1);
+    // A COPY with no `;` ends the input, so it has no rows to read. Without
+    // rows, `data` is absent, not undefined.
+    expect(script("COPY t FROM stdin")).toStrictEqual([copyIn("t")]);
+    expect("data" in parse("COPY t FROM stdin;\nSELECT 1;")[0]!).toBe(false);
+  });
+
+  it("keeps copy and stdin unreserved as names", () => {
+    expect(script("COPY stdin FROM stdin;\n1\n\\.")).toEqual([copyIn("stdin", "1\n")]);
+    // Rows are taken even when a table named `from` is rejected, after an
+    // earlier COPY that ended on a qualified name's dot too.
+    for (const sql of ["COPY from FROM stdin;", "COPY from.t FROM stdin;", "COPY s.;\nCOPY from FROM stdin;"]) {
+      expect(stripSpans(sqlLiteScript.diagnose(`${sql}\n\\connect x\n\\.\nSELECT 1;`).ast)).toEqual([one]);
+    }
+    expect(script("SELECT copy, stdin FROM copy;\nSELECT 1;")).toEqual([
+      firstStmt("SELECT copy, stdin FROM copy;"),
+      one,
+    ]);
+  });
+
+  it("rejects an unterminated block and text after the COPY's semicolon", () => {
+    expect(bad("COPY t FROM stdin;\n1\n2")).toThrow(/COPY data is not terminated by a "\\\." line \(2:0\)/);
+    expect(bad("COPY t FROM stdin;")).toThrow(/COPY data is not terminated/);
+    expect(bad("COPY t FROM stdin; SELECT 1;\n\\.")).toThrow(/Unexpected text after COPY … FROM STDIN \(1:19\)/);
+    expect(bad("COPY t FROM stdin; /* c */\n1\n\\.")).toThrow(/Unexpected text after COPY … FROM STDIN \(1:19\)/);
+    expect(bad("COPY t FROM stdin; -\n1\n\\.")).toThrow(/Unexpected text after COPY … FROM STDIN \(1:19\)/);
+    // With no terminator either, the rows swallowed the rest of the input: that is the error.
+    expect(bad("COPY t FROM stdin; x\nSELECT 2;")).toThrow(/COPY data is not terminated/);
+  });
+
+  it("parses meta-command lines at the start, middle and end", () => {
+    expect(
+      script("\\restrict abc\nSELECT 1;\n\\connect -reuse-previous=on \"dbname='app'\"\nSELECT 2;\n\\unrestrict abc\n"),
+    ).toEqual([
+      meta("restrict", "abc"),
+      one,
+      meta("connect", "-reuse-previous=on \"dbname='app'\""),
+      two,
+      meta("unrestrict", "abc"),
+    ]);
+    // After a `;` on the same line, and with no statement at all.
+    expect(script("SELECT 1; \\gset  \n")).toEqual([one, meta("gset")]);
+    expect(script("\\set ON_ERROR_STOP on\r\n\\.")).toEqual([meta("set", "ON_ERROR_STOP on"), meta(".")]);
+  });
+
+  it("ends a command name at whitespace or a backslash, as psql does", () => {
+    expect(script("\\dt+ s.*")).toEqual([meta("dt+", "s.*")]);
+    expect(script("\\x\\y")).toEqual([meta("x", "\\y")]);
+    expect(script("\\\\")).toEqual([meta("\\")]);
+    expect(script("\\! ls -l")).toEqual([meta("!", "ls -l")]);
+    expect(bad("\\")).toThrow(/Invalid psql meta-command "\\" \(1:0\)/);
+    expect(bad("SELECT 1;\n\\ x")).toThrow(/Invalid psql meta-command "\\" \(2:0\)/);
+  });
+
+  it("parses statements as sqlLite does, spans included", () => {
+    const text = "CREATE TABLE t (a int);\n-- c\nINSERT INTO t VALUES (1) /* c */ ;\nSELECT 1";
+    expect(sqlLiteScript.parse(text)).toEqual(sqlLite.parse(text));
+  });
+
+  it("still rejects a backslash inside a statement", () => {
+    expect(bad("SELECT 1 \\x;")).toThrow(/Unexpected character "\\" \(1:9\)/);
+    expect(bad("SELECT 1 \\x")).toThrow(/Unexpected character "\\"/);
+    // On a line of its own it is a meta-command, which cuts the statement short.
+    expect(bad("SELECT\n\\x\n1;")).toThrow(/but found "\\x" \(2:0\)/);
+    expect(bad("SELECT 1\n\\connect db")).toThrow(/Expected ";" but found "\\connect db" \(2:0\)/);
+  });
+
+  it("leaves sqlLite and sqlLexer strict", () => {
+    expect(() => sqlLite.parse("\\connect db")).toThrow(/Unexpected character "\\"/);
+    expect(() => sqlLite.parse("COPY t FROM stdin;\n1\n\\.")).toThrow(/Expected a statement but found "1" \(2:0\)/);
+    expect(() => lex("\\x")).toThrow(/Unexpected character "\\"/);
+    expect(lex("\\x", sqlScriptLexer)).toEqual([{ type: "psqlmeta", value: "\\x" }]);
+  });
+
+  it("recovers at the next statement, at a meta-command line and past COPY rows", () => {
+    const { ast, errors } = sqlLiteScript.diagnose(
+      [
+        "SELECT FROM WHERE;",
+        "\\connect db",
+        "SELECT (1",
+        "\\connect other",
+        "COPY t FROM stdin WITH junk;",
+        "1;SELECT 1;",
+        "\\.",
+        "bogus",
+        "\\unrestrict k",
+        "SELECT 2;",
+      ].join("\n"),
+    );
+    expect(stripSpans(ast)).toEqual([meta("connect", "db"), meta("connect", "other"), meta("unrestrict", "k"), two]);
+    expect(errors.map((error) => error.message)).toEqual([
+      'Expected a name but found "where" (1:12)',
+      'Expected ")" but found "\\connect other" (4:0)',
+      'Expected "(" but found "junk" (5:23)',
+      'Expected a statement or a psql meta-command but found "bogus" (8:0)',
+    ]);
+  });
+
+  it("reports a backslash with no command name without losing the statement before it", () => {
+    // `f(a)`'s parse looks one token past its `;`, at the bad line.
+    const { ast, errors } = sqlLiteScript.diagnose("SELECT f(a);\n\\ x\n\\connect db\nSELECT 2;");
+    expect(stripSpans(ast)).toEqual([firstStmt("SELECT f(a);"), meta("connect", "db"), two]);
+    expect(errors.map((error) => error.message)).toEqual(['Invalid psql meta-command "\\" (2:0)']);
+  });
+
+  it("keeps a meta-command line that follows a lexer error", () => {
+    const leads: [string, number][] = [
+      ["SELECT 1;\n\\ x", 1],
+      ["SELECT B'102'", 1],
+      // The bad COPY and the text after its `;`.
+      ["COPY t FROM stdin WITH junk; x\n1\n\\.", 2],
+    ];
+    for (const [lead, count] of leads) {
+      const { ast, errors } = sqlLiteScript.diagnose(`${lead}\n\\connect db\nSELECT 2;`);
+      expect(stripSpans(ast).slice(-2)).toEqual([meta("connect", "db"), two]);
+      expect(errors).toHaveLength(count);
+    }
+  });
+
+  it("keeps a COPY whose parse looked ahead into a bad data block", () => {
+    const { ast, errors } = sqlLiteScript.diagnose("COPY t FROM stdin WHERE f(a); x\n1\n\\.\nSELECT 1;");
+    expect(stripSpans(ast)).toEqual([{ ...firstStmt("COPY t FROM stdin WHERE f(a);"), data: "1\n" }, one]);
+    expect(errors.map((error) => error.message)).toEqual(["Unexpected text after COPY … FROM STDIN (1:30)"]);
+  });
+
+  it("reports an error in the data block and keeps the COPY and its rows", () => {
+    const { ast, errors } = sqlLiteScript.diagnose("COPY t FROM stdin; x\n1\n\\.\nSELECT 1;");
+    expect(stripSpans(ast)).toEqual([copyIn("t", "1\n"), one]);
+    expect(errors.map((error) => error.message)).toEqual(["Unexpected text after COPY … FROM STDIN (1:19)"]);
   });
 });
