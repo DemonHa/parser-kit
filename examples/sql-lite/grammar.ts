@@ -1485,12 +1485,20 @@ export type CopyLocation =
   | { kind: "stdin" }
   | { kind: "stdout" };
 // `COPY table [(col, …)] FROM location [[WITH] (option, …)] [WHERE cond]` or
-// `COPY {table [(col, …)] | (query)} TO location [[WITH] (option, …)]`.
+// `COPY {table [(col, …)] | (query)} TO location [[WITH] (option, …)]`, or
+// either in PG's pre-9.0 spelling (below).
 // Exactly one of `table` and `query` is set; `columns` is null without a list
-// (and always with a query), `options` without the parenthesised list, and
-// `where` unless a FROM writes one. The query is any statement PREPARE takes;
-// PG requires RETURNING on a DML query only in analysis, so without RETURNING it
+// (and always with a query), `options` when no option is written, and `where`
+// unless a FROM writes one. The query is any statement PREPARE takes; PG
+// requires RETURNING on a DML query only in analysis, so without RETURNING it
 // is accepted here, as ON COMMIT on a permanent table is.
+//
+// PG's pre-9.0 spelling — `COPY BINARY t`, `USING DELIMITERS 'c'` and the
+// bare-word options (`WITH CSV HEADER`, `FORCE QUOTE *`) — lands in `options`
+// under the names the parenthesised list gives the same settings (`CSV` is
+// `format csv`, `FORCE NOT NULL a` is `force_not_null (a)`), in the order PG
+// collects them. `legacy` is present only when any of that spelling is written,
+// a bare `WITH` with no option after it included.
 //
 // `data` is set by `sqlLiteScript` alone, on a `FROM STDIN` copy whose rows
 // follow it in the script: the lines up to the `\.` terminator, verbatim and
@@ -1504,6 +1512,7 @@ export type Copy = {
   location: CopyLocation;
   options: RelationOption[] | null;
   where: Expr | null;
+  legacy?: true;
   data?: string;
   span: Span;
 };
@@ -12039,9 +12048,18 @@ const closeStmt = custom<Stmt, SqlTokenType>(
 // `copy`, `program`, `stdin` and `stdout` stay UNRESERVED, matched by value; so
 // do the option names, which relationOptions reads as any word. A `(` straight
 // after COPY opens a query (PG has no parenthesised table name here); the query
-// goes through dmlStatement, as PREPARE's body does. Only the parenthesised
-// option list is taken — PG's pre-9.0 bare-word options (`WITH CSV HEADER`), and
-// the bare `WITH` an empty one leaves, are not.
+// goes through dmlStatement, as PREPARE's body does.
+//
+// PG's pre-9.0 options (its copy_opt_item) are read too, mapped onto the names
+// the parenthesised list uses (see `Copy`). Their words — `binary`, `freeze`,
+// `delimiter`, `csv`, `header`, `quote`, `escape`, `force`, `encoding`,
+// `delimiters` — are matched by value only past the location, where no name can
+// stand, so they stay unreserved; `null`, `not`, `as` and `using` are reserved
+// already. A table may be named `binary`: it is the BINARY prefix only when
+// another name follows it. As in PG, one statement takes either the bare words
+// or the parenthesised list, never both, while the BINARY prefix and USING
+// DELIMITERS (table form only) go with either; repeating a setting is left to
+// PG's analysis, as it is in the list.
 
 function copyLocation(ctx: ParseContext<SqlTokenType>, direction: "from" | "to"): CopyLocation {
   if (ctx.is("string")) return { kind: "file", path: ctx.parse(strValue) };
@@ -12051,10 +12069,94 @@ function copyLocation(ctx: ParseContext<SqlTokenType>, direction: "from" | "to")
   return ctx.croak(`Expected a file name, "program" or "${client}" but found ${describeFound(ctx.peek())}`);
 }
 
+const LEGACY_COPY_WORDS: ReadonlySet<string> = new Set([
+  "binary",
+  "freeze",
+  "delimiter",
+  "null",
+  "csv",
+  "header",
+  "quote",
+  "escape",
+  "force",
+  "encoding",
+]);
+
+function isLegacyCopyWord(tok: Token<SqlTokenType> | null): boolean {
+  return tok?.type === "ident" && LEGACY_COPY_WORDS.has(tok.value);
+}
+
+function copyString(ctx: ParseContext<SqlTokenType>): RelationOptionScalar {
+  const start = ctx.position();
+  return { kind: "string", value: ctx.parse(strValue), span: ctx.spanFrom(start) };
+}
+
+// A bare word the parenthesised list would write as a name value: `format csv`.
+function copyWordOption(ctx: ParseContext<SqlTokenType>, name: string, word: string): RelationOption {
+  const start = ctx.position();
+  ctx.next(); // the word
+  const span = ctx.spanFrom(start);
+  return { name, value: { kind: "name", parts: [word], span }, span };
+}
+
+// FORCE's column list: `*`, or PG's columnList, names without parentheses.
+function copyColumns(ctx: ParseContext<SqlTokenType>): RelationOptionValue {
+  const start = ctx.position();
+  if (ctx.eat("op", "*") !== null) return { kind: "star", table: null, span: ctx.spanFrom(start) };
+  const first = ctx.peek();
+  if (first?.type !== "qident" && (first?.type !== "ident" || RESERVED.has(first.value)))
+    ctx.croak(`Expected "*" or a name but found ${describeFound(ctx.peek())}`);
+  const items: RelationOptionScalar[] = [];
+  do {
+    const at = ctx.position();
+    items.push({ kind: "name", parts: [ctx.parse(nameWord)], span: ctx.spanFrom(at) });
+  } while (ctx.eat("punc", ",") !== null);
+  return { kind: "optionList", items, span: ctx.spanFrom(start) };
+}
+
+function legacyCopyOption(ctx: ParseContext<SqlTokenType>): RelationOption {
+  const start = ctx.position();
+  const word = ctx.peek()!.value;
+  if (word === "binary" || word === "csv") return copyWordOption(ctx, "format", word);
+  ctx.next(); // the word
+  let name = word;
+  let value: RelationOptionValue | null = null;
+  if (word === "force") {
+    if (ctx.eat("ident", "quote") !== null) {
+      name = "force_quote";
+      value = copyColumns(ctx);
+    } else if (ctx.eat("ident", "not") !== null) {
+      ctx.parse(kw("null"));
+      name = "force_not_null";
+      value = copyColumns(ctx);
+    } else if (ctx.eat("ident", "null") !== null) {
+      name = "force_null";
+      value = copyColumns(ctx);
+    } else {
+      return ctx.croak(`Expected "quote", "not" or "null" but found ${describeFound(ctx.peek())}`);
+    }
+  } else if (word !== "freeze" && word !== "header") {
+    // DELIMITER, NULL, QUOTE and ESCAPE take an optional AS; ENCODING does not.
+    if (word !== "encoding") ctx.eat("ident", "as");
+    value = copyString(ctx);
+  }
+  return { name, value, span: ctx.spanFrom(start) };
+}
+
 const copyStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
     ctx.parse(kw("copy"));
+    const options: RelationOption[] = [];
+    let legacy = false;
+    // `COPY binary t` — but `COPY binary FROM …` copies a table named binary.
+    if (ctx.is("ident", "binary")) {
+      const next = peekOrReport(ctx, 1);
+      if (next?.type === "qident" || (next?.type === "ident" && !RESERVED.has(next.value))) {
+        options.push(copyWordOption(ctx, "format", "binary"));
+        legacy = true;
+      }
+    }
     let table: string[] | null = null;
     let columns: string[] | null = null;
     let query: Copy["query"] = null;
@@ -12076,10 +12178,37 @@ const copyStmt = custom<Stmt, SqlTokenType>(
       return ctx.croak(`Expected ${expected} but found ${describeFound(ctx.peek())}`);
     }
     const location = copyLocation(ctx, direction);
+    if (table !== null && (ctx.is("ident", "using") || ctx.is("ident", "delimiters"))) {
+      const at = ctx.position();
+      ctx.eat("ident", "using");
+      ctx.parse(kw("delimiters"));
+      options.push({ name: "delimiter", value: copyString(ctx), span: ctx.spanFrom(at) });
+      legacy = true;
+    }
     const hasWith = ctx.eat("ident", "with") !== null;
-    const options = hasWith || ctx.is("punc", "(") ? ctx.parse(relationOptions) : null;
+    if (ctx.is("punc", "(")) options.push(...ctx.parse(relationOptions));
+    else if (hasWith || isLegacyCopyWord(ctx.peek())) {
+      // A modern option without its parentheses lands here: point at them.
+      const tok = ctx.peek();
+      if (hasWith && tok !== null && !isLegacyCopyWord(tok) && !ctx.is("ident", "where") && !ctx.is("punc", ";")) {
+        return ctx.croak(`Expected "(" or a COPY option but found ${describeFound(tok)}`);
+      }
+      legacy = true;
+      while (isLegacyCopyWord(ctx.peek())) options.push(legacyCopyOption(ctx));
+    }
     const where = direction === "from" && ctx.is("ident", "where") ? ctx.parse(whereClause) : null;
-    return { kind: "copy", table, columns, query, direction, location, options, where, span: ctx.spanFrom(start) };
+    return {
+      kind: "copy",
+      table,
+      columns,
+      query,
+      direction,
+      location,
+      options: options.length > 0 ? options : null,
+      where,
+      ...(legacy && { legacy: true as const }),
+      span: ctx.spanFrom(start),
+    };
   },
   { expected: '"copy"', first: [{ type: "ident", value: "copy" }] },
 );

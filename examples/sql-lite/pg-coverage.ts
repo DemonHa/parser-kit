@@ -521,7 +521,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ["copy", "sql-lite", "COPY users FROM PROGRAM 'gunzip -c /tmp/users.csv.gz' WITH (FORMAT csv);"],
     ["copy", "sql-lite", "COPY users TO PROGRAM 'gzip > /tmp/users.gz';"],
     ["copy", "sql-lite", "COPY users FROM STDIN;"],
-    ["copy", "neither", "COPY users FROM '/tmp/u.txt' DELIMITER '|' CSV HEADER;"],
+    ["copy", "sql-lite", "COPY users FROM '/tmp/u.txt' DELIMITER '|' CSV HEADER;"],
     ["copy", "sql-lite", "COPY users TO '/tmp/u.bin' WITH (FORMAT binary);"],
     ["copy", "sql-lite", "COPY t FROM STDIN WITH (FORMAT csv, HEADER match, FORCE_NOT_NULL (a, b), ENCODING 'UTF8');"],
     ["copy", "sql-lite", "COPY t FROM '/tmp/t.csv' WITH (FORMAT csv) WHERE a > 0;"],
