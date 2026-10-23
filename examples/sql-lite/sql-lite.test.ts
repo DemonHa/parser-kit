@@ -10495,6 +10495,11 @@ describe("SQL-lite COPY legacy options", () => {
       opt("format", word("csv")),
       opt("force_quote", star()),
     ]);
+    expect(optionsOf("CSV FORCE NOT NULL * FORCE NULL *")).toEqual([
+      opt("format", word("csv")),
+      opt("force_not_null", star()),
+      opt("force_null", star()),
+    ]);
   });
 
   it("reads the optional AS, the optional WITH and a bare WITH", () => {
@@ -10607,12 +10612,12 @@ describe("SQL-lite COPY legacy options", () => {
     expect(bad("COPY t FROM STDIN (HEADER) CSV;")).toThrow(/Expected ";" but found "csv"/);
     expect(bad("COPY t FROM STDIN FORCE;")).toThrow(/Expected "quote", "not" or "null" but found ";"/);
     expect(bad("COPY t FROM STDIN FORCE NOT a;")).toThrow(/Expected "null" but found "a"/);
-    expect(bad("COPY t FROM STDIN CSV FORCE NOT NULL *;")).toThrow(/Expected a name but found "\*"/);
-    expect(bad("COPY t FROM STDIN CSV FORCE NULL *;")).toThrow(/Expected a name but found "\*"/);
+    expect(bad("COPY t FROM STDIN CSV FORCE NOT NULL *, a;")).toThrow(/Expected ";" but found ","/);
     expect(bad("COPY t TO STDOUT WITH WHERE a;")).toThrow(/Expected ";" but found "where"/);
     expect(bad("COPY t FROM STDIN WITH FORMAT csv;")).toThrow(
       /Expected "\(" or a COPY option but found "format" \(1:23\)/,
     );
+    expect(bad("COPY t FROM STDIN WITH 1;")).toThrow(/Expected "\(" or a COPY option but found "1"/);
     // The BINARY lookahead reports what does not lex rather than dropping it.
     expect(sqlLite.diagnose("COPY binary 'x").errors[0]?.message).toMatch(/Unterminated/);
     expect(bad("COPY t TO STDOUT FORCE QUOTE (a);")).toThrow(/Expected a name but found "\("/);

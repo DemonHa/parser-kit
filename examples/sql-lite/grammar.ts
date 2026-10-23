@@ -9749,9 +9749,10 @@ function copyWordOption(ctx: ParseContext<SqlTokenType>, name: string, word: str
   return { name, value: { kind: "name", parts: [word], span }, span };
 }
 
-// FORCE's column list: PG's columnList, names without parentheses.
+// FORCE's column list: `*`, or PG's columnList, names without parentheses.
 function copyColumns(ctx: ParseContext<SqlTokenType>): RelationOptionValue {
   const start = ctx.position();
+  if (ctx.eat("op", "*") !== null) return { kind: "star", table: null, span: ctx.spanFrom(start) };
   const items: RelationOptionScalar[] = [];
   do {
     const at = ctx.position();
@@ -9770,8 +9771,7 @@ function legacyCopyOption(ctx: ParseContext<SqlTokenType>): RelationOption {
   if (word === "force") {
     if (ctx.eat("ident", "quote") !== null) {
       name = "force_quote";
-      const at = ctx.position();
-      value = ctx.eat("op", "*") !== null ? { kind: "star", table: null, span: ctx.spanFrom(at) } : copyColumns(ctx);
+      value = copyColumns(ctx);
     } else if (ctx.eat("ident", "not") !== null) {
       ctx.parse(kw("null"));
       name = "force_not_null";
@@ -9837,10 +9837,7 @@ const copyStmt = custom<Stmt, SqlTokenType>(
     else if (hasWith || isLegacyCopyWord(ctx.peek())) {
       // A modern option without its parentheses lands here: point at them.
       const tok = ctx.peek();
-      if (
-        hasWith &&
-        (tok?.type === "qident" || (tok?.type === "ident" && tok.value !== "where" && !isLegacyCopyWord(tok)))
-      ) {
+      if (hasWith && tok !== null && !isLegacyCopyWord(tok) && !ctx.is("ident", "where") && !ctx.is("punc", ";")) {
         return ctx.croak(`Expected "(" or a COPY option but found ${describeFound(tok)}`);
       }
       legacy = true;
