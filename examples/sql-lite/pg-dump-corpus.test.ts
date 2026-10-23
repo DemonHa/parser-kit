@@ -122,8 +122,7 @@ describe("pg_dump corpus", () => {
         ).toEqual(failing);
         if (failing.length === 0) expect(() => sqlLiteScript.parse(text)).not.toThrow();
         // Every "ok" statement is an item, and any other statement item is
-        // recovery's leftover from inside a failing one (a routine body cut at
-        // its first `;`).
+        // recovery's leftover from inside a failing one.
         const starts = ast.filter((item) => item.kind !== "psqlMeta").map((item) => item.span.start.row);
         const ok = expected.filter(([o]) => o === "ok").map(([, line]) => line);
         expect(ok.filter((line) => !starts.includes(line))).toEqual([]);

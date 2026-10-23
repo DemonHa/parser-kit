@@ -1708,6 +1708,279 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
   });
 });
 
+// --- SQL-standard routine bodies ---
+
+// PG 14+'s opt_routine_body: `RETURN expr` or `BEGIN ATOMIC stmt; … END` in
+// place of `AS 'definition'`, on CREATE FUNCTION and CREATE PROCEDURE. The body
+// is SQL, so it is parsed, and it reads its own `;`s and END.
+describe("SQL-lite SQL-standard routine bodies", () => {
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const ret = (expr: unknown) => ({ kind: "return", expr });
+  const atomic = (...statements: unknown[]) => ({ kind: "atomic", statements });
+  const fn = (body: unknown, over: Record<string, unknown> = {}) => ({
+    kind: "createFunction",
+    orReplace: false,
+    name: ["f"],
+    args: [],
+    returns: { kind: "type", setof: false, type: ct("int") },
+    options: [{ kind: "language", name: "sql" }],
+    body,
+    ...over,
+  });
+
+  it("parses RETURN expr as a function body", () => {
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int LANGUAGE sql RETURN 1 + 2;")).toEqual(
+      fn(ret(bin("+", num(1), num(2)))),
+    );
+    // Options may precede it in any order, and RETURNS may be left out.
+    expect(firstStmt("CREATE OR REPLACE FUNCTION s.f(x int) IMMUTABLE RETURN x * x")).toEqual(
+      fn(ret(bin("*", name("x"), name("x"))), {
+        orReplace: true,
+        name: ["s", "f"],
+        args: [{ mode: null, name: "x", type: ct("int"), defaultValue: null }],
+        returns: null,
+        options: [{ kind: "volatility", value: "immutable" }],
+      }),
+    );
+  });
+
+  it("parses a BEGIN ATOMIC body of several statements, an inner RETURN among them", () => {
+    const [stmt, after] = parse(
+      "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC INSERT INTO t VALUES (1); UPDATE t SET a = 2; SELECT CASE WHEN a THEN 1 END FROM t; RETURN 3; END; SELECT 1;",
+    );
+    expect(stmt).toEqual(
+      fn(
+        atomic(
+          firstStmt("INSERT INTO t VALUES (1);"),
+          firstStmt("UPDATE t SET a = 2;"),
+          firstStmt("SELECT CASE WHEN a THEN 1 END FROM t;"),
+          ret(num(3)),
+        ),
+      ),
+    );
+    expect(after).toEqual(firstStmt("SELECT 1;"));
+  });
+
+  it("parses BEGIN ATOMIC on a procedure, and an empty body", () => {
+    expect(firstStmt("CREATE PROCEDURE p(a int) LANGUAGE sql BEGIN ATOMIC DELETE FROM t WHERE x = a; END;")).toEqual({
+      kind: "createProcedure",
+      orReplace: false,
+      name: ["p"],
+      args: [{ mode: null, name: "a", type: ct("int"), defaultValue: null }],
+      options: [{ kind: "language", name: "sql" }],
+      body: atomic(firstStmt("DELETE FROM t WHERE x = a;")),
+    });
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC END")).toEqual(fn(atomic()));
+    // Empty statements inside the body yield nothing, as at the top level.
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC ; SELECT 1;; END;")).toEqual(
+      fn(atomic(firstStmt("SELECT 1;"))),
+    );
+  });
+
+  it("nests transaction control and routines inside a body", () => {
+    expect(
+      firstStmt(
+        "CREATE PROCEDURE p() BEGIN ATOMIC START TRANSACTION; COMMIT; CREATE FUNCTION g() RETURNS int BEGIN ATOMIC RETURN 1; END; END;",
+      ).body,
+    ).toEqual(
+      atomic(firstStmt("START TRANSACTION;"), firstStmt("COMMIT;"), {
+        ...fn(atomic(ret(num(1)))),
+        name: ["g"],
+        options: [],
+      }),
+    );
+  });
+
+  it("omits body for an AS definition, and keeps a statement-level END a COMMIT", () => {
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1';")).not.toHaveProperty("body");
+    expect(firstStmt("CREATE PROCEDURE p() LANGUAGE sql AS 'SELECT 1';")).not.toHaveProperty("body");
+    expect(parse("BEGIN; SELECT 1; END;")).toEqual([
+      { kind: "begin", start: false, modes: [] },
+      firstStmt("SELECT 1;"),
+      { kind: "commit", chain: false },
+    ]);
+    expect(parse("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1; END; END;")[1]).toEqual({
+      kind: "commit",
+      chain: false,
+    });
+  });
+
+  it("spans the body from its first word through RETURN's expression or END", () => {
+    const sql = "CREATE FUNCTION f() RETURNS int\nBEGIN ATOMIC\n  SELECT 1;\n  RETURN 2;\nEND;";
+    const [stmt] = sqlLite.parse(sql) as any[];
+    expect(stmt.span.end).toEqual({ row: 5, col: 3 });
+    expect(stmt.body.span).toEqual({ start: { row: 2, col: 0 }, end: { row: 5, col: 3 } });
+    expect(stmt.body.statements[0].span).toEqual({ start: { row: 3, col: 2 }, end: { row: 3, col: 10 } });
+    expect(stmt.body.statements[1].span).toEqual({ start: { row: 4, col: 2 }, end: { row: 4, col: 10 } });
+    const [single] = sqlLite.parse("CREATE FUNCTION f() RETURN a + 1;") as any[];
+    expect(single.body.span).toEqual({ start: { row: 1, col: 20 }, end: { row: 1, col: 32 } });
+  });
+
+  it("rejects a body alongside AS, and a body left open", () => {
+    expect(bad("CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1' RETURN 1;")).toThrow(
+      /A routine cannot have both AS and a SQL-standard body/,
+    );
+    expect(bad("CREATE PROCEDURE p() AS 'x' BEGIN ATOMIC END;")).toThrow(/both AS and a SQL-standard body/);
+    // The body is last: AS after it is no option.
+    expect(bad("CREATE FUNCTION f() RETURN 1 AS 'x';")).toThrow(/Expected ";" but found "as"/);
+    expect(bad("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1;")).toThrow(
+      /Expected "end", "return" or a statement but found end of input/,
+    );
+    // Every inner statement ends with `;`, the last one too.
+    expect(bad("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1 END;")).toThrow(/Expected ";" but found "end"/);
+    expect(bad("CREATE FUNCTION f() RETURNS int RETURN;")).toThrow(/but found ";"/);
+  });
+
+  it("rejects BEGIN inside a body, as PG's routine_body_stmt does", () => {
+    expect(bad("CREATE PROCEDURE p() BEGIN ATOMIC BEGIN; END;")).toThrow(
+      /Expected "end", "return" or a statement but found "begin"/,
+    );
+    // Only a body can follow the options, so BEGIN must open one.
+    expect(bad("CREATE FUNCTION f() RETURNS int BEGIN SELECT 1; END;")).toThrow(/Expected "atomic" but found "select"/);
+  });
+
+  it("keeps begin, atomic and return unreserved as names and aliases", () => {
+    for (const word of ["begin", "atomic", "return"]) {
+      expect(firstStmt(`SELECT ${word}, x ${word} FROM ${word};`)).toEqual(
+        sel({
+          columns: [col(name(word)), col(name("x"), word)],
+          from: [tableFrom([word])],
+        }),
+      );
+      expect(firstStmt(`CREATE TABLE t (${word} int);`).items[0].name).toBe(word);
+    }
+    // As the routine's name, and as names inside its body.
+    expect(firstStmt("CREATE FUNCTION atomic(return int) RETURN return;")).toMatchObject({
+      name: ["atomic"],
+      body: ret(name("return")),
+    });
+  });
+
+  it("parses a body in a psql script without splitting it at its `;`s", () => {
+    const routine = "CREATE PROCEDURE p() BEGIN ATOMIC INSERT INTO t VALUES (1); SELECT 1; END;";
+    const text = `${routine}\n\\connect db\nSELECT 2;\nEND;`;
+    const items = stripSpans(sqlLiteScript.parse(text));
+    expect(items).toEqual([
+      firstStmt(routine),
+      { kind: "psqlMeta", command: "connect", args: "db" },
+      firstStmt("SELECT 2;"),
+      { kind: "commit", chain: false },
+    ]);
+    expect(stripSpans(sqlLiteScript.diagnose(text).ast)).toEqual(items);
+    // A COPY … FROM STDIN inside a body is part of the routine, so the lines
+    // after it are SQL, not COPY rows (psql's heuristic too). A COPY after the
+    // routine still takes its rows, CASE … END and parentheses in the body
+    // notwithstanding.
+    const replace = "CREATE OR REPLACE PROCEDURE p() BEGIN ATOMIC SELECT (CASE WHEN a THEN 1 END), f(end_); END;";
+    expect(stripSpans(sqlLiteScript.parse(`${replace}\nCOPY t FROM stdin;\n1\n\\.\nSELECT 2;`))).toEqual([
+      firstStmt(replace),
+      { ...firstStmt("COPY t FROM stdin;"), data: "1\n" },
+      firstStmt("SELECT 2;"),
+    ]);
+    expect(
+      stripSpans(sqlLiteScript.parse("CREATE PROCEDURE p() BEGIN ATOMIC COPY t FROM stdin; END;\nSELECT 2;")),
+    ).toEqual([firstStmt("CREATE PROCEDURE p() BEGIN ATOMIC COPY t FROM stdin; END;"), firstStmt("SELECT 2;")]);
+  });
+
+  // diagnose() resumes inside a broken body, after the bad statement's `;`
+  // (or at the body's END), so the routine keeps the rest of its body.
+  it("recovers inside a broken body in diagnose", () => {
+    const body = (text: string) => {
+      const { ast, errors } = sqlLite.diagnose(`${text}\nSELECT 3;`);
+      return { ast: stripSpans(ast), messages: errors.map((error) => error.message.replace(/ \(.*$/, "")) };
+    };
+    expect(body("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT FROM WHERE; SELECT 2; END;")).toEqual({
+      ast: [{ ...fn(atomic(firstStmt("SELECT 2;"))), options: [] }, firstStmt("SELECT 3;")],
+      messages: [expect.stringMatching(/^Expected/)],
+    });
+    // A CASE … END in the bad statement is skipped whole, opened before the
+    // error or after it; a missing `;` stops at the body's END.
+    for (const broken of ["SELECT CASE WHEN THEN 1 END;", "SELECT CASE WHEN a THEN 1 + END;", "SELECT 1 + + ;"]) {
+      expect(body(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${broken} SELECT 2; END;`)).toEqual({
+        ast: [{ ...fn(atomic(firstStmt("SELECT 2;"))), options: [] }, firstStmt("SELECT 3;")],
+        messages: [expect.stringMatching(/^Expected/)],
+      });
+    }
+    expect(body("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 2; SELECT 1 END;")).toEqual({
+      ast: [{ ...fn(atomic(firstStmt("SELECT 2;"), firstStmt("SELECT 1;"))), options: [] }, firstStmt("SELECT 3;")],
+      messages: ['Expected ";" but found "end"'],
+    });
+    // AS alongside a body is reported, and the routine kept.
+    expect(body("CREATE FUNCTION f() RETURNS int AS 'x' BEGIN ATOMIC SELECT 1; END;")).toEqual({
+      ast: [
+        {
+          ...fn(atomic(firstStmt("SELECT 1;"))),
+          options: [{ kind: "as", parts: ["x"] }],
+        },
+        firstStmt("SELECT 3;"),
+      ],
+      messages: ["A routine cannot have both AS and a SQL-standard body"],
+    });
+  });
+
+  it("keeps a body cut short by a meta-command line, reporting it once", () => {
+    const { ast, errors } = sqlLiteScript.diagnose(
+      "CREATE PROCEDURE p() BEGIN ATOMIC SELECT 1;\n\\connect db\nSELECT 2;",
+    );
+    expect(stripSpans(ast)).toEqual([
+      firstStmt("CREATE PROCEDURE p() BEGIN ATOMIC SELECT 1; END;"),
+      { kind: "psqlMeta", command: "connect", args: "db" },
+      firstStmt("SELECT 2;"),
+    ]);
+    expect(errors.map((error) => error.message)).toEqual([
+      'Expected "end", "return" or a statement but found "\\connect db" (2:0)',
+    ]);
+  });
+
+  it("reports a lexer error in a body as it would outside one", () => {
+    const fails = (inner: string) => () => sqlLite.parse(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${inner} END;`);
+    expect(fails("SELECT 1 \\ + 2;")).toThrow(/Unexpected character "\\"/);
+    expect(fails("SELECT 1; SELECT \\ 2;")).toThrow(/Unexpected character "\\"/);
+    expect(fails("SELECT 'abc;")).toThrow(/Unterminated/);
+    // Inside a backtracking branch too.
+    expect(fails("INSERT INTO t (a, X'G1') VALUES (1);")).toThrow(/Invalid hexadecimal digit "G"/);
+    // A parser error before the bad text still comes first.
+    expect(fails("SELECT 1 + + ) 'abc;")).toThrow(/but found "\)"/);
+    const errorsOf = (text: string) => {
+      const { ast, errors } = sqlLite.diagnose(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${text} END;\nSELECT 4;`);
+      return { ast: stripSpans(ast), messages: errors.map((error) => error.message.replace(/ \(.*$/, "")) };
+    };
+    const kept = (...statements: unknown[]) => [{ ...fn(atomic(...statements)), options: [] }, firstStmt("SELECT 4;")];
+    expect(errorsOf("SELECT 1 \\ + 2; SELECT 3;")).toEqual({
+      ast: kept(firstStmt("SELECT 3;")),
+      messages: ['Unexpected character "\\"'],
+    });
+    // `SELECT` is whole before the `)`, so it is kept, as a statement missing its `;` is.
+    expect(errorsOf("SELECT ) \\ 1; SELECT 3;")).toEqual({
+      ast: kept(firstStmt("SELECT;"), firstStmt("SELECT 3;")),
+      messages: [expect.stringMatching(/but found "\)"/), 'Unexpected character "\\"'],
+    });
+    expect(errorsOf("SELECT $1a \\ ; SELECT 3;").messages).toEqual([
+      "Trailing junk after parameter",
+      'Unexpected character "\\"',
+    ]);
+    // In a nested routine's body, the inner body recovers.
+    expect(errorsOf("CREATE FUNCTION g() RETURNS int BEGIN ATOMIC SELECT \\ ); END; SELECT 3;")).toEqual({
+      ast: kept({ ...fn(atomic()), name: ["g"], options: [] }, firstStmt("SELECT 3;")),
+      messages: ['Unexpected character "\\"'],
+    });
+  });
+
+  it("parses a column named begin in a body, which psql's heuristic miscounts", () => {
+    expect(firstStmt("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT begin FROM t; RETURN 1; END;").body).toEqual(
+      atomic(firstStmt("SELECT begin FROM t;"), ret(num(1))),
+    );
+  });
+
+  it("reports a body left open at end of input and keeps the routine", () => {
+    const { ast, errors } = sqlLite.diagnose("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1;");
+    expect(stripSpans(ast)).toEqual([{ ...fn(atomic(firstStmt("SELECT 1;"))), options: [] }]);
+    expect(errors.map((error) => error.message)).toEqual([
+      'Expected "end", "return" or a statement but found end of input (1:54)',
+    ]);
+  });
+});
+
 // --- operator precedence among the tight tiers ---
 
 // PostgreSQL's gram.y orders these, loosest first: `^` < AT < COLLATE < unary
@@ -10466,10 +10739,14 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
     expect(bad("CREATE SCHEMA s CREATE frobnicate;")).toThrow(
       expectsKeys(["table", "unique", "index", "sequence", "view", "trigger"], '"frobnicate" (1:23)'),
     );
-    expect(bad("CREATE SCHEMA s CREATE SCHEMA t CREATE TABLE u (a int);")).toThrow(/or "trigger" but found "schema"/);
-    expect(bad("CREATE SCHEMA s CREATE DATABASE d;")).toThrow(/or "trigger" but found "database"/);
+    expect(bad("CREATE SCHEMA s CREATE SCHEMA t CREATE TABLE u (a int);")).toThrow(
+      expectsKeys(["table", "trigger", "recursive"], '"schema"'),
+    );
+    expect(bad("CREATE SCHEMA s CREATE DATABASE d;")).toThrow(
+      expectsKeys(["table", "trigger", "recursive"], '"database"'),
+    );
     expect(bad("CREATE SCHEMA s CREATE OR REPLACE TABLE t (a int);")).toThrow(
-      /Expected "view" or "trigger" but found "table" \(1:34\)/,
+      /Expected "view", "trigger", "recursive", "temp", "temporary", "local" or "global" but found "table" \(1:34\)/,
     );
     expect(bad("CREATE SCHEMA s CREATE OR TABLE t (a int);")).toThrow(/Expected "replace" but found "table" \(1:26\)/);
     // These two are only told apart once parsed, so they croak over the element.
@@ -10970,13 +11247,16 @@ describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
     expect(bad("CREATE LOCAL UNLOGGED TABLE t (id int);")).toThrow(
       /Expected "temp" or "temporary" but found "unlogged"/,
     );
-    expect(bad("CREATE TEMP UNLOGGED TABLE t (id int);")).toThrow(/Expected "table" but found "unlogged" \(1:12\)/);
-    expect(bad("CREATE TEMP TEMP TABLE t (id int);")).toThrow(/Expected "table" but found "temp"/);
-    expect(bad("CREATE UNLOGGED INDEX i ON t (a);")).toThrow(/Expected "table" but found "index"/);
-    expect(bad("CREATE TEMP VIEW v AS SELECT 1;")).toThrow(/Expected "table" but found "view"/);
-    expect(bad("CREATE TEMPORARY SEQUENCE s;")).toThrow(/Expected "table" but found "sequence"/);
-    expect(bad("CREATE OR REPLACE TEMP VIEW v AS SELECT 1;")).toThrow(/Expected "view", "materialized"/);
-    expect(bad("CREATE TEMP;")).toThrow(/Expected "table" but found ";"/);
+    const tempTargets = '"table", "recursive" or "view"';
+    expect(bad("CREATE TEMP UNLOGGED TABLE t (id int);")).toThrow(
+      `Expected ${tempTargets} but found "unlogged" (1:12)`,
+    );
+    expect(bad("CREATE TEMP TEMP TABLE t (id int);")).toThrow(`Expected ${tempTargets} but found "temp"`);
+    expect(bad("CREATE UNLOGGED INDEX i ON t (a);")).toThrow(/Expected "table" or "materialized" but found "index"/);
+    expect(bad("CREATE TEMP INDEX i ON t (a);")).toThrow(`Expected ${tempTargets} but found "index"`);
+    expect(bad("CREATE TEMPORARY SEQUENCE s;")).toThrow(`Expected ${tempTargets} but found "sequence"`);
+    expect(bad("CREATE OR REPLACE TEMP TABLE t (id int);")).toThrow(/Expected "recursive" or "view" but found "table"/);
+    expect(bad("CREATE TEMP;")).toThrow(`Expected ${tempTargets} but found ";"`);
     expect(bad("CREATE GLOBAL")).toThrow(/Expected "temp" or "temporary" but found end of input/);
   });
 });
@@ -14189,6 +14469,587 @@ describe("SQL-lite long-tail objects with definition lists", () => {
   });
 });
 
+// --- typed tables, storage clauses, CTAS forms, column storage, constraint
+// triggers, transition tables and temp / recursive views ---
+
+const plainType = (typeName: string) => ({ name: typeName, args: [], array: false });
+const plainColumn = (colName: string, typeName: string, extra: Record<string, unknown> = {}) => ({
+  kind: "column",
+  name: colName,
+  dataType: plainType(typeName),
+  ...extra,
+  constraints: [],
+});
+const selectOne = sel({ columns: [col(num(1))] });
+const parseFails = (src: string) => () => sqlLite.parse(src);
+
+describe("SQL-lite typed tables (OF type)", () => {
+  it("parses a typed table, its column options and its trailing clauses", () => {
+    expect(firstStmt("CREATE TABLE t OF typ;")).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["t"],
+      items: [],
+      ofType: ["typ"],
+    });
+    expect(
+      firstStmt(
+        "CREATE TABLE IF NOT EXISTS s.t OF s.typ (a WITH OPTIONS NOT NULL, b DEFAULT 1, PRIMARY KEY (a)) PARTITION BY RANGE (a) USING heap WITH (fillfactor = 70) TABLESPACE ts;",
+      ),
+    ).toEqual({
+      kind: "createTable",
+      ifNotExists: true,
+      name: ["s", "t"],
+      items: [
+        { kind: "columnOptions", name: "a", withOptions: true, constraints: [{ kind: "notNull" }] },
+        { kind: "columnOptions", name: "b", constraints: [{ kind: "default", expr: num(1) }] },
+        { kind: "primaryKey", name: null, columns: ["a"] },
+      ],
+      ofType: ["s", "typ"],
+      partitionBy: { strategy: "range", keys: [{ expr: name("a") }] },
+      accessMethod: "heap",
+      options: [{ name: "fillfactor", value: num(70) }],
+      tablespace: "ts",
+    });
+    expect(firstStmt("CREATE TEMP TABLE t OF typ ON COMMIT DROP;")).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["t"],
+      items: [],
+      ofType: ["typ"],
+      onCommit: "drop",
+      modifiers: ["temp"],
+    });
+  });
+
+  it("rejects an empty list, typed columns, LIKE and INHERITS", () => {
+    expect(parseFails("CREATE TABLE t OF typ ();")).toThrow(/Expected .* but found "\)"/);
+    expect(parseFails("CREATE TABLE t OF typ (a int);")).toThrow(/but found "int"/);
+    expect(parseFails("CREATE TABLE t OF typ (LIKE x);")).toThrow(/but found "like"/);
+    expect(parseFails("CREATE TABLE t OF typ INHERITS (p);")).toThrow(/Expected ";" but found "inherits"/);
+  });
+
+  it("keeps of unreserved as names", () => {
+    expect(firstStmt("CREATE TABLE of OF of;")).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["of"],
+      items: [],
+      ofType: ["of"],
+    });
+    expect(firstStmt("CREATE TABLE of (of int);").items).toEqual([plainColumn("of", "int")]);
+  });
+});
+
+describe("SQL-lite USING method and WITHOUT OIDS table clauses", () => {
+  it("parses them among a table's storage clauses, in PG's order", () => {
+    expect(
+      firstStmt("CREATE TABLE t (a int) INHERITS (p) USING heap WITHOUT OIDS ON COMMIT PRESERVE ROWS TABLESPACE ts;"),
+    ).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["t"],
+      items: [plainColumn("a", "int")],
+      inherits: [["p"]],
+      accessMethod: "heap",
+      withoutOids: true,
+      onCommit: "preserveRows",
+      tablespace: "ts",
+    });
+    expect(firstStmt("CREATE TABLE p1 PARTITION OF p FOR VALUES IN (1) USING heap;")).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["p1"],
+      items: [],
+      partitionOf: { parent: ["p"], bound: { kind: "list", values: [num(1)] } },
+      accessMethod: "heap",
+    });
+  });
+
+  it("rejects them out of order, together with WITH, or incomplete", () => {
+    expect(parseFails("CREATE TABLE t (a int) WITH (x = 1) WITHOUT OIDS;")).toThrow(/Expected ";" but found "without"/);
+    expect(parseFails("CREATE TABLE t (a int) TABLESPACE ts USING heap;")).toThrow(/Expected ";" but found "using"/);
+    expect(parseFails("CREATE TABLE t (a int) WITHOUT;")).toThrow(/Expected "oids" but found ";"/);
+  });
+
+  it("keeps without, oids and heap unreserved", () => {
+    expect(firstStmt("CREATE TABLE heap (without int, oids int) USING heap;")).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["heap"],
+      items: [plainColumn("without", "int"), plainColumn("oids", "int")],
+      accessMethod: "heap",
+    });
+    expect(firstStmt("SELECT without, oids, heap AS oids FROM heap AS without;")).toEqual(
+      sel({
+        columns: [col(name("without")), col(name("oids")), col(name("heap"), "oids")],
+        from: [tableFrom(["heap"], "without")],
+      }),
+    );
+  });
+});
+
+describe("SQL-lite CREATE TABLE AS TABLE and AS EXECUTE", () => {
+  it("parses both, with their storage clauses and WITH [NO] DATA", () => {
+    expect(firstStmt("CREATE TABLE x (a, b) USING heap WITHOUT OIDS TABLESPACE ts AS TABLE t WITH NO DATA;")).toEqual({
+      kind: "createTableAs",
+      ifNotExists: false,
+      name: ["x"],
+      columns: ["a", "b"],
+      query: { kind: "tableCmd", name: ["t"] },
+      withData: false,
+      accessMethod: "heap",
+      withoutOids: true,
+      tablespace: "ts",
+    });
+    expect(firstStmt("CREATE TABLE x USING heap AS EXECUTE p(1, 'a') WITH DATA;")).toEqual({
+      kind: "createTableAs",
+      ifNotExists: false,
+      name: ["x"],
+      columns: null,
+      query: { kind: "execute", name: "p", args: [num(1), str("a")] },
+      withData: true,
+      accessMethod: "heap",
+    });
+    expect(firstStmt("CREATE TEMP TABLE IF NOT EXISTS x (a) AS EXECUTE p;")).toEqual({
+      kind: "createTableAs",
+      ifNotExists: true,
+      name: ["x"],
+      columns: ["a"],
+      query: { kind: "execute", name: "p", args: null },
+      withData: null,
+      modifiers: ["temp"],
+    });
+    // EXPLAIN takes the EXECUTE form too, as PG's ExplainableStmt does.
+    expect(firstStmt("EXPLAIN CREATE TABLE x AS EXECUTE p;").statement).toEqual({
+      kind: "createTableAs",
+      ifNotExists: false,
+      name: ["x"],
+      columns: null,
+      query: { kind: "execute", name: "p", args: null },
+      withData: null,
+    });
+  });
+
+  it("rejects an empty argument list and clauses out of order", () => {
+    expect(parseFails("CREATE TABLE x AS EXECUTE p();")).toThrow(/but found "\)"/);
+    expect(parseFails("CREATE TABLE x AS frob;")).toThrow(/Expected a query or "execute" but found "frob"/);
+    expect(parseFails("CREATE TABLE x (a, b) WITH (x = 1) WITHOUT OIDS AS SELECT 1;")).toThrow(
+      /Expected "as" but found "without"/,
+    );
+    expect(parseFails("CREATE SCHEMA s CREATE TABLE x AS EXECUTE p;")).toThrow(/cannot be CREATE TABLE AS/);
+  });
+
+  it("keeps execute unreserved as a table name", () => {
+    expect(firstStmt("CREATE TABLE execute AS EXECUTE execute;")).toEqual({
+      kind: "createTableAs",
+      ifNotExists: false,
+      name: ["execute"],
+      columns: null,
+      query: { kind: "execute", name: "execute", args: null },
+      withData: null,
+    });
+  });
+});
+
+describe("SQL-lite column STORAGE and COMPRESSION", () => {
+  it("parses both ahead of a column's constraints", () => {
+    expect(
+      firstStmt(
+        'CREATE TABLE t (a text STORAGE external COMPRESSION lz4 NOT NULL, b text STORAGE DEFAULT, c text COMPRESSION default, d text STORAGE "MAIN", e text COMPRESSION "DEFAULT");',
+      ).items,
+    ).toEqual([
+      { ...plainColumn("a", "text", { storage: "external", compression: "lz4" }), constraints: [{ kind: "notNull" }] },
+      plainColumn("b", "text", { storage: "default" }),
+      plainColumn("c", "text", { compression: "default" }),
+      plainColumn("d", "text", { storage: "main" }),
+      plainColumn("e", "text", { compression: "DEFAULT" }),
+    ]);
+    expect(firstStmt("ALTER TABLE t ADD COLUMN a text STORAGE plain, ADD b int COMPRESSION lz4;").actions).toEqual([
+      { kind: "addColumn", ifNotExists: false, column: plainColumn("a", "text", { storage: "plain" }) },
+      { kind: "addColumn", ifNotExists: false, column: plainColumn("b", "int", { compression: "lz4" }) },
+    ]);
+    // SET STORAGE and SET COMPRESSION share the readers, and keep their nulls.
+    expect(firstStmt('ALTER TABLE t ALTER a SET STORAGE "DEFAULT", ALTER b SET COMPRESSION default;').actions).toEqual([
+      { kind: "setStorage", column: "a", storage: null },
+      { kind: "setCompression", column: "b", method: null },
+    ]);
+  });
+
+  it("reads them ahead of a column's OPTIONS, foreign tables included", () => {
+    expect(
+      firstStmt("CREATE FOREIGN TABLE ft (a int STORAGE plain COMPRESSION lz4 OPTIONS (x 'y') NOT NULL) SERVER s;")
+        .items,
+    ).toEqual([
+      {
+        ...plainColumn("a", "int", { storage: "plain", compression: "lz4", options: [{ name: "x", value: "y" }] }),
+        constraints: [{ kind: "notNull" }],
+      },
+    ]);
+    expect(parseFails("CREATE TABLE t (a int OPTIONS (x 'y') STORAGE plain);")).toThrow(
+      /Expected "," but found "storage"/,
+    );
+  });
+
+  it("rejects them out of order or with an unknown storage mode", () => {
+    expect(parseFails("CREATE TABLE t (a text COMPRESSION lz4 STORAGE main);")).toThrow(
+      /Expected "," but found "storage"/,
+    );
+    expect(parseFails('CREATE TABLE t (a text COLLATE "C" STORAGE main);')).toThrow(/Expected "," but found "storage"/);
+    expect(parseFails("CREATE TABLE t (a text STORAGE bogus);")).toThrow(/invalid storage type "bogus"/);
+  });
+
+  it("keeps storage and compression unreserved", () => {
+    expect(
+      firstStmt("CREATE TABLE storage (storage text STORAGE main COMPRESSION compression, compression int);"),
+    ).toEqual({
+      kind: "createTable",
+      ifNotExists: false,
+      name: ["storage"],
+      items: [
+        plainColumn("storage", "text", { storage: "main", compression: "compression" }),
+        plainColumn("compression", "int"),
+      ],
+    });
+    expect(firstStmt("SELECT storage, compression AS storage FROM compression storage;")).toEqual(
+      sel({
+        columns: [col(name("storage")), col(name("compression"), "storage")],
+        from: [tableFrom(["compression"], "storage")],
+      }),
+    );
+  });
+});
+
+describe("SQL-lite CREATE CONSTRAINT TRIGGER", () => {
+  it("parses FROM and the deferral attributes", () => {
+    expect(
+      firstStmt(
+        "CREATE CONSTRAINT TRIGGER c AFTER INSERT OR UPDATE ON t FROM s.r DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.a > 0) EXECUTE FUNCTION f(1);",
+      ),
+    ).toEqual({
+      kind: "createTrigger",
+      orReplace: false,
+      name: "c",
+      timing: "after",
+      events: [
+        { event: "insert", columns: null },
+        { event: "update", columns: null },
+      ],
+      table: ["t"],
+      constraint: true,
+      fromTable: ["s", "r"],
+      deferrable: true,
+      initially: "deferred",
+      forEach: "row",
+      when: bin(">", name("new", "a"), num(0)),
+      execute: { routine: "function", name: ["f"], args: [num(1)] },
+    });
+    const bare = {
+      kind: "createTrigger",
+      orReplace: false,
+      name: "c",
+      timing: "after",
+      events: [{ event: "delete", columns: null }],
+      table: ["t"],
+      constraint: true,
+      forEach: "row",
+      when: null,
+      execute: { routine: "procedure", name: ["f"], args: [] },
+    };
+    expect(firstStmt("CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();")).toEqual(
+      bare,
+    );
+    expect(
+      firstStmt(
+        "CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE PROCEDURE f();",
+      ),
+    ).toEqual({ ...bare, deferrable: false, initially: "immediate" });
+    // A schema element may be one, as in PG's schema_stmt.
+    expect(
+      firstStmt("CREATE SCHEMA s CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();")
+        .elements,
+    ).toEqual([bare]);
+  });
+
+  it("rejects other timings, row-less and statement forms, REFERENCING and refused attributes", () => {
+    const trig = (middle: string) => `CREATE CONSTRAINT TRIGGER c AFTER DELETE ON t ${middle} EXECUTE PROCEDURE f();`;
+    expect(parseFails("CREATE CONSTRAINT TRIGGER c BEFORE DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();")).toThrow(
+      /Expected "after" but found "before"/,
+    );
+    expect(parseFails(trig("FOR ROW"))).toThrow(/Expected "each" but found "row"/);
+    expect(parseFails(trig("FOR EACH STATEMENT"))).toThrow(/Expected "row" but found "statement"/);
+    expect(parseFails(trig("NOT VALID FOR EACH ROW"))).toThrow(/TRIGGER constraints cannot be marked NOT VALID/);
+    expect(parseFails(trig("NO INHERIT FOR EACH ROW"))).toThrow(/TRIGGER constraints cannot be marked NO INHERIT/);
+    expect(parseFails(trig("NOT DEFERRABLE INITIALLY DEFERRED FOR EACH ROW"))).toThrow(
+      /constraint declared INITIALLY DEFERRED must be DEFERRABLE/,
+    );
+    expect(parseFails(trig("REFERENCING NEW TABLE n FOR EACH ROW"))).toThrow(
+      /Expected "for each row" but found "referencing"/,
+    );
+    expect(
+      parseFails("CREATE OR REPLACE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
+    ).toThrow(/CREATE OR REPLACE CONSTRAINT TRIGGER is not supported/);
+    expect(
+      parseFails(
+        "CREATE SCHEMA s CREATE OR REPLACE CONSTRAINT TRIGGER c AFTER DELETE ON t FOR EACH ROW EXECUTE PROCEDURE f();",
+      ),
+    ).toThrow(/CREATE OR REPLACE CONSTRAINT TRIGGER is not supported/);
+    // FROM and the deferral attributes belong to constraint triggers only.
+    expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t FROM x FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
+      /Expected "execute" but found "from"/,
+    );
+    expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t DEFERRABLE FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
+      /Expected "execute" but found "deferrable"/,
+    );
+  });
+});
+
+describe("SQL-lite duplicate trigger events", () => {
+  it("rejects an event written twice, UPDATE OF included, as PG's grammar does", () => {
+    expect(
+      parseFails("CREATE CONSTRAINT TRIGGER c AFTER INSERT OR INSERT ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
+    ).toThrow(/duplicate trigger events specified \(1:44\)/);
+    expect(parseFails("CREATE TRIGGER tr AFTER UPDATE OF a OR DELETE OR UPDATE ON t EXECUTE FUNCTION f();")).toThrow(
+      /duplicate trigger events specified/,
+    );
+  });
+});
+
+describe("SQL-lite lead words of the prefixed, recursive and constraint CREATE forms", () => {
+  it("names them where they may stand, and takes them as schema elements", () => {
+    // The lead words neither CREATE map holds are named where they may stand.
+    expect(parseFails("CREATE OR REPLACE frobnicate v;")).toThrow(
+      expectsKeys(["view", "trigger", "recursive", "temp", "temporary", "local", "global"], '"frobnicate"'),
+    );
+    expect(parseFails("CREATE SCHEMA s CREATE frobnicate t;")).toThrow(
+      expectsKeys(["table", "trigger", "recursive", "constraint", "temp", "unlogged"], '"frobnicate"'),
+    );
+    expect(parseFails("CREATE SCHEMA s CREATE UNLOGGED foo;")).toThrow(/Expected "table" but found "foo"/);
+    expect(parseFails("CREATE SCHEMA s CREATE TEMP TABLE t AS SELECT 1;")).toThrow(/cannot be CREATE TABLE AS/);
+    expect(firstStmt("CREATE SCHEMA s CREATE UNLOGGED TABLE t (a int) CREATE TEMP TABLE u (b int);").elements).toEqual([
+      {
+        kind: "createTable",
+        ifNotExists: false,
+        name: ["t"],
+        items: [plainColumn("a", "int")],
+        modifiers: ["unlogged"],
+      },
+      { kind: "createTable", ifNotExists: false, name: ["u"], items: [plainColumn("b", "int")], modifiers: ["temp"] },
+    ]);
+  });
+});
+
+describe("SQL-lite trigger REFERENCING transition tables", () => {
+  it("parses OLD and NEW TABLE, AS optional, in either order", () => {
+    expect(
+      firstStmt(
+        "CREATE TRIGGER tr AFTER UPDATE ON t REFERENCING NEW TABLE AS n OLD TABLE o FOR EACH STATEMENT EXECUTE FUNCTION f();",
+      ),
+    ).toEqual({
+      kind: "createTrigger",
+      orReplace: false,
+      name: "tr",
+      timing: "after",
+      events: [{ event: "update", columns: null }],
+      table: ["t"],
+      referencing: [
+        { kind: "new", name: "n" },
+        { kind: "old", name: "o" },
+      ],
+      forEach: "statement",
+      when: null,
+      execute: { routine: "function", name: ["f"], args: [] },
+    });
+  });
+
+  it("rejects ROW transitions and an empty clause", () => {
+    expect(
+      parseFails("CREATE TRIGGER tr AFTER INSERT ON t REFERENCING NEW ROW AS n FOR EACH ROW EXECUTE FUNCTION f();"),
+    ).toThrow(/ROW variable naming in the REFERENCING clause is not supported/);
+    expect(parseFails("CREATE TRIGGER tr AFTER INSERT ON t REFERENCING FOR EACH ROW EXECUTE FUNCTION f();")).toThrow(
+      /Expected "old" or "new" but found "for"/,
+    );
+  });
+
+  it("keeps referencing, old and new unreserved", () => {
+    expect(
+      firstStmt(
+        "CREATE TRIGGER referencing AFTER INSERT ON new REFERENCING OLD TABLE old NEW TABLE new EXECUTE FUNCTION referencing();",
+      ),
+    ).toEqual({
+      kind: "createTrigger",
+      orReplace: false,
+      name: "referencing",
+      timing: "after",
+      events: [{ event: "insert", columns: null }],
+      table: ["new"],
+      referencing: [
+        { kind: "old", name: "old" },
+        { kind: "new", name: "new" },
+      ],
+      forEach: null,
+      when: null,
+      execute: { routine: "function", name: ["referencing"], args: [] },
+    });
+    expect(firstStmt("SELECT referencing, old AS new FROM new old;")).toEqual(
+      sel({ columns: [col(name("referencing")), col(name("old"), "new")], from: [tableFrom(["new"], "old")] }),
+    );
+  });
+});
+
+describe("SQL-lite TEMP and RECURSIVE views", () => {
+  const view = (over: Record<string, unknown>) => ({
+    kind: "createView",
+    materialized: false,
+    orReplace: false,
+    ifNotExists: false,
+    name: ["v"],
+    columns: null,
+    query: selectOne,
+    withData: null,
+    ...over,
+  });
+
+  it("parses both, with or without OR REPLACE", () => {
+    expect(firstStmt("CREATE TEMP VIEW v AS SELECT 1;")).toEqual(view({ modifiers: ["temp"] }));
+    expect(firstStmt("CREATE GLOBAL TEMPORARY VIEW v AS SELECT 1;")).toEqual(
+      view({ modifiers: ["global", "temporary"] }),
+    );
+    expect(firstStmt("CREATE OR REPLACE TEMPORARY VIEW v (a) AS SELECT 1;")).toEqual(
+      view({ orReplace: true, columns: ["a"], modifiers: ["temporary"] }),
+    );
+    expect(firstStmt("CREATE LOCAL TEMP RECURSIVE VIEW v (n) AS SELECT 1;")).toEqual(
+      view({ columns: ["n"], recursive: true, modifiers: ["local", "temp"] }),
+    );
+    expect(firstStmt("CREATE OR REPLACE RECURSIVE VIEW v (n) WITH (security_barrier) AS SELECT 1;")).toEqual(
+      view({ orReplace: true, columns: ["n"], recursive: true, options: [{ name: "security_barrier", value: null }] }),
+    );
+    // The span opens on CREATE, as an unprefixed view's does.
+    expect((sqlLite.parse("CREATE TEMP VIEW v AS SELECT 1;")[0] as Record<string, any>).span.start).toEqual({
+      row: 1,
+      col: 0,
+    });
+    // Schema elements take both, as in PG's schema_stmt.
+    expect(
+      firstStmt("CREATE SCHEMA s CREATE TEMP VIEW v AS SELECT 1 CREATE RECURSIVE VIEW v (n) AS SELECT 1;").elements,
+    ).toEqual([view({ modifiers: ["temp"] }), view({ columns: ["n"], recursive: true })]);
+  });
+
+  it("rejects a RECURSIVE view without columns or with a check option, and an unlogged view", () => {
+    expect(parseFails("CREATE RECURSIVE VIEW v AS SELECT 1;")).toThrow(/Expected "\(" but found "as" \(1:24\)/);
+    expect(parseFails("CREATE RECURSIVE VIEW v () AS SELECT 1;")).toThrow(/Expected a name but found "\)"/);
+    expect(parseFails("CREATE RECURSIVE VIEW v (n) AS SELECT 1 WITH CHECK OPTION;")).toThrow(
+      /WITH CHECK OPTION not supported on recursive views/,
+    );
+    for (const src of [
+      "CREATE UNLOGGED VIEW v AS SELECT 1;",
+      "CREATE OR REPLACE UNLOGGED VIEW v AS SELECT 1;",
+      "CREATE UNLOGGED RECURSIVE VIEW v (n) AS SELECT 1;",
+    ]) {
+      expect(parseFails(src)).toThrow(/views cannot be unlogged because they do not have storage/);
+    }
+    expect(parseFails("CREATE TEMP MATERIALIZED VIEW mv AS SELECT 1;")).toThrow(
+      /Expected "table", "recursive" or "view" but found "materialized"/,
+    );
+    expect(parseFails("EXPLAIN CREATE TEMP VIEW v AS SELECT 1;")).toThrow(
+      /EXPLAIN takes CREATE TABLE AS or CREATE MATERIALIZED VIEW/,
+    );
+  });
+
+  it("keeps recursive unreserved", () => {
+    expect(firstStmt("CREATE RECURSIVE VIEW recursive (recursive) AS SELECT 1;")).toEqual(
+      view({ name: ["recursive"], columns: ["recursive"], recursive: true }),
+    );
+    expect(firstStmt("CREATE VIEW recursive AS SELECT recursive FROM recursive;")).toEqual(
+      view({
+        name: ["recursive"],
+        query: sel({ columns: [col(name("recursive"))], from: [tableFrom(["recursive"])] }),
+      }),
+    );
+  });
+});
+
+describe("SQL-lite UNLOGGED materialized views and their storage clauses", () => {
+  it("parses UNLOGGED, USING, WITH and TABLESPACE, and AS TABLE", () => {
+    expect(
+      firstStmt(
+        "CREATE UNLOGGED MATERIALIZED VIEW IF NOT EXISTS mv (a) USING heap WITH (fillfactor = 50) TABLESPACE ts AS TABLE t WITH NO DATA;",
+      ),
+    ).toEqual({
+      kind: "createView",
+      materialized: true,
+      orReplace: false,
+      ifNotExists: true,
+      name: ["mv"],
+      columns: ["a"],
+      query: { kind: "tableCmd", name: ["t"] },
+      withData: false,
+      accessMethod: "heap",
+      options: [{ name: "fillfactor", value: num(50) }],
+      tablespace: "ts",
+      modifiers: ["unlogged"],
+    });
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv TABLESPACE ts AS SELECT 1;")).toEqual({
+      kind: "createView",
+      materialized: true,
+      orReplace: false,
+      ifNotExists: false,
+      name: ["mv"],
+      columns: null,
+      query: selectOne,
+      withData: null,
+      tablespace: "ts",
+    });
+  });
+
+  it("rejects the clauses out of order, on a plain view, and AS EXECUTE", () => {
+    expect(parseFails("CREATE MATERIALIZED VIEW mv USING heap TABLESPACE ts WITH (x = 1) AS SELECT 1;")).toThrow(
+      /Expected "as" but found "with"/,
+    );
+    expect(parseFails("CREATE VIEW v TABLESPACE ts AS SELECT 1;")).toThrow(/Expected "as" but found "tablespace"/);
+    expect(parseFails("CREATE OR REPLACE UNLOGGED MATERIALIZED VIEW v AS SELECT 1;")).toThrow(
+      /Expected "recursive" or "view" but found "materialized"/,
+    );
+    expect(parseFails("CREATE VIEW v USING heap AS SELECT 1;")).toThrow(/Expected "as" but found "using"/);
+    expect(parseFails("CREATE MATERIALIZED VIEW mv AS EXECUTE p;")).toThrow(/but found "execute"/);
+    // In a schema element it is refused at MATERIALIZED, as an unprefixed one is.
+    expect(parseFails("CREATE SCHEMA s CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;")).toThrow(
+      /Expected "table" but found "materialized" \(1:32\)/,
+    );
+  });
+
+  it("spans from CREATE, and is explainable", () => {
+    expect(
+      (sqlLite.parse("CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;")[0] as Record<string, any>).span.start,
+    ).toEqual({ row: 1, col: 0 });
+    expect(firstStmt("EXPLAIN CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;").statement).toEqual({
+      kind: "createView",
+      materialized: true,
+      orReplace: false,
+      ifNotExists: false,
+      name: ["mv"],
+      columns: null,
+      query: selectOne,
+      withData: null,
+      modifiers: ["unlogged"],
+    });
+  });
+
+  it("keeps tablespace unreserved", () => {
+    expect(firstStmt("CREATE MATERIALIZED VIEW mv (tablespace) TABLESPACE tablespace AS SELECT 1;")).toEqual({
+      kind: "createView",
+      materialized: true,
+      orReplace: false,
+      ifNotExists: false,
+      name: ["mv"],
+      columns: ["tablespace"],
+      query: selectOne,
+      withData: null,
+      tablespace: "tablespace",
+    });
+  });
+});
+
 // --- psql scripts: sqlLiteScript ---
 
 describe("SQL-lite psql scripts", () => {
@@ -14922,6 +15783,382 @@ describe("SQL-lite foreign data", () => {
       into: "version",
     });
     expect(firstStmt("ALTER TABLE t ALTER options TYPE int;").actions[0]).toMatchObject({ column: "options" });
+  });
+});
+
+// --- XML functions ---
+
+describe("SQL-lite XML functions", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const fromItem = (src: string) => (firstStmt(`SELECT * FROM ${src};`) as any).from[0];
+  const bad = (src: string) => () => sqlLite.parse(src);
+  const ty = (typeName: string, args: number[] = []) => ({ name: typeName, args, array: false });
+  const x = name("x");
+
+  it("parses XMLELEMENT with and without attributes and content", () => {
+    expect(colExpr("XMLELEMENT(NAME foo, XMLATTRIBUTES('bar' AS baz), 'content')")).toEqual({
+      kind: "xmlElement",
+      name: "foo",
+      attributes: [{ value: str("bar"), name: "baz" }],
+      content: [str("content")],
+    });
+    expect(colExpr("xmlelement(name foo)")).toEqual({ kind: "xmlElement", name: "foo" });
+    // The name is a ColLabel: quoted, or even a reserved word.
+    expect(colExpr('xmlelement(name "Foo", a, b || c)')).toEqual({
+      kind: "xmlElement",
+      name: "Foo",
+      content: [name("a"), bin("||", name("b"), name("c"))],
+    });
+    expect(colExpr("xmlelement(name select, xmlattributes(a, b AS from))")).toEqual({
+      kind: "xmlElement",
+      name: "select",
+      attributes: [{ value: name("a") }, { value: name("b"), name: "from" }],
+    });
+    // Only the argument after the name may be XMLATTRIBUTES; a bare
+    // `xmlattributes` there is a column.
+    expect(colExpr("xmlelement(name foo, xmlattributes)")).toEqual({
+      kind: "xmlElement",
+      name: "foo",
+      content: [name("xmlattributes")],
+    });
+    expect(bad("SELECT xmlelement(name foo, a, xmlattributes(b)) FROM t;")).toThrow(
+      /XMLATTRIBUTES is allowed only as the second argument of XMLELEMENT/,
+    );
+    expect(bad("SELECT xmlelement(foo) FROM t;")).toThrow(/Expected "name" but found "foo"/);
+    expect(bad("SELECT xmlelement(name 'foo') FROM t;")).toThrow(/Expected a name but found "foo"/);
+    expect(bad("SELECT xmlelement(name foo, xmlattributes()) FROM t;")).toThrow(/but found "\)"/);
+  });
+
+  it("parses XMLFOREST and XMLCONCAT", () => {
+    expect(colExpr("xmlforest(a, b AS bee, 'x' AS \"Y\")")).toEqual({
+      kind: "xmlForest",
+      items: [{ value: name("a") }, { value: name("b"), name: "bee" }, { value: str("x"), name: "Y" }],
+    });
+    // XMLCONCAT's keyword form is a list of expressions: a plain call node.
+    expect(colExpr("xmlconcat(a, b || c)")).toEqual({
+      kind: "call",
+      name: "xmlconcat",
+      args: [name("a"), bin("||", name("b"), name("c"))],
+    });
+    expect(bad("SELECT xmlforest() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT xmlconcat() FROM t;")).toThrow(/but found "\)"/);
+    // A col_name_keyword in PG, so no call modifiers or named arguments.
+    expect(bad("SELECT xmlconcat(a) OVER () FROM t;")).toThrow(/Expected ";" but found "\("/);
+    expect(bad("SELECT xmlconcat(DISTINCT a) FROM t;")).toThrow(/but found "distinct"/);
+  });
+
+  it("parses XMLPI and XMLROOT", () => {
+    expect(colExpr("xmlpi(name php)")).toEqual({ kind: "xmlPi", name: "php" });
+    expect(colExpr("xmlpi(NAME php, 'echo ' || x)")).toEqual({
+      kind: "xmlPi",
+      name: "php",
+      content: bin("||", str("echo "), x),
+    });
+    expect(colExpr("xmlroot(x, VERSION '1.0', STANDALONE YES)")).toEqual({
+      kind: "xmlRoot",
+      expr: x,
+      version: str("1.0"),
+      standalone: "yes",
+    });
+    expect(colExpr("xmlroot(x, version no value, standalone no value)")).toEqual({
+      kind: "xmlRoot",
+      expr: x,
+      standalone: "no value",
+    });
+    expect(colExpr("xmlroot(x, version '1.1', standalone no)")).toMatchObject({ standalone: "no" });
+    expect(colExpr("xmlroot(x, version v)")).toEqual({ kind: "xmlRoot", expr: x, version: name("v") });
+    // A column named `no` is a version; only NO VALUE is the keyword form.
+    expect(colExpr("xmlroot(x, version no)")).toEqual({ kind: "xmlRoot", expr: x, version: name("no") });
+    expect(bad("SELECT xmlpi(name php, a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT xmlroot(x) FROM t;")).toThrow(/Expected "," but found "\)"/);
+    expect(bad("SELECT xmlroot(x, '1.0') FROM t;")).toThrow(/Expected "version" but found "1.0"/);
+    expect(bad("SELECT xmlroot(x, version '1.0', standalone maybe) FROM t;")).toThrow(
+      /Expected "yes" or "no" but found "maybe"/,
+    );
+  });
+
+  it("parses XMLPARSE and XMLSERIALIZE", () => {
+    expect(colExpr("xmlparse(DOCUMENT x)")).toEqual({ kind: "xmlParse", option: "document", expr: x });
+    expect(colExpr("xmlparse(content '<a/>' || x strip whitespace)")).toEqual({
+      kind: "xmlParse",
+      option: "content",
+      expr: bin("||", str("<a/>"), x),
+      whitespace: "strip",
+    });
+    expect(colExpr("xmlparse(content x PRESERVE WHITESPACE)")).toMatchObject({ whitespace: "preserve" });
+    expect(colExpr("xmlserialize(CONTENT x AS text)")).toEqual({
+      kind: "xmlSerialize",
+      option: "content",
+      expr: x,
+      type: ty("text"),
+    });
+    expect(colExpr("xmlserialize(document x AS varchar(30) INDENT)")).toEqual({
+      kind: "xmlSerialize",
+      option: "document",
+      expr: x,
+      type: ty("varchar", [30]),
+      indent: true,
+    });
+    expect(colExpr("xmlserialize(content x AS character varying NO INDENT)")).toMatchObject({
+      type: ty("character varying"),
+      indent: false,
+    });
+    expect(bad("SELECT xmlparse(x) FROM t;")).toThrow(/Expected "document" or "content" but found "x"/);
+    expect(bad("SELECT xmlparse(content x preserve) FROM t;")).toThrow(/Expected "whitespace" but found "\)"/);
+    expect(bad("SELECT xmlserialize(content x) FROM t;")).toThrow(/Expected "as" but found "\)"/);
+    expect(bad("SELECT xmlserialize(content x AS text NO) FROM t;")).toThrow(/Expected "indent" but found "\)"/);
+    // PG's SimpleTypename: no array bounds and no SETOF.
+    expect(bad("SELECT xmlserialize(content x AS text[]) FROM t;")).toThrow(/Expected a type without array bounds/);
+    expect(bad("SELECT xmlserialize(content x AS setof text) FROM t;")).toThrow(/Expected a type without SETOF/);
+  });
+
+  it("parses XMLEXISTS with each passing mechanism", () => {
+    const exists = (passing: unknown) => ({ kind: "xmlExists", path: str("//a"), passing });
+    expect(colExpr("xmlexists('//a' PASSING doc)")).toEqual(exists({ expr: name("doc") }));
+    expect(colExpr("xmlexists('//a' PASSING BY REF doc)")).toEqual(exists({ expr: name("doc"), byBefore: "ref" }));
+    expect(colExpr("xmlexists('//a' passing doc by value)")).toEqual(exists({ expr: name("doc"), byAfter: "value" }));
+    expect(colExpr("xmlexists('//a' PASSING BY VALUE t.doc BY REF)")).toEqual(
+      exists({ expr: name("t", "doc"), byBefore: "value", byAfter: "ref" }),
+    );
+    // A boolean, so it composes as a predicate.
+    expect(firstStmt("SELECT a FROM t WHERE xmlexists('//a' PASSING doc) AND b;").where).toEqual(
+      bin("and", exists({ expr: name("doc") }), name("b")),
+    );
+    // Both operands are PG's c_expr: an operator needs parentheses.
+    expect(colExpr("xmlexists(('/' || p) PASSING (d))")).toEqual({
+      kind: "xmlExists",
+      path: bin("||", str("/"), name("p")),
+      passing: { expr: name("d") },
+    });
+    expect(bad("SELECT xmlexists('/' || p PASSING d) FROM t;")).toThrow(/Expected "passing" but found "\|\|"/);
+    expect(bad("SELECT xmlexists('//a' PASSING d::xml) FROM t;")).toThrow(/Expected "\)" but found "::"/);
+    expect(bad("SELECT xmlexists('//a') FROM t;")).toThrow(/Expected "passing" but found "\)"/);
+    expect(bad("SELECT xmlexists('//a' PASSING BY doc) FROM t;")).toThrow(/Expected "\)" but found "doc"/);
+  });
+
+  it("parses XMLTABLE as a FROM item with an alias", () => {
+    expect(
+      fromItem(
+        "XMLTABLE('/rows/row' PASSING data COLUMNS id int PATH '@id', name text PATH 'n' DEFAULT 'none' NOT NULL, " +
+          "n FOR ORDINALITY, note text NULL) AS x (a, b, c, d)",
+      ),
+    ).toEqual({
+      kind: "xmlTable",
+      rowPath: str("/rows/row"),
+      passing: { expr: name("data") },
+      tableColumns: [
+        { name: "id", type: ty("int"), path: str("@id") },
+        { name: "name", type: ty("text"), path: str("n"), default: str("none"), notNull: true },
+        { name: "n", forOrdinality: true },
+        { name: "note", type: ty("text"), notNull: false },
+      ],
+      alias: "x",
+      columns: ["a", "b", "c", "d"],
+    });
+    // Options in any order, and the item without an alias.
+    expect(fromItem("xmltable('/r' PASSING BY REF d COLUMNS a int NOT NULL DEFAULT 1 + 2 PATH 'p')")).toEqual({
+      kind: "xmlTable",
+      rowPath: str("/r"),
+      passing: { expr: name("d"), byBefore: "ref" },
+      tableColumns: [{ name: "a", type: ty("int"), path: str("p"), default: bin("+", num(1), num(2)), notNull: true }],
+      alias: null,
+    });
+  });
+
+  it("parses XMLTABLE's namespaces, LATERAL and joins", () => {
+    expect(
+      fromItem("xmltable(XMLNAMESPACES('http://a' AS a, DEFAULT 'http://d'), '/a:r' PASSING d COLUMNS c text) t"),
+    ).toEqual({
+      kind: "xmlTable",
+      namespaces: [
+        { uri: str("http://a"), name: "a" },
+        { uri: str("http://d"), default: true },
+      ],
+      rowPath: str("/a:r"),
+      passing: { expr: name("d") },
+      tableColumns: [{ name: "c", type: ty("text") }],
+      alias: "t",
+    });
+    expect(
+      (firstStmt("SELECT x.* FROM docs, LATERAL xmltable('/r' PASSING docs.body COLUMNS a int) x;") as any).from[1],
+    ).toEqual({
+      kind: "xmlTable",
+      rowPath: str("/r"),
+      passing: { expr: name("docs", "body") },
+      tableColumns: [{ name: "a", type: ty("int") }],
+      alias: "x",
+      lateral: true,
+    });
+    expect(
+      (firstStmt("SELECT * FROM docs d JOIN xmltable('/r' PASSING d.body COLUMNS a int) x ON true;") as any).from[0],
+    ).toMatchObject({ kind: "join", right: { kind: "xmlTable", alias: "x" } });
+  });
+
+  it("parses XMLTABLE's quoted option names and trailing passing mechanism", () => {
+    // PG reads an identifier there as an option name, so a quoted one works.
+    expect(fromItem(`xmltable('/r' PASSING d BY VALUE COLUMNS a int "path" 'p' "default" 0)`)).toEqual({
+      kind: "xmlTable",
+      rowPath: str("/r"),
+      passing: { expr: name("d"), byAfter: "value" },
+      tableColumns: [{ name: "a", type: ty("int"), path: str("p"), default: num(0) }],
+      alias: null,
+    });
+    const table = (cols: string) => bad(`SELECT * FROM xmltable('/r' PASSING d COLUMNS ${cols});`);
+    expect(table("a int foo 'x'")).toThrow(/unrecognized column option "foo"/);
+    expect(table(`a int "PATH" 'x'`)).toThrow(/unrecognized column option "PATH"/);
+    expect(table(`a int PATH 'x' "path" 'y'`)).toThrow(/only one PATH value per column is allowed/);
+  });
+
+  it("rejects malformed XMLTABLE forms", () => {
+    const table = (cols: string) => bad(`SELECT * FROM xmltable('/r' PASSING d COLUMNS ${cols});`);
+    expect(table("a int PATH 'a' PATH 'b'")).toThrow(/only one PATH value per column is allowed/);
+    expect(table("a int DEFAULT 1 DEFAULT 2")).toThrow(/only one DEFAULT value is allowed/);
+    expect(table("a int NULL NOT NULL")).toThrow(
+      /conflicting or redundant NULL \/ NOT NULL declarations for column "a"/,
+    );
+    expect(table("")).toThrow(/Expected a name but found "\)"/);
+    expect(table("a")).toThrow(/but found "\)"/);
+    expect(table("a FOR")).toThrow(/Expected "ordinality" but found "\)"/);
+    expect(bad("SELECT * FROM xmltable('/r' PASSING d);")).toThrow(/Expected "columns" but found "\)"/);
+    // An alias clause only, never a column definition list; a c_expr row path.
+    expect(bad("SELECT * FROM xmltable('/r' PASSING d COLUMNS a int) AS x (a int);")).toThrow(
+      /Expected "\)" but found "int"/,
+    );
+    expect(bad("SELECT * FROM xmltable('/r'::text PASSING d COLUMNS a int);")).toThrow(
+      /Expected "passing" but found "::"/,
+    );
+    const namespaces = (list: string) =>
+      bad(`SELECT * FROM xmltable(xmlnamespaces(${list}), '/r' PASSING d COLUMNS a int);`);
+    expect(namespaces("'u'")).toThrow(/Expected "as" but found "\)"/);
+    expect(namespaces("DEFAULT 'u' AS a")).toThrow(/Expected "\)" but found "as"/);
+    expect(namespaces("")).toThrow(/but found "\)"/);
+    expect(bad("SELECT * FROM xmltable(xmlnamespaces('u' AS a) '/r' PASSING d COLUMNS a int);")).toThrow(
+      /Expected "," but found "\/r"/,
+    );
+    expect(bad("SELECT * FROM xmltable('/r' PASSING d COLUMNS a int) WITH ORDINALITY;")).toThrow(/but found "with"/);
+    // Not an expression, and XMLNAMESPACES not a call, in PG either.
+    expect(bad("SELECT xmltable('/r' PASSING d COLUMNS a int) FROM t;")).toThrow(
+      /XMLTABLE is allowed only as a FROM item of its own/,
+    );
+    expect(bad("SELECT xmlnamespaces('u' AS a) FROM t;")).toThrow(
+      /XMLNAMESPACES is allowed only as the first argument of XMLTABLE/,
+    );
+  });
+
+  it("parses the XML functions as table functions and bare keys", () => {
+    // PG's func_table takes every keyword form but XMLTABLE's (its own item).
+    expect(fromItem("xmlelement(name a) e")).toEqual({
+      kind: "function",
+      call: { kind: "xmlElement", name: "a" },
+      alias: "e",
+    });
+    expect(fromItem("LATERAL xmlparse(content 'x') WITH ORDINALITY p")).toEqual({
+      kind: "function",
+      call: { kind: "xmlParse", option: "content", expr: str("x") },
+      alias: "p",
+      lateral: true,
+      ordinality: true,
+    });
+    expect(fromItem("ROWS FROM (xmlpi(name a), xmlconcat(b))")).toMatchObject({
+      kind: "rowsFrom",
+      calls: [
+        { kind: "xmlPi", name: "a" },
+        { kind: "call", name: "xmlconcat", args: [name("b")] },
+      ],
+    });
+    expect(fromItem("xmlforest(a) AS f (x xml)")).toMatchObject({
+      call: { kind: "xmlForest" },
+      columnDefinitions: [{ name: "x", type: ty("xml") }],
+    });
+    expect(bad("SELECT * FROM xmlattributes(1);")).toThrow(/XMLATTRIBUTES is allowed only as the second argument/);
+    expect(bad("SELECT * FROM ROWS FROM (xmltable('/r' PASSING d COLUMNS a int));")).toThrow(
+      /XMLTABLE is allowed only as a FROM item of its own/,
+    );
+    // And, as func_expr_windowless, unparenthesised partition and statistics keys.
+    expect(firstStmt("CREATE TABLE p (a xml) PARTITION BY LIST (xmlelement(name a));").partitionBy).toMatchObject({
+      keys: [{ expr: { kind: "xmlElement", name: "a" } }],
+    });
+    expect(firstStmt("CREATE STATISTICS s ON xmlexists('a' PASSING b), c FROM t;")).toMatchObject({
+      kind: "createStatistics",
+    });
+    expect(firstStmt("INSERT INTO t VALUES (1) ON CONFLICT (xmlelement(name a)) DO NOTHING;")).toMatchObject({
+      onConflict: { inference: { elements: [{ expr: { kind: "xmlElement", name: "a" } }] } },
+    });
+  });
+
+  it("keeps quoted and qualified XML function names ordinary calls", () => {
+    expect(colExpr('"xmlelement"(a, b)')).toEqual({ kind: "call", name: "xmlelement", args: [name("a"), name("b")] });
+    expect(colExpr("s.xmlpi(a)")).toEqual({ kind: "call", name: "s.xmlpi", args: [name("a")] });
+    expect(colExpr('"xmlattributes"(a)')).toEqual({ kind: "call", name: "xmlattributes", args: [name("a")] });
+    expect(fromItem('"xmltable"(1) t')).toEqual({
+      kind: "function",
+      call: { kind: "call", name: "xmltable", args: [num(1)] },
+      alias: "t",
+    });
+    // `xmlagg` is an ordinary aggregate, with an ORDER BY.
+    expect(colExpr("xmlagg(x ORDER BY y)")).toEqual({
+      kind: "call",
+      name: "xmlagg",
+      args: [x],
+      orderBy: [{ expr: name("y"), dir: null, nulls: null }],
+    });
+  });
+
+  it("keeps the XML keywords unreserved as names and aliases", () => {
+    for (const word of [
+      "name",
+      "version",
+      "standalone",
+      "document",
+      "content",
+      "whitespace",
+      "preserve",
+      "strip",
+      "indent",
+      "passing",
+      "ref",
+      "columns",
+      "ordinality",
+      "path",
+      "yes",
+      "xmlconcat",
+      "xmlelement",
+      "xmlexists",
+      "xmlforest",
+      "xmlparse",
+      "xmlpi",
+      "xmlroot",
+      "xmlserialize",
+      "xmltable",
+      "xmlattributes",
+      "xmlnamespaces",
+    ]) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [col(name(word))],
+        from: [{ kind: "table", name: [word], alias: null }],
+      });
+      expect(firstStmt(`SELECT a AS ${word} FROM t ${word};`)).toMatchObject({
+        columns: [col(name("a"), word)],
+        from: [{ kind: "table", name: ["t"], alias: word }],
+      });
+      expect(firstStmt(`CREATE TABLE t (${word} int);`)).toMatchObject({ items: [{ name: word }] });
+    }
+    // As XML operands and column names too.
+    expect(colExpr("xmlelement(name name, content, version)")).toEqual({
+      kind: "xmlElement",
+      name: "name",
+      content: [name("content"), name("version")],
+    });
+    expect(fromItem("xmltable(path PASSING passing COLUMNS path text PATH path, columns FOR ORDINALITY)")).toEqual({
+      kind: "xmlTable",
+      rowPath: name("path"),
+      passing: { expr: name("passing") },
+      tableColumns: [
+        { name: "path", type: ty("text"), path: name("path") },
+        { name: "columns", forOrdinality: true },
+      ],
+      alias: null,
+    });
   });
 });
 

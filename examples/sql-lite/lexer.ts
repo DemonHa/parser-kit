@@ -901,7 +901,86 @@ const withoutComments = (tokens: TokenStream<SqlTokenType>): TokenStream<SqlToke
 // for anyone tokenizing SQL directly (highlighters, formatters).
 export const sqlParseLexer: Lexer<SqlTokenType> = {
   labels: sqlLexer.labels,
-  tokenize: (input) => withoutComments(sqlLexer.tokenize(input)),
+  tokenize: (input) => withRoutineDepths(withoutComments(sqlLexer.tokenize(input))),
+};
+
+// --- routine bodies ---
+// psql's routine-body heuristic (psqlscan.l), which keeps a `BEGIN ATOMIC …
+// END` body one statement: in a statement led by CREATE [OR REPLACE]
+// {FUNCTION | PROCEDURE}, a BEGIN outside parentheses opens a block, a CASE
+// inside one nests, and END closes one; a `;` in a block doesn't end the
+// statement. Like psql's, it counts every such word, so a column named
+// `begin` in a body throws it off, for recovery and, in a script, for the
+// COPY framing of the statements after it. The parse lexers record each
+// token's depth after it, which the grammar's recovery inside a body resyncs
+// by (a body's statements end at a `;` of the body's own depth); the script
+// lexer frames COPY … FROM STDIN with it.
+
+// The leading words the heuristic matches; `heads` keeps their first letters.
+const ROUTINE_HEAD_WORDS: ReadonlySet<string> = new Set(["create", "or", "replace", "function", "procedure"]);
+
+// Tokens inside a routine block, by depth; any other token is at depth 0.
+const routineDepths = new WeakMap<Token<SqlTokenType>, number>();
+/** How many routine-body blocks are open after `token`, by psql's heuristic. */
+export const routineDepth = (token: Token<SqlTokenType>): number => routineDepths.get(token) ?? 0;
+
+// Feeds the heuristic one token at a time, recording and returning the
+// depth after each. `heads` holds the first letters of the statement's
+// leading words that are among psql's five, "" for any other.
+const routineTracker = () => {
+  let heads: string[] = [];
+  let depth = 0;
+  let parens = 0;
+  const observe = (token: Token<SqlTokenType>): number => {
+    if (token.type === "psqlmeta" || (token.type === "punc" && token.value === ";" && depth === 0)) {
+      heads = [];
+      depth = parens = 0;
+      return 0;
+    }
+    if (token.type === "punc" && token.value === "(") parens++;
+    else if (token.type === "punc" && token.value === ")") parens = Math.max(0, parens - 1);
+    else if (token.type === "ident") {
+      if (heads.length < 4) heads.push(ROUTINE_HEAD_WORDS.has(token.value) ? token.value[0]! : "");
+      const routine =
+        heads[0] === "c" &&
+        (heads[1] === "f" ||
+          heads[1] === "p" ||
+          (heads[1] === "o" && heads[2] === "r" && (heads[3] === "f" || heads[3] === "p")));
+      if (routine && parens === 0) {
+        if (token.value === "begin") depth++;
+        else if (token.value === "case" && depth > 0) depth++;
+        else if (token.value === "end" && depth > 0) depth--;
+      }
+    }
+    if (depth > 0) routineDepths.set(token, depth);
+    return depth;
+  };
+  return { observe };
+};
+
+// Each token is observed once, when first peeked, so its depth is recorded
+// before the parser can look at it.
+const withRoutineDepths = (tokens: TokenStream<SqlTokenType>): TokenStream<SqlTokenType> => {
+  const routine = routineTracker();
+  let observed: Token<SqlTokenType> | null = null;
+  const peek = () => {
+    const token = tokens.peek();
+    if (token !== null && token !== observed) {
+      observed = token;
+      routine.observe(token);
+    }
+    return token;
+  };
+  return {
+    next: () => {
+      peek();
+      return tokens.next();
+    },
+    peek,
+    eof: () => peek() === null,
+    croak: tokens.croak,
+    position: tokens.position,
+  };
 };
 
 // --- psql scripts ---
@@ -912,11 +991,11 @@ export const sqlParseLexer: Lexer<SqlTokenType> = {
 // lexers below read them (the rows: `sqlScriptParseLexer` alone); `sqlLexer`
 // still rejects every backslash outside a literal, as the server does.
 //
-// A statement ends at every `;`, as it does for `sqlLite`, so a routine body
-// (`BEGIN ATOMIC … END`, which psql keeps whole) is cut at its first `;` until
-// the grammar parses one: the routine fails and recovery may take the rest of
-// its body as statements of their own. The rows of a `\copy … from stdin`
-// meta-command are not read either; they lex as SQL.
+// A `BEGIN ATOMIC … END` routine body is one statement, as psql keeps it: the
+// grammar reads the `;`s inside it, and the COPY tracking below nests with
+// psql's heuristic (except that a meta-command line, which ends an unfinished
+// statement here, ends the routine too). The rows of a `\copy … from stdin`
+// meta-command are not read; they lex as SQL.
 
 // A backslash is a meta-command where psql would run one on its own: between
 // statements (at the start of input, after a `;` or after another meta-command
@@ -1051,6 +1130,8 @@ export const sqlScriptParseLexer: Lexer<SqlTokenType> = {
     let located = false;
     let copyIn = false;
     let dataPending = false;
+    // A `;` inside a routine body doesn't end the statement.
+    const routine = routineTracker();
 
     const endStatement = () => {
       leading = true;
@@ -1059,8 +1140,9 @@ export const sqlScriptParseLexer: Lexer<SqlTokenType> = {
       previous = "";
     };
     const track = (token: Token<SqlTokenType>) => {
+      const inRoutine = routine.observe(token) > 0;
       if (token.type === "psqlmeta") return endStatement();
-      if (token.type === "punc" && token.value === ";") {
+      if (token.type === "punc" && token.value === ";" && !inRoutine) {
         dataPending = copyIn;
         return endStatement();
       }

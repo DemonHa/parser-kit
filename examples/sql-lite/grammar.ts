@@ -28,7 +28,7 @@ import {
   skip,
   type Token,
 } from "@parser-kit/core";
-import { copyDataError, type SqlTokenType, sqlParseLexer, sqlScriptParseLexer } from "./lexer";
+import { copyDataError, routineDepth, type SqlTokenType, sqlParseLexer, sqlScriptParseLexer } from "./lexer";
 
 // SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
@@ -343,7 +343,50 @@ export type Expr =
   | { kind: "typedLiteral"; type: ColType; value: string; span: Span }
   // `OVERLAY(value PLACING placing FROM from [FOR for_])`. The comma spelling,
   // `overlay(a, b, 1)`, stays an ordinary call node.
-  | { kind: "overlay"; value: Expr; placing: Expr; from: Expr; for_: Expr | null; span: Span };
+  | { kind: "overlay"; value: Expr; placing: Expr; from: Expr; for_: Expr | null; span: Span }
+  // --- XML functions (PG's xml_* productions; XMLCONCAT is a plain call) ---
+  // `XMLELEMENT(NAME name [, XMLATTRIBUTES(…)] [, content, …])`. `attributes`
+  // and `content` are each present only when written.
+  | { kind: "xmlElement"; name: string; attributes?: XmlNamedValue[]; content?: Expr[]; span: Span }
+  // `XMLFOREST(value [AS name], …)`.
+  | { kind: "xmlForest"; items: XmlNamedValue[]; span: Span }
+  // `XMLPI(NAME target [, content])`.
+  | { kind: "xmlPi"; name: string; content?: Expr; span: Span }
+  // `XMLROOT(xml, VERSION {expr | NO VALUE} [, STANDALONE {YES | NO | NO VALUE}])`.
+  // `version` is omitted for VERSION NO VALUE, and `standalone` when no
+  // STANDALONE clause is written.
+  | { kind: "xmlRoot"; expr: Expr; version?: Expr; standalone?: "yes" | "no" | "no value"; span: Span }
+  // `XMLPARSE({DOCUMENT | CONTENT} expr [{PRESERVE | STRIP} WHITESPACE])`;
+  // `whitespace` is present only when written.
+  | { kind: "xmlParse"; option: XmlOption; expr: Expr; whitespace?: "preserve" | "strip"; span: Span }
+  // `XMLSERIALIZE({DOCUMENT | CONTENT} expr AS type [[NO] INDENT])`. `indent`
+  // is true for INDENT, false for NO INDENT, and omitted when neither is written.
+  | { kind: "xmlSerialize"; option: XmlOption; expr: Expr; type: ColType; indent?: boolean; span: Span }
+  // `XMLEXISTS(xpath PASSING [BY {REF | VALUE}] xml [BY {REF | VALUE}])`.
+  | { kind: "xmlExists"; path: Expr; passing: XmlPassing; span: Span };
+
+// Whether an XML value is parsed or serialized as a whole document or as a
+// content fragment.
+export type XmlOption = "document" | "content";
+
+// One `value [AS name]` of XMLATTRIBUTES or XMLFOREST. `name` is omitted when
+// no AS is written (PG then names the item after the column it references).
+export type XmlNamedValue = { value: Expr; name?: string };
+
+// The `PASSING [BY {REF | VALUE}] doc [BY {REF | VALUE}]` of XMLEXISTS and
+// XMLTABLE. PG accepts a mechanism on either side of the document and ignores
+// both; each is present only when written.
+export type XmlPassing = { expr: Expr; byBefore?: "ref" | "value"; byAfter?: "ref" | "value" };
+
+// One XMLNAMESPACES entry: `uri AS prefix`, or the `DEFAULT uri` namespace.
+export type XmlNamespace = { uri: Expr; name: string } | { uri: Expr; default: true };
+
+// One XMLTABLE column: `name FOR ORDINALITY`, or `name type` with its options
+// in any order. `path` and `default` are present only when written; `notNull`
+// is true for NOT NULL, false for NULL, and omitted when neither is written.
+export type XmlTableColumn =
+  | { name: string; forOrdinality: true }
+  | { name: string; type: ColType; path?: Expr; default?: Expr; notNull?: boolean };
 
 // The nine niladic keyword functions. All are reserved words, so none of them
 // was usable as a bare name before it became an expression either.
@@ -515,15 +558,22 @@ export type ColConstraintElem = (
 
 export type ColConstraint = ColConstraintElem | { kind: "collate"; collation: string[]; span: Span };
 
-// `options` is the column's `OPTIONS (…)`, present only when written.
+// `storage` and `compression` are the `STORAGE mode` and `COMPRESSION method`
+// clauses PG reads between the type and the constraints, each present only
+// when written. Both spell their DEFAULT keyword `"default"`, as PG's grammar
+// does. `options` is the column's `OPTIONS (…)`, present only when written.
 export type ColumnDef = {
   kind: "column";
   name: string;
   dataType: ColType;
+  storage?: StorageMode | "default";
+  compression?: string;
   options?: GenericOption[];
   constraints: ColConstraint[];
   span: Span;
 };
+
+export type StorageMode = "plain" | "external" | "extended" | "main";
 
 export type TableConstraint =
   | ({ kind: "primaryKey"; name: string | null; columns: string[]; span: Span } & IndexParams & ConstraintAttrs)
@@ -668,7 +718,7 @@ export type AlterAction =
   | { kind: "alterIdentity"; column: string; options: IdentityOption[] }
   | { kind: "dropIdentity"; column: string; ifExists?: true }
   | { kind: "setStatistics"; column: string; value: number | null }
-  | { kind: "setStorage"; column: string; storage: "plain" | "external" | "extended" | "main" | null }
+  | { kind: "setStorage"; column: string; storage: StorageMode | null }
   | { kind: "setCompression"; column: string; method: string | null }
   | { kind: "setColumnOptions"; column: string; options: RelationOption[] }
   | { kind: "resetColumnOptions"; column: string; options: RelationOption[] }
@@ -838,13 +888,18 @@ export type DomainConstraint =
   | { kind: "default"; expr: Expr }
   | { kind: "collate"; collation: string[] };
 
-// `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] name [(cols)] [WITH
-// (option, …)] AS query [WITH [NO] DATA | WITH [CASCADED | LOCAL] CHECK OPTION]`.
+// `CREATE [OR REPLACE] [TEMP] [RECURSIVE] VIEW name [(cols)] [WITH (option, …)]
+// AS query [WITH [CASCADED | LOCAL] CHECK OPTION]`, or `CREATE [UNLOGGED]
+// MATERIALIZED VIEW [IF NOT EXISTS] name [(cols)] [USING method] [WITH (option,
+// …)] [TABLESPACE name] AS query [WITH [NO] DATA]`.
 // `withData` is materialized-only (`null` otherwise / when the clause is absent);
 // `ifNotExists` is materialized-only in PG but stored uniformly. `options` (a
 // view's `security_barrier`, a materialized view's storage parameters) and the
 // plain-view-only `checkOption` are present only when written; a bare WITH CHECK
-// OPTION is CASCADED, as in PG.
+// OPTION is CASCADED, as in PG. `recursive` (whose view always has a column
+// list), the materialized-only `accessMethod` and `tablespace`, and
+// `modifiers` (the prefix words, as on `createTable`) are likewise present only
+// when written.
 export type CreateView = {
   kind: "createView";
   materialized: boolean;
@@ -854,8 +909,12 @@ export type CreateView = {
   columns: string[] | null;
   query: Query;
   withData: boolean | null;
+  recursive?: true;
+  accessMethod?: string;
   options?: RelationOption[];
+  tablespace?: string;
   checkOption?: "cascaded" | "local";
+  modifiers?: string[];
   span: Span;
 };
 
@@ -1131,11 +1190,13 @@ export type CreateTableAs = {
   ifNotExists: boolean;
   name: string[];
   columns: string[] | null;
-  query: Query;
+  // The query, or the prepared statement of `AS EXECUTE name [(args)]`.
+  query: Query | Execute;
   withData: boolean | null;
-  // The storage clauses PG allows ahead of the AS (its `USING method` aside,
-  // which is not parsed), each omitted when absent — the same keys, and the
-  // same rule, as on `createTable` (INHERITS aside).
+  // The storage clauses PG allows ahead of the AS, each omitted when absent —
+  // the same keys, and the same rule, as on `createTable` (INHERITS aside).
+  accessMethod?: string;
+  withoutOids?: true;
   options?: RelationOption[];
   onCommit?: "preserveRows" | "deleteRows" | "drop";
   tablespace?: string;
@@ -1147,7 +1208,9 @@ export type CreateTableAs = {
 // --- Phase 8: functions / aggregates / triggers ---
 // The routine body (`AS $$…$$` / plpgsql) is kept OPAQUE — the dollar-quoted
 // string lexes as one `string` token and we store its inner text verbatim rather
-// than parsing plpgsql, matching node-sql-parser's practical depth.
+// than parsing plpgsql, matching node-sql-parser's practical depth. A
+// SQL-standard body (`RETURN expr`, `BEGIN ATOMIC … END`) is SQL, so it is
+// parsed (`RoutineBody`).
 
 // One argument of a function/aggregate signature: `[mode] [name] type [DEFAULT
 // expr]`. `mode` and `name` are null when absent; both are recovered by a small
@@ -1247,7 +1310,16 @@ export type FunctionOption =
   | { kind: "window" }
   | { kind: "set"; parameter: string; value: FunctionSetValue };
 
-// `CREATE [OR REPLACE] FUNCTION name (args) [RETURNS …] option*`.
+// `RETURN expr`: a SQL-standard routine body of its own, or one statement of
+// a `BEGIN ATOMIC` body.
+export type RoutineReturn = { kind: "return"; expr: Expr; span: Span };
+
+// A routine's SQL-standard body (PG 14+), in place of `AS 'definition'`:
+// `RETURN expr`, or `BEGIN ATOMIC stmt; … END` (`statements` may be empty).
+export type RoutineBody = RoutineReturn | { kind: "atomic"; statements: (Stmt | RoutineReturn)[]; span: Span };
+
+// `CREATE [OR REPLACE] FUNCTION name (args) [RETURNS …] option* [body]`.
+// `body` is omitted when absent.
 export type CreateFunction = {
   kind: "createFunction";
   orReplace: boolean;
@@ -1255,18 +1327,21 @@ export type CreateFunction = {
   args: FunctionArg[];
   returns: FunctionReturns | null;
   options: FunctionOption[];
+  body?: RoutineBody;
   span: Span;
 };
 
 // `CREATE [OR REPLACE] PROCEDURE name (args) option*` — a function with no
 // RETURNS, whose options are those of CREATE FUNCTION's that PG also admits on
-// a procedure (LANGUAGE, AS, [EXTERNAL] SECURITY and SET).
+// a procedure (LANGUAGE, AS, [EXTERNAL] SECURITY and SET). `body` is as
+// CREATE FUNCTION's, omitted when absent.
 export type CreateProcedure = {
   kind: "createProcedure";
   orReplace: boolean;
   name: string[];
   args: FunctionArg[];
   options: FunctionOption[];
+  body?: RoutineBody;
   span: Span;
 };
 
@@ -1293,10 +1368,16 @@ export type CreateAggregate = {
 // `OF col, …` column list.
 export type TriggerEvent = { event: "insert" | "update" | "delete" | "truncate"; columns: string[] | null };
 
+// One `{OLD | NEW} TABLE [AS] name` transition relation of REFERENCING.
+export type TriggerTransition = { kind: "old" | "new"; name: string };
+
 // `CREATE [OR REPLACE] TRIGGER name {BEFORE|AFTER|INSTEAD OF} event [OR …] ON
-// table [FOR [EACH] {ROW|STATEMENT}] [WHEN (cond)] EXECUTE {FUNCTION|PROCEDURE}
-// fn(args)`. Constraint-trigger extras (DEFERRABLE / REFERENCING / FROM) are out
-// of scope.
+// table [REFERENCING transition …] [FOR [EACH] {ROW|STATEMENT}] [WHEN (cond)]
+// EXECUTE {FUNCTION|PROCEDURE} fn(args)`, or `CREATE CONSTRAINT TRIGGER name
+// AFTER event [OR …] ON table [FROM table] [deferral attributes] FOR EACH ROW
+// [WHEN (cond)] EXECUTE …` (OR REPLACE refused, as in PG). `referencing`,
+// `constraint`, `fromTable` and the deferral attributes are present only when
+// written.
 export type CreateTrigger = {
   kind: "createTrigger";
   orReplace: boolean;
@@ -1304,11 +1385,14 @@ export type CreateTrigger = {
   timing: "before" | "after" | "insteadOf";
   events: TriggerEvent[];
   table: string[];
+  constraint?: true;
+  fromTable?: string[];
+  referencing?: TriggerTransition[];
   forEach: "row" | "statement" | null;
   when: Expr | null;
   execute: { routine: "function" | "procedure"; name: string[]; args: Expr[] };
   span: Span;
-};
+} & ConstraintAttrs;
 
 // --- long-tail objects: casts, collations, operators, text search, … ---
 
@@ -1773,21 +1857,26 @@ export type ScriptItem = Stmt | PsqlMeta;
 
 export type Stmt =
   // `modifiers` are the prefix words between CREATE and TABLE (PG's TEMP /
-  // UNLOGGED family, see parseTempPrefix), in source order. Omitted, not null,
-  // when there are none.
+  // UNLOGGED family, see parseTempPrefix), in source order — as on a view.
+  // Omitted, not null, when there are none.
   // The clauses after the element list follow the same rule: each key is
   // present only when its clause is written (see parseTableClauses).
-  // `partitionOf` marks a `PARTITION OF parent … FOR VALUES …` table, whose
-  // `items` are `columnOptions` and table constraints — empty when it writes no
-  // element list.
+  // `partitionOf` marks a `PARTITION OF parent … FOR VALUES …` table and
+  // `ofType` an `OF type` (typed) table; the `items` of either are
+  // `columnOptions` and table constraints — empty when it writes no element
+  // list. `accessMethod` is `USING method`, `withoutOids` PG's `WITHOUT OIDS`
+  // noise clause.
   | {
       kind: "createTable";
       ifNotExists: boolean;
       name: string[];
       items: TableItem[];
       partitionOf?: PartitionOf;
+      ofType?: string[];
       inherits?: string[][];
       partitionBy?: PartitionSpec;
+      accessMethod?: string;
+      withoutOids?: true;
       options?: RelationOption[];
       onCommit?: "preserveRows" | "deleteRows" | "drop";
       tablespace?: string;
@@ -2188,8 +2277,9 @@ export type FromItem =
   // `lateral` is present (and true) only for a `LATERAL (subquery)`.
   | { kind: "subquery"; query: Query; alias: string | null; columns?: string[]; lateral?: boolean }
   // A table-function FROM item — `foo(args) alias`, optionally LATERAL. `call`
-  // is the underlying `call` expression node. `ordinality` is present (and
-  // true) only for `WITH ORDINALITY`, as on a `rowsFrom` item.
+  // is the underlying `call` expression node, or the node of an XML function's
+  // keyword form (`xmlElement`, …), which PG takes here too. `ordinality` is
+  // present (and true) only for `WITH ORDINALITY`, as on a `rowsFrom` item.
   // `columnDefinitions` is present only for a column definition list
   // (`f() AS x (a int)`, `f() AS (a int)`), which takes the place of `columns`.
   | {
@@ -2202,7 +2292,8 @@ export type FromItem =
       ordinality?: boolean;
     }
   // `ROWS FROM (f(…), g(…))` — several table functions zipped side by side,
-  // optionally LATERAL. `calls` are the underlying `call` expression nodes.
+  // optionally LATERAL. `calls` are the underlying `call` expression nodes,
+  // or XML keyword-form nodes, as on a `function` item.
   // `callColumnDefinitions` is present only when some call carries its own
   // `AS (col type, …)` list; it runs parallel to `calls`, with null for a call
   // without one. `columnDefinitions` is a list after the whole item, as on a
@@ -2221,6 +2312,20 @@ export type FromItem =
   // clause's column list, as on the items above; the COLUMNS clause is
   // `table.columns`.
   | { kind: "jsonTable"; table: JsonTable; alias: string | null; columns?: string[]; lateral?: boolean }
+  // `XMLTABLE([XMLNAMESPACES(…),] row_path PASSING doc COLUMNS …) [alias]`,
+  // optionally LATERAL. `namespaces` is present only when written, and
+  // `lateral` (and true) only for LATERAL; `tableColumns` are the COLUMNS
+  // entries, and `columns` the alias's column list, as on the other items.
+  | {
+      kind: "xmlTable";
+      namespaces?: XmlNamespace[];
+      rowPath: Expr;
+      passing: XmlPassing;
+      tableColumns: XmlTableColumn[];
+      alias: string | null;
+      columns?: string[];
+      lateral?: boolean;
+    }
   // `alias` and `columns` are present only on a parenthesised join that carries
   // an alias clause — `(a JOIN b ON …) AS x (c, d)`. A parenthesised join
   // without one is the bare join node: the parentheses only group. `natural`
@@ -2995,6 +3100,331 @@ function parseNormalize(ctx: ParseContext<SqlTokenType>, start: Position): Expr 
   return { kind: "normalize", value, form: form.value as NormalForm, span: ctx.spanFrom(start) };
 }
 
+// --- XML functions ---
+// PG's xml_* productions. Every lead word is one of its col_name_keywords,
+// which it never takes as a bare function name, so a bare `xmlelement(` (and
+// the rest) always opens the keyword form here, as there; quoted or qualified,
+// each is an ordinary function (see BARE_ONLY_CALLS). XMLCONCAT's keyword form
+// is just a list of expressions, so it gives a plain call node. The clause
+// words (`name`, `version`, `passing`, …) are matched by value inside the
+// parentheses alone, and stay unreserved.
+
+// PG's ColLabel: a name that may be any word, reserved or not.
+function xmlLabel(ctx: ParseContext<SqlTokenType>): string {
+  const tok = ctx.peek();
+  if (tok === null || (tok.type !== "ident" && tok.type !== "qident")) {
+    return ctx.croak(`Expected a name but found ${describeFound(tok)}`);
+  }
+  ctx.next();
+  return tok.value;
+}
+
+// Whether the bare keyword `word` sits at the cursor with a `(` after it.
+const startsXmlCall = (ctx: ParseContext<SqlTokenType>, word: string): boolean =>
+  ctx.is("ident", word) && isPuncToken(ctx.peekAhead(1), "(");
+
+// `value [AS name], …` up to the closing `)`, which is consumed: the list of
+// XMLATTRIBUTES and XMLFOREST.
+function parseXmlNamedValues(ctx: ParseContext<SqlTokenType>): XmlNamedValue[] {
+  const items: XmlNamedValue[] = [];
+  do {
+    const value = ctx.parse(expression);
+    items.push(ctx.eat("ident", "as") !== null ? { value, name: xmlLabel(ctx) } : { value });
+  } while (ctx.eat("punc", ",") !== null);
+  expectClose(ctx);
+  return items;
+}
+
+// `DOCUMENT` or `CONTENT`, which XMLPARSE and XMLSERIALIZE open with.
+function parseXmlOption(ctx: ParseContext<SqlTokenType>): XmlOption {
+  const tok = ctx.eat("ident", ["document", "content"]);
+  if (tok === null) ctx.croak(`Expected "document" or "content" but found ${describeFound(ctx.peek())}`);
+  return tok!.value as XmlOption;
+}
+
+// `PASSING [BY {REF | VALUE}] doc [BY {REF | VALUE}]`, positioned on PASSING.
+// Like the path before it, the document is an atom (PG's c_expr), so an
+// operator needs parentheses. `by` opens a mechanism only before REF or VALUE.
+function parseXmlPassing(ctx: ParseContext<SqlTokenType>): XmlPassing {
+  ctx.parse(kw("passing"));
+  const mechanism = (): "ref" | "value" | null => {
+    const after = ctx.peekAhead(1);
+    if (!ctx.is("ident", "by") || after?.type !== "ident" || (after.value !== "ref" && after.value !== "value")) {
+      return null;
+    }
+    ctx.next(); // by
+    return ctx.next()!.value as "ref" | "value";
+  };
+  const byBefore = mechanism();
+  const expr = ctx.parse(atom);
+  const byAfter = mechanism();
+  return { expr, ...(byBefore !== null && { byBefore }), ...(byAfter !== null && { byAfter }) };
+}
+
+// XMLCONCAT(expr, …): at least one expression, and none of a call's modifiers.
+function parseXmlConcat(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const args = [ctx.parse(expression)];
+  while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(expression));
+  expectClose(ctx);
+  return { kind: "call", name: "xmlconcat", args, span: ctx.spanFrom(start) };
+}
+
+// XMLELEMENT(NAME name [, XMLATTRIBUTES(…)] [, content, …]). The attributes
+// may only come first; a column named `xmlattributes` is content.
+function parseXmlElement(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  ctx.parse(kw("name"));
+  const name = xmlLabel(ctx);
+  let attributes: XmlNamedValue[] | null = null;
+  const content: Expr[] = [];
+  if (ctx.eat("punc", ",") !== null) {
+    if (startsXmlCall(ctx, "xmlattributes")) {
+      ctx.next(); // xmlattributes
+      ctx.next(); // "("
+      attributes = parseXmlNamedValues(ctx);
+      if (ctx.eat("punc", ",") !== null) content.push(ctx.parse(expression));
+    } else {
+      content.push(ctx.parse(expression));
+    }
+    while (content.length > 0 && ctx.eat("punc", ",") !== null) content.push(ctx.parse(expression));
+  }
+  expectClose(ctx);
+  return {
+    kind: "xmlElement",
+    name,
+    ...(attributes !== null && { attributes }),
+    ...(content.length > 0 && { content }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// XMLFOREST(value [AS name], …).
+function parseXmlForest(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  return { kind: "xmlForest", items: parseXmlNamedValues(ctx), span: ctx.spanFrom(start) };
+}
+
+// XMLPI(NAME target [, content]).
+function parseXmlPi(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  ctx.parse(kw("name"));
+  const name = xmlLabel(ctx);
+  const content = ctx.eat("punc", ",") !== null ? ctx.parse(expression) : null;
+  expectClose(ctx);
+  return { kind: "xmlPi", name, ...(content !== null && { content }), span: ctx.spanFrom(start) };
+}
+
+// Whether `no value` sits at the cursor: the NO VALUE of XMLROOT, which a
+// column named `no` cannot be followed by.
+const startsNoValue = (ctx: ParseContext<SqlTokenType>): boolean =>
+  ctx.is("ident", "no") && isWordAhead(ctx, 1, "value");
+
+// XMLROOT(xml, VERSION {expr | NO VALUE} [, STANDALONE {YES | NO | NO VALUE}]).
+function parseXmlRoot(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const expr = ctx.parse(expression);
+  ctx.parse(punc(","));
+  ctx.parse(kw("version"));
+  let version: Expr | null = null;
+  if (startsNoValue(ctx)) {
+    ctx.next(); // no
+    ctx.next(); // value
+  } else {
+    version = ctx.parse(expression);
+  }
+  let standalone: "yes" | "no" | "no value" | null = null;
+  if (ctx.eat("punc", ",") !== null) {
+    ctx.parse(kw("standalone"));
+    if (startsNoValue(ctx)) {
+      ctx.next(); // no
+      ctx.next(); // value
+      standalone = "no value";
+    } else {
+      const tok = ctx.eat("ident", ["yes", "no"]);
+      if (tok === null) ctx.croak(`Expected "yes" or "no" but found ${describeFound(ctx.peek())}`);
+      standalone = tok!.value as "yes" | "no";
+    }
+  }
+  expectClose(ctx);
+  return {
+    kind: "xmlRoot",
+    expr,
+    ...(version !== null && { version }),
+    ...(standalone !== null && { standalone }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// XMLPARSE({DOCUMENT | CONTENT} expr [{PRESERVE | STRIP} WHITESPACE]).
+function parseXmlParse(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const option = parseXmlOption(ctx);
+  const expr = ctx.parse(expression);
+  const whitespace = ctx.eat("ident", ["preserve", "strip"]);
+  if (whitespace !== null) ctx.parse(kw("whitespace"));
+  expectClose(ctx);
+  return {
+    kind: "xmlParse",
+    option,
+    expr,
+    ...(whitespace !== null && { whitespace: whitespace.value as "preserve" | "strip" }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// XMLSERIALIZE({DOCUMENT | CONTENT} expr AS type [[NO] INDENT]). The type is
+// PG's SimpleTypename, which takes neither SETOF nor array bounds.
+function parseXmlSerialize(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const option = parseXmlOption(ctx);
+  const expr = ctx.parse(expression);
+  ctx.parse(kw("as"));
+  const type = ctx.parse(typeRef);
+  if (type.array || type.setof) {
+    ctx.croak(`Expected a type without ${type.setof ? "SETOF" : "array bounds"}`, type.span.start, type.span.end);
+  }
+  let indent: boolean | null = null;
+  if (ctx.eat("ident", "indent") !== null) {
+    indent = true;
+  } else if (ctx.is("ident", "no")) {
+    ctx.parse(kwseq("no", "indent"));
+    indent = false;
+  }
+  expectClose(ctx);
+  return {
+    kind: "xmlSerialize",
+    option,
+    expr,
+    type,
+    ...(indent !== null && { indent }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// XMLEXISTS(xpath PASSING [BY …] xml [BY …]). The path is an atom, as in PG.
+function parseXmlExists(ctx: ParseContext<SqlTokenType>, start: Position): Expr {
+  const path = ctx.parse(atom);
+  const passing = parseXmlPassing(ctx);
+  expectClose(ctx);
+  return { kind: "xmlExists", path, passing, span: ctx.spanFrom(start) };
+}
+
+// XMLATTRIBUTES, XMLNAMESPACES and XMLTABLE have no call form of their own:
+// PG takes the first two only inside another construct and XMLTABLE only as a
+// FROM item, and so does this grammar.
+const misplacedXmlCall =
+  (what: string, where: string) =>
+  (ctx: ParseContext<SqlTokenType>, start: Position): Expr =>
+    ctx.croak(`${what} is allowed only ${where}`, start, ctx.lastEnd());
+
+const XML_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Position) => Expr> = {
+  xmlconcat: parseXmlConcat,
+  xmlelement: parseXmlElement,
+  xmlforest: parseXmlForest,
+  xmlpi: parseXmlPi,
+  xmlroot: parseXmlRoot,
+  xmlparse: parseXmlParse,
+  xmlserialize: parseXmlSerialize,
+  xmlexists: parseXmlExists,
+  xmlattributes: misplacedXmlCall("XMLATTRIBUTES", "as the second argument of XMLELEMENT"),
+  xmlnamespaces: misplacedXmlCall("XMLNAMESPACES", "as the first argument of XMLTABLE"),
+  xmltable: misplacedXmlCall("XMLTABLE", "as a FROM item of its own"),
+};
+
+// One XMLNAMESPACES entry: `uri AS prefix` or `DEFAULT uri`, each a b_expr.
+function parseXmlNamespace(ctx: ParseContext<SqlTokenType>): XmlNamespace {
+  if (ctx.eat("ident", "default") !== null) return { uri: ctx.parse(bExpression), default: true };
+  const uri = ctx.parse(bExpression);
+  ctx.parse(kw("as"));
+  return { uri, name: xmlLabel(ctx) };
+}
+
+// One XMLTABLE column. The options may come in any order, but each at most
+// once — PG's grammar action rejects a repeat, and so does this one, over the
+// repeated option. PATH and DEFAULT take a b_expr, so a NOT NULL after either
+// is the option, never an operator. PG also reads any other identifier there as
+// an option name (its `IDENT b_expr`), so a quoted `"path"` or `"default"` is
+// that option too, and any other word is an unrecognized option.
+function parseXmlTableColumn(ctx: ParseContext<SqlTokenType>): XmlTableColumn {
+  const name = ctx.parse(nameWord);
+  if (ctx.is("ident", "for")) {
+    ctx.parse(kwseq("for", "ordinality"));
+    return { name, forOrdinality: true };
+  }
+  const type = ctx.parse(typeRef);
+  let path: Expr | null = null;
+  let default_: Expr | null = null;
+  let notNull: boolean | null = null;
+  for (;;) {
+    const optStart = ctx.position();
+    const tok = ctx.peek();
+    const word = tok?.type === "qident" || (tok?.type === "ident" && !RESERVED.has(tok.value)) ? tok.value : null;
+    if (word !== null && word !== "path" && word !== "default") {
+      ctx.croak(`unrecognized column option "${word}"`);
+    }
+    if (word === "path") {
+      ctx.next(); // path
+      const value = ctx.parse(bExpression);
+      if (path !== null) ctx.croak("only one PATH value per column is allowed", optStart, ctx.lastEnd());
+      path = value;
+    } else if (word === "default" || ctx.is("ident", "default")) {
+      ctx.next(); // default
+      const value = ctx.parse(bExpression);
+      if (default_ !== null) ctx.croak("only one DEFAULT value is allowed", optStart, ctx.lastEnd());
+      default_ = value;
+    } else if (ctx.is("ident", "not") || ctx.is("ident", "null")) {
+      const not = ctx.eat("ident", "not") !== null;
+      ctx.parse(kw("null"));
+      if (notNull !== null) {
+        ctx.croak(
+          `conflicting or redundant NULL / NOT NULL declarations for column "${name}"`,
+          optStart,
+          ctx.lastEnd(),
+        );
+      }
+      notNull = not;
+    } else {
+      break;
+    }
+  }
+  return {
+    name,
+    type,
+    ...(path !== null && { path }),
+    ...(default_ !== null && { default: default_ }),
+    ...(notNull !== null && { notNull }),
+  };
+}
+
+// `XMLTABLE([XMLNAMESPACES(…),] row_path PASSING … COLUMNS col, …) [alias]`,
+// positioned on `xmltable` (with a `(` after it). The row path and the
+// document are atoms, as in PG. Like a subquery, the item takes an alias
+// clause but no WITH ORDINALITY.
+function parseXmlTable(ctx: ParseContext<SqlTokenType>, lateral: boolean): FromItem {
+  ctx.next(); // xmltable
+  ctx.next(); // "("
+  let namespaces: XmlNamespace[] | null = null;
+  if (startsXmlCall(ctx, "xmlnamespaces")) {
+    ctx.next(); // xmlnamespaces
+    ctx.next(); // "("
+    namespaces = [parseXmlNamespace(ctx)];
+    while (ctx.eat("punc", ",") !== null) namespaces.push(parseXmlNamespace(ctx));
+    expectClose(ctx);
+    ctx.parse(punc(","));
+  }
+  const rowPath = ctx.parse(atom);
+  const passing = parseXmlPassing(ctx);
+  ctx.parse(kw("columns"));
+  const tableColumns = [parseXmlTableColumn(ctx)];
+  while (ctx.eat("punc", ",") !== null) tableColumns.push(parseXmlTableColumn(ctx));
+  expectClose(ctx);
+  const { alias, columns } = parseAliasClause(ctx);
+  return {
+    kind: "xmlTable",
+    ...(namespaces !== null && { namespaces }),
+    rowPath,
+    passing,
+    tableColumns,
+    alias,
+    ...(columns !== null && { columns }),
+    ...(lateral && { lateral: true }),
+  };
+}
+
 // The keyword-argument functions columnRef's call branch hands a single-part
 // callee over to, entered just past the `(`.
 const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Position) => Expr> = {
@@ -3004,6 +3434,7 @@ const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Pos
   row: parseRow,
   substring: parseSubstring,
   normalize: parseNormalize,
+  ...XML_CALLS,
 };
 
 // --- SQL/JSON ---
@@ -3492,6 +3923,10 @@ function parseJsonTableCall(
   };
 }
 
+// The SPECIAL_CALLS that are PG keywords only when bare: quoted, each is an
+// ordinary function name to it.
+const BARE_ONLY_CALLS: ReadonlySet<string> = new Set(["normalize", ...Object.keys(XML_CALLS)]);
+
 // --- window functions ---
 // `fn(…)` may carry, in order, `WITHIN GROUP (ORDER BY …)`, `IGNORE|RESPECT
 // NULLS`, `FILTER (WHERE …)`, and `OVER (…)` / `OVER name`. These are attached
@@ -3692,14 +4127,15 @@ const columnRef = custom<Expr, SqlTokenType>(
     if (ctx.is("punc", "(")) {
       ctx.next(); // "("
       // A keyword-argument function (EXTRACT / POSITION / TRIM / ROW /
-      // SUBSTRING / NORMALIZE) owns the rest of the call; a plain name falls
-      // through to a normal call.
+      // SUBSTRING / NORMALIZE / the XML functions) owns the rest of the call;
+      // a plain name falls through to a normal call.
       // `Object.hasOwn` for the reason `lookup` gives: `constructor(1)` and
       // `__proto__(1)` would otherwise find an inherited "handler".
-      // NORMALIZE is a keyword only when bare: a quoted `"normalize"(x, 'NFC')`
-      // is an ordinary call to PG.
+      // NORMALIZE and the XML functions are keywords only when bare (see
+      // BARE_ONLY_CALLS): a quoted `"normalize"(x, 'NFC')` is an ordinary call
+      // to PG.
       const special =
-        parts.length === 1 && Object.hasOwn(SPECIAL_CALLS, parts[0]!) && (bareLead || parts[0] !== "normalize")
+        parts.length === 1 && Object.hasOwn(SPECIAL_CALLS, parts[0]!) && (bareLead || !BARE_ONLY_CALLS.has(parts[0]!))
           ? SPECIAL_CALLS[parts[0]!]
           : undefined;
       if (special !== undefined) return special(ctx, start);
@@ -5263,8 +5699,16 @@ function atNot(ctx: ParseContext<SqlTokenType>, word: string): boolean {
 // The constraint a table-level attribute list belongs to, spelled as PG's
 // "%s constraints cannot be marked …" messages name it.
 // ALTER TABLE's ALTER CONSTRAINT reads the same list, and PG names it "ALTER
-// CONSTRAINT statement" there, refusing NOT VALID and NO INHERIT.
-type ConstraintType = "PRIMARY KEY" | "UNIQUE" | "EXCLUDE" | "FOREIGN KEY" | "CHECK" | "ALTER CONSTRAINT statement";
+// CONSTRAINT statement" there, refusing NOT VALID and NO INHERIT; CREATE
+// CONSTRAINT TRIGGER reads it as "TRIGGER", refusing the same two.
+type ConstraintType =
+  | "PRIMARY KEY"
+  | "UNIQUE"
+  | "EXCLUDE"
+  | "FOREIGN KEY"
+  | "CHECK"
+  | "ALTER CONSTRAINT statement"
+  | "TRIGGER";
 
 // `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. At
 // column level only UNIQUE, PRIMARY KEY and REFERENCES read this tail, so PG's
@@ -5737,20 +6181,32 @@ const columnGenericOptions = custom<GenericOption[], SqlTokenType>(parseGenericO
   first: [{ type: "ident", value: "options" }],
 });
 
-const columnDef = seq(
-  field("name", nameWord),
-  field("dataType", typeRef),
-  field("options", optional(columnGenericOptions)),
-  field("constraints", many(columnConstraint)),
-).map(
-  ({ name, dataType, options, constraints }, span): ColumnDef => ({
-    kind: "column",
-    name,
-    dataType,
-    ...(options !== null && { options }),
-    constraints,
-    span,
-  }),
+// `name type [STORAGE mode] [COMPRESSION method] [OPTIONS (…)] constraint*`,
+// the three clauses in PG's fixed order. Their lead words are matched by value
+// straight after the type, where no constraint starts with any of them, so all
+// three stay names everywhere.
+const columnConstraints = many(columnConstraint);
+const columnDef = custom<ColumnDef, SqlTokenType>(
+  (ctx) => {
+    const start = ctx.position();
+    const name = ctx.parse(nameWord);
+    const dataType = ctx.parse(typeRef);
+    const storage = ctx.eat("ident", "storage") !== null ? parseStorageMode(ctx) : null;
+    const compression = ctx.eat("ident", "compression") !== null ? parseCompressionMethod(ctx) : null;
+    const options = ctx.is("ident", "options") ? ctx.parse(columnGenericOptions) : null;
+    const constraints = ctx.parse(columnConstraints);
+    return {
+      kind: "column",
+      name,
+      dataType,
+      ...(storage !== null && { storage }),
+      ...(compression !== null && { compression }),
+      ...(options !== null && { options }),
+      constraints,
+      span: ctx.spanFrom(start),
+    };
+  },
+  { expected: nameWord.expected(), first: nameWord.first() },
 );
 
 // An element led by `exclude`: an EXCLUDE constraint when the lookahead says
@@ -5938,19 +6394,22 @@ const relationOptions = custom<RelationOption[], SqlTokenType>(
   { expected: '"("', first: [{ type: "punc", value: "(" }] },
 );
 
-// The storage clauses, in the fixed order PG's CreateStmt gives them: `[WITH
-// (option, …)] [ON COMMIT {PRESERVE ROWS | DELETE ROWS | DROP}] [TABLESPACE
-// name]`. CREATE TABLE takes them last — after its element list, INHERITS and
-// PARTITION BY (below), or after a partition's bound and PARTITION BY — and
+// The storage clauses, in the fixed order PG's CreateStmt gives them: `[USING
+// method] [WITH (option, …) | WITHOUT OIDS] [ON COMMIT {PRESERVE ROWS | DELETE
+// ROWS | DROP}] [TABLESPACE name]`. CREATE TABLE takes them last — after its
+// element list, INHERITS and PARTITION BY (below), after a partition's bound
+// and PARTITION BY, or after a typed table's items and PARTITION BY — and
 // CREATE TABLE AS ahead of its AS. Written out of order they are an error, as
 // in PG. Every key is set only when its clause is written, so a table with none
 // of them keeps exactly the node it had before they existed.
 //
-// The lead words take no name away: `with` and `on` are reserved, and in any of
-// these positions nothing else but `;` or `AS` could follow. PG accepts ON
+// The lead words take no name away: `using`, `with` and `on` are reserved, and
+// in any of these positions nothing else but `;` or `AS` could follow, so
+// `without` and `oids` are matched by value. WITHOUT OIDS is PG's legacy noise
+// clause; it sets nothing there but is kept here as written. PG accepts ON
 // COMMIT on any table in its grammar and rejects it on a permanent one only in
 // analysis; this parser has no analysis pass, so it accepts it everywhere.
-type StorageClauses = Pick<CreateTableAs, "options" | "onCommit" | "tablespace">;
+type StorageClauses = Pick<CreateTableAs, "accessMethod" | "withoutOids" | "options" | "onCommit" | "tablespace">;
 type TableClauses = Pick<Extract<Stmt, { kind: "createTable" }>, "inherits" | "partitionBy"> & StorageClauses;
 
 const onCommitAction = oneOf(
@@ -5961,7 +6420,12 @@ const onCommitAction = oneOf(
 
 function parseStorageClauses(ctx: ParseContext<SqlTokenType>): StorageClauses {
   const clauses: StorageClauses = {};
+  if (ctx.eat("ident", "using") !== null) clauses.accessMethod = ctx.parse(nameWord);
   if (ctx.eat("ident", "with") !== null) clauses.options = ctx.parse(relationOptions);
+  else if (ctx.is("ident", "without")) {
+    ctx.parse(kwseq("without", "oids"));
+    clauses.withoutOids = true;
+  }
   if (ctx.is("ident", "on")) {
     ctx.parse(kwseq("on", "commit"));
     clauses.onCommit = ctx.parse(onCommitAction);
@@ -5993,10 +6457,10 @@ function partitionStrategy(ctx: ParseContext<SqlTokenType>): PartitionSpec["stra
 
 // The expression forms PG's `part_elem` takes unparenthesised: a column (its
 // ColId, so one part) or a function call, the special-syntax ones (EXTRACT,
-// CURRENT_DATE, the SQL/JSON forms, …) included, as PG's func_expr_windowless
-// includes them (an aggregate's, but not a FILTER or OVER around it). CAST
-// is one of those too, but its node is a `::` cast's as well, so
-// isBareFuncExpr tells the two apart by the lead word instead.
+// CURRENT_DATE, the XML and SQL/JSON functions, …) included, as PG's
+// func_expr_windowless includes them (an aggregate's, but not a FILTER or OVER
+// around it). CAST is one of those too, but its node is a `::` cast's as well,
+// so isBareFuncExpr tells the two apart by the lead word instead.
 const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "name",
   "call",
@@ -6006,6 +6470,13 @@ const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "trim",
   "overlay",
   "sqlValueFunction",
+  "xmlElement",
+  "xmlForest",
+  "xmlPi",
+  "xmlRoot",
+  "xmlParse",
+  "xmlSerialize",
+  "xmlExists",
   "jsonObject",
   "jsonArray",
   "jsonArrayQuery",
@@ -6200,9 +6671,24 @@ const columnOptions = custom<ColumnOptions, SqlTokenType>(
 
 const partitionItem = oneOf(tableConstraint, excludeOr(columnOptions), columnOptions);
 
+// The optional `(item, …)` of a PARTITION OF or OF type table, `[]` when no
+// `(` follows. Unlike the classic form's, this list may not be empty: `()`
+// croaks as the missing first item.
+// The peek goes through peekOrReport, and only on a `(`: lexing is lazy, and
+// a bad first item must reach delimited()'s recovery rather than escape it.
+function parseTypedItems(ctx: ParseContext<SqlTokenType>): TableItem[] {
+  if (!ctx.is("punc", "(")) return [];
+  const close = peekOrReport(ctx, 1);
+  if (close?.type === "punc" && close.value === ")") {
+    ctx.next(); // "("
+    ctx.parse(partitionItem);
+  }
+  return ctx.parse(typedItems);
+}
+const typedItems = delimited(P("("), P(")"), P(","), partitionItem, { interleaved: true, recover: true });
+
 // `[INHERITS (parent, …)] [PARTITION BY …]` and then the storage clauses — what
-// this grammar takes after a table's element list. PG also allows `USING
-// method` between PARTITION BY and WITH; that is not parsed yet.
+// this grammar takes after a table's element list.
 function parseTableClauses(ctx: ParseContext<SqlTokenType>): TableClauses {
   return { ...parseInherits(ctx), ...parsePartitionBy(ctx), ...parseStorageClauses(ctx) };
 }
@@ -6235,11 +6721,17 @@ const ctasColumns = attempt(
   ),
 );
 
+// What follows CREATE TABLE … AS: a query, or `EXECUTE name [(args)]`.
+// `execute` leads no query, so the two first sets are disjoint and the "Expected
+// …" message names both. lazy() because executeStmt is defined further down.
+const ctasQuery = lazy(() => oneOf(query, executeStmt as Rule<Execute, SqlTokenType>));
+const parseCtasQuery = (ctx: ParseContext<SqlTokenType>): CreateTableAs["query"] => ctx.parse(ctasQuery);
+
 // CREATE TABLE — the ordinary `(items)` form or the query-backed `AS query`
 // (CREATE TABLE AS). A handler rather than a rule so the CTAS branches (`name
 // AS …` and `name (cols) AS …`) share the leading IF-NOT-EXISTS / name with the
-// classic form, and so PLAIN_CREATE can hand it the span start and the prefix
-// modifiers it collected between CREATE and here.
+// classic form, and so its callers can hand it the span start and the prefix
+// modifiers createWithPrefix collected between CREATE and here.
 function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modifiers: string[]): Stmt {
   ctx.parse(kw("table"));
   // attempt() so a typo'd `IF NOT EXIST` backtracks to try a table name rather
@@ -6252,7 +6744,7 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
   const storage = parseStorageClauses(ctx);
   if (Object.keys(storage).length > 0 || ctx.is("ident", "as")) {
     ctx.parse(kw("as"));
-    const q = ctx.parse(query);
+    const q = parseCtasQuery(ctx);
     return {
       kind: "createTableAs",
       ifNotExists,
@@ -6282,12 +6774,29 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
       span: ctx.spanFrom(start),
     };
   }
+  // `CREATE TABLE name OF type [(items)] [PARTITION BY …] [storage clauses]`,
+  // a typed table: its items are those of PARTITION OF, and INHERITS is not
+  // allowed, as in PG. `of` can only lead this clause straight after the name.
+  if (ctx.eat("ident", "of") !== null) {
+    const ofType = ctx.parse(qualName);
+    return {
+      kind: "createTable",
+      ifNotExists,
+      name,
+      items: parseTypedItems(ctx),
+      ofType,
+      ...parsePartitionBy(ctx),
+      ...parseStorageClauses(ctx),
+      ...(modifiers.length > 0 && { modifiers }),
+      span: ctx.spanFrom(start),
+    };
+  }
   // `CREATE TABLE name (cols) [storage clauses] AS query` — the `(cols) … AS`
   // prefix backtracks (via ctasColumns) when the `(` really opens a
   // column-definition list.
   const ctas = ctx.parse(optional(ctasColumns));
   if (ctas !== null) {
-    const q = ctx.parse(query);
+    const q = parseCtasQuery(ctx);
     return {
       kind: "createTableAs",
       ifNotExists,
@@ -6317,18 +6826,7 @@ function createTableRest(ctx: ParseContext<SqlTokenType>, start: Position, modif
 function parsePartitionOf(ctx: ParseContext<SqlTokenType>): { items: TableItem[]; partitionOf: PartitionOf } {
   ctx.parse(kwseq("partition", "of"));
   const parent = ctx.parse(qualName);
-  // Unlike the classic form's, this list may not be empty: `()` croaks as the
-  // missing first item.
-  // The peek goes through peekOrReport, and only on a `(`: lexing is lazy, and
-  // a bad first item must reach delimited()'s recovery rather than escape it.
-  const close = ctx.is("punc", "(") ? peekOrReport(ctx, 1) : null;
-  if (close?.type === "punc" && close.value === ")") {
-    ctx.next(); // "("
-    ctx.parse(partitionItem);
-  }
-  const items = ctx.is("punc", "(")
-    ? ctx.parse(delimited(P("("), P(")"), P(","), partitionItem, { interleaved: true, recover: true }))
-    : [];
+  const items = parseTypedItems(ctx);
   return { items, partitionOf: { parent, bound: parsePartitionBound(ctx) } };
 }
 
@@ -6689,11 +7187,13 @@ function createDatabaseRest(ctx: ParseContext<SqlTokenType>): Stmt {
 }
 
 // One schema element: a GRANT of privileges ON an object, or a CREATE of one of
-// the kinds PG's schema_stmt list has — TABLE / [UNIQUE] INDEX / SEQUENCE / VIEW
-// / TRIGGER, only the last two after OR REPLACE. CREATE and OR REPLACE are
+// the kinds PG's schema_stmt list has — [TEMP | UNLOGGED] TABLE / [UNIQUE]
+// INDEX / SEQUENCE / [TEMP] [RECURSIVE] VIEW / [CONSTRAINT] TRIGGER, only
+// views and plain triggers after OR REPLACE. CREATE and OR REPLACE are
 // consumed here so that a wrong target croaks at the target word itself, and
-// the entry is then entered straight from createStmt's two maps, with the same
-// two starts createStmt gives it. A nested CREATE SCHEMA can therefore never
+// the entry is then entered as createStmt enters it: through
+// createUnmappedTarget first, then straight from createStmt's two maps, with
+// the same starts createStmt gives each. A nested CREATE SCHEMA can therefore never
 // swallow the elements after it. CREATE TABLE AS and a role GRANT share their
 // lead words with an admitted form, so only the finished node tells them apart.
 const SCHEMA_ELEMENT_TARGETS = ["table", "unique", "index", "sequence", "view", "trigger"];
@@ -6712,20 +7212,44 @@ function parseSchemaElement(ctx: ParseContext<SqlTokenType>): Stmt {
   const tailStart = ctx.position();
   const orReplace = ctx.is("ident", "or");
   if (orReplace) ctx.parse(kwseq("or", "replace"));
+  // A prefixed TABLE or view, a RECURSIVE view and a CONSTRAINT TRIGGER are
+  // schema elements too; of what createUnmappedTarget reads, only an UNLOGGED
+  // MATERIALIZED VIEW is not. So after UNLOGGED only TABLE (or a view, which
+  // createWithPrefix refuses for its own reason) is named, and MATERIALIZED is
+  // refused at the word itself, as an unprefixed one is.
+  const unloggedTarget = () => ["table", "view", "recursive"].some((word) => isWordAhead(ctx, 1, word));
+  if (!orReplace && ctx.is("ident", "unlogged") && !unloggedTarget()) {
+    ctx.next(); // UNLOGGED
+    return ctx.croak(`Expected "table" but found ${describeFound(ctx.peek())}`);
+  }
+  const element =
+    createUnmappedTarget(ctx, start, orReplace) ?? parseMappedSchemaElement(ctx, start, tailStart, orReplace);
+  if (element.kind === "createTableAs") {
+    return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", element.span.start, element.span.end);
+  }
+  return element;
+}
+
+// A schema element led by a word one of createStmt's two maps holds.
+function parseMappedSchemaElement(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  tailStart: Position,
+  orReplace: boolean,
+): Stmt {
   const allowed = orReplace ? SCHEMA_REPLACEABLE_TARGETS : SCHEMA_ELEMENT_TARGETS;
   const tok = ctx.peek();
   if (tok === null || tok.type !== "ident" || !allowed.includes(tok.value)) {
-    return ctx.croak(`Expected ${quoteList(allowed)} but found ${describeFound(tok)}`);
+    const unmapped = orReplace
+      ? ["recursive", ...TEMP_LEAD_WORDS]
+      : ["recursive", "constraint", ...TEMP_LEAD_WORDS, "unlogged"];
+    return ctx.croak(`Expected ${quoteList([...allowed, ...unmapped])} but found ${describeFound(tok)}`);
   }
   if (SCHEMA_REPLACEABLE_TARGETS.includes(tok.value)) {
     ctx.next(); // the target's lead word, as createStmt consumes it
     return REPLACEABLE_CREATE[tok.value]!.parse(ctx, start, orReplace);
   }
-  const element = PLAIN_CREATE[tok.value]!.parse(ctx, tailStart, []);
-  if (element.kind === "createTableAs") {
-    return ctx.croak("A schema element CREATE TABLE cannot be CREATE TABLE AS", element.span.start, element.span.end);
-  }
-  return element;
+  return PLAIN_CREATE[tok.value]!.parse(ctx, tailStart);
 }
 
 function createSchemaRest(ctx: ParseContext<SqlTokenType>): Stmt {
@@ -6904,23 +7428,35 @@ function parseCheckOption(ctx: ParseContext<SqlTokenType>): "cascaded" | "local"
 }
 
 // The body of a (MATERIALIZED) VIEW after the VIEW keyword: `[IF NOT EXISTS] name
-// [(cols)] [WITH (option, …)] AS query`, then WITH [NO] DATA on a materialized
-// view or a check option on a plain one. The query reuses the shared `query`
-// rule. `with` is reserved, so before AS it can only open the option list.
+// [(cols)]`, a materialized view's `[USING method]`, `[WITH (option, …)]`, a
+// materialized view's `[TABLESPACE name]`, then `AS query` and WITH [NO] DATA
+// on a materialized view or a check option on a plain one. The query reuses the
+// shared `query` rule. `using` and `with` are reserved, and before AS only
+// these clauses could follow, so `tablespace` is matched by value. A RECURSIVE
+// view must name its columns and takes no check option, as in PG.
+// `modifiers` are the prefix words createStmt read ahead of the target.
 function parseViewBody(
   ctx: ParseContext<SqlTokenType>,
   start: Position,
   materialized: boolean,
   orReplace: boolean,
+  modifiers: string[] = [],
+  recursive = false,
 ): Stmt {
   const ifNotExists = materialized && ctx.parse(optional(attempt(kwseq("if", "not", "exists")))) !== null;
   const name = ctx.parse(qualName);
-  const columns = ctx.is("punc", "(") ? ctx.parse(columnList) : null;
+  const columns = recursive ? parseColumnNames(ctx) : ctx.is("punc", "(") ? ctx.parse(columnList) : null;
+  const accessMethod = materialized && ctx.eat("ident", "using") !== null ? ctx.parse(nameWord) : null;
   const options = ctx.eat("ident", "with") !== null ? ctx.parse(relationOptions) : null;
+  const tablespace = materialized && ctx.eat("ident", "tablespace") !== null ? ctx.parse(nameWord) : null;
   ctx.parse(kw("as"));
   const q = ctx.parse(query);
   const withData = materialized ? parseWithData(ctx) : null;
+  const checkStart = ctx.position();
   const checkOption = materialized ? null : parseCheckOption(ctx);
+  if (recursive && checkOption !== null) {
+    ctx.croak("WITH CHECK OPTION not supported on recursive views", checkStart, ctx.lastEnd());
+  }
   return {
     kind: "createView",
     materialized,
@@ -6930,10 +7466,26 @@ function parseViewBody(
     columns,
     query: q,
     withData,
+    ...(recursive && { recursive: true as const }),
+    ...(accessMethod !== null && { accessMethod }),
     ...(options !== null && { options }),
+    ...(tablespace !== null && { tablespace }),
     ...(checkOption !== null && { checkOption }),
+    ...(modifiers.length > 0 && { modifiers }),
     span: ctx.spanFrom(start),
   };
+}
+
+// `RECURSIVE VIEW …`, from RECURSIVE: no CREATE target but this view leads with
+// the word, so it commits.
+function parseRecursiveView(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  orReplace: boolean,
+  modifiers: string[],
+): Stmt {
+  ctx.parse(kwseq("recursive", "view"));
+  return parseViewBody(ctx, start, false, orReplace, modifiers, true);
 }
 
 // --- Phase 8: CREATE FUNCTION / AGGREGATE / TRIGGER ---
@@ -7351,7 +7903,17 @@ function parseFunctionBody(ctx: ParseContext<SqlTokenType>, start: Position, orR
   const args = ctx.parse(functionArgs);
   const returns = parseFunctionReturns(ctx);
   const options = parseFunctionOptions(ctx);
-  return { kind: "createFunction", orReplace, name, args, returns, options, span: ctx.spanFrom(start) };
+  const body = parseRoutineBody(ctx, options);
+  return {
+    kind: "createFunction",
+    orReplace,
+    name,
+    args,
+    returns,
+    options,
+    ...(body !== undefined && { body }),
+    span: ctx.spanFrom(start),
+  };
 }
 
 // The option words of parseFunctionOptions that PG also admits on a procedure
@@ -7366,7 +7928,116 @@ function parseProcedureBody(ctx: ParseContext<SqlTokenType>, start: Position, or
   const name = ctx.parse(qualName);
   const args = ctx.parse(functionArgs);
   const options = parseFunctionOptions(ctx, PROCEDURE_OPTIONS);
-  return { kind: "createProcedure", orReplace, name, args, options, span: ctx.spanFrom(start) };
+  const body = parseRoutineBody(ctx, options);
+  return {
+    kind: "createProcedure",
+    orReplace,
+    name,
+    args,
+    options,
+    ...(body !== undefined && { body }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+// A statement inside a `BEGIN ATOMIC` body: any statement, reached lazily since
+// statementBody is defined (and includes CREATE FUNCTION) further down.
+const routineBodyStatement: Rule<Stmt, SqlTokenType> = lazy(() => statementBody);
+
+function parseRoutineReturn(ctx: ParseContext<SqlTokenType>): RoutineReturn {
+  const start = ctx.position();
+  ctx.parse(kw("return"));
+  return { kind: "return", expr: ctx.parse(expression), span: ctx.spanFrom(start) };
+}
+
+// PG's opt_routine_body, after a routine's options: `RETURN a_expr`, or
+// `BEGIN ATOMIC` then statements each ending in `;` (an empty one, a lone
+// `;`, yields nothing) up to `END`. The body reads its own `;`s and its `END`,
+// so neither ends the CREATE nor reaches statement dispatch, where a
+// statement-level END is COMMIT. As in PG's routine_body_stmt, an inner
+// statement may be `RETURN expr` but not BEGIN or END (START TRANSACTION and
+// COMMIT take their place). Nothing but a body can follow the options, so a
+// BEGIN commits to one. `begin`, `atomic` and `return` stay unreserved (`end`
+// is reserved).
+function parseRoutineBody(ctx: ParseContext<SqlTokenType>, options: FunctionOption[]): RoutineBody | undefined {
+  const at = ctx.peek();
+  if (at === null || at.type !== "ident" || (at.value !== "begin" && at.value !== "return")) return undefined;
+  const body = at.value === "return" ? parseRoutineReturn(ctx) : parseAtomicBody(ctx);
+  // PG rejects a body alongside `AS 'definition'` (when it creates the
+  // routine, so after any syntax error in the body). Reported once the body
+  // is read, so diagnose() keeps the node and lists body errors first.
+  if (options.some((option) => option.kind === "as")) {
+    const error = new ParseError(
+      "A routine cannot have both AS and a SQL-standard body",
+      at.position.start,
+      at.position.end,
+    );
+    if (!ctx.report(error)) throw error;
+  }
+  return body;
+}
+
+function parseAtomicBody(ctx: ParseContext<SqlTokenType>): RoutineBody {
+  const start = ctx.position();
+  const begin = ctx.next()!; // BEGIN, peeked by the caller
+  ctx.parse(kw("atomic"));
+  // The body's depth by psql's heuristic (0 when the heuristic doesn't see a
+  // routine), which recovery below resyncs by.
+  const level = routineDepth(begin);
+  bodyCut = null;
+  const statements: (Stmt | RoutineReturn)[] = [];
+  for (;;) {
+    try {
+      if (ctx.eat("ident", "end") !== null) break;
+      if (ctx.eat("punc", ";") !== null) continue;
+      if (ctx.is("ident", "return")) statements.push(parseRoutineReturn(ctx));
+      else if (!ctx.is("ident", "begin") && matchesFirst(ctx.peek(), routineBodyStatement.first())) {
+        statements.push(ctx.parse(routineBodyStatement));
+      } else ctx.croak(`Expected "end", "return" or a statement but found ${describeFound(ctx.peek())}`);
+      if (cutShort(ctx)) break;
+      ctx.parse(SEMICOLON);
+    } catch (error) {
+      // diagnose() records the error and resumes after the statement, so the
+      // rest of the body stays in the routine rather than surfacing as
+      // statements of their own (and its END as a COMMIT). parse() rethrows.
+      if (!(error instanceof ParseError) || level === 0 || !ctx.report(error)) throw error;
+      if (!skipBodyStatement(ctx, level)) {
+        bodyCut = ctx.peek() ?? END_OF_INPUT;
+        break;
+      }
+    }
+  }
+  return { kind: "atomic", statements, span: ctx.spanFrom(start) };
+}
+
+// Where a body that recovery ran out of stopped: the psql meta-command line
+// it stopped at, or END_OF_INPUT. Its error is reported, so the statements
+// around it don't report the missing `;` or END again (`cutShort`). Only read
+// right after the body returns; each body and each statement clears it.
+const END_OF_INPUT = {};
+let bodyCut: Token<SqlTokenType> | typeof END_OF_INPUT | null = null;
+const cutShort = (ctx: ParseContext<SqlTokenType>): boolean =>
+  bodyCut !== null && (ctx.peek() ?? END_OF_INPUT) === bodyCut;
+
+// Skips the rest of a broken statement in a body at `level`: through the `;`
+// that ends it, the next one at the body's own depth, or up to the END that
+// closes the body. Lexer errors on the way are reported, as recover() does.
+// False when the body runs out first, at end of input or a meta-command line
+// (which ends the statement in a script).
+function skipBodyStatement(ctx: ParseContext<SqlTokenType>, level: number): boolean {
+  for (;;) {
+    let tok: Token<SqlTokenType> | null;
+    try {
+      tok = ctx.peek();
+    } catch (error) {
+      if (!(error instanceof ParseError) || !ctx.report(error)) throw error;
+      continue;
+    }
+    if (tok === null || tok.type === "psqlmeta") return false;
+    if (tok.type === "ident" && tok.value === "end" && routineDepth(tok) === level - 1) return true;
+    ctx.next();
+    if (tok.type === "punc" && tok.value === ";" && routineDepth(tok) === level) return true;
+  }
 }
 
 // `( NAME [= value] , … )` — the aggregate definition list. `value` is a type/
@@ -7475,11 +8146,48 @@ function parseTriggerEvent(ctx: ParseContext<SqlTokenType>): TriggerEvent {
   return ctx.croak(`Expected "insert", "update", "delete" or "truncate" but found ${describeFound(ctx.peek())}`);
 }
 
-// `CREATE [OR REPLACE] TRIGGER` — `TRIGGER` consumed by the caller.
-function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orReplace: boolean): Stmt {
+// `{OLD | NEW} TABLE [AS] name …` once REFERENCING is consumed: at least one.
+// PG's grammar also reads `OLD ROW` / `NEW ROW`, only so that CreateTrigger can
+// refuse them with a better message; they have no node here, so this refuses
+// them too. CreateTrigger's other transition-table checks (AFTER only, no
+// repeats, the events each side allows) are analysis-time and stay accepted.
+// `new`, `old` and `referencing` are matched by value only here.
+function parseTriggerReferencing(ctx: ParseContext<SqlTokenType>): TriggerTransition[] {
+  const transitions: TriggerTransition[] = [];
+  do {
+    const tok = ctx.peek();
+    if (tok?.type !== "ident" || (tok.value !== "old" && tok.value !== "new")) {
+      return ctx.croak(`Expected "old" or "new" but found ${describeFound(tok)}`);
+    }
+    const start = ctx.position();
+    ctx.next();
+    if (ctx.is("ident", "row")) {
+      ctx.next();
+      ctx.croak("ROW variable naming in the REFERENCING clause is not supported", start, ctx.lastEnd());
+    }
+    ctx.parse(kw("table"));
+    ctx.eat("ident", "as");
+    transitions.push({ kind: tok.value, name: ctx.parse(nameWord) });
+  } while (ctx.is("ident", ["old", "new"]));
+  return transitions;
+}
+
+// `CREATE [OR REPLACE] [CONSTRAINT] TRIGGER` — `TRIGGER` consumed by the
+// caller. A constraint trigger fires AFTER and FOR EACH ROW only, takes FROM
+// and the deferral attributes in place of REFERENCING, and judges those
+// attributes as a table constraint's are.
+function parseTriggerBody(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  orReplace: boolean,
+  constraint = false,
+): Stmt {
   const name = ctx.parse(nameWord);
   let timing: CreateTrigger["timing"];
-  if (ctx.eat("ident", "before") !== null) timing = "before";
+  if (constraint) {
+    ctx.parse(kw("after"));
+    timing = "after";
+  } else if (ctx.eat("ident", "before") !== null) timing = "before";
   else if (ctx.eat("ident", "after") !== null) timing = "after";
   else if (ctx.is("ident", "instead")) {
     ctx.parse(kwseq("instead", "of"));
@@ -7488,9 +8196,30 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
     return ctx.croak(`Expected "before", "after" or "instead" but found ${describeFound(ctx.peek())}`);
   }
   const events = [parseTriggerEvent(ctx)];
-  while (ctx.eat("ident", "or") !== null) events.push(parseTriggerEvent(ctx));
+  while (ctx.eat("ident", "or") !== null) {
+    const eventStart = ctx.position();
+    const event = parseTriggerEvent(ctx);
+    // PG's TriggerEvents action, which also keeps UPDATE from coming twice.
+    if (events.some((e) => e.event === event.event)) {
+      ctx.croak("duplicate trigger events specified", eventStart, ctx.lastEnd());
+    }
+    events.push(event);
+  }
   ctx.parse(kw("on"));
   const table = ctx.parse(qualName);
+  if (constraint) {
+    const fromTable = ctx.eat("ident", "from") !== null ? ctx.parse(qualName) : null;
+    const { deferrable, initially } = parseConstraintAttrs(ctx, "table", "TRIGGER");
+    ctx.parse(kwseq("for", "each", "row"));
+    return {
+      ...parseTriggerTail(ctx, start, orReplace, name, timing, events, table, "row"),
+      constraint: true,
+      ...(fromTable !== null && { fromTable }),
+      ...(deferrable !== undefined && { deferrable }),
+      ...(initially !== undefined && { initially }),
+    };
+  }
+  const referencing = ctx.eat("ident", "referencing") !== null ? parseTriggerReferencing(ctx) : null;
   let forEach: CreateTrigger["forEach"] = null;
   if (ctx.eat("ident", "for") !== null) {
     ctx.eat("ident", "each"); // optional EACH
@@ -7498,6 +8227,22 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
     else if (ctx.eat("ident", "statement") !== null) forEach = "statement";
     else return ctx.croak(`Expected "row" or "statement" but found ${describeFound(ctx.peek())}`);
   }
+  const trigger = parseTriggerTail(ctx, start, orReplace, name, timing, events, table, forEach);
+  return referencing !== null ? { ...trigger, referencing } : trigger;
+}
+
+// `[WHEN (cond)] EXECUTE {FUNCTION | PROCEDURE} fn(args)`, the tail both
+// trigger forms share, and the node built from what came before it.
+function parseTriggerTail(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  orReplace: boolean,
+  name: string,
+  timing: CreateTrigger["timing"],
+  events: TriggerEvent[],
+  table: string[],
+  forEach: CreateTrigger["forEach"],
+): CreateTrigger {
   const when = ctx.eat("ident", "when") !== null ? ctx.parse(parenExpr) : null;
   ctx.parse(kw("execute"));
   let routine: "function" | "procedure";
@@ -7527,19 +8272,21 @@ function parseTriggerBody(ctx: ParseContext<SqlTokenType>, start: Position, orRe
   };
 }
 
-// The words PG's `OptTemp` puts between CREATE and TABLE, and its
+// The words PG's `OptTemp` puts between CREATE and TABLE or VIEW, and its
 // `OptTempTableName` between SELECT's INTO and the target. Both allow at most one
 // of `temp`/`temporary`/`unlogged`, with the scope words `global`/`local` legal
 // only ahead of a `temp`/`temporary`, never on their own and never repeated.
 const TEMP_SCOPE_WORDS: ReadonlySet<string> = new Set(["global", "local"]);
 const TEMP_WORDS: ReadonlySet<string> = new Set(["temp", "temporary"]);
 const TABLE_STORAGE_WORDS: ReadonlySet<string> = new Set(["temp", "temporary", "unlogged"]);
+// The words that may open a temp prefix, as "Expected …" messages name them.
+const TEMP_LEAD_WORDS = ["temp", "temporary", "local", "global"];
 
 // `[{GLOBAL | LOCAL} {TEMP | TEMPORARY} | TEMP | TEMPORARY | UNLOGGED]` after
 // CREATE, returned in source order. No CREATE target leads with one of these
 // words, so they are claimed without looking past them; a scope word must be
-// followed by a temp word, and a second storage word is left for the caller's
-// `"table"` check to reject.
+// followed by a temp word, and a second storage word is left for
+// createWithPrefix's target check to reject.
 function parseTempPrefix(ctx: ParseContext<SqlTokenType>): string[] {
   const head = ctx.peek();
   if (head?.type !== "ident") return [];
@@ -7564,12 +8311,11 @@ function parseTempPrefix(ctx: ParseContext<SqlTokenType>): string[] {
 //
 // PLAIN_CREATE dispatch PEEKS: each handler parses its own lead keyword, so its
 // node's span still opens on `TABLE` / `INDEX` / …. Every handler is offered the
-// position just after CREATE and the prefix-modifier bag, but only `table` reads
-// them — the others build their own span from their own keyword and drop the
-// bag, which is safe only because createStmt refuses modifiers ahead of any
-// target but TABLE. Widen that check along with any handler that learns them.
-const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
-  table: { parse: createTableRest },
+// position just after CREATE, but only some read it — the others build their
+// own span from their own keyword. A prefixed TABLE never comes through here:
+// createWithPrefix enters createTableRest itself, with its modifiers.
+const PLAIN_CREATE: DispatchMap<Stmt, [Position]> = {
+  table: { parse: (ctx, start) => createTableRest(ctx, start, []) },
   // `[UNIQUE] INDEX` can lead with either word, so it takes two keys. They share
   // one label, which joinExpected's dedupe then folds back into a single part.
   unique: { parse: (ctx) => ctx.parse(createIndexRest) },
@@ -7630,7 +8376,9 @@ const REPLACEABLE_CREATE: DispatchMap<Stmt, [Position, boolean]> = {
 // PLAIN_CREATE is reached through an `oneOf`-shaped message, REPLACEABLE_CREATE
 // through a hand-written croak — hence the two derivations (see joinExpected).
 const PLAIN_CREATE_EXPECTED = joinExpected(PLAIN_CREATE);
-const REPLACEABLE_CREATE_EXPECTED = keyList(REPLACEABLE_CREATE);
+// The words that can lead an accepted target after OR REPLACE through
+// createUnmappedTarget are listed too.
+const REPLACEABLE_CREATE_EXPECTED = quoteList([...Object.keys(REPLACEABLE_CREATE), "recursive", ...TEMP_LEAD_WORDS]);
 
 // PLAIN_CREATE is only consulted once the lead word has missed
 // REPLACEABLE_CREATE, so a word in both would leave the plain target
@@ -7640,6 +8388,13 @@ const REPLACEABLE_CREATE_EXPECTED = keyList(REPLACEABLE_CREATE);
 for (const key of Object.keys(PLAIN_CREATE)) {
   if (Object.hasOwn(REPLACEABLE_CREATE, key)) {
     throw new Error(`CREATE target "${key}" is in both dispatch maps - the PLAIN_CREATE entry is unreachable`);
+  }
+}
+// createUnmappedTarget runs ahead of both maps, so a key that is one of its
+// lead words would be unreachable the same way.
+for (const word of [...TEMP_LEAD_WORDS, "unlogged", "recursive", "constraint"]) {
+  if (Object.hasOwn(PLAIN_CREATE, word) || Object.hasOwn(REPLACEABLE_CREATE, word)) {
+    throw new Error(`CREATE target "${word}" leads createUnmappedTarget - its dispatch entry is unreachable`);
   }
 }
 
@@ -7660,9 +8415,11 @@ for (const target of SCHEMA_REPLACEABLE_TARGETS) {
 // remaining keyword-led targets (TABLE / [UNIQUE] INDEX / TYPE / SEQUENCE /
 // DOMAIN / DATABASE / SCHEMA / EXTENSION / TABLESPACE / ROLE / USER / POLICY /
 // PUBLICATION / SUBSCRIPTION, and CAST, COLLATION, CONVERSION, OPERATOR and the
-// other PLAIN_CREATE keys), TABLE alone taking the TEMP / UNLOGGED prefix. `OR
-// REPLACE` before a non-replaceable object croaks, as does a prefix before
-// anything but TABLE — PG's TEMP VIEW and TEMP SEQUENCE are not parsed.
+// other PLAIN_CREATE keys). RECURSIVE VIEW and CONSTRAINT TRIGGER are led by
+// words no other target starts with, and are told apart before either map is
+// consulted. `OR REPLACE` before a non-replaceable object croaks, and a TEMP /
+// UNLOGGED prefix is taken only where createWithPrefix allows it — PG's TEMP
+// SEQUENCE is not parsed.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -7672,6 +8429,8 @@ const createStmt = custom<Stmt, SqlTokenType>(
     const tailStart = ctx.position();
     const orReplace = ctx.is("ident", "or");
     if (orReplace) ctx.parse(kwseq("or", "replace"));
+    const special = createUnmappedTarget(ctx, start, orReplace);
+    if (special !== null) return special;
     const replaceable = lookup(REPLACEABLE_CREATE, ctx.peek());
     if (replaceable !== undefined) {
       ctx.next(); // the target's lead word
@@ -7680,17 +8439,62 @@ const createStmt = custom<Stmt, SqlTokenType>(
     if (orReplace) {
       return ctx.croak(`Expected ${REPLACEABLE_CREATE_EXPECTED} but found ${describeFound(ctx.peek())}`);
     }
-    // Nothing was consumed since `tailStart` — OR REPLACE never reaches here —
-    // so a target with no modifiers spans exactly as it did before, and one with
-    // them spans from its first modifier.
-    const modifiers = parseTempPrefix(ctx);
-    if (modifiers.length > 0 && !ctx.is("ident", "table")) {
-      return ctx.croak(`Expected "table" but found ${describeFound(ctx.peek())}`);
-    }
-    return dispatch(PLAIN_CREATE, PLAIN_CREATE_EXPECTED, ctx, tailStart, modifiers);
+    // Nothing was consumed since `tailStart` — OR REPLACE and a prefix never
+    // reach here — so every plain target spans exactly as it did before.
+    return dispatch(PLAIN_CREATE, PLAIN_CREATE_EXPECTED, ctx, tailStart);
   },
   { expected: '"create"', first: [{ type: "ident", value: "create" }] },
 );
+
+// The CREATE targets led by a word neither dispatch map holds — a TEMP /
+// UNLOGGED prefix (see createWithPrefix), RECURSIVE VIEW and CONSTRAINT TRIGGER
+// — or null when none leads. No other target starts with any of these words,
+// so each commits, taking nothing away from either map. createStmt and
+// parseSchemaElement both enter it just past `CREATE [OR REPLACE]`.
+function createUnmappedTarget(ctx: ParseContext<SqlTokenType>, start: Position, orReplace: boolean): Stmt | null {
+  const prefixStart = ctx.position();
+  const modifiers = parseTempPrefix(ctx);
+  if (modifiers.length > 0) return createWithPrefix(ctx, start, prefixStart, orReplace, modifiers);
+  if (ctx.is("ident", "recursive")) return parseRecursiveView(ctx, start, orReplace, []);
+  if (!ctx.is("ident", "constraint")) return null;
+  ctx.parse(kwseq("constraint", "trigger"));
+  // PG's grammar action rejects the combination outright.
+  if (orReplace) ctx.croak("CREATE OR REPLACE CONSTRAINT TRIGGER is not supported", start, ctx.lastEnd());
+  return parseTriggerBody(ctx, start, false, true);
+}
+
+// The target after a TEMP / UNLOGGED prefix (see parseTempPrefix), as PG's
+// OptTemp and OptNoLog place them: TABLE takes any prefix but no OR REPLACE,
+// spanning from its first modifier (`prefixStart`); [RECURSIVE] VIEW takes a
+// temp one, an unlogged view being PG's "no storage" error; MATERIALIZED VIEW
+// takes UNLOGGED alone. The view bodies span from CREATE, as without a prefix.
+function createWithPrefix(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  prefixStart: Position,
+  orReplace: boolean,
+  modifiers: string[],
+): Stmt {
+  const unlogged = modifiers[0] === "unlogged";
+  if (!orReplace && ctx.is("ident", "table")) return createTableRest(ctx, prefixStart, modifiers);
+  if (ctx.is("ident", ["view", "recursive"])) {
+    // PG's grammar takes the word and DefineView refuses it; the check is
+    // local, so it is made here.
+    if (unlogged) ctx.croak("views cannot be unlogged because they do not have storage", prefixStart, ctx.lastEnd());
+    if (ctx.eat("ident", "view") !== null) return parseViewBody(ctx, start, false, orReplace, modifiers);
+    return parseRecursiveView(ctx, start, orReplace, modifiers);
+  }
+  if (unlogged && !orReplace && ctx.eat("ident", "materialized") !== null) {
+    ctx.parse(kw("view"));
+    return parseViewBody(ctx, start, true, false, modifiers);
+  }
+  const expected = orReplace
+    ? ["recursive", "view"]
+    : unlogged
+      ? ["table", "materialized"]
+      : ["table", "recursive", "view"];
+  return ctx.croak(`Expected ${quoteList(expected)} but found ${describeFound(ctx.peek())}`);
+}
 
 // `[IF NOT EXISTS] column-def`, the tail of `ADD [COLUMN]`. IF NOT EXISTS is
 // peeked by parseIfNotExists rather than tried by `attempt`, so a column that
@@ -7816,6 +8620,27 @@ function parseAlterIdentity(ctx: ParseContext<SqlTokenType>, column: string): Al
 // a quoted "default" names it too.
 const STORAGE_MODES: ReadonlySet<string> = new Set(["plain", "external", "extended", "main"]);
 
+// The mode after STORAGE, in a column definition or ALTER COLUMN's SET
+// STORAGE. Compared case-blind, as PG does, so a quoted "MAIN" is MAIN too, and
+// a quoted "DEFAULT" is DEFAULT.
+function parseStorageMode(ctx: ParseContext<SqlTokenType>): StorageMode | "default" {
+  if (ctx.eat("ident", "default") !== null) return "default";
+  const start = ctx.position();
+  const written = ctx.parse(nameWord);
+  const mode = written.toLowerCase();
+  if (mode !== "default" && !STORAGE_MODES.has(mode)) {
+    ctx.croak(`invalid storage type "${written}"`, start, ctx.lastEnd());
+  }
+  return mode as StorageMode | "default";
+}
+
+// The method after COMPRESSION, in the same two places. PG matches DEFAULT by
+// its exact lowercase spelling, so a quoted "default" is DEFAULT too, and
+// "DEFAULT" a method name.
+function parseCompressionMethod(ctx: ParseContext<SqlTokenType>): string {
+  return ctx.eat("ident", "default") !== null ? "default" : ctx.parse(nameWord);
+}
+
 // What follows `ALTER [COLUMN] name`, keyed by its lead word and handed the
 // column. Each handler consumes its own lead word.
 const ALTER_COLUMN_ACTIONS: DispatchMap<AlterAction, [string]> = {
@@ -7852,19 +8677,11 @@ const ALTER_COLUMN_ACTIONS: DispatchMap<AlterAction, [string]> = {
         return { kind: "setStatistics", column, value };
       }
       if (ctx.eat("ident", "storage") !== null) {
-        if (ctx.eat("ident", "default") !== null) return { kind: "setStorage", column, storage: null };
-        const start = ctx.position();
-        // Compared case-blind, as PG does, so a quoted "MAIN" is MAIN too.
-        const written = ctx.parse(nameWord);
-        const mode = written.toLowerCase();
-        if (mode === "default") return { kind: "setStorage", column, storage: null };
-        if (!STORAGE_MODES.has(mode)) ctx.croak(`invalid storage type "${written}"`, start, ctx.lastEnd());
-        return { kind: "setStorage", column, storage: mode as "plain" | "external" | "extended" | "main" };
+        const mode = parseStorageMode(ctx);
+        return { kind: "setStorage", column, storage: mode === "default" ? null : mode };
       }
       if (ctx.eat("ident", "compression") !== null) {
-        // PG matches DEFAULT by its exact lowercase spelling, so a quoted
-        // "default" is DEFAULT too, and "DEFAULT" a method name.
-        const method = ctx.eat("ident", "default") !== null ? null : ctx.parse(nameWord);
+        const method = parseCompressionMethod(ctx);
         return { kind: "setCompression", column, method: method === "default" ? null : method };
       }
       const words = ["(", "default", "not", "data", "expression", "statistics", "storage", "compression", "generated"];
@@ -11842,13 +12659,21 @@ function tableTail(ctx: ParseContext<SqlTokenType>, name: string[], only: boolea
 // A table-function call in FROM — `name(arg, …)`, positioned on the name.
 function parseFromCall(ctx: ParseContext<SqlTokenType>): Expr {
   const start = ctx.position();
+  const bare = ctx.peek()?.type === "ident";
   const nameParts = ctx.parse(qualName);
-  return parseFromCallArgs(ctx, nameParts, start);
+  return parseFromCallArgs(ctx, nameParts, bare, start);
 }
 // The argument list of a FROM call whose name is read. The call's span runs
 // from `start`, which tableRef passes so a plain item's span keeps covering a
-// leading LATERAL.
-function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[], start: Position): Expr {
+// leading LATERAL. `bare` says the name was one unquoted word, which makes an
+// XML function name the keyword form (see XML_CALLS), as in an expression —
+// XMLTABLE included, which is no table function inside ROWS FROM.
+function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[], bare: boolean, start: Position): Expr {
+  const xml = bare && nameParts.length === 1 && Object.hasOwn(XML_CALLS, nameParts[0]!);
+  if (xml && ctx.is("punc", "(")) {
+    ctx.next(); // "("
+    return XML_CALLS[nameParts[0]!]!(ctx, start);
+  }
   const { args, variadic } = parseCallArgList(ctx);
   return {
     kind: "call",
@@ -12054,6 +12879,7 @@ const tableRef = custom<FromItem, SqlTokenType>(
       return lateral ? parseParenSubquery(ctx, true) : parenFromItem(ctx);
     }
     if (startsRowsFrom(ctx)) return parseRowsFrom(ctx, lateral);
+    if (startsXmlCall(ctx, "xmltable")) return parseXmlTable(ctx, lateral);
     const nameStart = ctx.position();
     const bare = ctx.peek()?.type === "ident";
     const nameParts = ctx.parse(qualName);
@@ -12075,7 +12901,7 @@ const tableRef = custom<FromItem, SqlTokenType>(
         }
         call = json.call;
       } else {
-        call = parseFromCallArgs(ctx, nameParts, start);
+        call = parseFromCallArgs(ctx, nameParts, bare, start);
       }
       const ordinality = eatOrdinality(ctx);
       const { alias, columns, columnDefinitions } = parseFuncAliasClause(ctx);
@@ -13560,7 +14386,9 @@ const statement = custom<Stmt | null, SqlTokenType>(
   (ctx) => {
     if (ctx.eat("punc", ";") !== null) return null;
     const stmt = ctx.parse(statementBody);
-    if (!ctx.eof()) ctx.parse(SEMICOLON);
+    // A routine body that recovery ran out of has reported its error.
+    if (!ctx.eof() && !cutShort(ctx)) ctx.parse(SEMICOLON);
+    bodyCut = null;
     return stmt;
   },
   { expected: statementBody.expected(), first: [...statementBody.first(), { type: "punc", value: ";" }] },

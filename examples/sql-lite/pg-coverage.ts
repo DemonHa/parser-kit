@@ -274,7 +274,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ["func", "sql-lite", "SELECT make_interval(days := 10);"],
     ["func", "both", "SELECT date_trunc('week', ts), to_char(ts, 'YYYY-MM-DD') FROM t;"],
     ["func", "both", "SELECT pg_catalog.lower('ABC');"],
-    ["func", "neither", "SELECT XMLELEMENT(NAME foo, XMLATTRIBUTES('bar' AS baz), 'content');"],
+    ["func", "sql-lite", "SELECT XMLELEMENT(NAME foo, XMLATTRIBUTES('bar' AS baz), 'content');"],
     ["func", "sql-lite", "SELECT count(ALL x) FROM t;"],
     ["func", "sql-lite", "SELECT sum(x ORDER BY y) FROM t;"],
     ["func", "both", "SELECT normalize('abc', NFC), 'abc' IS NFC NORMALIZED;"],
@@ -760,8 +760,8 @@ export const PG_BATTERY: BatteryRow[] = [
       "sql-lite",
       "CREATE TABLE snapshot (uid, n) AS SELECT user_id, count(*) FROM orders GROUP BY 1 WITH NO DATA;",
     ],
-    ["create-table", "neither", "CREATE TABLE typed_tbl OF address_type (street WITH OPTIONS NOT NULL);"],
-    ["create-table", "neither", "CREATE TABLE comp (a int) USING heap;"],
+    ["create-table", "sql-lite", "CREATE TABLE typed_tbl OF address_type (street WITH OPTIONS NOT NULL);"],
+    ["create-table", "sql-lite", "CREATE TABLE comp (a int) USING heap;"],
     [
       "create-table",
       "both",
@@ -769,7 +769,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ],
     [
       "create-table",
-      "neither",
+      "sql-lite",
       "CREATE TABLE cmp (a text COMPRESSION lz4, b int PRIMARY KEY USING INDEX TABLESPACE idxspace);",
     ],
     ["create-table", "sql-lite", "CREATE TABLE t_as AS TABLE users;"],
@@ -851,8 +851,12 @@ export const PG_BATTERY: BatteryRow[] = [
       "both",
       "CREATE VIEW v_cols (a, b) WITH (security_barrier = true) AS SELECT 1, 2 WITH LOCAL CHECK OPTION;",
     ],
-    ["view", "neither", "CREATE RECURSIVE VIEW nums (n) AS VALUES (1) UNION ALL SELECT n + 1 FROM nums WHERE n < 100;"],
-    ["view", "node", "CREATE TEMP VIEW tv AS SELECT 1 AS x;"],
+    [
+      "view",
+      "sql-lite",
+      "CREATE RECURSIVE VIEW nums (n) AS VALUES (1) UNION ALL SELECT n + 1 FROM nums WHERE n < 100;",
+    ],
+    ["view", "both", "CREATE TEMP VIEW tv AS SELECT 1 AS x;"],
     [
       "view",
       "sql-lite",
@@ -893,10 +897,10 @@ export const PG_BATTERY: BatteryRow[] = [
       "sql-lite",
       "CREATE FUNCTION secure_fn(OUT n int, INOUT m text) SECURITY DEFINER SET search_path = pg_catalog, pg_temp LANGUAGE plpgsql AS $$ BEGIN n := 1; END $$;",
     ],
-    ["routine", "neither", "CREATE FUNCTION sq(x int) RETURNS int LANGUAGE sql IMMUTABLE RETURN x * x;"],
+    ["routine", "sql-lite", "CREATE FUNCTION sq(x int) RETURNS int LANGUAGE sql IMMUTABLE RETURN x * x;"],
     [
       "routine",
-      "neither",
+      "sql-lite",
       "CREATE FUNCTION atomic_ins(v text) RETURNS void LANGUAGE sql BEGIN ATOMIC INSERT INTO log (msg) VALUES (v); SELECT 1; END;",
     ],
     [
@@ -936,12 +940,12 @@ export const PG_BATTERY: BatteryRow[] = [
     ],
     [
       "trigger",
-      "neither",
+      "sql-lite",
       "CREATE TRIGGER trans_audit AFTER UPDATE ON accounts REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION audit_tx();",
     ],
     [
       "trigger",
-      "node",
+      "both",
       "CREATE CONSTRAINT TRIGGER chk AFTER INSERT ON orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION chk_fn();",
     ],
     ["trigger", "both", "CREATE TRIGGER trunc_t BEFORE TRUNCATE ON orders EXECUTE FUNCTION no_trunc();"],
