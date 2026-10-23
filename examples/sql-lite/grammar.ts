@@ -2394,9 +2394,9 @@ function peekOrReport(ctx: ParseContext<SqlTokenType>, index: number): Token<Sql
 
 // The longest continuation of `lead` sitting `offset` tokens past the cursor, or
 // null. Pure lookahead: nothing is consumed, so the caller decides. Every word
-// must be a bare `ident` — `readers.string("qident", …)` yields the *inner*
-// text, so a quoted `"precision"` is otherwise indistinguishable from the
-// keyword by value alone, and PG treats it as an ordinary name.
+// must be a bare `ident` — a `qident` token carries the *inner* text, so a
+// quoted `"precision"` is otherwise indistinguishable from the keyword by
+// value alone, and PG treats it as an ordinary name.
 function findTypeTail(ctx: ParseContext<SqlTokenType>, lead: string, offset: number): readonly string[] | null {
   const tails = MULTI_WORD_TYPES.get(lead);
   if (tails === undefined) return null;

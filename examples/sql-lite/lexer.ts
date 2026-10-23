@@ -19,18 +19,26 @@ export type SqlTokenType =
   | "comment"
   | "param";
 
-// --- PG's letter-prefixed literals ---
-// `B'1011'`, `X'ff'` and `U&'\0041'` all begin with a letter, so each owns a
-// reader that restores the stream and returns null when no quote follows the
-// prefix — the same fall-through the E-string reader uses to keep `end` and
-// `explain` identifiers, and what keeps `b`, `x` and `u` usable as plain names.
+// --- Quoted literals ---
+// PG reads every quoted form in its scanner (scan.l), and so does this file:
+// sql-lite owns its `'…'`, `E'…'`, `"…"`, `B'…'`, `X'…'` and `U&` readers rather
+// than borrowing core's `readers.string`, which is lenient where PG is not —
+// it lets an unterminated literal run to the end of input, and knows only the
+// `{n,t,r,b,f}` backslash escapes. Running off the end croaks here, as it does
+// in PG: anything else would turn `SELECT 'abc FROM t` into one string.
+//
+// The letter-prefixed forms (`E'…'`, `B'…'`, `X'…'`, `U&'…'`, `U&"…"`) all begin
+// with a letter, so each reader restores the stream and returns null when no
+// quote follows the prefix — that fall-through is what keeps `e`, `b`, `x`,
+// `u`, `end` and `explain` usable as plain names.
 
-// Shared with `sqlLexer`'s own `whitespace` below rather than copied: a second
-// literal would let the two drift, and `readUescapeTail` would then stop
-// matching across a character the lexer still skips. Sharing one RegExp is only
-// safe while it carries no `g`/`y` flag — both consumers call `.test()`, which
-// is stateless without one and would otherwise desync through `lastIndex`.
-const WHITESPACE = /[ \t\r\n]/;
+// PG's `space` class, `\f` and `\v` included. Shared with `sqlLexer`'s own
+// `whitespace` below rather than copied: a second literal would let the two
+// drift, and `readUescapeTail` would then stop matching across a character the
+// lexer still skips. Sharing one RegExp is only safe while it carries no
+// `g`/`y` flag — every consumer calls `.test()`, which is stateless without one
+// and would otherwise desync through `lastIndex`.
+const WHITESPACE = /[ \t\r\n\f\v]/;
 // The decimal and octal tests run once per character of every number, so they
 // compare characters rather than run a RegExp.
 const isDecDigit = (char: string) => char >= "0" && char <= "9";
@@ -38,42 +46,121 @@ const isHexDigit = (char: string) => /[0-9A-Fa-f]/.test(char);
 const isOctalDigit = (char: string) => char >= "0" && char <= "7";
 const isBinaryDigit = (char: string) => /[01]/.test(char);
 const isSpace = (char: string) => WHITESPACE.test(char);
+const isNewline = (char: string) => char === "\n" || char === "\r";
 
-// Scan a `'…'` body with the cursor on the opening quote, leaving it past the
-// closing one. `doubling` collapses `''` to a single quote (PG's rule for the
-// unicode form; a bit-string body has no escapes at all). The returned span
-// covers the body, not the quotes, exactly as the shared string reader's does.
-// Running off the end stays lenient there too — it reports `terminated: false`
-// rather than croaking, so an unterminated literal here fails the same way an
-// unterminated `'…'` does, at the `;` the parser never reaches. That flag is
-// the reason this isn't `readers.string`'s body scan, which is otherwise
-// byte-for-byte equivalent: EOF alone can't stand in for it, since a properly
-// closed literal at the end of input leaves the stream at EOF as well.
-const readQuotedBody = (stream: InputStream, doubling: boolean) => {
+// PG's {quotecontinue}, tried with the cursor just past a closing `'`: two
+// string constants separated by whitespace that contains at least one newline
+// are one constant (`'foo'` newline `'bar'` is `foobar`), and a `--` comment
+// counts as whitespace there. On a match the cursor is left past the next
+// opening quote; otherwise it is restored. It takes the stream's one snapshot
+// slot, so callers only reach it once their own literal is committed.
+const readQuoteContinuation = (stream: InputStream): boolean => {
+  const first = stream.peek();
+  if (first !== "-" && !isSpace(first)) return false; // the common case: no snapshot
+  stream.snapshot();
+  let newline = false;
+  for (;;) {
+    const char = stream.peek();
+    if (char === "-") {
+      stream.next();
+      // A lone `-` is an operator, so there is no continuation: `'a'⏎-'b'`
+      // must not go on to the quote test below.
+      if (stream.peek() !== "-") break;
+      while (stream.peek() !== "" && !isNewline(stream.peek())) stream.next();
+      continue;
+    }
+    if (!isSpace(char)) {
+      if (newline && char === "'") {
+        stream.next();
+        return true;
+      }
+      break;
+    }
+    if (isNewline(char)) newline = true;
+    stream.next();
+  }
+  stream.reload();
+  return false;
+};
+
+interface QuotedForm {
+  quote: "'" | '"';
+  /** `''` (or `""`) inside the body is one quote character. */
+  doubling: boolean;
+  /** Whether {quotecontinue} applies; identifiers never continue. */
+  continuation: boolean;
+  /** PG's own message for running off the end. */
+  unterminated: string;
+}
+
+const STRING: QuotedForm = {
+  quote: "'",
+  doubling: true,
+  continuation: true,
+  unterminated: "Unterminated quoted string",
+};
+const IDENTIFIER: QuotedForm = {
+  quote: '"',
+  doubling: true,
+  continuation: false,
+  unterminated: "Unterminated quoted identifier",
+};
+// A bit-string body has no escapes at all, so `B'1''0'` is two literals, as
+// it is in PG.
+const BIT_STRING: QuotedForm = {
+  quote: "'",
+  doubling: false,
+  continuation: true,
+  unterminated: "Unterminated bit string literal",
+};
+const HEX_STRING: QuotedForm = { ...BIT_STRING, unterminated: "Unterminated hexadecimal string literal" };
+// The UESCAPE operand. One that never closes is reported as the bad escape
+// character it is, the same message as any other the tail rejects.
+const UESCAPE_CHAR: QuotedForm = { ...STRING, unterminated: "Invalid Unicode escape character" };
+
+// Scan a quoted body with the cursor on the opening quote, leaving it past the
+// closing one (past the last one, when continuations joined several). The
+// returned span covers the body, not the quotes — from the first body's start
+// to the last body's end. Every croak here runs to the end of input, so the
+// stream is past the literal and recovery resumes after it.
+const readQuotedBody = (stream: InputStream, form: QuotedForm, tokenStart: Position) => {
   stream.next(); // opening quote
   const start = stream.position();
   let value = "";
-  while (!stream.eof()) {
-    if (stream.peek() === "'") {
-      const end = stream.position();
-      stream.next(); // the terminator — or, with doubling, the first of a pair
-      if (!doubling || stream.peek() !== "'") return { value, start, end, terminated: true };
-      stream.next();
-      value += "'";
+  for (;;) {
+    const char = stream.peek();
+    if (char === "") stream.croak(form.unterminated, tokenStart, stream.position());
+    if (char !== form.quote) {
+      value += stream.next();
       continue;
     }
-    value += stream.next();
+    const end = stream.position();
+    stream.next(); // the terminator — or, with doubling, the first of a pair
+    if (form.doubling && stream.peek() === form.quote) {
+      stream.next();
+      value += form.quote;
+      continue;
+    }
+    if (form.continuation && readQuoteContinuation(stream)) continue;
+    return { value, start, end };
   }
-  return { value, start, end: stream.position(), terminated: false };
 };
 
-// `B'1011'` / `X'ff'` — PG's bit-string constants. A digit outside the base is
-// rejected here because PG rejects it in its scanner too: no later stage can
-// make anything of `B'12'`, and the alternative is a bit string that silently
-// isn't one.
+// A double-quoted identifier, `"…"` or `U&"…"`. PG rejects the empty one in
+// its scanner — there is no zero-length name to refer to.
+const readIdentifierBody = (stream: InputStream, tokenStart: Position) => {
+  const body = readQuotedBody(stream, IDENTIFIER, tokenStart);
+  if (body.value === "") stream.croak("Zero-length delimited identifier", tokenStart, stream.position());
+  return body;
+};
+
+// `B'1011'` / `X'ff'` — PG's bit-string constants. PG checks the digits later,
+// in `bit_in`; checking here rejects `B'12'` just the same and points at the
+// literal, and the alternative is a bit string that silently isn't one.
 const bitStringReader = (opts: {
   type: SqlTokenType;
   startsWith: string;
+  form: QuotedForm;
   isDigit: (char: string) => boolean;
   display: string;
   invalid: string;
@@ -89,60 +176,203 @@ const bitStringReader = (opts: {
         stream.reload(); // a `b` / `x` with no quote after it is an identifier
         return null;
       }
-      const { value, start, end, terminated } = readQuotedBody(stream, false);
-      // Only a literal that actually closed is checked: an unterminated one has
-      // swallowed the rest of the input, so every character after the missing
-      // quote is "not a digit" and the croak would blame the wrong thing.
-      const bad = terminated ? [...value].find((char) => !opts.isDigit(char)) : undefined;
+      const { value, start, end } = readQuotedBody(stream, opts.form, tokenStart);
+      const bad = [...value].find((char) => !opts.isDigit(char));
       if (bad !== undefined) stream.croak(`${opts.invalid} "${bad}"`, tokenStart, stream.position());
       return { value, start, end };
     },
   });
 
+// `E'…'`'s body, scanned raw: a backslash shields the character after it (so
+// `\'` does not close the literal) and both stay in the text for
+// `decodeEscapes`. Each continued constant is its own segment, because an
+// escape sequence never spans the quotes between two of them.
+const readEscapeBody = (stream: InputStream, tokenStart: Position) => {
+  stream.next(); // opening quote
+  const start = stream.position();
+  const segments: string[] = [];
+  let raw = "";
+  for (;;) {
+    const char = stream.peek();
+    if (char === "") stream.croak(STRING.unterminated, tokenStart, stream.position());
+    if (char === "\\") {
+      raw += stream.next();
+      if (!stream.eof()) raw += stream.next();
+      continue;
+    }
+    if (char !== "'") {
+      raw += stream.next();
+      continue;
+    }
+    const end = stream.position();
+    stream.next();
+    if (stream.peek() === "'") {
+      // Doubled, it is a quote character, kept raw as a lone `'`. The decoder
+      // passes that through: a backslash in `raw` always has its partner
+      // beside it, and no escape's digits can include a quote.
+      stream.next();
+      raw += "'";
+      continue;
+    }
+    segments.push(raw);
+    raw = "";
+    if (readQuoteContinuation(stream)) continue;
+    return { segments, start, end };
+  }
+};
+
+const SINGLE_CHAR_ESCAPES: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" };
+let utf8: TextDecoder | undefined;
+
+// Decode `E'…'` the way scan.l's `xe` state does. `\b \f \n \r \t \v` are
+// control characters and any other escaped character stands for itself.
+// `\ooo` (one to three octal digits) and `\xh[h]` are single *bytes*, so a run
+// of them is assembled and read as UTF-8 — `E'\303\251'` is `é` — and a run
+// that isn't valid UTF-8, or holds a NUL, is rejected as PG rejects it.
+// `\uXXXX` and `\UXXXXXXXX` are code points, with UTF-16 surrogate pairs
+// combined and unpaired halves rejected.
+const decodeEscapes = (stream: InputStream, segments: readonly string[], start: Position): string => {
+  // Most E-strings are a single segment with nothing to decode.
+  if (segments.length === 1 && !segments[0]!.includes("\\")) return segments[0]!;
+  const fail = (message: string): never => stream.croak(message, start, stream.position());
+  let value = "";
+  let bytes: number[] = [];
+  let pendingHigh = 0;
+  const flushBytes = () => {
+    if (bytes.length === 0) return;
+    if (bytes.includes(0)) fail('Invalid byte sequence for encoding "UTF8": 0x00');
+    // `ignoreBOM`: a U+FEFF spelled in escapes is content, not a marker to strip.
+    utf8 ??= new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    try {
+      value += utf8.decode(new Uint8Array(bytes));
+    } catch {
+      fail('Invalid byte sequence for encoding "UTF8"');
+    }
+    bytes = [];
+  };
+  // Everything but a byte escape ends a byte run, and everything but the low
+  // half ends a pending high surrogate.
+  const append = (text: string) => {
+    if (pendingHigh !== 0) fail("Invalid Unicode surrogate pair");
+    flushBytes();
+    value += text;
+  };
+  for (const raw of segments) {
+    let index = 0;
+    while (index < raw.length) {
+      const slash = raw.indexOf("\\", index);
+      if (slash === -1) {
+        append(raw.slice(index));
+        break;
+      }
+      if (slash > index) append(raw.slice(index, slash));
+      const char = raw[slash + 1]!;
+      index = slash + 2;
+      if (char === "u" || char === "U") {
+        const width = char === "u" ? 4 : 8;
+        const digits = raw.slice(index, index + width);
+        if (digits.length < width || ![...digits].every(isHexDigit)) {
+          fail("Invalid Unicode escape: use \\uXXXX or \\UXXXXXXXX");
+        }
+        index += width;
+        const code = Number.parseInt(digits, 16);
+        if (pendingHigh !== 0) {
+          if (code < 0xdc00 || code > 0xdfff) fail("Invalid Unicode surrogate pair");
+          const pair = 0x10000 + ((pendingHigh - 0xd800) << 10) + (code - 0xdc00);
+          pendingHigh = 0;
+          append(String.fromCodePoint(pair));
+        } else if (code >= 0xd800 && code <= 0xdbff) {
+          flushBytes();
+          pendingHigh = code;
+        } else if (code >= 0xdc00 && code <= 0xdfff) {
+          fail("Invalid Unicode surrogate pair");
+        } else {
+          // PG's is_valid_unicode_codepoint — zero is not a valid escape either.
+          if (code === 0 || code > 0x10ffff) fail("Invalid Unicode escape value");
+          append(String.fromCodePoint(code));
+        }
+        continue;
+      }
+      if (isOctalDigit(char)) {
+        let end = index;
+        while (end < index + 2 && isOctalDigit(raw[end] ?? "")) end += 1;
+        if (pendingHigh !== 0) fail("Invalid Unicode surrogate pair");
+        // PG keeps the low byte of `\777`, as an `unsigned char` would.
+        bytes.push(Number.parseInt(raw.slice(slash + 1, end), 8) & 0xff);
+        index = end;
+        continue;
+      }
+      if (char === "x" && isHexDigit(raw[index] ?? "")) {
+        const end = isHexDigit(raw[index + 1] ?? "") ? index + 2 : index + 1;
+        if (pendingHigh !== 0) fail("Invalid Unicode surrogate pair");
+        bytes.push(Number.parseInt(raw.slice(index, end), 16));
+        index = end;
+        continue;
+      }
+      append(SINGLE_CHAR_ESCAPES[char] ?? char);
+    }
+    // A pair never spans two continued constants: PG ends the literal's
+    // `xeu` state at the quote between them.
+    if (pendingHigh !== 0) fail("Invalid Unicode surrogate pair");
+  }
+  flushBytes();
+  return value;
+};
+
 // The `UESCAPE 'c'` tail, read with the cursor just past a unicode literal's
 // closing quote. A word that isn't UESCAPE, or one with no quoted character
 // after it, restores the cursor and leaves those tokens to the parser — so
 // `SELECT U&'\0041' uescape FROM t` still reads `uescape` as a column alias.
-// `skipSpace` uses this lexer's whitespace class rather than PG's wider one, so
-// a comment before `UESCAPE` or before its `'c'` declines the tail (PG would
-// still apply it): the comment is dropped by `sqlParseLexer`, `uescape` reaches
-// the parser as a plain word (a column alias), and the `'c'` after it is a
-// syntax error.
+// Whitespace and comments may separate the parts, as they may any two tokens
+// in PG (whose parser, not its scanner, reads the tail).
 const readUescapeTail = (stream: InputStream): string | null => {
-  const skipSpace = () => {
-    while (isSpace(stream.peek())) stream.next();
+  // Skip whitespace and both comment forms; false when a `-` or `/` turned out
+  // not to start one, or a block comment never closed. Either way the tail is
+  // declined, and the main readers lex — or croak on — what is there.
+  const skipSpace = (): boolean => {
+    for (;;) {
+      const char = stream.peek();
+      if (isSpace(char)) {
+        stream.next();
+      } else if (char === "-") {
+        stream.next();
+        if (stream.peek() !== "-") return false;
+        while (stream.peek() !== "" && !isNewline(stream.peek())) stream.next();
+      } else if (char === "/") {
+        stream.next();
+        if (stream.peek() !== "*") return false;
+        stream.next();
+        if (!skipBlockComment(stream)) return false;
+      } else {
+        return true;
+      }
+    }
   };
   // `InputStream` has a single snapshot slot, so this clobbers the caller's —
   // safe only because the caller took it before `U` and is past every path that
   // could reload it by the time the literal is ours.
   stream.snapshot();
-  skipSpace();
-  for (const char of "uescape") {
-    if (stream.peek().toLowerCase() !== char) {
-      stream.reload();
-      return null;
-    }
-    stream.next();
-  }
-  skipSpace();
-  if (stream.peek() !== "'") {
+  const decline = () => {
     stream.reload();
     return null;
+  };
+  if (!skipSpace()) return decline();
+  for (const char of "uescape") {
+    if (stream.peek().toLowerCase() !== char) return decline();
+    stream.next();
   }
+  if (!skipSpace() || stream.peek() !== "'") return decline();
   // The tail is committed from here: no path below restores the cursor.
   const start = stream.position();
   // Read the whole `'…'`, not one character, so that a croak below resumes
   // *past* it. Croaking with the closing quote unconsumed would leave it to
   // open a runaway string and swallow the rest of the file.
-  const { value: escapeChar, terminated } = readQuotedBody(stream, true);
-  // PG's check_uescapechar: exactly one character, and not one that could be
+  const { value: escapeChar } = readQuotedBody(stream, UESCAPE_CHAR, start);
+  // PG's check_uescapechar: exactly one ASCII character (one byte), and not one that could be
   // part of an escape it introduces (a hex digit or `+`), a quote, or space.
-  // `terminated` is part of the test, not an afterthought: without it a
-  // truncated `UESCAPE '!` whose body happens to be one legal character would
-  // pass, silently changing what the literal ahead of it decodes to.
   if (
-    !terminated ||
     escapeChar.length !== 1 ||
+    escapeChar > "\x7f" ||
     isHexDigit(escapeChar) ||
     "+'\"".includes(escapeChar) ||
     isSpace(escapeChar)
@@ -196,34 +426,40 @@ const decodeUnicodeEscapes = (stream: InputStream, raw: string, escapeChar: stri
   return value;
 };
 
-// `U&'\0041' [UESCAPE 'c']`. PG decodes these in its scanner and so does this
-// reader: the result is an ordinary `string` token, so a unicode literal is
-// usable everywhere a plain one is — enum labels, `COMMENT ON … IS`, DEFAULTs —
-// with no grammar surface at all. The UESCAPE tail belongs to the reader for
-// the same reason it belongs to PG's scanner: it chooses the escape character,
-// so nothing can be decoded until we know whether it is there. No `display`:
-// labels are first-wins per token type and `"a string"` is already registered.
+// `U&'\0041' [UESCAPE 'c']` and `U&"d\0061t" [UESCAPE 'c']`. PG decodes these just
+// after scanning (its parser reads the tail); this reader does it in the
+// lexer. The string form yields an ordinary `string` token and the identifier
+// form an ordinary `qident`, so either is usable everywhere its plain spelling is — enum labels, `COMMENT ON … IS`,
+// DEFAULTs, any name — with no grammar surface at all. The UESCAPE tail belongs
+// to the reader because it chooses the escape character, so nothing can be
+// decoded until we know whether it is there. No `display`: labels are
+// first-wins per token type and `"a string"` is already registered.
 const unicodeStringReader: Reader<SqlTokenType> = readers.custom("string", {
   startsWith: "Uu",
   read: (stream) => {
     const tokenStart = stream.position();
     stream.snapshot();
     stream.next(); // `U`
-    // Neither `U&"…"` — a unicode-escaped *identifier*, out of scope — nor a
-    // bare `u` is ours. Both restore and lex as they did before: `u`, `&`, and
-    // whatever followed.
+    // A bare `u`, or a `u&` with no quote after it, is not ours: both restore
+    // and lex as `u`, `&`, and whatever followed — PG's {xufailed}.
     if (stream.peek() !== "&") {
       stream.reload();
       return null;
     }
     stream.next(); // `&`
-    if (stream.peek() !== "'") {
+    const quote = stream.peek();
+    if (quote !== "'" && quote !== '"') {
       stream.reload();
       return null;
     }
-    const { value: raw, start, end } = readQuotedBody(stream, true);
+    const {
+      value: raw,
+      start,
+      end,
+    } = quote === "'" ? readQuotedBody(stream, STRING, tokenStart) : readIdentifierBody(stream, tokenStart);
     const escapeChar = readUescapeTail(stream);
     return {
+      type: quote === "'" ? "string" : "qident",
       value: decodeUnicodeEscapes(stream, raw, escapeChar ?? "\\", tokenStart),
       start,
       // Body start through the end of whatever the literal consumed. With no
@@ -234,6 +470,82 @@ const unicodeStringReader: Reader<SqlTokenType> = readers.custom("string", {
       // short of it. Nothing here slices source by span; errors point with it.
       end: escapeChar === null ? end : stream.position(),
     };
+  },
+});
+
+// `'…'` — a standard-conforming string: backslash is an ordinary character.
+const stringReader: Reader<SqlTokenType> = readers.custom("string", {
+  startsWith: "'",
+  display: "a string",
+  read: (stream) => readQuotedBody(stream, STRING, stream.position()),
+});
+
+// `E'…'` — the escape string. Decoded once the whole literal is read, so an
+// invalid escape croaks with the stream already past it.
+const escapeStringReader: Reader<SqlTokenType> = readers.custom("string", {
+  startsWith: "Ee",
+  read: (stream) => {
+    const tokenStart = stream.position();
+    stream.snapshot();
+    stream.next(); // `E`
+    if (stream.peek() !== "'") {
+      stream.reload(); // `end`, `explain`, a bare `e`: an identifier
+      return null;
+    }
+    const { segments, start, end } = readEscapeBody(stream, tokenStart);
+    return { value: decodeEscapes(stream, segments, tokenStart), start, end };
+  },
+});
+
+// `"…"` — case-preserved (no fold), doubled `""` is one quote.
+const quotedIdentifierReader: Reader<SqlTokenType> = readers.custom("qident", {
+  startsWith: '"',
+  display: "a quoted identifier",
+  read: (stream) => readIdentifierBody(stream, stream.position()),
+});
+
+// Skip a `/* … */` body with the cursor just past its opener, nesting as PG's
+// does; false when the input ends first, with the cursor at the end.
+const skipBlockComment = (stream: InputStream, onChar?: (text: string) => void): boolean => {
+  let depth = 1;
+  for (;;) {
+    // Peek first: `next()` at the end of input still advances the position.
+    const char = stream.peek();
+    if (char === "") return false;
+    stream.next();
+    if (char === "*" && stream.peek() === "/") {
+      stream.next();
+      depth -= 1;
+      if (depth === 0) return true;
+      onChar?.("*/");
+    } else if (char === "/" && stream.peek() === "*") {
+      stream.next();
+      depth += 1;
+      onChar?.("/*");
+    } else {
+      onChar?.(char);
+    }
+  }
+};
+
+// `/* … */`, nested. Unlike core's `blockComment` it croaks when the input
+// ends inside one, as PG does.
+const blockCommentReader: Reader<SqlTokenType> = readers.custom("comment", {
+  startsWith: "/",
+  read: (stream) => {
+    const tokenStart = stream.position();
+    stream.snapshot();
+    stream.next();
+    if (stream.peek() !== "*") {
+      stream.reload(); // a `/` operator
+      return null;
+    }
+    stream.next();
+    let value = "";
+    if (!skipBlockComment(stream, (text) => (value += text))) {
+      stream.croak("Unterminated /* comment", tokenStart, stream.position());
+    }
+    return value;
   },
 });
 
@@ -412,17 +724,17 @@ export const sqlLexer = defineLexer({
   readers: [
     numberReader,
     // Standard strings double their quote; E-strings decode backslash escapes.
-    // Both are type "string"; the E reader owns its own `startsWith` and falls
-    // through (reload + null) when the quote doesn't follow, so `end` and
-    // `explain` still lex as identifiers.
-    readers.string("string", { quote: "'", escape: { doubling: true }, display: "a string" }),
-    readers.string("string", { quote: "'", prefix: "E", escape: { doubling: true, backslash: true } }),
+    // Both are type "string"; the E reader falls through when the quote doesn't
+    // follow, so `end` and `explain` still lex as identifiers.
+    stringReader,
+    escapeStringReader,
     // The other letter-prefixed literals (see above). Bit strings keep a token
     // type of their own — they are `bit` constants, not text — while a unicode
-    // literal decodes to a plain string.
+    // literal decodes to a plain string or quoted identifier.
     bitStringReader({
       type: "bitstring",
       startsWith: "Bb",
+      form: BIT_STRING,
       isDigit: isBinaryDigit,
       display: "a bit string",
       invalid: "Invalid binary digit",
@@ -430,19 +742,19 @@ export const sqlLexer = defineLexer({
     bitStringReader({
       type: "hexstring",
       startsWith: "Xx",
+      form: HEX_STRING,
       isDigit: isHexDigit,
       display: "a hex string",
       invalid: "Invalid hexadecimal digit",
     }),
     unicodeStringReader,
-    // Quoted identifiers: case-preserved (no fold), doubled `""` is one quote.
-    readers.string("qident", { quote: '"', escape: { doubling: true }, display: "a quoted identifier" }),
+    quotedIdentifierReader,
     readers.dollarString("string"),
     paramReader,
     // Comment readers must precede the operator reader: `stopAt` then guarantees
     // an operator scan never swallows a comment start (`@--x` → `@`, then `--x`).
     readers.lineComment("comment", "--", { display: "a comment" }),
-    readers.blockComment("comment", "/*", "*/", { nested: true }),
+    blockCommentReader,
     readers.operator("op", { display: "an operator" }),
   ],
   trivia: ["comment"],
@@ -452,10 +764,9 @@ export const sqlLexer = defineLexer({
 
 // What the grammar parses: `sqlLexer`'s tokens with every `comment` dropped, so
 // a comment is legal anywhere whitespace is (`SELECT /* x */ 1`, `count -- n
-// ⏎ (*)`), as in PG's scanner — except around `UESCAPE` (see
-// `readUescapeTail`). Core skips trivia only in the list-shaped combinators and
-// at the grammar's root boundaries, and `peek`/`peekAhead` lookahead never
-// skips, so the comments are removed before the parse context sees them.
+// ⏎ (*)`), as in PG's scanner. Core skips trivia only in the list-shaped
+// combinators and at the grammar's root boundaries, and `peek`/`peekAhead`
+// lookahead never skips, so the comments are removed before the parse context sees them.
 // Comments are not kept in the AST, and spans end at the last real token rather
 // than at a trailing comment. `sqlLexer` itself still emits `comment` tokens
 // for anyone tokenizing SQL directly (highlighters, formatters).

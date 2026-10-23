@@ -338,7 +338,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ["literal", "both", "SELECT 42, 3.14, .5, 1e10, 1.5E-3, 0x1F, 0o17, 0b101, 1_000_000;"],
     ["literal", "sql-lite", "SELECT 5., 1.e3;"],
     ["literal", "both", "SELECT TRUE, FALSE, NULL;"],
-    ["literal", "node", "SELECT 'foo'\n'bar';"],
+    ["literal", "both", "SELECT 'foo'\n'bar';"],
     ["lexical", "both", "SELECT 1; -- trailing comment"],
     ["lexical", "both", "/* block /* nested */ comment */ SELECT 1;"],
     ["lexical", "both", "SELECT /* inline */ 1;"],
