@@ -518,15 +518,29 @@ export type IndexColumn = {
   nulls?: "first" | "last";
 };
 
+// `ifExists` and `behavior` on dropColumn, and `collate` and `using` on
+// setDataType, are present only when written. A `null` storage, compression,
+// statistics target or access method is the DEFAULT keyword.
 export type AlterAction =
   | { kind: "addColumn"; ifNotExists: boolean; column: ColumnDef }
-  | { kind: "dropColumn"; name: string }
+  | { kind: "dropColumn"; name: string; ifExists?: true; behavior?: "cascade" | "restrict" }
   | { kind: "addConstraint"; name: string | null; constraint: TableConstraint }
   | { kind: "setDefault"; column: string; expr: Expr }
   | { kind: "dropDefault"; column: string }
   | { kind: "setNotNull"; column: string }
   | { kind: "dropNotNull"; column: string }
-  | { kind: "setDataType"; column: string; dataType: ColType }
+  | { kind: "setDataType"; column: string; dataType: ColType; collate?: string[]; using?: Expr }
+  | { kind: "setExpression"; column: string; expr: Expr }
+  | { kind: "dropExpression"; column: string; ifExists?: true }
+  | { kind: "addIdentity"; column: string; generated: "always" | "by default"; options?: SequenceOption[] }
+  | { kind: "alterIdentity"; column: string; options: IdentityOption[] }
+  | { kind: "dropIdentity"; column: string; ifExists?: true }
+  | { kind: "setStatistics"; column: string; value: number | null }
+  | { kind: "setStorage"; column: string; storage: "plain" | "external" | "extended" | "main" | null }
+  | { kind: "setCompression"; column: string; method: string | null }
+  | { kind: "setColumnOptions"; column: string; options: RelationOption[] }
+  | { kind: "resetColumnOptions"; column: string; options: RelationOption[] }
+  | { kind: "alterConstraint"; name: string; attrs: ConstraintAttrs }
   | { kind: "renameColumn"; from: string; to: string }
   | { kind: "renameConstraint"; from: string; to: string }
   | { kind: "renameTable"; to: string }
@@ -542,7 +556,25 @@ export type AlterAction =
   | { kind: "attachPartition"; partition: string[]; bound: PartitionBound }
   | { kind: "detachPartition"; partition: string[]; mode: "concurrently" | "finalize" | null }
   | { kind: "clusterOn"; index: string }
-  | { kind: "setWithoutCluster" };
+  | { kind: "setWithoutCluster" }
+  | { kind: "setWithoutOids" }
+  | { kind: "setLogged" }
+  | { kind: "setUnlogged" }
+  | { kind: "setAccessMethod"; method: string | null }
+  | { kind: "enableRule"; mode?: "replica" | "always"; rule: string }
+  | { kind: "disableRule"; rule: string }
+  | { kind: "rowSecurity"; action: "enable" | "disable" | "force" | "noForce" }
+  | { kind: "inherit"; parent: string[] }
+  | { kind: "noInherit"; parent: string[] }
+  | { kind: "of"; type: string[] }
+  | { kind: "notOf" };
+// One step of an identity column's `ALTER c {SET GENERATED … | SET option |
+// RESTART …} …` run: a SET's sequence option, a RESTART (a `restart` option,
+// which takes no SET), or the new GENERATED mode. AS, OWNED BY and SEQUENCE
+// NAME are refused there.
+export type IdentityOption =
+  | Exclude<SequenceOption, { kind: "as" | "ownedBy" | "sequenceName" }>
+  | { kind: "generated"; generated: "always" | "by default" };
 // The trigger an ENABLE / DISABLE TRIGGER names: one by name, or ALL / USER.
 export type AlterTriggerTarget = { kind: "all" | "user" } | { kind: "name"; name: string };
 
@@ -585,11 +617,15 @@ export type AlterTypeAction =
       position: { placement: "before" | "after"; value: string } | null;
     }
   | { kind: "renameValue"; from: string; to: string };
+// An index's `setStatistics` names its column by position (1-based), as PG's
+// ALTER INDEX does; `null` is DEFAULT.
 export type AlterIndexAction =
   | AlterRenameTo
   | { kind: "setTablespace"; tablespace: string }
   | { kind: "setOptions"; options: RelationOption[] }
-  | { kind: "resetOptions"; options: RelationOption[] };
+  | { kind: "resetOptions"; options: RelationOption[] }
+  | { kind: "attachPartition"; partition: string[] }
+  | { kind: "setStatistics"; column: number; value: number | null };
 // ALTER FUNCTION's and ALTER SEQUENCE's `options` hold the run of attributes or
 // sequence options written in place of a named action, in source order.
 export type AlterFunctionAction =
@@ -598,13 +634,14 @@ export type AlterFunctionAction =
   | AlterSetSchema
   | { kind: "options"; options: FunctionOption[] };
 export type AlterAggregateAction = AlterRenameTo | AlterOwnerTo | AlterSetSchema;
-// The column actions are ALTER TABLE's shapes, the option lists ALTER INDEX's.
+// The column actions are ALTER TABLE's shapes, the option lists ALTER INDEX's;
+// only a materialized view takes setTablespace.
 export type AlterViewAction =
   | AlterRenameTo
   | AlterOwnerTo
   | AlterSetSchema
   | Extract<AlterAction, { kind: "renameColumn" | "setDefault" | "dropDefault" }>
-  | Extract<AlterIndexAction, { kind: "setOptions" | "resetOptions" }>;
+  | Extract<AlterIndexAction, { kind: "setOptions" | "resetOptions" | "setTablespace" }>;
 export type AlterSequenceAction =
   | AlterRenameTo
   | AlterOwnerTo
@@ -613,8 +650,10 @@ export type AlterSequenceAction =
 
 // --- Phase 7: more CREATE objects ---
 
-// `CREATE TYPE` in its three body shapes, all sharing the `createType` kind and
-// discriminated by `form`. The enum form keeps its original `values` payload.
+// `CREATE TYPE` in its body shapes, all sharing the `createType` kind and
+// discriminated by `form`. The enum form keeps its original `values` payload;
+// `base` is the `( definition )` of a base type, and `shell` the bare `CREATE
+// TYPE name` that reserves a name for one.
 export type CompositeAttr = { name: string; type: ColType };
 // A `name = value` option in a `RANGE` type body (`SUBTYPE = float8`, …). `value`
 // is the raw (possibly qualified) name / type on the right of the `=`.
@@ -622,7 +661,25 @@ export type RangeOption = { name: string; value: string };
 export type CreateType =
   | { kind: "createType"; form: "enum"; name: string[]; values: string[]; span: Span }
   | { kind: "createType"; form: "composite"; name: string[]; attributes: CompositeAttr[]; span: Span }
-  | { kind: "createType"; form: "range"; name: string[]; options: RangeOption[]; span: Span };
+  | { kind: "createType"; form: "range"; name: string[]; options: RangeOption[]; span: Span }
+  | { kind: "createType"; form: "base"; name: string[]; definition: DefinitionElem[]; span: Span }
+  | { kind: "createType"; form: "shell"; name: string[]; span: Span };
+
+// One value in a definition list (PG's `def_arg`): a type or plain word
+// (`int4`, `btree`, `icu`), a word in RESERVED (`true`, `null`, `default`, …,
+// kept as written rather than read as a boolean or null), an operator (`<>`, or
+// `OPERATOR(pg_catalog.=)` as its dotted name), a number (with `raw` as on the
+// number expression), a string, or NONE.
+export type DefinitionArg =
+  | { kind: "type"; type: ColType }
+  | { kind: "keyword"; value: string }
+  | { kind: "operator"; name: string[] }
+  | { kind: "number"; value: number; raw?: string }
+  | { kind: "string"; value: string }
+  | { kind: "none" };
+// One `name [= value]` element of a parenthesised definition list (PG's
+// `def_elem`); `value` is omitted for a bare name (`PASSEDBYVALUE`).
+export type DefinitionElem = { name: string; value?: DefinitionArg };
 
 // A single `CREATE SEQUENCE` option. Numeric operands are full expressions (so a
 // signed `MINVALUE -100` parses); the flag / ownership forms carry their own shape.
@@ -635,7 +692,8 @@ export type SequenceOption =
   | { kind: "restart"; value: Expr | null } // null = bare RESTART
   | { kind: "cache"; value: Expr }
   | { kind: "cycle"; value: boolean } // false = NO CYCLE
-  | { kind: "ownedBy"; owner: string[] | null }; // null = OWNED BY NONE
+  | { kind: "ownedBy"; owner: string[] | null } // null = OWNED BY NONE
+  | { kind: "sequenceName"; name: string[] }; // an identity column's SEQUENCE NAME
 
 // A `CREATE DOMAIN` constraint. DEFAULT / COLLATE are never named; NOT NULL /
 // NULL / CHECK may carry an optional `CONSTRAINT name`.
@@ -1013,6 +1071,137 @@ export type CreateTrigger = {
   span: Span;
 };
 
+// --- long-tail objects: casts, collations, operators, text search, … ---
+
+// `CREATE CAST (source AS target) {WITH FUNCTION f[(args)] | WITHOUT FUNCTION |
+// WITH INOUT} [AS ASSIGNMENT | AS IMPLICIT]`. `function` is present only for
+// the `function` method, its `signature` only when an argument list is written;
+// `context` is omitted for an explicit-only cast.
+export type CreateCast = {
+  kind: "createCast";
+  source: ColType;
+  target: ColType;
+  method: "function" | "withoutFunction" | "inout";
+  function?: { name: string[]; signature?: DropSignature };
+  context?: "assignment" | "implicit";
+  span: Span;
+};
+
+// `CREATE COLLATION [IF NOT EXISTS] name {( definition ) | FROM existing}`;
+// exactly one of `definition` and `from` is present.
+export type CreateCollation = {
+  kind: "createCollation";
+  ifNotExists: boolean;
+  name: string[];
+  definition?: DefinitionElem[];
+  from?: string[];
+  span: Span;
+};
+
+// `CREATE [DEFAULT] CONVERSION name FOR 'source' TO 'target' FROM function`.
+export type CreateConversion = {
+  kind: "createConversion";
+  default?: true;
+  name: string[];
+  source: string;
+  target: string;
+  function: string[];
+  span: Span;
+};
+
+// `CREATE STATISTICS [IF NOT EXISTS] [name] [(kind, …)] ON item, … FROM t, …`.
+// Each `on` item is a column name, a function call or a parenthesised
+// expression, as PG's grammar allows; `name` and `kinds` are omitted when absent.
+export type CreateStatistics = {
+  kind: "createStatistics";
+  ifNotExists: boolean;
+  name?: string[];
+  kinds?: string[];
+  on: Expr[];
+  from: string[][];
+  span: Span;
+};
+
+// `CREATE EVENT TRIGGER name ON event [WHEN var IN ('v', …) [AND …]] EXECUTE
+// {FUNCTION | PROCEDURE} f()`; `when` is omitted when absent.
+export type CreateEventTrigger = {
+  kind: "createEventTrigger";
+  name: string;
+  event: string;
+  when?: { variable: string; values: string[] }[];
+  execute: { routine: "function" | "procedure"; name: string[] };
+  span: Span;
+};
+
+// `CREATE [OR REPLACE] [TRUSTED] [PROCEDURAL] LANGUAGE name [HANDLER h [INLINE
+// i] [VALIDATOR v | NO VALIDATOR]]`. The flags and handlers are omitted when
+// not written; `validator` is null for NO VALIDATOR.
+export type CreateLanguage = {
+  kind: "createLanguage";
+  orReplace: boolean;
+  trusted?: true;
+  procedural?: true;
+  name: string;
+  handler?: string[];
+  inline?: string[];
+  validator?: string[] | null;
+  span: Span;
+};
+
+// `CREATE ACCESS METHOD name TYPE {TABLE | INDEX} HANDLER handler`.
+export type CreateAccessMethod = {
+  kind: "createAccessMethod";
+  name: string;
+  type: "table" | "index";
+  handler: string[];
+  span: Span;
+};
+
+// `CREATE TEXT SEARCH {PARSER | DICTIONARY | TEMPLATE | CONFIGURATION} name (
+// definition )`.
+export type CreateTextSearch = {
+  kind: "createTextSearch";
+  objectType: "parser" | "dictionary" | "template" | "configuration";
+  name: string[];
+  definition: DefinitionElem[];
+  span: Span;
+};
+
+// `CREATE OPERATOR [schema.]op ( definition )`; `name` ends in the symbol.
+export type CreateOperator = { kind: "createOperator"; name: string[]; definition: DefinitionElem[]; span: Span };
+
+// One item of an operator class's `AS` list. An OPERATOR's `operands` are
+// present when written, null where NONE stands; `purpose` is omitted when no
+// FOR clause is written (PG's default, FOR SEARCH). A FUNCTION's `types` are
+// the optional `(left, right)` before its name, and its `signature` is present
+// when written.
+export type OpClassItem =
+  | {
+      kind: "operator";
+      strategy: number;
+      operator: string[];
+      operands?: [ColType | null, ColType | null];
+      purpose?: { kind: "search" } | { kind: "orderBy"; family: string[] };
+    }
+  | { kind: "function"; support: number; types?: ColType[]; name: string[]; signature?: DropSignature }
+  | { kind: "storage"; type: ColType };
+
+// `CREATE OPERATOR CLASS name [DEFAULT] FOR TYPE type USING method [FAMILY f]
+// AS item, …`; `default` and `family` are omitted when absent.
+export type CreateOperatorClass = {
+  kind: "createOperatorClass";
+  name: string[];
+  default?: true;
+  type: ColType;
+  using: string;
+  family?: string[];
+  items: OpClassItem[];
+  span: Span;
+};
+
+// `CREATE OPERATOR FAMILY name USING method`.
+export type CreateOperatorFamily = { kind: "createOperatorFamily"; name: string[]; using: string; span: Span };
+
 // --- Phase 9: DCL / TCL / session ---
 
 // A single privilege in GRANT/REVOKE: a keyword like SELECT/INSERT/USAGE with an
@@ -1374,6 +1563,17 @@ export type Stmt =
   | CreateProcedure
   | CreateAggregate
   | CreateTrigger
+  | CreateCast
+  | CreateCollation
+  | CreateConversion
+  | CreateStatistics
+  | CreateEventTrigger
+  | CreateLanguage
+  | CreateAccessMethod
+  | CreateTextSearch
+  | CreateOperator
+  | CreateOperatorClass
+  | CreateOperatorFamily
   // `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`; `withData`
   // is null when the clause is absent, as on createView.
   | { kind: "refreshMaterializedView"; concurrently: boolean; name: string[]; withData: boolean | null; span: Span }
@@ -1384,8 +1584,20 @@ export type Stmt =
   | { kind: "alterSchema"; name: string; action: AlterSchemaAction; span: Span }
   | { kind: "alterDomain"; name: string[]; action: AlterDomainAction; span: Span }
   | { kind: "alterType"; name: string[]; action: AlterTypeAction; span: Span }
-  // As on alterTable, `actions` is never empty and a RENAME stands alone.
+  // As on alterTable, `actions` is never empty and a RENAME or ATTACH PARTITION stands alone.
   | { kind: "alterIndex"; ifExists: boolean; name: string[]; actions: AlterIndexAction[]; span: Span }
+  // `ALTER {TABLE | INDEX | MATERIALIZED VIEW} ALL IN TABLESPACE from [OWNED BY
+  // role, …] SET TABLESPACE to [NOWAIT]`. `ownedBy` and `nowait` are present
+  // only when written.
+  | {
+      kind: "alterAllInTablespace";
+      objectType: "table" | "index" | "materialized view";
+      tablespace: string;
+      ownedBy?: string[];
+      newTablespace: string;
+      nowait?: true;
+      span: Span;
+    }
   // `args` is null when the signature is left off, as PG allows for a name that
   // is not overloaded; an aggregate's is never optional, and `star` marks `(*)`.
   | { kind: "alterFunction"; name: string[]; args: FunctionArg[] | null; action: AlterFunctionAction; span: Span }
@@ -1449,7 +1661,11 @@ export type Stmt =
   // - `signatures` (FUNCTION / PROCEDURE / AGGREGATE): one entry per name, null
   //   where a function or procedure name carries no argument list;
   // - `table` (TRIGGER, POLICY): the `ON table` the object belongs to;
-  // - `force` (DATABASE): present, as true, only when `(FORCE)` is written.
+  // - `force` (DATABASE): present, as true, only when `(FORCE)` is written;
+  // - `operands` (OPERATOR): one `(left, right)` pair per name, null where NONE
+  //   stands;
+  // - `using` (OPERATOR CLASS / FAMILY): the index access method;
+  // - `source` and `target` (CAST): its two types, with `names` empty.
   | {
       kind: "drop";
       objectType: string;
@@ -1460,6 +1676,10 @@ export type Stmt =
       signatures?: (DropSignature | null)[];
       table?: string[];
       force?: true;
+      operands?: [ColType | null, ColType | null][];
+      using?: string;
+      source?: ColType;
+      target?: ColType;
       span: Span;
     }
   // `TRUNCATE [TABLE] {[ONLY] name [*] | ONLY (name)}[, …]
@@ -4156,7 +4376,9 @@ function atNot(ctx: ParseContext<SqlTokenType>, word: string): boolean {
 
 // The constraint a table-level attribute list belongs to, spelled as PG's
 // "%s constraints cannot be marked …" messages name it.
-type ConstraintType = "PRIMARY KEY" | "UNIQUE" | "EXCLUDE" | "FOREIGN KEY" | "CHECK";
+// ALTER TABLE's ALTER CONSTRAINT reads the same list, and PG names it "ALTER
+// CONSTRAINT statement" there, refusing NOT VALID and NO INHERIT.
+type ConstraintType = "PRIMARY KEY" | "UNIQUE" | "EXCLUDE" | "FOREIGN KEY" | "CHECK" | "ALTER CONSTRAINT statement";
 
 // `[NOT] DEFERRABLE` and `INITIALLY DEFERRED | IMMEDIATE`, in either order. At
 // column level only UNIQUE, PRIMARY KEY and REFERENCES read this tail, so PG's
@@ -4390,31 +4612,20 @@ const COLUMN_CONSTRAINT_ELEMS: DispatchMap<ColConstraintElem> = {
   // lookahead, so one key covers both forms. As in PG, BY DEFAULT is only for
   // identity columns. VIRTUAL is PG 18's, taken because schemas (pagila's
   // among them) write it; PG 18's bare form (no STORED or VIRTUAL) is still
-  // rejected, as PG 17 does. PG's identity-only `SEQUENCE NAME` option is not
-  // parsed yet. GENERATED, ALWAYS, IDENTITY, STORED and VIRTUAL stay
-  // unreserved: they are matched only here, in a column's constraint list.
+  // rejected, as PG 17 does. The options take PG's identity-only `SEQUENCE
+  // NAME`. GENERATED, ALWAYS, IDENTITY, STORED and VIRTUAL stay unreserved:
+  // they are matched by value only, here and in ALTER COLUMN's identity actions.
   generated: {
     parse: (ctx) => {
       const start = ctx.position();
       ctx.parse(kw("generated"));
       const whenStart = ctx.position();
-      let generated: "always" | "by default";
-      if (ctx.eat("ident", "always") !== null) {
-        generated = "always";
-      } else if (ctx.is("ident", "by")) {
-        ctx.parse(kwseq("by", "default"));
-        generated = "by default";
-      } else {
-        return ctx.croak(`Expected ${quoteList(["always", "by default"])} but found ${describeFound(ctx.peek())}`);
-      }
+      const generated = parseGeneratedWhen(ctx);
       const whenEnd = ctx.lastEnd();
       ctx.parse(kw("as"));
       if (ctx.eat("ident", "identity") !== null) {
-        if (ctx.eat("punc", "(") === null) return { kind: "identity", generated, span: ctx.spanFrom(start) };
-        // At least one option, as in PG: an empty `IDENTITY ()` is an error.
-        const options = parseSequenceOptions(ctx);
-        if (options.length === 0) ctx.croak(`Expected a sequence option but found ${describeFound(ctx.peek())}`);
-        expectClose(ctx);
+        const options = parseIdentityOptions(ctx);
+        if (options === null) return { kind: "identity", generated, span: ctx.spanFrom(start) };
         return { kind: "identity", generated, options, span: ctx.spanFrom(start) };
       }
       if (!ctx.is("punc", "(")) {
@@ -4430,6 +4641,27 @@ const COLUMN_CONSTRAINT_ELEMS: DispatchMap<ColConstraintElem> = {
     },
   },
 };
+
+// `ALWAYS | BY DEFAULT`, after GENERATED: a column's identity or generation
+// clause, and ALTER TABLE's ADD GENERATED and SET GENERATED.
+function parseGeneratedWhen(ctx: ParseContext<SqlTokenType>): "always" | "by default" {
+  if (ctx.eat("ident", "always") !== null) return "always";
+  if (!ctx.is("ident", "by")) {
+    return ctx.croak(`Expected ${quoteList(["always", "by default"])} but found ${describeFound(ctx.peek())}`);
+  }
+  ctx.parse(kwseq("by", "default"));
+  return "by default";
+}
+
+// The optional `(option …)` after AS IDENTITY, null when no `(` follows. At
+// least one option, as in PG: an empty `IDENTITY ()` is an error.
+function parseIdentityOptions(ctx: ParseContext<SqlTokenType>): SequenceOption[] | null {
+  if (ctx.eat("punc", "(") === null) return null;
+  const options = parseSequenceOptions(ctx, true);
+  if (options.length === 0) ctx.croak(`Expected a sequence option but found ${describeFound(ctx.peek())}`);
+  expectClose(ctx);
+  return options;
+}
 
 const COLUMN_CONSTRAINT_ELEM_EXPECTED = joinExpected(COLUMN_CONSTRAINT_ELEMS);
 
@@ -4859,8 +5091,8 @@ function partitionStrategy(ctx: ParseContext<SqlTokenType>): PartitionSpec["stra
 // The expression forms PG's `part_elem` takes unparenthesised: a column (its
 // ColId, so one part) or a function call, the special-syntax ones (EXTRACT,
 // CURRENT_DATE, …) included, as PG's func_expr_windowless includes them. CAST
-// is one of those too, but its node is a `::` cast's as well, so partitionKey
-// tells the two apart by the lead word instead.
+// is one of those too, but its node is a `::` cast's as well, so
+// isBareFuncExpr tells the two apart by the lead word instead.
 const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "name",
   "call",
@@ -4872,13 +5104,24 @@ const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "sqlValueFunction",
 ]);
 
+// Whether `expr`, read unparenthesised, is one of the forms BARE_PARTITION_KEYS
+// describes: CREATE STATISTICS's items take the same ones. `castCall` says the
+// expression was led by `cast`; a `CAST(…)` is then a cast node whose operand
+// starts after it, where `CAST(a AS int)::text`'s outer cast has its operand
+// start where it does.
+function isBareFuncExpr(expr: Expr, castCall: boolean): boolean {
+  if (expr.kind === "cast") {
+    const operand = expr.expr.span.start;
+    return castCall && (operand.row !== expr.span.start.row || operand.col !== expr.span.start.col);
+  }
+  return BARE_PARTITION_KEYS.has(expr.kind) && !(expr.kind === "name" && expr.parts.length > 1);
+}
+
 // `column | func(…) | (expr)`, then `[COLLATE collation] [opclass]`. A bare key
 // goes through the full expression rule, whose COLLATE postfix takes the
 // collation; it is lifted off the node here, since in PG it belongs to the key,
 // not the expression. Anything else unparenthesised — `a + b`, `t.a`, `a::int`
-// — is PG's syntax error, and so is it here. A `CAST(…)` key is a cast node led
-// by `cast` whose operand starts after it: `CAST(a AS int)::text` is led by
-// `cast` too, but its outer cast's operand starts where it does.
+// — is PG's syntax error, and so is it here (see isBareFuncExpr).
 // ON CONFLICT's arbiter elements share this reader, under their own `what`.
 function partitionKey(ctx: ParseContext<SqlTokenType>, what = "a partition key"): PartitionKey {
   const start = ctx.position();
@@ -4894,12 +5137,7 @@ function partitionKey(ctx: ParseContext<SqlTokenType>, what = "a partition key")
       collate = expr.collation;
       expr = expr.expr;
     }
-    const bare =
-      expr.kind === "cast"
-        ? castCall &&
-          (expr.expr.span.start.row !== expr.span.start.row || expr.expr.span.start.col !== expr.span.start.col)
-        : BARE_PARTITION_KEYS.has(expr.kind) && !(expr.kind === "name" && expr.parts.length > 1);
-    if (!bare) {
+    if (!isBareFuncExpr(expr, castCall)) {
       return ctx.croak(`${what} expression must be parenthesised`, start, ctx.lastEnd());
     }
   }
@@ -5307,6 +5545,13 @@ const createTypeRest = custom<Stmt, SqlTokenType>(
     const start = ctx.position();
     ctx.parse(kw("type"));
     const name = ctx.parse(qualName);
+    // `( definition )` is a base type; nothing at all, a shell type.
+    if (ctx.is("punc", "(")) {
+      return { kind: "createType", form: "base", name, definition: parseDefinition(ctx), span: ctx.spanFrom(start) };
+    }
+    if (ctx.peek() === null || ctx.is("punc", ";")) {
+      return { kind: "createType", form: "shell", name, span: ctx.spanFrom(start) };
+    }
     ctx.parse(kw("as"));
     if (ctx.eat("ident", "enum") !== null) {
       return { kind: "createType", form: "enum", name, values: ctx.parse(enumValues), span: ctx.spanFrom(start) };
@@ -5329,55 +5574,69 @@ const createTypeRest = custom<Stmt, SqlTokenType>(
 // CREATE SEQUENCE options: a repeatable, order-free list. Numeric operands are
 // full expressions (so `MINVALUE -100` / `INCREMENT BY -1` parse); the flag and
 // ownership forms carry their own shape. All option words stay unreserved.
-function parseSequenceOptions(ctx: ParseContext<SqlTokenType>): SequenceOption[] {
+// `SEQUENCE NAME name` is taken only where `identity` says so: PG writes it
+// for an identity column's sequence, and refuses it on CREATE / ALTER
+// SEQUENCE.
+function parseSequenceOptions(ctx: ParseContext<SqlTokenType>, identity = false): SequenceOption[] {
   const options: SequenceOption[] = [];
-  while (true) {
-    if (ctx.eat("ident", "as") !== null) {
-      options.push({ kind: "as", type: ctx.parse(typeRef) });
-    } else if (ctx.eat("ident", "increment") !== null) {
-      ctx.eat("ident", "by"); // optional BY
-      options.push({ kind: "increment", value: ctx.parse(expression) });
-    } else if (ctx.eat("ident", "minvalue") !== null) {
-      options.push({ kind: "minValue", value: ctx.parse(expression) });
-    } else if (ctx.eat("ident", "maxvalue") !== null) {
-      options.push({ kind: "maxValue", value: ctx.parse(expression) });
-    } else if (ctx.eat("ident", "start") !== null) {
-      ctx.eat("ident", "with"); // optional WITH
-      options.push({ kind: "start", value: ctx.parse(expression) });
-    } else if (ctx.eat("ident", "restart") !== null) {
-      // RESTART, RESTART n, or RESTART WITH n. A bare RESTART (no value) is
-      // followed by another option word (an ident) or the end, so only a numeric
-      // start (a number, or a signed `-`/`+`) counts as the restart value —
-      // otherwise `RESTART CACHE 5` would read `CACHE` as an expression.
-      const withKw = ctx.eat("ident", "with") !== null;
-      const hasValue = withKw || ctx.is("number") || ctx.is("op", "-") || ctx.is("op", "+");
-      options.push({ kind: "restart", value: hasValue ? ctx.parse(expression) : null });
-    } else if (ctx.eat("ident", "cache") !== null) {
-      options.push({ kind: "cache", value: ctx.parse(expression) });
-    } else if (ctx.eat("ident", "cycle") !== null) {
-      options.push({ kind: "cycle", value: true });
-    } else if (ctx.is("ident", "no")) {
-      const after = ctx.peekAhead(1)?.value;
-      if (after === "minvalue") {
-        ctx.parse(kwseq("no", "minvalue"));
-        options.push({ kind: "minValue", value: null });
-      } else if (after === "maxvalue") {
-        ctx.parse(kwseq("no", "maxvalue"));
-        options.push({ kind: "maxValue", value: null });
-      } else if (after === "cycle") {
-        ctx.parse(kwseq("no", "cycle"));
-        options.push({ kind: "cycle", value: false });
-      } else {
-        break; // some other NO … — not a sequence option
-      }
-    } else if (ctx.is("ident", "owned")) {
-      ctx.parse(kwseq("owned", "by"));
-      options.push({ kind: "ownedBy", owner: ctx.eat("ident", "none") !== null ? null : ctx.parse(qualName) });
-    } else {
-      break;
-    }
+  for (let option = parseSequenceOption(ctx, identity); option !== null; option = parseSequenceOption(ctx, identity)) {
+    options.push(option);
   }
   return options;
+}
+
+// One sequence option, or null — consuming nothing — when none starts here.
+function parseSequenceOption(ctx: ParseContext<SqlTokenType>, identity: boolean): SequenceOption | null {
+  if (ctx.eat("ident", "as") !== null) return { kind: "as", type: ctx.parse(typeRef) };
+  if (ctx.eat("ident", "increment") !== null) {
+    ctx.eat("ident", "by"); // optional BY
+    return { kind: "increment", value: ctx.parse(expression) };
+  }
+  if (ctx.eat("ident", "minvalue") !== null) return { kind: "minValue", value: ctx.parse(expression) };
+  if (ctx.eat("ident", "maxvalue") !== null) return { kind: "maxValue", value: ctx.parse(expression) };
+  if (ctx.eat("ident", "start") !== null) {
+    ctx.eat("ident", "with"); // optional WITH
+    return { kind: "start", value: ctx.parse(expression) };
+  }
+  if (ctx.eat("ident", "restart") !== null) return parseRestartValue(ctx);
+  if (ctx.eat("ident", "cache") !== null) return { kind: "cache", value: ctx.parse(expression) };
+  if (ctx.eat("ident", "cycle") !== null) return { kind: "cycle", value: true };
+  if (ctx.is("ident", "no")) {
+    const after = ctx.peekAhead(1)?.value;
+    if (after === "minvalue") {
+      ctx.parse(kwseq("no", "minvalue"));
+      return { kind: "minValue", value: null };
+    }
+    if (after === "maxvalue") {
+      ctx.parse(kwseq("no", "maxvalue"));
+      return { kind: "maxValue", value: null };
+    }
+    if (after === "cycle") {
+      ctx.parse(kwseq("no", "cycle"));
+      return { kind: "cycle", value: false };
+    }
+    return null; // some other NO … — not a sequence option
+  }
+  if (ctx.is("ident", "owned")) {
+    ctx.parse(kwseq("owned", "by"));
+    return { kind: "ownedBy", owner: ctx.eat("ident", "none") !== null ? null : ctx.parse(qualName) };
+  }
+  if (identity && ctx.is("ident", "sequence")) {
+    ctx.parse(kwseq("sequence", "name"));
+    return { kind: "sequenceName", name: ctx.parse(qualName) };
+  }
+  return null;
+}
+
+// The rest of a RESTART once the word is consumed: RESTART, RESTART n, or
+// RESTART WITH n. A bare RESTART (no value) is followed by another option word
+// (an ident) or the end, so only a numeric start (a number, or a signed
+// `-`/`+`) counts as the restart value — otherwise `RESTART CACHE 5` would read
+// `CACHE` as an expression.
+function parseRestartValue(ctx: ParseContext<SqlTokenType>): Extract<SequenceOption, { kind: "restart" }> {
+  const withKw = ctx.eat("ident", "with") !== null;
+  const hasValue = withKw || ctx.is("number") || ctx.is("op", "-") || ctx.is("op", "+");
+  return { kind: "restart", value: hasValue ? ctx.parse(expression) : null };
 }
 
 const createSequenceRest = custom<Stmt, SqlTokenType>(
@@ -6399,6 +6658,15 @@ const PLAIN_CREATE: DispatchMap<Stmt, [Position, string[]]> = {
   policy: { parse: createPolicyRest },
   publication: { parse: createPublicationRest },
   subscription: { parse: createSubscriptionRest },
+  cast: { parse: createCastRest },
+  collation: { parse: createCollationRest },
+  default: { parse: createConversionRest },
+  conversion: { parse: createConversionRest },
+  statistics: { parse: createStatisticsRest },
+  event: { parse: createEventTriggerRest },
+  access: { parse: createAccessMethodRest },
+  text: { parse: createTextSearchRest },
+  operator: { parse: createOperatorRest },
 };
 
 // REPLACEABLE_CREATE dispatch CONSUMES the lead word: these bodies are entered
@@ -6416,6 +6684,9 @@ const REPLACEABLE_CREATE: DispatchMap<Stmt, [Position, boolean]> = {
   procedure: { parse: (ctx, start, orReplace) => parseProcedureBody(ctx, start, orReplace) },
   aggregate: { parse: (ctx, start, orReplace) => parseAggregateBody(ctx, start, orReplace) },
   trigger: { parse: (ctx, start, orReplace) => parseTriggerBody(ctx, start, orReplace) },
+  language: { parse: (ctx, start, orReplace) => parseLanguageBody(ctx, start, orReplace, "language") },
+  trusted: { parse: (ctx, start, orReplace) => parseLanguageBody(ctx, start, orReplace, "trusted") },
+  procedural: { parse: (ctx, start, orReplace) => parseLanguageBody(ctx, start, orReplace, "procedural") },
 };
 
 // PLAIN_CREATE is reached through an `oneOf`-shaped message, REPLACEABLE_CREATE
@@ -6446,13 +6717,14 @@ for (const target of SCHEMA_REPLACEABLE_TARGETS) {
 }
 
 // After CREATE: an optional `OR REPLACE`, then one of the objects that permit it
-// (VIEW / MATERIALIZED VIEW / FUNCTION / PROCEDURE / AGGREGATE / TRIGGER) — or,
-// with no such prefix, one of the remaining keyword-led targets (TABLE /
-// [UNIQUE] INDEX / TYPE / SEQUENCE / DOMAIN / DATABASE / SCHEMA / EXTENSION /
-// TABLESPACE / ROLE / USER / POLICY / PUBLICATION / SUBSCRIPTION), TABLE alone
-// taking the TEMP / UNLOGGED prefix. `OR REPLACE` before a non-replaceable
-// object croaks, as does a prefix before anything but TABLE — PG's TEMP VIEW
-// and TEMP SEQUENCE are not parsed.
+// (VIEW / MATERIALIZED VIEW / FUNCTION / PROCEDURE / AGGREGATE / TRIGGER /
+// [TRUSTED] [PROCEDURAL] LANGUAGE) — or, with no such prefix, one of the
+// remaining keyword-led targets (TABLE / [UNIQUE] INDEX / TYPE / SEQUENCE /
+// DOMAIN / DATABASE / SCHEMA / EXTENSION / TABLESPACE / ROLE / USER / POLICY /
+// PUBLICATION / SUBSCRIPTION, and CAST, COLLATION, CONVERSION, OPERATOR and the
+// other PLAIN_CREATE keys), TABLE alone taking the TEMP / UNLOGGED prefix. `OR
+// REPLACE` before a non-replaceable object croaks, as does a prefix before
+// anything but TABLE — PG's TEMP VIEW and TEMP SEQUENCE are not parsed.
 const createStmt = custom<Stmt, SqlTokenType>(
   (ctx) => {
     const start = ctx.position();
@@ -6526,6 +6798,180 @@ function parseTriggerTarget(ctx: ParseContext<SqlTokenType>): AlterTriggerTarget
   return { kind: "name", name: ctx.parse(nameWord) };
 }
 
+// `ROW LEVEL SECURITY` after ENABLE, DISABLE, FORCE or NO FORCE.
+function parseRowSecurity(
+  ctx: ParseContext<SqlTokenType>,
+  action: Extract<AlterAction, { kind: "rowSecurity" }>["action"],
+): AlterAction {
+  ctx.parse(kwseq("row", "level", "security"));
+  return { kind: "rowSecurity", action };
+}
+
+// The rest of `[SET DATA] TYPE t [COLLATE c] [USING expr]` once TYPE is
+// consumed. Each tail is present only when written.
+function parseSetDataType(ctx: ParseContext<SqlTokenType>, column: string): AlterAction {
+  const dataType = ctx.parse(typeRef);
+  const collate = ctx.eat("ident", "collate") !== null ? ctx.parse(qualName) : null;
+  const using = ctx.eat("ident", "using") !== null ? ctx.parse(expression) : null;
+  return { kind: "setDataType", column, dataType, ...(collate && { collate }), ...(using && { using }) };
+}
+
+// An optional `IF EXISTS` straight after a word, as DROP EXPRESSION and DROP
+// IDENTITY end: nothing else can follow either there, so `if` commits.
+function parseTrailingIfExists(ctx: ParseContext<SqlTokenType>): boolean {
+  if (!ctx.is("ident", "if")) return false;
+  ctx.parse(kwseq("if", "exists"));
+  return true;
+}
+
+// Whether `tok` leads one step of an identity column's option run after SET:
+// GENERATED, or a sequence option's word, SEQUENCE NAME's included.
+const isIdentitySetWord = (tok: Token<SqlTokenType> | null): boolean =>
+  tok !== null &&
+  tok.type === "ident" &&
+  (tok.value === "generated" || tok.value === "sequence" || SEQUENCE_OPTIONS.includes(tok.value));
+
+// The sequence options refused after an identity column's SET. PG's grammar
+// refuses the first three, by these names; SEQUENCE NAME fails only once the
+// statement runs, and is refused here under a name in the same style.
+const IDENTITY_REFUSED: Partial<Record<SequenceOption["kind"], string>> = {
+  as: "as",
+  restart: "restart",
+  ownedBy: "owned_by",
+  sequenceName: "sequence_name",
+};
+
+// `{SET GENERATED when | SET option | RESTART [[WITH] n]} …`, PG's
+// alter_identity_column_option_list: one or more steps, with no commas
+// between them, each SET taking a single option. The run ends at anything but
+// SET or RESTART; a SET there that leads no step is an error at its next word.
+function parseAlterIdentity(ctx: ParseContext<SqlTokenType>, column: string): AlterAction {
+  const options: IdentityOption[] = [];
+  for (;;) {
+    if (ctx.eat("ident", "restart") !== null) {
+      options.push(parseRestartValue(ctx));
+      continue;
+    }
+    if (!ctx.is("ident", "set")) break;
+    ctx.next(); // SET
+    if (!isIdentitySetWord(ctx.peek())) {
+      ctx.croak(`Expected "generated" or a sequence option but found ${describeFound(ctx.peek())}`);
+    }
+    if (ctx.eat("ident", "generated") !== null) {
+      options.push({ kind: "generated", generated: parseGeneratedWhen(ctx) });
+      continue;
+    }
+    const start = ctx.position();
+    const option = parseSequenceOption(ctx, true);
+    if (option === null) {
+      ctx.next(); // NO
+      ctx.croak(`Expected ${quoteList(["minvalue", "maxvalue", "cycle"])} but found ${describeFound(ctx.peek())}`);
+    }
+    const refused = IDENTITY_REFUSED[option.kind];
+    if (refused !== undefined) ctx.croak(`sequence option "${refused}" not supported here`, start, ctx.lastEnd());
+    options.push(option as IdentityOption); // AS, OWNED BY and SEQUENCE NAME were refused
+  }
+  return { kind: "alterIdentity", column, options };
+}
+
+// The `STORAGE` modes. DEFAULT, the type's own, is reserved and read apart;
+// a quoted "default" names it too.
+const STORAGE_MODES: ReadonlySet<string> = new Set(["plain", "external", "extended", "main"]);
+
+// What follows `ALTER [COLUMN] name`, keyed by its lead word and handed the
+// column. Each handler consumes its own lead word.
+const ALTER_COLUMN_ACTIONS: DispatchMap<AlterAction, [string]> = {
+  // `TYPE t` — shorthand for `SET DATA TYPE t`.
+  type: {
+    parse: (ctx, column) => {
+      ctx.next(); // TYPE
+      return parseSetDataType(ctx, column);
+    },
+  },
+  // SET leads a fixed word, or an identity column's option run, which owns its
+  // SETs and so is told apart by the word after this one before anything is
+  // consumed.
+  set: {
+    parse: (ctx, column) => {
+      if (isIdentitySetWord(ctx.peekAhead(1))) return parseAlterIdentity(ctx, column);
+      ctx.next(); // SET
+      if (ctx.is("punc", "(")) return { kind: "setColumnOptions", column, options: ctx.parse(relationOptions) };
+      if (ctx.eat("ident", "default") !== null) return { kind: "setDefault", column, expr: ctx.parse(expression) };
+      if (ctx.is("ident", "not")) {
+        ctx.parse(kwseq("not", "null"));
+        return { kind: "setNotNull", column };
+      }
+      if (ctx.is("ident", "data")) {
+        ctx.parse(kwseq("data", "type"));
+        return parseSetDataType(ctx, column);
+      }
+      if (ctx.is("ident", "expression")) {
+        ctx.parse(kwseq("expression", "as"));
+        return { kind: "setExpression", column, expr: ctx.parse(parenExpr) };
+      }
+      if (ctx.eat("ident", "statistics") !== null) {
+        const value = ctx.eat("ident", "default") !== null ? null : parseSignedInt(ctx);
+        return { kind: "setStatistics", column, value };
+      }
+      if (ctx.eat("ident", "storage") !== null) {
+        if (ctx.eat("ident", "default") !== null) return { kind: "setStorage", column, storage: null };
+        const start = ctx.position();
+        // Compared case-blind, as PG does, so a quoted "MAIN" is MAIN too.
+        const written = ctx.parse(nameWord);
+        const mode = written.toLowerCase();
+        if (mode === "default") return { kind: "setStorage", column, storage: null };
+        if (!STORAGE_MODES.has(mode)) ctx.croak(`invalid storage type "${written}"`, start, ctx.lastEnd());
+        return { kind: "setStorage", column, storage: mode as "plain" | "external" | "extended" | "main" };
+      }
+      if (ctx.eat("ident", "compression") !== null) {
+        // PG matches DEFAULT by its exact lowercase spelling, so a quoted
+        // "default" is DEFAULT too, and "DEFAULT" a method name.
+        const method = ctx.eat("ident", "default") !== null ? null : ctx.parse(nameWord);
+        return { kind: "setCompression", column, method: method === "default" ? null : method };
+      }
+      const words = ["(", "default", "not", "data", "expression", "statistics", "storage", "compression", "generated"];
+      const expected = `${words.map((w) => `"${w}"`).join(", ")} or a sequence option`;
+      return ctx.croak(`Expected ${expected} but found ${describeFound(ctx.peek())}`);
+    },
+  },
+  reset: {
+    parse: (ctx, column) => {
+      const { options } = parseResetOptions(ctx);
+      return { kind: "resetColumnOptions", column, options };
+    },
+  },
+  drop: {
+    parse: (ctx, column) => {
+      ctx.next(); // DROP
+      if (ctx.eat("ident", "default") !== null) return { kind: "dropDefault", column };
+      if (ctx.is("ident", "not")) {
+        ctx.parse(kwseq("not", "null"));
+        return { kind: "dropNotNull", column };
+      }
+      if (ctx.eat("ident", "expression") !== null) {
+        return { kind: "dropExpression", column, ...(parseTrailingIfExists(ctx) && { ifExists: true }) };
+      }
+      if (ctx.eat("ident", "identity") === null) {
+        const words = ["default", "not", "expression", "identity"];
+        ctx.croak(`Expected ${quoteList(words)} but found ${describeFound(ctx.peek())}`);
+      }
+      return { kind: "dropIdentity", column, ...(parseTrailingIfExists(ctx) && { ifExists: true }) };
+    },
+  },
+  // `ADD GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(option …)]`.
+  add: {
+    parse: (ctx, column) => {
+      ctx.parse(kwseq("add", "generated"));
+      const generated = parseGeneratedWhen(ctx);
+      ctx.parse(kwseq("as", "identity"));
+      const options = parseIdentityOptions(ctx);
+      return { kind: "addIdentity", column, generated, ...(options && { options }) };
+    },
+  },
+  restart: { parse: parseAlterIdentity },
+};
+const ALTER_COLUMN_ACTION_EXPECTED = keyList(ALTER_COLUMN_ACTIONS);
+
 // The ALTER TABLE actions. Dispatch peeks; each handler consumes its own lead
 // word and owns whatever lookahead its own shapes need — `ADD [COLUMN] …` vs
 // `ADD [CONSTRAINT name] …` vs a bare table constraint all begin with `add`, and
@@ -6559,40 +7005,35 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       return parseAddColumn(ctx);
     },
   },
-  // `constraint` is reserved, so an unquoted one never names the column dropped.
+  // `DROP [COLUMN] [IF EXISTS] name [CASCADE | RESTRICT]`. `constraint` is
+  // reserved, so an unquoted one never names the column dropped.
   drop: {
     parse: (ctx) => {
       ctx.next(); // DROP
       if (ctx.eat("ident", "constraint") !== null) return parseDropConstraint(ctx);
       ctx.eat("ident", "column"); // optional COLUMN
-      return { kind: "dropColumn", name: ctx.parse(nameWord) };
+      const ifExists = parseIfExists(ctx);
+      const name = ctx.parse(nameWord);
+      const behavior = ctx.parse(dropBehavior);
+      return { kind: "dropColumn", name, ...(ifExists && { ifExists: true }), ...(behavior && { behavior }) };
     },
   },
+  // `ALTER [COLUMN] name …` or `ALTER CONSTRAINT name …`. `column` and
+  // `constraint` are reserved, so an unquoted one never names the column.
   alter: {
     parse: (ctx) => {
       ctx.next(); // ALTER
+      if (ctx.eat("ident", "constraint") !== null) {
+        const name = ctx.parse(nameWord);
+        return {
+          kind: "alterConstraint",
+          name,
+          attrs: parseConstraintAttrs(ctx, "table", "ALTER CONSTRAINT statement"),
+        };
+      }
       ctx.eat("ident", "column"); // optional COLUMN
       const column = ctx.parse(nameWord);
-      // `TYPE t` — shorthand for `SET DATA TYPE t`.
-      if (ctx.eat("ident", "type") !== null) {
-        return { kind: "setDataType", column, dataType: ctx.parse(typeRef) };
-      }
-      if (ctx.is("ident", "set")) {
-        ctx.next(); // SET
-        if (ctx.eat("ident", "default") !== null) {
-          return { kind: "setDefault", column, expr: ctx.parse(expression) };
-        }
-        if (ctx.is("ident", "not")) {
-          ctx.parse(kwseq("not", "null"));
-          return { kind: "setNotNull", column };
-        }
-        ctx.parse(kwseq("data", "type"));
-        return { kind: "setDataType", column, dataType: ctx.parse(typeRef) };
-      }
-      ctx.parse(kw("drop"));
-      if (ctx.eat("ident", "default") !== null) return { kind: "dropDefault", column };
-      ctx.parse(kwseq("not", "null"));
-      return { kind: "dropNotNull", column };
+      return dispatch(ALTER_COLUMN_ACTIONS, ALTER_COLUMN_ACTION_EXPECTED, ctx, column);
     },
   },
   // `RENAME [COLUMN] old TO new` / `RENAME CONSTRAINT old TO new` /
@@ -6630,37 +7071,58 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       return { kind: "replicaIdentity", mode: "default", index: null };
     },
   },
-  // `SET {SCHEMA name | TABLESPACE name | (option, …) | WITHOUT CLUSTER}`. The
-  // word after SET is a fixed slot, never a name.
+  // `SET {SCHEMA name | TABLESPACE name | (option, …) | WITHOUT {CLUSTER |
+  // OIDS} | LOGGED | UNLOGGED | ACCESS METHOD {name | DEFAULT}}`. The word
+  // after SET is a fixed slot, never a name.
   set: {
     parse: (ctx) => {
       ctx.next(); // SET
       if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
       if (ctx.is("ident", "schema")) return parseSetSchema(ctx);
       if (ctx.is("ident", "tablespace")) return parseSetTablespace(ctx);
-      if (ctx.eat("ident", "without") === null) {
-        ctx.croak(
-          `Expected ${quoteList(["(", "schema", "tablespace", "without"])} but found ${describeFound(ctx.peek())}`,
-        );
+      if (ctx.eat("ident", "logged") !== null) return { kind: "setLogged" };
+      if (ctx.eat("ident", "unlogged") !== null) return { kind: "setUnlogged" };
+      if (ctx.is("ident", "access")) {
+        ctx.parse(kwseq("access", "method"));
+        return { kind: "setAccessMethod", method: ctx.eat("ident", "default") !== null ? null : ctx.parse(nameWord) };
       }
-      ctx.parse(kw("cluster"));
+      if (ctx.eat("ident", "without") === null) {
+        const words = ["(", "schema", "tablespace", "logged", "unlogged", "access", "without"];
+        ctx.croak(`Expected ${quoteList(words)} but found ${describeFound(ctx.peek())}`);
+      }
+      if (ctx.eat("ident", "oids") !== null) return { kind: "setWithoutOids" };
+      if (!ctx.is("ident", "cluster")) {
+        ctx.croak(`Expected ${quoteList(["cluster", "oids"])} but found ${describeFound(ctx.peek())}`);
+      }
+      ctx.next(); // CLUSTER
       return { kind: "setWithoutCluster" };
     },
   },
   reset: { parse: parseResetOptions },
   validate: { parse: parseValidateConstraint },
-  // `ENABLE [REPLICA | ALWAYS] TRIGGER …` / `DISABLE TRIGGER …`.
+  // `ENABLE [REPLICA | ALWAYS] {TRIGGER … | RULE name}` / `ENABLE ROW LEVEL
+  // SECURITY`, and DISABLE's TRIGGER, RULE and ROW LEVEL SECURITY.
   enable: {
     parse: (ctx) => {
       ctx.next(); // ENABLE
       const mode = ctx.eat("ident", "replica") ?? ctx.eat("ident", "always");
       if (mode !== null) {
-        ctx.parse(kw("trigger"));
+        const modeValue = mode.value as "replica" | "always";
+        if (ctx.eat("ident", "rule") !== null) {
+          return { kind: "enableRule", mode: modeValue, rule: ctx.parse(nameWord) };
+        }
+        if (!ctx.is("ident", "trigger")) {
+          ctx.croak(`Expected ${quoteList(["trigger", "rule"])} but found ${describeFound(ctx.peek())}`);
+        }
+        ctx.next(); // TRIGGER
         const trigger = { kind: "name" as const, name: ctx.parse(nameWord) };
-        return { kind: "enableTrigger", mode: mode.value as "replica" | "always", trigger };
+        return { kind: "enableTrigger", mode: modeValue, trigger };
       }
+      if (ctx.eat("ident", "rule") !== null) return { kind: "enableRule", rule: ctx.parse(nameWord) };
+      if (ctx.is("ident", "row")) return parseRowSecurity(ctx, "enable");
       if (!ctx.is("ident", "trigger")) {
-        ctx.croak(`Expected ${quoteList(["replica", "always", "trigger"])} but found ${describeFound(ctx.peek())}`);
+        const words = ["replica", "always", "trigger", "rule", "row"];
+        ctx.croak(`Expected ${quoteList(words)} but found ${describeFound(ctx.peek())}`);
       }
       return { kind: "enableTrigger", mode: null, trigger: parseTriggerTarget(ctx) };
     },
@@ -6668,7 +7130,48 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
   disable: {
     parse: (ctx) => {
       ctx.next(); // DISABLE
+      if (ctx.eat("ident", "rule") !== null) return { kind: "disableRule", rule: ctx.parse(nameWord) };
+      if (ctx.is("ident", "row")) return parseRowSecurity(ctx, "disable");
+      if (!ctx.is("ident", "trigger")) {
+        ctx.croak(`Expected ${quoteList(["trigger", "rule", "row"])} but found ${describeFound(ctx.peek())}`);
+      }
       return { kind: "disableTrigger", trigger: parseTriggerTarget(ctx) };
+    },
+  },
+  force: {
+    parse: (ctx) => {
+      ctx.next(); // FORCE
+      return parseRowSecurity(ctx, "force");
+    },
+  },
+  // `NO FORCE ROW LEVEL SECURITY` / `NO INHERIT parent`.
+  no: {
+    parse: (ctx) => {
+      ctx.next(); // NO
+      if (ctx.eat("ident", "force") !== null) return parseRowSecurity(ctx, "noForce");
+      if (ctx.eat("ident", "inherit") === null) {
+        ctx.croak(`Expected ${quoteList(["force", "inherit"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return { kind: "noInherit", parent: ctx.parse(qualName) };
+    },
+  },
+  inherit: {
+    parse: (ctx) => {
+      ctx.next(); // INHERIT
+      return { kind: "inherit", parent: ctx.parse(qualName) };
+    },
+  },
+  // `OF type` / `NOT OF`: make the table typed, or untyped again.
+  of: {
+    parse: (ctx) => {
+      ctx.next(); // OF
+      return { kind: "of", type: ctx.parse(qualName) };
+    },
+  },
+  not: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("not", "of"));
+      return { kind: "notOf" };
     },
   },
   cluster: {
@@ -6733,10 +7236,42 @@ function parseIfExists(ctx: ParseContext<SqlTokenType>): boolean {
 // (`[ONLY] name [*]`, `ONLY (name)`), which pg_dump writes as ALTER TABLE ONLY.
 function alterTableRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
   ctx.next(); // TABLE
+  if (ctx.is("ident", "all")) return alterAllInTablespaceRest(ctx, start, "table");
   const ifExists = parseIfExists(ctx);
   const { name, only } = ctx.parse(relationExpr);
   const actions = parseActionList(ctx, "TABLE", (c) => c.parse(alterAction), ALTER_ACTIONS, SOLO_ALTER_ACTIONS);
   return { kind: "alterTable", ifExists, name, ...(only && { only: true }), actions, span: ctx.spanFrom(start) };
+}
+
+// `ALL IN TABLESPACE name [OWNED BY role, …] SET TABLESPACE name [NOWAIT]`,
+// once the target's own word(s) are consumed. `all` is reserved, so it never
+// starts the name of the object altered.
+function alterAllInTablespaceRest(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  objectType: Extract<Stmt, { kind: "alterAllInTablespace" }>["objectType"],
+): Stmt {
+  ctx.parse(kwseq("all", "in", "tablespace"));
+  const tablespace = ctx.parse(nameWord);
+  let ownedBy: string[] | null = null;
+  if (ctx.is("ident", "owned")) {
+    ctx.parse(kwseq("owned", "by"));
+    ownedBy = [];
+    do ownedBy.push(parseRoleSpec(ctx));
+    while (ctx.eat("punc", ",") !== null);
+  }
+  ctx.parse(kwseq("set", "tablespace"));
+  const newTablespace = ctx.parse(nameWord);
+  const nowait = ctx.eat("ident", "nowait") !== null;
+  return {
+    kind: "alterAllInTablespace",
+    objectType,
+    tablespace,
+    ...(ownedBy && { ownedBy }),
+    newTablespace,
+    ...(nowait && { nowait: true }),
+    span: ctx.spanFrom(start),
+  };
 }
 
 // The `action[, …]` list of ALTER TABLE, INDEX and [MATERIALIZED] VIEW, whose
@@ -6900,7 +7435,8 @@ function parseResetOptions(ctx: ParseContext<SqlTokenType>): Extract<AlterIndexA
   return { kind: "resetOptions", options };
 }
 
-// `TABLESPACE name` once its SET is consumed, ALTER INDEX's and ALTER TABLE's.
+// `TABLESPACE name` once its SET is consumed, ALTER INDEX's, TABLE's and
+// MATERIALIZED VIEW's.
 function parseSetTablespace(ctx: ParseContext<SqlTokenType>): Extract<AlterIndexAction, { kind: "setTablespace" }> {
   ctx.parse(kw("tablespace"));
   return { kind: "setTablespace", tablespace: ctx.parse(nameWord) };
@@ -6908,6 +7444,28 @@ function parseSetTablespace(ctx: ParseContext<SqlTokenType>): Extract<AlterIndex
 
 const INDEX_ACTIONS: DispatchMap<AlterIndexAction> = {
   rename: { parse: parseRenameTo },
+  // `ATTACH PARTITION index`: a partition's index joins the partitioned one.
+  attach: {
+    parse: (ctx) => {
+      ctx.parse(kwseq("attach", "partition"));
+      return { kind: "attachPartition", partition: ctx.parse(qualName) };
+    },
+  },
+  // `ALTER [COLUMN] n SET STATISTICS {k | DEFAULT}`, where an index names its
+  // column by position, as PG requires of an index (an expression column has
+  // no name to give).
+  alter: {
+    parse: (ctx) => {
+      ctx.next(); // ALTER
+      ctx.eat("ident", "column"); // optional COLUMN
+      const tok = ctx.peek();
+      if (!isIntegerConstant(tok)) ctx.croak(`Expected a column number but found ${describeFound(tok)}`);
+      const column = Number(ctx.next()!.value);
+      ctx.parse(kwseq("set", "statistics"));
+      const value = ctx.eat("ident", "default") !== null ? null : parseSignedInt(ctx);
+      return { kind: "setStatistics", column, value };
+    },
+  },
   set: {
     parse: (ctx) => {
       ctx.next(); // SET
@@ -6977,6 +7535,19 @@ const AGGREGATE_ACTIONS: DispatchMap<AlterAggregateAction> = {
   set: { parse: parseSetSchemaAction },
 };
 
+// `SET {(option, …) | SCHEMA name}`, and for a materialized view `SET
+// TABLESPACE name` too.
+function parseViewSet(ctx: ParseContext<SqlTokenType>, materialized: boolean): AlterViewAction {
+  ctx.next(); // SET
+  if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
+  if (materialized && ctx.is("ident", "tablespace")) return parseSetTablespace(ctx);
+  if (!ctx.is("ident", "schema")) {
+    const words = materialized ? ["(", "schema", "tablespace"] : ["(", "schema"];
+    ctx.croak(`Expected ${quoteList(words)} but found ${describeFound(ctx.peek())}`);
+  }
+  return parseSetSchema(ctx);
+}
+
 // After RENAME, TO is tried before a column name, as ALTER TABLE's RENAME does.
 const MATERIALIZED_VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
   rename: {
@@ -6990,21 +7561,14 @@ const MATERIALIZED_VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
     },
   },
   owner: { parse: parseOwnerTo },
-  set: {
-    parse: (ctx) => {
-      ctx.next(); // SET
-      if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
-      if (!ctx.is("ident", "schema")) {
-        ctx.croak(`Expected ${quoteList(["(", "schema"])} but found ${describeFound(ctx.peek())}`);
-      }
-      return parseSetSchema(ctx);
-    },
-  },
+  set: { parse: (ctx) => parseViewSet(ctx, true) },
   reset: { parse: parseResetOptions },
 };
-// A materialized view has no column defaults to set or drop.
+// A materialized view has no column defaults to set or drop, and only it has
+// storage to move to another tablespace.
 const VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
   ...MATERIALIZED_VIEW_ACTIONS,
+  set: { parse: (ctx) => parseViewSet(ctx, false) },
   alter: {
     parse: (ctx) => {
       ctx.next(); // ALTER
@@ -7242,14 +7806,27 @@ function parseObjectKind(ctx: ParseContext<SqlTokenType>, trie: ObjectKindTrie):
 // An OPERATOR reference: `[schema.]op`, then `(left, right)` where NONE stands
 // for the missing side of a prefix operator. PG has no `(type)` form, and no
 // operator lacks both sides.
-function parseOperatorRef(ctx: ParseContext<SqlTokenType>): Pick<ObjectRef, "name" | "operands"> {
+function parseOperatorRef(ctx: ParseContext<SqlTokenType>): Required<Pick<ObjectRef, "name" | "operands">> {
+  const name = parseAnyOperator(ctx);
+  return { name, operands: parseOperandTypes(ctx) };
+}
+
+// PG's any_operator, `[schema.]op`: the dotted name ends in the symbol, which is
+// any operator but `=>`, as in PG.
+function parseAnyOperator(ctx: ParseContext<SqlTokenType>): string[] {
   const name: string[] = [];
   while (!ctx.is("op")) {
     if (!isNameToken(ctx.peek())) ctx.croak(`Expected an operator but found ${describeFound(ctx.peek())}`);
     name.push(ctx.parse(nameWord));
     ctx.parse(punc("."));
   }
-  name.push(ctx.parse(sortOperator)); // any operator but `=>`, as in PG
+  name.push(ctx.parse(sortOperator));
+  return name;
+}
+
+// PG's oper_argtypes, `(left, right)`, with NONE for the missing side of a
+// prefix operator.
+function parseOperandTypes(ctx: ParseContext<SqlTokenType>): [ColType | null, ColType | null] {
   ctx.parse(punc("("));
   const operand = () => (ctx.eat("ident", "none") !== null ? null : ctx.parse(typeRef));
   const left = operand();
@@ -7257,7 +7834,17 @@ function parseOperatorRef(ctx: ParseContext<SqlTokenType>): Pick<ObjectRef, "nam
   const right = operand();
   expectClose(ctx);
   if (left === null && right === null) ctx.croak("An operator takes at least one operand type, not NONE twice");
-  return { name, operands: [left, right] };
+  return [left, right];
+}
+
+// A cast's `(source AS target)`, as CREATE, DROP and COMMENT ON name it.
+function parseCastTypes(ctx: ParseContext<SqlTokenType>): { source: ColType; target: ColType } {
+  ctx.parse(punc("("));
+  const source = ctx.parse(typeRef);
+  ctx.parse(kw("as"));
+  const target = ctx.parse(typeRef);
+  expectClose(ctx);
+  return { source, target };
 }
 
 // `name ON table`, and for a CONSTRAINT `name ON DOMAIN domain`. DOMAIN is the
@@ -7288,14 +7875,7 @@ const OBJECT_REF_SHAPES = {
   },
   aggregate: (ctx) => ctx.parse(aggregateRef),
   operator: parseOperatorRef,
-  cast: (ctx) => {
-    ctx.parse(punc("("));
-    const source = ctx.parse(typeRef);
-    ctx.parse(kw("as"));
-    const target = ctx.parse(typeRef);
-    expectClose(ctx);
-    return { source, target };
-  },
+  cast: parseCastTypes,
   transform: (ctx) => {
     ctx.parse(kw("for"));
     const type = ctx.parse(typeRef);
@@ -7812,6 +8392,400 @@ function alterSubscriptionRest(ctx: ParseContext<SqlTokenType>, start: Position)
   return { kind: "alterSubscription", name, action, span: ctx.spanFrom(start) };
 }
 
+// --- long-tail objects: casts, collations, operators, text search, … ---
+//
+// Most of these objects are created from PG's `definition`, a parenthesised
+// `name [= value]` list whose names are ColLabels and whose values are
+// parseDefinition's to read. Every lead and clause word is matched by value, so
+// none of them stops being usable as a name.
+
+// A number in a definition list, a sign folded in. The node carries no span,
+// so numberNode's is dropped.
+function definitionNumber(ctx: ParseContext<SqlTokenType>, start: Position, sign: string): DefinitionArg {
+  const text = ctx.next()!.value;
+  const { value, raw } = numberNode(text, ctx.spanFrom(start), sign);
+  return { kind: "number", value, ...(raw !== undefined && { raw }) };
+}
+
+// One definition value, PG's def_arg: a string, a signed number, an operator
+// (bare, or as `OPERATOR(schema.op)`), NONE, a reserved keyword, or else a type
+// name, which covers every plain word (`btree`, `icu`, `int4`).
+function parseDefinitionArg(ctx: ParseContext<SqlTokenType>): DefinitionArg {
+  const start = ctx.position();
+  const tok = ctx.peek();
+  if (tok?.type === "string") {
+    ctx.next();
+    return { kind: "string", value: tok.value };
+  }
+  if (tok?.type === "number") return definitionNumber(ctx, start, "");
+  if (tok?.type === "op") {
+    if ((tok.value === "-" || tok.value === "+") && ctx.peekAhead(1)?.type === "number") {
+      ctx.next(); // the sign
+      return definitionNumber(ctx, start, tok.value);
+    }
+    return { kind: "operator", name: [ctx.parse(sortOperator)] };
+  }
+  if (tok?.type === "ident") {
+    if (tok.value === "operator" && isPuncToken(ctx.peekAhead(1), "(")) {
+      ctx.next(); // OPERATOR
+      ctx.next(); // "("
+      const name = parseAnyOperator(ctx);
+      expectClose(ctx);
+      return { kind: "operator", name };
+    }
+    if (tok.value === "none") {
+      ctx.next();
+      return { kind: "none" };
+    }
+    if (RESERVED.has(tok.value)) {
+      ctx.next();
+      return { kind: "keyword", value: tok.value };
+    }
+  }
+  if (tok?.type === "ident" || tok?.type === "qident") return { kind: "type", type: ctx.parse(typeRef) };
+  return ctx.croak(`Expected a name, a number, a string or an operator but found ${describeFound(tok)}`);
+}
+
+// PG's `definition`, `( name [= value], … )`, entered on the `(`.
+function parseDefinition(ctx: ParseContext<SqlTokenType>): DefinitionElem[] {
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" but found ${describeFound(ctx.peek())}`);
+  ctx.next(); // "("
+  const elements = commaList(ctx, (c): DefinitionElem => {
+    const name = optionName(c);
+    return c.eat("op", "=") === null ? { name } : { name, value: parseDefinitionArg(c) };
+  });
+  expectClose(ctx);
+  return elements;
+}
+
+// A bare string, PG's Sconst.
+function stringConst(ctx: ParseContext<SqlTokenType>): string {
+  if (!ctx.is("string")) return ctx.croak(`Expected a string but found ${describeFound(ctx.peek())}`);
+  return ctx.next()!.value;
+}
+
+// A plain integer, PG's Iconst.
+function integerConst(ctx: ParseContext<SqlTokenType>): number {
+  if (!isIntegerConstant(ctx.peek())) ctx.croak(`Expected an integer but found ${describeFound(ctx.peek())}`);
+  return Number(ctx.next()!.value);
+}
+
+// A function named with its optional argument list, as a routine reference
+// reads it, the list omitted when not written.
+function routineWithArgs(ctx: ParseContext<SqlTokenType>): { name: string[]; signature?: DropSignature } {
+  const { name, signature } = ctx.parse(routineRef);
+  return signature === null ? { name } : { name, signature };
+}
+
+function createCastRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("cast"));
+  const { source, target } = parseCastTypes(ctx);
+  let method: CreateCast["method"];
+  let fn: CreateCast["function"];
+  if (ctx.eat("ident", "without") !== null) {
+    ctx.parse(kw("function"));
+    method = "withoutFunction";
+  } else {
+    if (ctx.eat("ident", "with") === null) {
+      return ctx.croak(`Expected "with" or "without" but found ${describeFound(ctx.peek())}`);
+    }
+    if (ctx.eat("ident", "inout") !== null) {
+      method = "inout";
+    } else if (ctx.eat("ident", "function") !== null) {
+      method = "function";
+      fn = routineWithArgs(ctx);
+    } else {
+      return ctx.croak(`Expected "function" or "inout" but found ${describeFound(ctx.peek())}`);
+    }
+  }
+  let context: CreateCast["context"];
+  if (ctx.eat("ident", "as") !== null) {
+    if (ctx.eat("ident", "assignment") !== null) context = "assignment";
+    else if (ctx.eat("ident", "implicit") !== null) context = "implicit";
+    else return ctx.croak(`Expected "assignment" or "implicit" but found ${describeFound(ctx.peek())}`);
+  }
+  return {
+    kind: "createCast",
+    source,
+    target,
+    method,
+    ...(fn !== undefined && { function: fn }),
+    ...(context !== undefined && { context }),
+    span: ctx.spanFrom(start),
+  };
+}
+
+function createCollationRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("collation"));
+  const ifNotExists = parseIfNotExists(ctx);
+  const name = ctx.parse(qualName);
+  if (ctx.eat("ident", "from") !== null) {
+    return { kind: "createCollation", ifNotExists, name, from: ctx.parse(qualName), span: ctx.spanFrom(start) };
+  }
+  if (!ctx.is("punc", "(")) ctx.croak(`Expected "(" or "from" but found ${describeFound(ctx.peek())}`);
+  return { kind: "createCollation", ifNotExists, name, definition: parseDefinition(ctx), span: ctx.spanFrom(start) };
+}
+
+// `[DEFAULT] CONVERSION …`; DEFAULT is the dispatch key of the DEFAULT form.
+function createConversionRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  const isDefault = ctx.eat("ident", "default") !== null;
+  ctx.parse(kw("conversion"));
+  const name = ctx.parse(qualName);
+  ctx.parse(kw("for"));
+  const source = stringConst(ctx);
+  ctx.parse(kw("to"));
+  const target = stringConst(ctx);
+  ctx.parse(kw("from"));
+  const fn = ctx.parse(qualName);
+  return {
+    kind: "createConversion",
+    ...(isDefault && { default: true }),
+    name,
+    source,
+    target,
+    function: fn,
+    span: ctx.spanFrom(start),
+  };
+}
+
+// One item after CREATE STATISTICS … ON: a column, a function call, or a
+// parenthesised expression, as PG's stats_param admits; any other expression
+// must be parenthesised.
+function parseStatsParam(ctx: ParseContext<SqlTokenType>): Expr {
+  if (ctx.eat("punc", "(") !== null) {
+    const expr = ctx.parse(expression);
+    expectClose(ctx);
+    return expr;
+  }
+  const start = ctx.position();
+  const castCall = ctx.is("ident", "cast");
+  const expr = ctx.parse(expression);
+  if (isBareFuncExpr(expr, castCall)) return expr;
+  const message = "A statistics expression other than a column or a function call must be parenthesised";
+  return ctx.croak(message, start, ctx.lastEnd());
+}
+
+// The name is optional unless IF NOT EXISTS is written; `on` is reserved, so it
+// can never be read as one.
+function createStatisticsRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kw("statistics"));
+  const ifNotExists = parseIfNotExists(ctx);
+  const name = ifNotExists || isNameToken(ctx.peek()) ? ctx.parse(qualName) : undefined;
+  let kinds: string[] | undefined;
+  if (ctx.eat("punc", "(") !== null) {
+    kinds = commaList(ctx, (c) => c.parse(nameWord));
+    expectClose(ctx);
+  }
+  ctx.parse(kw("on"));
+  const on = commaList(ctx, parseStatsParam);
+  ctx.parse(kw("from"));
+  const from = commaList(ctx, (c) => c.parse(qualName));
+  return {
+    kind: "createStatistics",
+    ifNotExists,
+    ...(name !== undefined && { name }),
+    ...(kinds !== undefined && { kinds }),
+    on,
+    from,
+    span: ctx.spanFrom(start),
+  };
+}
+
+// `EXECUTE {FUNCTION | PROCEDURE} name()` — the empty argument list is required.
+function createEventTriggerRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kwseq("event", "trigger"));
+  const name = ctx.parse(nameWord);
+  ctx.parse(kw("on"));
+  const event = ctx.parse(nameWord);
+  let when: CreateEventTrigger["when"];
+  if (ctx.eat("ident", "when") !== null) {
+    when = [];
+    do {
+      const variable = ctx.parse(nameWord);
+      ctx.parse(kw("in"));
+      ctx.parse(punc("("));
+      const values = commaList(ctx, stringConst);
+      expectClose(ctx);
+      when.push({ variable, values });
+    } while (ctx.eat("ident", "and") !== null);
+  }
+  ctx.parse(kw("execute"));
+  let routine: "function" | "procedure";
+  if (ctx.eat("ident", "function") !== null) routine = "function";
+  else if (ctx.eat("ident", "procedure") !== null) routine = "procedure";
+  else return ctx.croak(`Expected "function" or "procedure" but found ${describeFound(ctx.peek())}`);
+  const fn = ctx.parse(qualName);
+  ctx.parse(punc("("));
+  expectClose(ctx);
+  return {
+    kind: "createEventTrigger",
+    name,
+    event,
+    ...(when !== undefined && { when }),
+    execute: { routine, name: fn },
+    span: ctx.spanFrom(start),
+  };
+}
+
+// `[TRUSTED] [PROCEDURAL] LANGUAGE …`, entered past `lead`, the first of those
+// words, which REPLACEABLE_CREATE consumes.
+function parseLanguageBody(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  orReplace: boolean,
+  lead: "trusted" | "procedural" | "language",
+): Stmt {
+  const trusted = lead === "trusted";
+  const procedural = lead === "procedural" || (trusted && ctx.eat("ident", "procedural") !== null);
+  if (lead !== "language" && ctx.eat("ident", "language") === null) {
+    const expected = trusted && !procedural ? '"procedural" or "language"' : '"language"';
+    return ctx.croak(`Expected ${expected} but found ${describeFound(ctx.peek())}`);
+  }
+  const name = ctx.parse(nameWord);
+  const handlers: Pick<CreateLanguage, "handler" | "inline" | "validator"> = {};
+  if (ctx.eat("ident", "handler") !== null) {
+    handlers.handler = ctx.parse(qualName);
+    if (ctx.eat("ident", "inline") !== null) handlers.inline = ctx.parse(qualName);
+    if (ctx.eat("ident", "validator") !== null) {
+      handlers.validator = ctx.parse(qualName);
+    } else if (ctx.is("ident", "no")) {
+      ctx.parse(kwseq("no", "validator"));
+      handlers.validator = null;
+    }
+  }
+  return {
+    kind: "createLanguage",
+    orReplace,
+    ...(trusted && { trusted: true }),
+    ...(procedural && { procedural: true }),
+    name,
+    ...handlers,
+    span: ctx.spanFrom(start),
+  };
+}
+
+function createAccessMethodRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  ctx.parse(kwseq("access", "method"));
+  const name = ctx.parse(nameWord);
+  ctx.parse(kw("type"));
+  let type: CreateAccessMethod["type"];
+  if (ctx.eat("ident", "table") !== null) type = "table";
+  else if (ctx.eat("ident", "index") !== null) type = "index";
+  else return ctx.croak(`Expected "table" or "index" but found ${describeFound(ctx.peek())}`);
+  ctx.parse(kw("handler"));
+  return { kind: "createAccessMethod", name, type, handler: ctx.parse(qualName), span: ctx.spanFrom(start) };
+}
+
+// The word after TEXT SEARCH that names one of its four object kinds.
+type TextSearchKind = CreateTextSearch["objectType"];
+const TEXT_SEARCH_KINDS: readonly TextSearchKind[] = ["parser", "dictionary", "template", "configuration"];
+const TEXT_SEARCH_KIND_EXPECTED = quoteList([...TEXT_SEARCH_KINDS]);
+function parseTextSearchKind(ctx: ParseContext<SqlTokenType>): TextSearchKind {
+  ctx.parse(kwseq("text", "search"));
+  const tok = ctx.peek();
+  const kind = TEXT_SEARCH_KINDS.find((k) => tok?.type === "ident" && tok.value === k);
+  if (kind === undefined) return ctx.croak(`Expected ${TEXT_SEARCH_KIND_EXPECTED} but found ${describeFound(tok)}`);
+  ctx.next();
+  return kind;
+}
+
+function createTextSearchRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  const objectType = parseTextSearchKind(ctx);
+  const name = ctx.parse(qualName);
+  return { kind: "createTextSearch", objectType, name, definition: parseDefinition(ctx), span: ctx.spanFrom(start) };
+}
+
+// Whether the cursor sits on `OPERATOR CLASS` or `OPERATOR FAMILY`: as in
+// parseObjectKind, CLASS or FAMILY is the keyword only when a name follows it,
+// so `OPERATOR class.+` is an operator in a schema called `class`.
+function opClassWordAhead(ctx: ParseContext<SqlTokenType>): "class" | "family" | null {
+  const word = ctx.peekAhead(1);
+  if (word?.type !== "ident" || (word.value !== "class" && word.value !== "family")) return null;
+  return isNameToken(ctx.peekAhead(2)) ? word.value : null;
+}
+
+// One item of an operator class's AS list (PG's opclass_item).
+function parseOpClassItem(ctx: ParseContext<SqlTokenType>): OpClassItem {
+  if (ctx.eat("ident", "operator") !== null) {
+    const strategy = integerConst(ctx);
+    const operator = parseAnyOperator(ctx);
+    const operands = ctx.is("punc", "(") ? parseOperandTypes(ctx) : undefined;
+    let purpose: Extract<OpClassItem, { kind: "operator" }>["purpose"];
+    if (ctx.eat("ident", "for") !== null) {
+      if (ctx.eat("ident", "search") !== null) {
+        purpose = { kind: "search" };
+      } else if (ctx.is("ident", "order")) {
+        ctx.parse(kwseq("order", "by"));
+        purpose = { kind: "orderBy", family: ctx.parse(qualName) };
+      } else {
+        return ctx.croak(`Expected "search" or "order" but found ${describeFound(ctx.peek())}`);
+      }
+    }
+    return {
+      kind: "operator",
+      strategy,
+      operator,
+      ...(operands !== undefined && { operands }),
+      ...(purpose !== undefined && { purpose }),
+    };
+  }
+  if (ctx.eat("ident", "function") !== null) {
+    const support = integerConst(ctx);
+    let types: ColType[] | undefined;
+    if (ctx.eat("punc", "(") !== null) {
+      types = commaList(ctx, (c) => c.parse(typeRef));
+      expectClose(ctx);
+    }
+    return { kind: "function", support, ...(types !== undefined && { types }), ...routineWithArgs(ctx) };
+  }
+  if (ctx.eat("ident", "storage") !== null) return { kind: "storage", type: ctx.parse(typeRef) };
+  return ctx.croak(`Expected "operator", "function" or "storage" but found ${describeFound(ctx.peek())}`);
+}
+
+// `OPERATOR op (definition)`, `OPERATOR CLASS …` or `OPERATOR FAMILY …`.
+function createOperatorRest(ctx: ParseContext<SqlTokenType>): Stmt {
+  const start = ctx.position();
+  const sub = opClassWordAhead(ctx);
+  if (sub === "family") {
+    ctx.parse(kwseq("operator", "family"));
+    const name = ctx.parse(qualName);
+    ctx.parse(kw("using"));
+    return { kind: "createOperatorFamily", name, using: ctx.parse(nameWord), span: ctx.spanFrom(start) };
+  }
+  if (sub === "class") {
+    ctx.parse(kwseq("operator", "class"));
+    const name = ctx.parse(qualName);
+    const isDefault = ctx.eat("ident", "default") !== null;
+    ctx.parse(kw("for"));
+    ctx.parse(kw("type"));
+    const type = ctx.parse(typeRef);
+    ctx.parse(kw("using"));
+    const using = ctx.parse(nameWord);
+    const family = ctx.eat("ident", "family") !== null ? ctx.parse(qualName) : undefined;
+    ctx.parse(kw("as"));
+    return {
+      kind: "createOperatorClass",
+      name,
+      ...(isDefault && { default: true }),
+      type,
+      using,
+      ...(family !== undefined && { family }),
+      items: commaList(ctx, parseOpClassItem),
+      span: ctx.spanFrom(start),
+    };
+  }
+  ctx.parse(kw("operator"));
+  const name = parseAnyOperator(ctx);
+  return { kind: "createOperator", name, definition: parseDefinition(ctx), span: ctx.spanFrom(start) };
+}
+
 // The ALTER targets. Dispatch peeks, as PLAIN_CREATE's does: each handler
 // consumes its own lead word, and is handed the position before ALTER so its
 // node spans the whole statement. The croak is hand-written and replaces no
@@ -7845,10 +8819,17 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
   index: {
     parse: (ctx, start) => {
       ctx.next(); // INDEX
+      if (ctx.is("ident", "all")) return alterAllInTablespaceRest(ctx, start, "index");
       const ifExists = parseIfExists(ctx);
       const name = ctx.parse(qualName);
       const parseAction = (c: ParseContext<SqlTokenType>) => dispatch(INDEX_ACTIONS, INDEX_ACTION_EXPECTED, c);
-      const actions = parseActionList(ctx, "INDEX", parseAction, INDEX_ACTIONS, { rename: "RENAME" });
+      const solo = { rename: "RENAME", attachPartition: "ATTACH PARTITION" } as const;
+      const actionStart = ctx.position();
+      const actions = parseActionList(ctx, "INDEX", parseAction, INDEX_ACTIONS, solo);
+      // PG's ATTACH PARTITION form of ALTER INDEX has no IF EXISTS.
+      if (ifExists && actions[0]!.kind === "attachPartition") {
+        ctx.croak("ALTER INDEX IF EXISTS cannot ATTACH PARTITION", actionStart, ctx.lastEnd());
+      }
       return { kind: "alterIndex", ifExists, name, actions, span: ctx.spanFrom(start) };
     },
   },
@@ -7878,6 +8859,7 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
   materialized: {
     parse: (ctx, start) => {
       ctx.parse(kwseq("materialized", "view"));
+      if (ctx.is("ident", "all")) return alterAllInTablespaceRest(ctx, start, "materialized view");
       return alterViewRest(ctx, start, true);
     },
   },
@@ -7953,7 +8935,7 @@ const dropNode = (
   start: Position,
   objectType: string,
   fields: Pick<DropStmt, "concurrently" | "ifExists" | "names" | "behavior">,
-  extra: Pick<DropStmt, "signatures" | "table" | "force"> = {},
+  extra: Pick<DropStmt, "signatures" | "table" | "force" | "operands" | "using" | "source" | "target"> = {},
 ): Stmt => ({ kind: "drop", objectType, ...fields, ...extra, span: ctx.spanFrom(start) });
 
 const unqualName = nameWord.map((n) => [n]);
@@ -7987,6 +8969,12 @@ const routineDrop = (objectType: string, ref: Rule<RoutineRef, SqlTokenType>): D
     const signatures = items.map((i) => i.signature);
     return dropNode(ctx, start, objectType, { concurrently: false, ifExists, names, behavior }, { signatures });
   },
+});
+
+// An operator and its `(left, right)` operand types, as DROP OPERATOR lists them.
+const operatorWithArgtypes = custom<Required<Pick<ObjectRef, "name" | "operands">>, SqlTokenType>(parseOperatorRef, {
+  expected: "an operator",
+  first: [{ type: "op" }, ...nameWord.first()],
 });
 
 // `DROP kind [IF EXISTS] name ON table [CASCADE|RESTRICT]` — one object.
@@ -8065,6 +9053,55 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
       const behavior = ctx.parse(dropBehavior);
       const fields = { concurrently: false, ifExists, names: [[name]], behavior };
       return dropNode(ctx, start, "subscription", fields);
+    },
+  },
+  collation: listDrop("collation", qualName),
+  conversion: listDrop("conversion", qualName),
+  statistics: listDrop("statistics", qualName),
+  event: listDrop("event trigger", unqualName, { lead: kwseq("event", "trigger") }),
+  language: listDrop("language", unqualName),
+  procedural: listDrop("language", unqualName, { lead: kwseq("procedural", "language") }),
+  access: listDrop("access method", unqualName, { lead: kwseq("access", "method") }),
+  // `DROP TEXT SEARCH {PARSER | DICTIONARY | TEMPLATE | CONFIGURATION} …`.
+  text: {
+    parse: (ctx, start) => {
+      const objectType = `text search ${parseTextSearchKind(ctx)}`;
+      const { ifExists, items: names } = parseDropNames(ctx, qualName);
+      const fields = { concurrently: false, ifExists, names, behavior: ctx.parse(dropBehavior) };
+      return dropNode(ctx, start, objectType, fields);
+    },
+  },
+  // `DROP CAST [IF EXISTS] (source AS target) [CASCADE|RESTRICT]` — one cast,
+  // named by its types alone.
+  cast: {
+    parse: (ctx, start) => {
+      ctx.next(); // CAST
+      const ifExists = parseIfExists(ctx);
+      const { source, target } = parseCastTypes(ctx);
+      const fields = { concurrently: false, ifExists, names: [], behavior: ctx.parse(dropBehavior) };
+      return dropNode(ctx, start, "cast", fields, { source, target });
+    },
+  },
+  // `DROP OPERATOR [IF EXISTS] op (left, right)[, …]`, and `DROP OPERATOR
+  // {CLASS | FAMILY} [IF EXISTS] name USING method` — one class or family.
+  operator: {
+    parse: (ctx, start) => {
+      const sub = opClassWordAhead(ctx);
+      if (sub !== null) {
+        ctx.next(); // OPERATOR
+        ctx.next(); // CLASS / FAMILY
+        const ifExists = parseIfExists(ctx);
+        const name = ctx.parse(qualName);
+        ctx.parse(kw("using"));
+        const using = ctx.parse(nameWord);
+        const fields = { concurrently: false, ifExists, names: [name], behavior: ctx.parse(dropBehavior) };
+        return dropNode(ctx, start, `operator ${sub}`, fields, { using });
+      }
+      ctx.next(); // OPERATOR
+      const { ifExists, items } = parseDropNames(ctx, operatorWithArgtypes);
+      const names = items.map((i) => i.name);
+      const fields = { concurrently: false, ifExists, names, behavior: ctx.parse(dropBehavior) };
+      return dropNode(ctx, start, "operator", fields, { operands: items.map((i) => i.operands) });
     },
   },
 };
@@ -9106,8 +10143,9 @@ const windowClause = seq(skip(kw("window")), field("defs", sepBy(namedWindowDef,
 
 // The operator after `USING`: any operator token except `=>`, which PG lexes
 // as its own named-argument token rather than an operator (see `functionArg`).
-// PG's `OPERATOR(schema.op)` spelling is taken only inside expressions; here, as
-// after an exclusion constraint's WITH, it is not supported yet.
+// PG's `OPERATOR(schema.op)` spelling is taken only inside expressions and
+// definition values (parseDefinitionArg); here, as after an exclusion
+// constraint's WITH, it is not supported yet.
 const sortOperator = custom<string, SqlTokenType>(
   (ctx) => {
     const tok = ctx.peek();
