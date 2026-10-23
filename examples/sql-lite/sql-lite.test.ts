@@ -4698,9 +4698,16 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
     ]);
     // Only the exact closer ends it; `$É$` is a different tag.
     expect(lex("$é$a$É$b$é$")).toEqual([{ type: "string", value: "a$É$b" }]);
+    // A tag outside the BMP closes too.
+    expect(lex("$🐘$x$🐘$ $a🐘$y$a🐘$")).toEqual([
+      { type: "string", value: "x" },
+      { type: "string", value: "y" },
+    ]);
     expect(() => sqlLite.parse("SELECT $é$abc;")).toThrow(/Unterminated dollar-quoted string/);
     // A `$` with no tag-closing `$` is not a dollar quote.
     expect(lex("$1")).toEqual([{ type: "param", value: "1" }]);
+    // A named parameter takes the same characters, so none is split off as an alias.
+    expect(lex("$café")).toEqual([{ type: "param", value: "café" }]);
   });
 
   it("keeps quoted non-ASCII identifiers exactly as written", () => {

@@ -702,9 +702,11 @@ const dollarStringReader: Reader<SqlTokenType> = readers.custom("string", {
         const end = stream.position();
         // The opener is committed, so the snapshot slot is free again.
         stream.snapshot();
+        // By UTF-16 code unit, as the stream reads: a `for…of` would compare a
+        // whole astral character (`$🐘$`) against half of one.
         let matched = true;
-        for (const char of closer) {
-          if (stream.peek() !== char) {
+        for (let index = 0; index < closer.length; index++) {
+          if (stream.peek() !== closer[index]) {
             matched = false;
             break;
           }
@@ -725,7 +727,8 @@ const dollarStringReader: Reader<SqlTokenType> = readers.custom("string", {
 // `$` is neither an operator char nor an identifier start, so nothing else
 // competes. A positional one takes plain digits — PG allows no `_` separators
 // in it — and, as PG 15+ does, rejects an identifier glued to it (`$1abc`).
-// `$name` is not PG syntax at all; it is kept for callers that template SQL.
+// `$name` is not PG syntax at all; it is kept for callers that template SQL,
+// and spelt with the dollar-quote tag's characters, so `$café` is one name.
 const paramReader: Reader<SqlTokenType> = readers.custom("param", {
   startsWith: "$",
   display: "a parameter",
@@ -737,8 +740,8 @@ const paramReader: Reader<SqlTokenType> = readers.custom("param", {
     if (isDecDigit(stream.peek())) {
       while (isDecDigit(stream.peek())) name += stream.next();
       rejectJunk(stream, tokenStart, "Trailing junk after parameter");
-    } else if (/[A-Za-z_]/.test(stream.peek())) {
-      while (/[A-Za-z0-9_]/.test(stream.peek())) name += stream.next();
+    } else if (isIdentStart(stream.peek())) {
+      while (isIdentCont(stream.peek()) && stream.peek() !== "$") name += stream.next();
     }
     // A bare `$` (no digits/name) isn't a parameter — restore and fall through
     // so the lexer reports it as an unexpected character, matching PG.
