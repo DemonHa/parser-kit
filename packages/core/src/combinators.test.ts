@@ -255,6 +255,68 @@ describe("delimited() — recover", () => {
   });
 });
 
+describe("delimited() — strictDelimited", () => {
+  const num = token("num").map((node) => Number(node.value));
+  const list = delimited(match("punc", "("), match("punc", ")"), match("punc", ","), num, { interleaved: true });
+  const body = delimited(match("punc", "{"), match("punc", "}"), match("punc", "\n"), num);
+  const lenient = defineGrammar({ lexer: toyLexer, root: list });
+  const strict = defineGrammar({ lexer: toyLexer, root: list, strictDelimited: true });
+
+  it("off (default): end of input closes an open list", () => {
+    expect(lenient.parse("(1, 2")).toEqual([1, 2]);
+    expect(lenient.parse("(")).toEqual([]);
+    expect(defineGrammar({ lexer: toyLexer, root: body }).parse("{\n1\n")).toEqual([1]);
+  });
+
+  it("is visible to custom() rules as ctx.strictDelimited", () => {
+    const flag = custom<boolean, ToyTT>((ctx) => ctx.strictDelimited === true, { expected: "anything", first: [] });
+    expect(defineGrammar({ lexer: toyLexer, root: flag }).parse("")).toBe(false);
+    expect(defineGrammar({ lexer: toyLexer, root: flag, strictDelimited: true }).parse("")).toBe(true);
+  });
+
+  it("on: an open list at end of input fails on the missing close", () => {
+    expect(() => strict.parse("(1, 2")).toThrow('Expected ")" but found end of input');
+    expect(() => strict.parse("(")).toThrow('Expected ")" but found end of input');
+    expect(() => strict.parseValue(list, "(1")).toThrow('Expected ")" but found end of input');
+    expect(() => defineGrammar({ lexer: toyLexer, root: body, strictDelimited: true }).parse("{\n1\n")).toThrow(
+      'Expected "}" but found end of input',
+    );
+  });
+
+  it("on: closed lists parse as before", () => {
+    expect(strict.parse("(1, 2)")).toEqual([1, 2]);
+    expect(strict.parse("()")).toEqual([]);
+    expect(() => strict.parse("(1 2)")).toThrow('Expected "," but found "2"');
+  });
+
+  it("on: diagnose() records the missing close and drops the open list", () => {
+    const lists = defineGrammar({ lexer: toyLexer, root: repeat(list), strictDelimited: true });
+    const { ast, errors } = lists.diagnose("(1) (2, 3");
+    expect(ast).toEqual([[1]]);
+    expect(errors.map((error) => error.msg)).toEqual(['Expected ")" but found end of input']);
+  });
+
+  it("on: a recovering list reports the bad item, then the close it never reached", () => {
+    const recovering = delimited(match("punc", "("), match("punc", ")"), match("punc", ","), num, {
+      interleaved: true,
+      recover: true,
+    });
+    const lists = defineGrammar({ lexer: toyLexer, root: repeat(recovering), strictDelimited: true });
+    // Off, the same input keeps the open list and reports only the bad item.
+    const off = defineGrammar({ lexer: toyLexer, root: repeat(recovering) }).diagnose("(1) (2, oops");
+    expect(off.ast).toEqual([[1], [2]]);
+    expect(off.errors.map((error) => error.msg)).toEqual(['Expected a number but found "oops"']);
+    const { ast, errors } = lists.diagnose("(1) (2, oops");
+    expect(ast).toEqual([[1]]);
+    expect(errors.map((error) => error.msg)).toEqual([
+      'Expected a number but found "oops"',
+      'Expected ")" but found end of input',
+    ]);
+    // Closed, the same list recovers as before.
+    expect(lists.diagnose("(1) (2, oops)").ast).toEqual([[1], [2]]);
+  });
+});
+
 describe("sepBy()", () => {
   it("parses a bare separated list", () => {
     const rule = sepBy(token("var"), match("punc", "."));
