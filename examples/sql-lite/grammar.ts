@@ -3653,10 +3653,11 @@ const takeJsonObject: JsonCallHandler = (ctx, start, call) => {
 
 // JSON_ARRAY(value [FORMAT JSON], … [clauses]), JSON_ARRAY(RETURNING type) and
 // JSON_ARRAY(query [FORMAT JSON] [RETURNING type]) (see startsFormatJson). The
-// query is PG's select_no_parens, and only one that opens on a query word is read as one
-// here: `JSON_ARRAY((SELECT 1))` is a one-element array of a scalar subquery,
-// as in PG, but so is the `(SELECT 1)` of `JSON_ARRAY((SELECT 1) UNION …)`,
-// which PG reads as a query and this grammar rejects.
+// query is PG's select_no_parens, and only one that opens on a query word is
+// read as one here: `JSON_ARRAY((SELECT 1))` is a one-element array of a
+// scalar subquery, as in PG, but so is the `(SELECT 1)` of
+// `JSON_ARRAY((SELECT 1) UNION …)`, which PG reads as a query and this grammar
+// rejects.
 const JSON_ARRAY_CLAUSE_WORDS = ["format", "null", "absent", "returning"];
 const takeJsonArray: JsonCallHandler = (ctx, start, call) => {
   if (call === null) {
