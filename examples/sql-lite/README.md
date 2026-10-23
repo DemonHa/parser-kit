@@ -38,7 +38,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 
 | File | What it is |
 |---|---|
-| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, PostgreSQL numbers (`1e5`, `.5`, `0xff`, `1_000`), `$1` parameters, comments, and the operator reader. `sqlLexer` emits `comment` tokens; `sqlParseLexer`, which the grammar uses, drops them |
+| `lexer.ts` | Tokens: identifier folding, quoted identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` strings, PostgreSQL numbers (`1e5`, `.5`, `5.`, `0xff`, `0o17`, `0b101`, `1_000`, with PostgreSQL 15+'s rejection of `123abc`), `$1` parameters, comments, and the operator reader. `sqlLexer` emits `comment` tokens; `sqlParseLexer`, which the grammar uses, drops them |
 | `grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, and one rule per statement |
 | `index.ts` | Re-exports both |
 | `sql-lite.test.ts` | Unit tests, one `describe` per feature |
@@ -76,16 +76,16 @@ The battery in `pg-coverage.ts` has 599 distinct statements, all syntactically v
 |---|---:|---:|---:|---:|---:|
 | Queries | 93 | 59 | 32 | 1 | 1 |
 | Expressions | 87 | 47 | 21 | 4 | 15 |
-| Types and lexical | 34 | 18 | 11 | 2 | 3 |
+| Types and lexical | 34 | 18 | 12 | 2 | 2 |
 | DML | 77 | 32 | 35 | 6 | 4 |
 | Transactions and session | 70 | 17 | 33 | 0 | 20 |
 | Utility and maintenance | 35 | 2 | 21 | 0 | 12 |
 | Tables and indexes | 84 | 13 | 40 | 2 | 29 |
 | Other schema objects | 93 | 15 | 37 | 3 | 38 |
 | Roles and privileges | 26 | 8 | 6 | 0 | 12 |
-| **Total** | **599** | **211** | **236** | **18** | **134** |
+| **Total** | **599** | **211** | **237** | **18** | **133** |
 
-So sql-lite accepts 447 of the 599 statements (75%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+So sql-lite accepts 448 of the 599 statements (75%) and node-sql-parser accepts 229 (38%). "Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -120,7 +120,6 @@ These are roughly ordered by how often real SQL hits them. Every item has a fail
 **Lexical**
 
 - String constants continued across a line break (`'foo'` newline `'bar'`).
-- Numbers with a trailing dot (`5.`, `1.e3`).
 - A comment between a `U&'…'` literal and its `UESCAPE` clause, or inside that clause (`U&'…' /* c */ UESCAPE '!'`, `U&'…' UESCAPE /* c */ '!'`).
 - `U&"…"` Unicode-escaped identifiers. These parse, but into the wrong tree (see below).
 
@@ -196,7 +195,7 @@ These statements parse without error, but the tree they produce is wrong:
 - **`U&"d\0061t"` parses as the binary expression `u & "d\0061t"`** instead of one identifier.
 - **Some `E'…'` escapes are left undecoded.** The backslash is dropped and the rest kept as text: `E'\x41'` gives `x41`, `E'\101'` gives `101`, and `E'\u0041'` gives `u0041`, where PostgreSQL gives `A` for all three. `\n`, `\t` and `\'` are decoded.
 - **`DEFAULT 'x' COLLATE "C"` folds the collation into the default expression** instead of applying it to the column.
-- **Numeric literals become JavaScript numbers,** so integers beyond 2^53 lose precision (`12345678901234567890`).
+- **Numbers below 2^53 in magnitude keep only double precision.** `0.1000000000000000055511151231257827` rounds, and an underflow such as `1e-400` reads as `0`. A number whose magnitude reaches 2^53 (every such double is a whole number), or that overflows to infinity, keeps its exact text in the node's `raw` field.
 
 ### Accepted, but PostgreSQL rejects
 
@@ -208,8 +207,9 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **Empty lists:** `IN ()`, `USING ()`, `VALUES ()`.
 - **Subscripting a call without parentheses:** `f(x)[1]`. PostgreSQL requires `(f(x))[1]`.
 - **Impossible type modifiers and interval ranges:** `x::int(4)`, `interval '1' DAY TO YEAR`.
-- **Junk after a number:** `SELECT 123abc` reads as `123 AS abc`. PostgreSQL 15+ rejects it.
+- **A whole-valued float where PostgreSQL wants an integer constant:** `MODULUS 4.0` or `MODULUS 4.` in a hash partition bound, `int[5.]`.
 - **The zero-length identifier `""`.**
+- **Named parameters** such as `$name`. PostgreSQL only has positional ones (`$1`); sql-lite keeps `$name` for templated SQL.
 - **`WITH ADMIN OPTION` / `ADMIN OPTION FOR` on object privileges.** Only role grants allow them.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted: `VALUES` rows of different lengths, `ON CONFLICT DO UPDATE` without a conflict target, and four-part names like `a.b.c.d` (a cross-database reference). node-sql-parser also accepts the `ON CONFLICT` one.

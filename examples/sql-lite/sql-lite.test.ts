@@ -3629,6 +3629,191 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
   });
 });
 
+// --- numeric literals and parameters ---
+// PG 17's scan.l: trailing-dot numbers, `0o`/`0b` radix forms, `_` only
+// between digits, junk glued to a number or a positional parameter rejected
+// (PG 15+), and the `:=` token. A number whose value a JS number can't hold
+// keeps its text in `raw`.
+
+describe("SQL-lite numeric literals and parameters", () => {
+  const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
+  const options = (list: string) => (firstStmt(`CREATE TABLE t (id int) WITH (${list});`) as any).options;
+
+  it("reads trailing-dot numbers as one token", () => {
+    expect(lex("5. 1.e3 1.E-3 .5e1")).toEqual([
+      { type: "number", value: "5." },
+      { type: "number", value: "1.e3" },
+      { type: "number", value: "1.E-3" },
+      { type: "number", value: ".5e1" },
+    ]);
+    expect(firstStmt("SELECT 5., 1.e3;").columns).toEqual([col(num(5)), col(num(1000))]);
+    // `1..` is PG's `{numericfail}`: the integer, with both dots left behind.
+    expect(lex("1..")).toEqual([
+      { type: "number", value: "1" },
+      { type: "punc", value: "." },
+      { type: "punc", value: "." },
+    ]);
+    // A dot after a number still separates two numbers, and starts none on its own.
+    expect(lex("1.5.6 t.5")).toEqual([
+      { type: "number", value: "1.5" },
+      { type: "number", value: ".6" },
+      { type: "ident", value: "t" },
+      { type: "number", value: ".5" },
+    ]);
+  });
+
+  it("reads hex, octal and binary integers, with `_` between digits", () => {
+    expect(firstStmt("SELECT 0o17, 0O17, 0b101, 0B1, 0x_ff, 0X1F, 1_000.000_1, 1_0e1_0;").columns).toEqual(
+      [15, 15, 5, 1, 255, 31, 1000.0001, 1e11].map((value) => col(num(value))),
+    );
+    // A radix integer runs into a following `.5`, as in PG: two numbers.
+    expect(lex("0x1.5")).toEqual([
+      { type: "number", value: "0x1" },
+      { type: "number", value: ".5" },
+    ]);
+    // Octal and binary are integer constants wherever PG wants one.
+    expect(colExpr("current_timestamp(0o3)")).toEqual({
+      kind: "sqlValueFunction",
+      name: "current_timestamp",
+      precision: 3,
+    });
+    expect(colExpr("current_time(0b11)")).toEqual({ kind: "sqlValueFunction", name: "current_time", precision: 3 });
+  });
+
+  it("rejects junk after a number, as PostgreSQL 15+ does", () => {
+    const cases: [string, RegExp][] = [
+      ["123abc", /Trailing junk after numeric literal \(1:7\)/],
+      ["1.5x", /Trailing junk after numeric literal/],
+      ["5.e", /Trailing junk after numeric literal/],
+      ["1e", /Trailing junk after numeric literal/],
+      ["1e+", /Trailing junk after numeric literal/],
+      ["1e5x", /Trailing junk after numeric literal/],
+      ["1e5_", /Trailing junk after numeric literal/],
+      // PG counts every non-ASCII character as an identifier character.
+      ["1é", /Trailing junk after numeric literal/],
+      ["1_", /Trailing junk after numeric literal/],
+      ["1__2", /Trailing junk after numeric literal/],
+      ["1._5", /Trailing junk after numeric literal/],
+      ["00x1", /Trailing junk after numeric literal/],
+      ["0xg", /Trailing junk after numeric literal/],
+      ["0x1g", /Trailing junk after numeric literal/],
+      ["0b102", /Trailing junk after numeric literal/],
+      ["0o8", /Trailing junk after numeric literal/],
+      ["0x_g", /Trailing junk after numeric literal/],
+      ["0x__ff", /Trailing junk after numeric literal/],
+      ["0x1_", /Trailing junk after numeric literal/],
+      ["0x1$", /Trailing junk after numeric literal/],
+      ["0x", /Invalid hexadecimal integer/],
+      ["0x_", /Invalid hexadecimal integer/],
+      ["0o", /Invalid octal integer/],
+      ["0b", /Invalid binary integer/],
+    ];
+    for (const [src, error] of cases) expect(() => sqlLite.parse(`SELECT ${src};`), src).toThrow(error);
+    // The error spans the whole word.
+    const error = (() => {
+      try {
+        sqlLite.parse("SELECT 123abc FROM t;");
+      } catch (caught) {
+        return caught as ParseError;
+      }
+      return undefined;
+    })();
+    expect(error).toBeInstanceOf(ParseError);
+    expect([error!.start, error!.end]).toEqual([
+      { row: 1, col: 7 },
+      { row: 1, col: 13 },
+    ]);
+  });
+
+  it("rejects junk after a positional parameter, keeping `$name`", () => {
+    expect(lex("$1 $12 $foo")).toEqual([
+      { type: "param", value: "1" },
+      { type: "param", value: "12" },
+      { type: "param", value: "foo" },
+    ]);
+    expect(() => sqlLite.parse("SELECT $1abc;")).toThrow(/Trailing junk after parameter \(1:7\)/);
+    // A positional parameter takes no `_` separators.
+    expect(() => sqlLite.parse("SELECT $1_000;")).toThrow(/Trailing junk after parameter/);
+    expect(() => sqlLite.parse("SELECT $1é;")).toThrow(/Trailing junk after parameter/);
+  });
+
+  it("reports junk inside a backtracking position as the lexer error", () => {
+    // INSERT's column list is read under attempt(), which rolls a failed read
+    // back; the lexer's own error must surface rather than a parser one.
+    const cases: [string, RegExp][] = [
+      ["123abc", /Trailing junk after numeric literal \(1:18\)/],
+      ["0x", /Invalid hexadecimal integer \(1:18\)/],
+      ["$1abc", /Trailing junk after parameter \(1:18\)/],
+      ["1e+", /Trailing junk after numeric literal \(1:18\)/],
+    ];
+    for (const [src, error] of cases) {
+      expect(() => sqlLite.parse(`INSERT INTO t (a, ${src}) VALUES (1);`), src).toThrow(error);
+    }
+  });
+
+  it("lexes `:=` as one token, and only when written together", () => {
+    expect(lex("a:=1")).toEqual([
+      { type: "ident", value: "a" },
+      { type: "punc", value: ":=" },
+      { type: "number", value: "1" },
+    ]);
+    expect(lex("a : = 1")).toEqual([
+      { type: "ident", value: "a" },
+      { type: "punc", value: ":" },
+      { type: "op", value: "=" },
+      { type: "number", value: "1" },
+    ]);
+    // No rule takes `:=` yet, and the spaced spelling is no named argument.
+    expect(() => sqlLite.parse("SELECT f(a := 1);")).toThrow(/found ":="/);
+    expect(() => sqlLite.parse("SELECT f(a : = 1);")).toThrow(/found ":"/);
+    // `:` and `::` lex as before.
+    expect(colExpr("a[1:2]")).toMatchObject({ kind: "subscript" });
+    expect(colExpr("a::int")).toMatchObject({ kind: "cast" });
+  });
+
+  it("keeps the text of a number its value can't hold in `raw`", () => {
+    expect(colExpr("9007199254740993")).toEqual({ kind: "number", value: 9007199254740992, raw: "9007199254740993" });
+    expect(colExpr("9_007_199_254_740_993")).toEqual({
+      kind: "number",
+      value: 9007199254740992,
+      raw: "9007199254740993",
+    });
+    expect(colExpr("0xFFFFFFFFFFFFFFFF")).toEqual({
+      kind: "number",
+      value: 18446744073709552000,
+      raw: "0xFFFFFFFFFFFFFFFF",
+    });
+    // The test is on the value: every double from 2^53 up is a whole number.
+    expect(colExpr("1.5e300")).toEqual({ kind: "number", value: 1.5e300, raw: "1.5e300" });
+    expect(colExpr("1e400")).toEqual({ kind: "number", value: Number.POSITIVE_INFINITY, raw: "1e400" });
+    // JSON writes Infinity as null; `raw` survives it.
+    expect(JSON.parse(JSON.stringify(colExpr("1e400")))).toEqual({ kind: "number", value: null, raw: "1e400" });
+    // A sign in an expression is a unary operator, so `raw` is the literal's own.
+    expect(colExpr("-12345678901234567890")).toEqual({
+      kind: "unary",
+      op: "-",
+      operand: { kind: "number", value: 12345678901234567000, raw: "12345678901234567890" },
+    });
+  });
+
+  it("leaves `raw` off every number its value holds exactly", () => {
+    for (const src of ["0", "42", "9007199254740991", "3.14", ".5", "5.", "1e10", "0.1", "0x1F", "1_000"]) {
+      expect(colExpr(src), src).not.toHaveProperty("raw");
+    }
+  });
+
+  it("folds an option value's sign into `raw` and the value alike", () => {
+    expect(options("a = -99999999999999999999, b = +99999999999999999999, c = -1e400, d = -0x10, e = -5")).toEqual([
+      { name: "a", value: { kind: "number", value: -100000000000000000000, raw: "-99999999999999999999" } },
+      { name: "b", value: { kind: "number", value: 100000000000000000000, raw: "+99999999999999999999" } },
+      { name: "c", value: { kind: "number", value: Number.NEGATIVE_INFINITY, raw: "-1e400" } },
+      // The sign applies after decoding: `Number("-0x10")` alone is NaN.
+      { name: "d", value: num(-16) },
+      { name: "e", value: num(-5) },
+    ]);
+  });
+});
+
 // --- keyword dispatch maps ---
 // The CREATE / ALTER / constraint rules derive their "Expected …" strings from
 // keyword-keyed dispatch maps rather than restating them. What follows pins the
