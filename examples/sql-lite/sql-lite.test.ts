@@ -14950,7 +14950,7 @@ describe("SQL-lite SQL/JSON functions", () => {
     });
     expect(
       colExpr(
-        "json_object(k || 'x' VALUE y FORMAT JSON ENCODING UTF8 ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb FORMAT JSON)",
+        "json_object((k || 'x') VALUE y FORMAT JSON ENCODING UTF8 ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb FORMAT JSON)",
       ),
     ).toEqual({
       kind: "jsonObject",
@@ -14966,6 +14966,21 @@ describe("SQL-lite SQL/JSON functions", () => {
       uniqueKeys: false,
     });
     expect(colExpr("JSON_OBJECT(RETURNING jsonb)")).toEqual({ kind: "jsonObject", entries: [], ...jsonb });
+    // Before VALUE the key is PG's c_expr: an operator expression only in
+    // parentheses. Before `:` it may be any expression.
+    expect(colExpr("JSON_OBJECT(k || 'x' : y, -k : 1, f(k)[1] VALUE 2)")).toEqual({
+      kind: "jsonObject",
+      entries: [
+        { key: bin("||", name("k"), str("x")), value: v(name("y")) },
+        { key: { kind: "unary", op: "-", operand: name("k") }, value: v(num(1)) },
+        { key: { kind: "subscript", base: call("f", [name("k")]), index: num(1) }, value: v(num(2)) },
+      ],
+    });
+    expect(bad("SELECT JSON_OBJECT(k || 'x' VALUE y) FROM t;")).toThrow(
+      /Expected ":" after an unparenthesised operator expression but found "value"/,
+    );
+    expect(bad("SELECT JSON_OBJECTAGG(k::text VALUE y) FROM t;")).toThrow(/but found "value"/);
+    expect(colExpr("JSON_OBJECTAGG((k::text) VALUE y)")).toMatchObject({ key: { kind: "cast" } });
   });
 
   it("parses JSON_ARRAY's value and query forms", () => {
@@ -14991,6 +15006,21 @@ describe("SQL-lite SQL/JSON functions", () => {
       query: { kind: "values" },
       format: {},
     });
+    // FORMAT JSON ends the query: it is never a bare alias ahead of JSON.
+    expect(colExpr("JSON_ARRAY(SELECT a FROM u FORMAT JSON)")).toEqual({
+      kind: "jsonArrayQuery",
+      query: sel({ columns: [col(name("a"))], from: [tableFrom(["u"])] }),
+      format: {},
+    });
+    expect(colExpr("JSON_ARRAY(SELECT 1 format json RETURNING jsonb)")).toMatchObject({
+      query: { columns: [col(num(1))] },
+      format: {},
+      ...jsonb,
+    });
+    expect(firstStmt("SELECT a format, b AS format FROM t format;")).toMatchObject({
+      columns: [col(name("a"), "format"), col(name("b"), "format")],
+      from: [tableFrom(["t"], "format")],
+    });
     // A parenthesised query is a scalar-subquery element, as in PG.
     expect(colExpr("JSON_ARRAY((SELECT 1) RETURNING jsonb)")).toMatchObject({
       kind: "jsonArray",
@@ -15012,6 +15042,11 @@ describe("SQL-lite SQL/JSON functions", () => {
       value: v(x, { format: {} }),
       orderBy: [{ expr: name("y"), dir: "desc", nulls: null }],
       onNull: "null",
+    });
+    expect(colExpr("JSON_ARRAYAGG(x FORMAT JSON ORDER BY y)")).toEqual({
+      kind: "jsonArrayAgg",
+      value: v(x, { format: {} }),
+      orderBy: [{ expr: name("y"), dir: null, nulls: null }],
     });
     expect(colExpr("JSON_ARRAYAGG(x ORDER BY y RETURNING jsonb)")).toEqual({
       kind: "jsonArrayAgg",
@@ -15164,7 +15199,7 @@ describe("SQL-lite SQL/JSON functions", () => {
         kind: "jsonTable",
         table: {
           context: v(name("doc")),
-          path: str("$[*]"),
+          path: "$[*]",
           pathName: "root",
           passing: [{ value: v(num(1)), name: "n" }],
           columns: [
@@ -15206,7 +15241,7 @@ describe("SQL-lite SQL/JSON functions", () => {
       kind: "jsonTable",
       table: {
         context: v(name("t", "doc")),
-        path: str("$[*]"),
+        path: "$[*]",
         columns: [{ kind: "value", name: "a", type: ct("int") }],
       },
       alias,
@@ -15246,6 +15281,37 @@ describe("SQL-lite SQL/JSON functions", () => {
       { kind: "value", name: "nested", type: ct("int") },
       { kind: "value", name: "p", type: ct("path"), path: "$.p" },
     ]);
+    expect(
+      from("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (NESTED PATH '$.a' COLUMNS (b int)));")[0].table.columns,
+    ).toEqual([{ kind: "nested", path: "$.a", columns: [{ kind: "value", name: "b", type: ct("int") }] }]);
+  });
+
+  it("spans the clause forms from the function name to the closing parenthesis", () => {
+    const span = (startCol: number, endCol: number) => ({
+      start: { row: 1, col: startCol },
+      end: { row: 1, col: endCol },
+    });
+    const [stmt] = sqlLite.parse(
+      "SELECT JSON_OBJECT('a' VALUE 1) + 1, JSON_ARRAYAGG(x RETURNING jsonb) OVER () FROM t;",
+    );
+    const columns = (stmt as any).columns;
+    expect(columns[0].expr.left.span).toEqual(span(7, 31));
+    expect(columns[1].expr.span).toEqual(span(37, 77));
+    expect(columns[1].expr.fn.span).toEqual(span(37, 69));
+    const [fromStmt] = sqlLite.parse("SELECT * FROM LATERAL JSON_TABLE(d, '$' COLUMNS (a int)) j;");
+    expect((fromStmt as any).from[0].table.span).toEqual(span(22, 56));
+  });
+
+  it("takes the clause forms where PG takes a function call unparenthesised", () => {
+    expect(
+      firstStmt("CREATE TABLE p (doc jsonb) PARTITION BY LIST (json_value(doc, '$.a' RETURNING int));").partitionBy,
+    ).toMatchObject({ keys: [{ expr: { kind: "jsonValue" } }] });
+    expect(
+      firstStmt("INSERT INTO t VALUES (1) ON CONFLICT (json_value(doc, '$.a' RETURNING int)) DO NOTHING;").onConflict,
+    ).toMatchObject({ inference: { elements: [{ expr: { kind: "jsonValue" } }] } });
+    expect(firstStmt("CREATE STATISTICS s ON json_object('a' VALUE b), c FROM t;")).toMatchObject({
+      kind: "createStatistics",
+    });
   });
 
   it("rejects malformed SQL/JSON clauses", () => {
@@ -15270,6 +15336,10 @@ describe("SQL-lite SQL/JSON functions", () => {
     );
     expect(bad("SELECT JSON_VALUE(doc, '$' PASSING 1) FROM t;")).toThrow(/Expected "as" but found "\)"/);
     expect(bad("SELECT JSON_VALUE(doc FORMAT JSON) FROM t;")).toThrow(/Expected "," but found "\)"/);
+    expect(bad("SELECT JSON_VALUE(x FORMAT JSON ENCODING latin1, '$') FROM t;")).toThrow(
+      /Expected "utf8", "utf16" or "utf32" but found "latin1"/,
+    );
+    expect(colExpr('JSON(x FORMAT JSON ENCODING "UTF16")')).toMatchObject({ value: { format: { encoding: "utf16" } } });
     expect(bad("SELECT JSON(x WITH KEYS) FROM t;")).toThrow(/Expected "unique" but found "keys"/);
     expect(bad("SELECT JSON_SERIALIZE(x RETURNING) FROM t;")).toThrow(/but found "\)"/);
     // A clause after a named, VARIADIC or `*` argument is no SQL/JSON form.
@@ -15280,6 +15350,13 @@ describe("SQL-lite SQL/JSON functions", () => {
     // JSON_TABLE needs its COLUMNS, holding at least one column, and is a FROM item only.
     expect(bad("SELECT * FROM JSON_TABLE(doc, '$' AS p);")).toThrow(/Expected "columns" but found "\)"/);
     expect(bad("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS ());")).toThrow(/but found "\)"/);
+    expect(bad("SELECT * FROM JSON_TABLE(doc, p COLUMNS (a int));")).toThrow(
+      /Expected a string constant as the JSON_TABLE path/,
+    );
+    // As in PG, `nested path` always opens a NESTED entry.
+    expect(bad("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (nested path));")).toThrow(
+      /Expected a string but found "\)"/,
+    );
     expect(bad("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a int PATH x));")).toThrow(
       /Expected a string but found "x"/,
     );

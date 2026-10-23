@@ -416,7 +416,8 @@ export type JsonPathCall = {
 // the FROM item's table expression.
 export type JsonTable = {
   context: JsonValueExpr;
-  path: Expr;
+  // A string constant in PG's grammar, so its value alone.
+  path: string;
   pathName?: string;
   passing?: JsonPassingArg[];
   columns: JsonTableColumn[];
@@ -3018,11 +3019,19 @@ const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Pos
 // changes nothing that parsed before, and a call that never shows a clause
 // stays the plain call it always was (`json_array(1, 2)`, `json(x)`).
 
-// `FORMAT JSON [ENCODING name]`, when the cursor is on FORMAT.
+// `FORMAT JSON [ENCODING name]`, when the cursor is on FORMAT. PG's grammar
+// action takes only the three UTF encodings, in any case.
+const JSON_ENCODINGS: ReadonlySet<string> = new Set(["utf8", "utf16", "utf32"]);
 function parseJsonFormat(ctx: ParseContext<SqlTokenType>): JsonFormat | null {
   if (ctx.eat("ident", "format") === null) return null;
   ctx.parse(kw("json"));
-  return ctx.eat("ident", "encoding") === null ? {} : { encoding: ctx.parse(nameWord) };
+  if (ctx.eat("ident", "encoding") === null) return {};
+  const start = ctx.position();
+  const encoding = ctx.parse(nameWord).toLowerCase();
+  if (!JSON_ENCODINGS.has(encoding)) {
+    ctx.croak(`Expected "utf8", "utf16" or "utf32" but found "${encoding}"`, start, ctx.lastEnd());
+  }
+  return { encoding };
 }
 
 // A JSON input whose expression is already read, with its optional FORMAT JSON.
@@ -3069,10 +3078,44 @@ function parseJsonConstructorTail(
 }
 
 // The rest of a `key VALUE value` or `key : value` entry whose key is read.
+// PG reads the key before VALUE as a c_expr, so an operator expression there
+// must be parenthesised (`(a || b) VALUE c`); before `:` it may be any
+// expression. The operator forms' nodes are these; a parenthesised one is
+// told apart by the `)` read after its span ends.
+const JSON_OPERATOR_KEYS: ReadonlySet<Expr["kind"]> = new Set<Expr["kind"]>([
+  "unary",
+  "binary",
+  "cast",
+  "collate",
+  "atTimeZone",
+  "atLocal",
+  "is",
+  "isDistinct",
+  "isTest",
+  "isNormalized",
+  "isDocument",
+  "isJson",
+  "like",
+  "similarTo",
+  "between",
+  "in",
+  "inSubquery",
+  "anyAll",
+  "overlaps",
+]);
 const atJsonKeySeparator = (ctx: ParseContext<SqlTokenType>): boolean =>
   ctx.is("ident", "value") || ctx.is("punc", ":");
 function finishJsonKeyValue(ctx: ParseContext<SqlTokenType>, key: Expr): JsonKeyValue {
   if (!atJsonKeySeparator(ctx)) ctx.croak(`Expected "value" or ":" but found ${describeFound(ctx.peek())}`);
+  const end = ctx.lastEnd();
+  if (
+    ctx.is("ident", "value") &&
+    JSON_OPERATOR_KEYS.has(key.kind) &&
+    end.row === key.span.end.row &&
+    end.col === key.span.end.col
+  ) {
+    ctx.croak('Expected ":" after an unparenthesised operator expression but found "value"');
+  }
   ctx.next(); // value or ":"
   return { key, value: parseJsonValue(ctx) };
 }
@@ -3173,11 +3216,11 @@ const takeJsonObject: JsonCallHandler = (ctx, start, call) => {
 };
 
 // JSON_ARRAY(value [FORMAT JSON], … [clauses]), JSON_ARRAY(RETURNING type) and
-// JSON_ARRAY(query [FORMAT JSON] [RETURNING type]). The query is PG's
-// select_no_parens, so it opens on a query word: `JSON_ARRAY((SELECT 1))` is
-// a one-element array of a scalar subquery. (Unlike PG, which looks ahead for
-// the JSON after FORMAT, a FORMAT straight after the query's last table is read
-// as that table's alias.)
+// JSON_ARRAY(query [FORMAT JSON] [RETURNING type]) (see startsFormatJson). The query is PG's
+// select_no_parens, and only one that opens on a query word is read as one
+// here: `JSON_ARRAY((SELECT 1))` is a one-element array of a scalar subquery,
+// as in PG, but so is the `(SELECT 1)` of `JSON_ARRAY((SELECT 1) UNION …)`,
+// which PG reads as a query and this grammar rejects.
 const JSON_ARRAY_CLAUSE_WORDS = ["format", "null", "absent", "returning"];
 const takeJsonArray: JsonCallHandler = (ctx, start, call) => {
   if (call === null) {
@@ -3259,29 +3302,38 @@ const takeJsonPathCall =
       context = finishJsonValue(ctx, call.args[0]!);
       ctx.parse(punc(","));
       path = ctx.parse(expression);
-    } else if (call.args.length === 2 && ctx.is("ident", JSON_PATH_CALL_WORDS[kind] as string[])) {
+    } else if (call.args.length === 2 && ctx.is("ident", JSON_PATH_CALL_WORDS[kind])) {
       context = { expr: call.args[0]! };
       path = call.args[1]!;
     } else {
       return null;
     }
     const passing = parseJsonPassing(ctx);
-    const returning = kind === "jsonExists" ? null : parseJsonReturning(ctx);
-    const wrapper = kind === "jsonQuery" ? parseJsonWrapper(ctx) : null;
-    const quotes = kind === "jsonQuery" ? parseJsonQuotes(ctx) : null;
-    const behaviors = parseJsonBehaviors(ctx, kind !== "jsonExists");
+    const shared = { context, path, ...(passing !== null && { passing }) };
+    if (kind === "jsonExists") {
+      const { onError } = parseJsonBehaviors(ctx, false);
+      expectClose(ctx);
+      return { kind, ...shared, ...(onError !== undefined && { onError }), span: ctx.spanFrom(start) };
+    }
+    const returning = parseJsonReturning(ctx);
+    const output = { ...shared, ...(returning !== null && { returning }) };
+    if (kind === "jsonValue") {
+      const behaviors = parseJsonBehaviors(ctx, true);
+      expectClose(ctx);
+      return { kind, ...output, ...behaviors, span: ctx.spanFrom(start) };
+    }
+    const wrapper = parseJsonWrapper(ctx);
+    const quotes = parseJsonQuotes(ctx);
+    const behaviors = parseJsonBehaviors(ctx, true);
     expectClose(ctx);
     return {
       kind,
-      context,
-      path,
-      ...(passing !== null && { passing }),
-      ...(returning !== null && { returning }),
+      ...output,
       ...(wrapper !== null && { wrapper }),
       ...(quotes !== null && { quotes }),
       ...behaviors,
       span: ctx.spanFrom(start),
-    } as Expr;
+    };
   };
 
 // JSON(value [FORMAT JSON] [{WITH | WITHOUT} UNIQUE [KEYS]]).
@@ -3338,16 +3390,14 @@ function parseJsonTableColumns(ctx: ParseContext<SqlTokenType>): JsonTableColumn
 }
 
 // One JSON_TABLE column (see JsonTableColumn). `nested` is unreserved, so it
-// opens a NESTED entry only ahead of the path string, or of PATH and the
-// string; a column named `nested` is followed by its type (and a type named
-// `path` takes no string after it).
+// opens a NESTED entry only ahead of the path string or of PATH; a column named
+// `nested` is followed by its type. PG resolves `nested path` the same way,
+// so no column named `nested` can have a type named `path`.
 function parseJsonTableColumn(ctx: ParseContext<SqlTokenType>): JsonTableColumn {
-  if (
-    ctx.is("ident", "nested") &&
-    (ctx.peekAhead(1)?.type === "string" || (isWordAhead(ctx, 1, "path") && ctx.peekAhead(2)?.type === "string"))
-  ) {
+  if (ctx.is("ident", "nested") && (ctx.peekAhead(1)?.type === "string" || isWordAhead(ctx, 1, "path"))) {
     ctx.next(); // nested
     ctx.eat("ident", "path");
+    if (!ctx.is("string")) ctx.croak(`Expected a string but found ${describeFound(ctx.peek())}`);
     const path = ctx.next()!.value;
     const pathName = ctx.eat("ident", "as") !== null ? ctx.parse(nameWord) : null;
     ctx.parse(kw("columns"));
@@ -3408,6 +3458,10 @@ function parseJsonTableCall(
       } else {
         return null;
       }
+      // PG's grammar action takes a string constant alone.
+      if (path.kind !== "string") {
+        ctx.croak("Expected a string constant as the JSON_TABLE path", path.span.start, path.span.end);
+      }
       const pathName = ctx.eat("ident", "as") !== null ? ctx.parse(nameWord) : null;
       const passing = parseJsonPassing(ctx);
       ctx.parse(kw("columns"));
@@ -3416,7 +3470,7 @@ function parseJsonTableCall(
       expectClose(ctx);
       return {
         context,
-        path,
+        path: path.value,
         ...(pathName !== null && { pathName }),
         ...(passing !== null && { passing }),
         columns,
@@ -5933,7 +5987,8 @@ function partitionStrategy(ctx: ParseContext<SqlTokenType>): PartitionSpec["stra
 
 // The expression forms PG's `part_elem` takes unparenthesised: a column (its
 // ColId, so one part) or a function call, the special-syntax ones (EXTRACT,
-// CURRENT_DATE, …) included, as PG's func_expr_windowless includes them. CAST
+// CURRENT_DATE, the SQL/JSON forms, …) included, as PG's func_expr_windowless
+// includes them (an aggregate's, but not a FILTER or OVER around it). CAST
 // is one of those too, but its node is a `::` cast's as well, so
 // isBareFuncExpr tells the two apart by the lead word instead.
 const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
@@ -5945,6 +6000,16 @@ const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "trim",
   "overlay",
   "sqlValueFunction",
+  "jsonObject",
+  "jsonArray",
+  "jsonArrayQuery",
+  "jsonObjectAgg",
+  "jsonArrayAgg",
+  "jsonValue",
+  "jsonQuery",
+  "jsonExists",
+  "jsonParse",
+  "jsonSerialize",
 ]);
 
 // Whether `expr`, read unparenthesised, is one of the forms BARE_PARTITION_KEYS
@@ -11100,6 +11165,14 @@ const discardStmt = custom<Stmt, SqlTokenType>(
 // AS; that is not checked here.
 const AS_LABEL_KEYWORDS: ReadonlySet<string> = new Set(["isnull", "notnull", "overlaps"]);
 
+// PG's lexer turns a FORMAT ahead of JSON into a token of its own, which is no
+// bare alias: `JSON_ARRAY(SELECT a FROM t FORMAT JSON)` ends the query there.
+const startsFormatJson = (ctx: ParseContext<SqlTokenType>): boolean => {
+  if (!ctx.is("ident", "format")) return false;
+  const after = peekOrReport(ctx, 1);
+  return after?.type === "ident" && after.value === "json";
+};
+
 // `[AS] alias`. A custom rule rather than optional(seq(...)) because the
 // alias's first set is a bare `ident`, which also matches every following
 // clause keyword — so it checks RESERVED directly and stops at a clause/join
@@ -11113,7 +11186,9 @@ const asAlias = custom<string | null, SqlTokenType>(
     const isName =
       tok !== null &&
       (tok.type === "qident" ||
-        (tok.type === "ident" && !RESERVED.has(tok.value) && (hasAs || !AS_LABEL_KEYWORDS.has(tok.value))));
+        (tok.type === "ident" &&
+          !RESERVED.has(tok.value) &&
+          (hasAs || (!AS_LABEL_KEYWORDS.has(tok.value) && !startsFormatJson(ctx)))));
     if (isName) return ctx.parse(nameWord);
     if (hasAs) return ctx.croak(`Expected an alias but found ${describeFound(ctx.peek())}`);
     return null;
