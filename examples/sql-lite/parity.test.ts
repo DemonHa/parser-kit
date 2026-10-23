@@ -369,10 +369,11 @@ const MALFORMED = [
   // in, and that recovery keeps going after the first one.
   "SELECT * FROM;\nSELECT * FRUM u;\nSELECT 4;",
   "CREATE TABLE a (id int, 42 bad);\nSELECT * FROM;\nSELECT 5;",
-  // A character no reader claims at a *token start*. A backslash, not a
-  // non-ASCII letter: PG reads every character from U+0080 up as part of an
-  // identifier, and so does this grammar.
-  "SELECT \\ FROM t;\nSELECT 6;",
+  // A non-ASCII character at a *token start* — the only input here that drives
+  // the out-of-range path of an ASCII-indexed dispatch or char-class table —
+  // followed by a character no reader claims. The `é` is an identifier, as
+  // every character from U+0080 up is to PG; the backslash is the lex error.
+  "SELECT é \\ FROM t;\nSELECT 6;",
   // The three croak sites in the letter-prefixed literal readers. A lexer
   // croak has to leave the cursor somewhere recovery can resync from, and the
   // only way to see that is to pin what `diagnose` salvages: the first two

@@ -4691,6 +4691,18 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
     );
   });
 
+  it("reads non-ASCII dollar-quote tags, as PG does", () => {
+    expect(lex("$é$a;b$é$ $tag_ü1$x$tag_ü1$")).toEqual([
+      { type: "string", value: "a;b" },
+      { type: "string", value: "x" },
+    ]);
+    // Only the exact closer ends it; `$É$` is a different tag.
+    expect(lex("$é$a$É$b$é$")).toEqual([{ type: "string", value: "a$É$b" }]);
+    expect(() => sqlLite.parse("SELECT $é$abc;")).toThrow(/Unterminated dollar-quoted string/);
+    // A `$` with no tag-closing `$` is not a dollar quote.
+    expect(lex("$1")).toEqual([{ type: "param", value: "1" }]);
+  });
+
   it("keeps quoted non-ASCII identifiers exactly as written", () => {
     expect(lex('"Café" "ÉTÉ" U&"caf\\00E9"')).toEqual([
       { type: "qident", value: "Café" },
@@ -4722,6 +4734,9 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
     const literal = stmt.columns[0].expr;
     expect(literal.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 12 } });
     expect(literal.type.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 8 } });
+    // A continued literal ends where its last constant's body does.
+    const [continued] = sqlLite.parse("SELECT N'foo'\n  'bar';") as any[];
+    expect(continued.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 2, col: 6 } });
   });
 
   it("keeps n and the words it starts usable as names", () => {
@@ -4743,7 +4758,7 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
     expect(() => sqlLite.parse("SELECT * FROM f() x (a N'abc);")).toThrow(/Unterminated quoted string \(1:23\)/);
   });
 
-  it("still rejects the characters PG has no token for", () => {
+  it("still rejects characters that start no token", () => {
     expect(() => sqlLite.parse("SELECT \\ FROM t;")).toThrow(/Unexpected character "\\" \(1:7\)/);
     expect(() => sqlLite.parse("SELECT { FROM t;")).toThrow(/Unexpected character "\{" \(1:7\)/);
     expect(() => sqlLite.parse("SELECT café\\ FROM t;")).toThrow(/Unexpected character "\\" \(1:11\)/);

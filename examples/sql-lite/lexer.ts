@@ -675,6 +675,50 @@ const numberReader: Reader<SqlTokenType> = readers.custom("number", {
   },
 });
 
+// `$tag$…$tag$` and `$$…$$`. Core's `readers.dollarString` takes ASCII tags
+// only; PG's `dolq_start`/`dolq_cont` are its identifier classes without `$`,
+// so `$é$…$é$` is a dollar string there and here. Otherwise the same reader: a
+// `$` with no tag-closing `$` (`$1`, a bare `$`) restores and declines, the body
+// is raw, and only the exact closer, case-sensitive, ends it.
+const dollarStringReader: Reader<SqlTokenType> = readers.custom("string", {
+  startsWith: "$",
+  read: (stream) => {
+    stream.snapshot();
+    stream.next(); // opening `$`
+    let tag = "";
+    if (isIdentStart(stream.peek())) {
+      while (isIdentCont(stream.peek()) && stream.peek() !== "$") tag += stream.next();
+    }
+    if (stream.peek() !== "$") {
+      stream.reload();
+      return null;
+    }
+    stream.next(); // the opener's closing `$`
+    const closer = `$${tag}$`;
+    const start = stream.position();
+    let value = "";
+    while (!stream.eof()) {
+      if (stream.peek() === "$") {
+        const end = stream.position();
+        // The opener is committed, so the snapshot slot is free again.
+        stream.snapshot();
+        let matched = true;
+        for (const char of closer) {
+          if (stream.peek() !== char) {
+            matched = false;
+            break;
+          }
+          stream.next();
+        }
+        if (matched) return { value, start, end };
+        stream.reload();
+      }
+      value += stream.next();
+    }
+    return stream.croak("Unterminated dollar-quoted string", start, stream.position());
+  },
+});
+
 // Positional (`$1`) and named (`$name`) parameters. Must follow the dollar-
 // string reader: `$tag$…$tag$` is claimed there first, and only a `$` that is
 // *not* a dollar-string opener (no `$` closes the tag) falls through to here.
@@ -790,7 +834,7 @@ export const sqlLexer = defineLexer({
     nationalStringReader,
     identifierReader,
     quotedIdentifierReader,
-    readers.dollarString("string"),
+    dollarStringReader,
     paramReader,
     // Comment readers must precede the operator reader: `stopAt` then guarantees
     // an operator scan never swallows a comment start (`@--x` → `@`, then `--x`).

@@ -526,13 +526,13 @@
     ]
   },
   {
-    "source": "SELECT \\ FROM t;\nSELECT 6;",
+    "source": "SELECT é \\ FROM t;\nSELECT 6;",
     "errors": [
       {
-        "message": "Unexpected character \"\\\" (1:7)",
+        "message": "Unexpected character \"\\\" (1:9)",
         "end": {
           "row": 1,
-          "col": 8
+          "col": 10
         }
       }
     ],
