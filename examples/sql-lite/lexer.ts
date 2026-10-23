@@ -31,9 +31,11 @@ export type SqlTokenType =
 // safe while it carries no `g`/`y` flag — both consumers call `.test()`, which
 // is stateless without one and would otherwise desync through `lastIndex`.
 const WHITESPACE = /[ \t\r\n]/;
-const isDecDigit = (char: string) => /[0-9]/.test(char);
+// The decimal and octal tests run once per character of every number, so they
+// compare characters rather than run a RegExp.
+const isDecDigit = (char: string) => char >= "0" && char <= "9";
 const isHexDigit = (char: string) => /[0-9A-Fa-f]/.test(char);
-const isOctalDigit = (char: string) => /[0-7]/.test(char);
+const isOctalDigit = (char: string) => char >= "0" && char <= "7";
 const isBinaryDigit = (char: string) => /[01]/.test(char);
 const isSpace = (char: string) => WHITESPACE.test(char);
 
@@ -238,8 +240,10 @@ const unicodeStringReader: Reader<SqlTokenType> = readers.custom("string", {
 // PG's identifier classes: what may start an identifier, and what may continue
 // one. Every byte from 0x80 up is an identifier character there, which is why
 // the junk check below fires on any non-ASCII character too.
-const isIdentStart = (char: string) => /[A-Za-z_\u0080-\uffff]/.test(char);
-const isIdentCont = (char: string) => /[A-Za-z0-9_$\u0080-\uffff]/.test(char);
+// Both run after every number, so they compare characters too.
+const isIdentStart = (char: string) =>
+  (char >= "a" && char <= "z") || (char >= "A" && char <= "Z") || char === "_" || char >= "\u0080";
+const isIdentCont = (char: string) => isIdentStart(char) || isDecDigit(char) || char === "$";
 const RADIX_DIGITS: Readonly<Record<string, { isDigit: (char: string) => boolean; invalid: string }>> = {
   x: { isDigit: isHexDigit, invalid: "Invalid hexadecimal integer" },
   o: { isDigit: isOctalDigit, invalid: "Invalid octal integer" },
