@@ -882,6 +882,26 @@ export type AlterExtensionAction =
   | AlterSetSchema
   | { kind: "update"; version?: string };
 
+// The SET / RESET of a role's or database's parameter defaults: SET as the SET
+// statement's `name` and `values`, RESET as the RESET statement's `name` ("all"
+// for RESET ALL).
+export type AlterConfigAction =
+  | { kind: "set"; name: string; values: Expr[] | "default" | "fromCurrent" }
+  | { kind: "reset"; name: string };
+// ALTER ROLE's `options` are CREATE ROLE's, bar the membership ones (IN ROLE,
+// ROLE, ADMIN, and the undocumented USER that PG keeps for ALTER GROUP), which
+// are not taken; PG lets the run be empty.
+export type AlterRoleAction = { kind: "options"; options: RoleOption[] } | AlterRenameTo | AlterConfigAction;
+// ALTER DATABASE's `options` are CREATE DATABASE's entries; RENAME TO and
+// OWNER TO build the generic `alterObject` node instead.
+export type AlterDatabaseAction =
+  | { kind: "options"; options: RelationOption[] }
+  | Extract<AlterIndexAction, { kind: "setTablespace" }>
+  | { kind: "refreshCollationVersion" }
+  | AlterConfigAction;
+// ALTER TABLESPACE's; RENAME TO and OWNER TO build `alterObject`, as on ALTER DATABASE.
+export type AlterTablespaceAction = Extract<AlterIndexAction, { kind: "setOptions" | "resetOptions" }>;
+
 // `RETURNS [SETOF] type` or `RETURNS TABLE (col type, …)`.
 export type FunctionReturns =
   | { kind: "type"; setof: boolean; type: ColType }
@@ -1361,6 +1381,19 @@ export type Stmt =
     }
   | { kind: "alterSequence"; ifExists: boolean; name: string[]; action: AlterSequenceAction; span: Span }
   | { kind: "alterExtension"; name: string; action: AlterExtensionAction; span: Span }
+  // `ALTER {ROLE | USER} role …`; `user` marks the USER spelling. `name` is null
+  // for ALL, which only SET and RESET take, and `database` is the IN DATABASE
+  // they may scope to, omitted when absent.
+  | {
+      kind: "alterRole";
+      user: boolean;
+      name: string | null;
+      database?: string;
+      action: AlterRoleAction;
+      span: Span;
+    }
+  | { kind: "alterDatabase"; name: string; action: AlterDatabaseAction; span: Span }
+  | { kind: "alterTablespace"; name: string; action: AlterTablespaceAction; span: Span }
   // `ALTER POLICY name ON table [TO role, …] [USING (expr)] [WITH CHECK (expr)]`;
   // PG's grammar takes all three clauses as optional, so none may be written.
   // `ALTER POLICY … RENAME TO` is an alterObject node, as TRIGGER's is.
@@ -1384,7 +1417,7 @@ export type Stmt =
   // [CASCADE|RESTRICT]`. `objectType` is the folded keyword (`"materialized
   // view"` for the two-word one); `behavior` is the trailing CASCADE/RESTRICT
   // (null when absent, and always null where PG takes none: DATABASE, ROLE,
-  // USER). CONCURRENTLY is only accepted on the original six object kinds.
+  // USER, TABLESPACE). CONCURRENTLY is only accepted on the original six object kinds.
   // The remaining keys belong to one object kind each and are omitted elsewhere:
   // - `signatures` (FUNCTION / PROCEDURE / AGGREGATE): one entry per name, null
   //   where a function or procedure name carries no argument list;
@@ -5317,14 +5350,22 @@ function parseRoleSpec(ctx: ParseContext<SqlTokenType>): string {
 // already makes. So is a lone `CONNECTION = n`, read as an ordinary option
 // named `connection`. The list has no delimiter, so it runs while a name leads:
 // an unreserved word or a quoted one, as PG's own option names are IDENT bar a
-// few.
+// few — and bar the words that lead ALTER DATABASE's other actions, which are
+// keywords to PG and never an option's name. OWNER is an option name, but never
+// before TO, which is reserved and so no value.
+const DATABASE_ACTION_WORDS: ReadonlySet<string> = new Set(["rename", "set", "reset", "refresh"]);
 function isDatabaseOptionStart(ctx: ParseContext<SqlTokenType>): boolean {
   const tok = ctx.peek();
-  return tok !== null && (tok.type === "qident" || (tok.type === "ident" && !RESERVED.has(tok.value)));
+  if (tok?.type === "qident") return true;
+  return tok?.type === "ident" && !RESERVED.has(tok.value) && !DATABASE_ACTION_WORDS.has(tok.value);
 }
 
 function parseDatabaseOption(ctx: ParseContext<SqlTokenType>): RelationOption {
   const next = ctx.peekAhead(1);
+  if (ctx.is("ident", "owner") && isWordAhead(ctx, 1, "to")) {
+    ctx.next(); // OWNER
+    return ctx.croak(`Expected an option value but found ${describeFound(ctx.peek())}`);
+  }
   if (!(ctx.is("ident", "connection") && next?.type === "ident" && next.value === "limit")) {
     return ctx.parse(relationOption);
   }
@@ -5482,10 +5523,13 @@ function parseSignedInt(ctx: ParseContext<SqlTokenType>, what = "an integer"): n
 // word is matched by value and stays unreserved (bar `in`, `group`, `limit`,
 // `null` and `user`, reserved already); the list has no delimiter, so it simply
 // runs until a word leads no option. PG's legacy spellings `IN GROUP` and
-// `USER` read as `IN ROLE` and `ROLE`; its SYSID is not taken.
-function parseRoleOption(ctx: ParseContext<SqlTokenType>): RoleOption | null {
+// `USER` read as `IN ROLE` and `ROLE`; its SYSID is not taken. With `alter`,
+// the membership options (IN ROLE, ROLE, USER, ADMIN) lead none: ALTER ROLE
+// takes none of them in PG bar an undocumented USER, which is not taken here.
+const MEMBERSHIP_OPTIONS: ReadonlySet<string> = new Set(["in", "role", "user", "admin"]);
+function parseRoleOption(ctx: ParseContext<SqlTokenType>, alter = false): RoleOption | null {
   const tok = ctx.peek();
-  if (tok === null || tok.type !== "ident") return null;
+  if (tok === null || tok.type !== "ident" || (alter && MEMBERSHIP_OPTIONS.has(tok.value))) return null;
   const flag = tok.value.startsWith("no") ? tok.value.slice(2) : tok.value;
   if (ROLE_FLAGS.has(flag)) {
     ctx.next();
@@ -5802,16 +5846,17 @@ function zoneValue(ctx: ParseContext<SqlTokenType>): Expr[] | "default" {
   return value !== null ? [value] : ctx.croak(`Expected a time zone but found ${describeFound(ctx.peek())}`);
 }
 
-// Whether the token after the current one is `=`, `.`, TO or FROM — what
-// follows (part of) a parameter name in a generic SET, and never a special
-// form's second word. PG reads `SET session TO 1` and `SET role.x = 1` that way.
-const isGenericSet = (ctx: ParseContext<SqlTokenType>): boolean => {
-  const tok = ctx.peekAhead(1);
+// Whether the token after the current one (or after the one `at` tokens on) is
+// `=`, `.`, TO or FROM — what follows (part of) a parameter name in a generic
+// SET, and never a special form's second word. PG reads `SET session TO 1` and
+// `SET role.x = 1` that way.
+const isGenericSet = (ctx: ParseContext<SqlTokenType>, at = 0): boolean => {
+  const tok = ctx.peekAhead(at + 1);
   return (
     (tok?.type === "op" && tok.value === "=") ||
     (tok?.type === "punc" && tok.value === ".") ||
-    isWordAhead(ctx, 1, "to") ||
-    isWordAhead(ctx, 1, "from")
+    isWordAhead(ctx, at + 1, "to") ||
+    isWordAhead(ctx, at + 1, "from")
   );
 };
 
@@ -6943,7 +6988,7 @@ type ObjectKind = {
   member?: true;
   // The generic ALTER's actions on the kind, for a kind with no ALTER target of
   // its own; absent where PG has none, a dedicated target owns the ALTER (as
-  // for TABLE, POLICY or PUBLICATION), or one is to (ROLE, FOREIGN TABLE).
+  // for TABLE, POLICY or PUBLICATION), or one is to (FOREIGN TABLE).
   alter?: readonly AlterObjectVerb[];
 };
 
@@ -6952,9 +6997,9 @@ const RENAME_OWNER: readonly AlterObjectVerb[] = ["rename", "owner"];
 const RENAME_SCHEMA: readonly AlterObjectVerb[] = ["rename", "set"];
 
 // Grouped as gram.y groups them; the order is the order an "Expected …" croak
-// lists the lead words in. ROLE and FOREIGN TABLE take no generic ALTER: each
-// is left for a dedicated target that will own its whole ALTER, as POLICY,
-// PUBLICATION and SUBSCRIPTION already have.
+// lists the lead words in. FOREIGN TABLE takes no generic ALTER: it is left
+// for a dedicated target that will own its whole ALTER, as ROLE, DATABASE,
+// TABLESPACE, POLICY, PUBLICATION and SUBSCRIPTION already have.
 const OBJECT_KINDS: readonly ObjectKind[] = [
   // object_type_any_name
   { objectType: "table", shape: "qualName", label: true, member: true },
@@ -6989,10 +7034,12 @@ const OBJECT_KINDS: readonly ObjectKind[] = [
   { objectType: "publication", shape: "name", label: true, member: true },
   { objectType: "schema", shape: "name", label: true, member: true },
   { objectType: "server", shape: "name", label: true, member: true, alter: RENAME_OWNER },
-  { objectType: "database", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  // DATABASE and TABLESPACE have ALTER targets of their own, which hand RENAME
+  // TO and OWNER TO back to the generic node (see alterRenameOwner).
+  { objectType: "database", shape: "name", label: true, member: true },
   { objectType: "role", shape: "name", label: true, member: true },
   { objectType: "subscription", shape: "name", label: true, member: true },
-  { objectType: "tablespace", shape: "name", label: true, member: true, alter: RENAME_OWNER },
+  { objectType: "tablespace", shape: "name", label: true, member: true },
   // The kinds with a reference shape of their own.
   { objectType: "type", shape: "qualName", label: true, member: true },
   { objectType: "domain", shape: "qualName", label: true, member: true },
@@ -7204,6 +7251,146 @@ const EXTENSION_ACTIONS: DispatchMap<AlterExtensionAction> = {
   },
 };
 const EXTENSION_ACTION_EXPECTED = keyList(EXTENSION_ACTIONS);
+
+// `SET …` (a parseConfigSet form) or `RESET target` (parseConfigTarget's), the
+// parameter defaults ALTER ROLE and ALTER DATABASE set, or null when neither
+// leads. Of PG's SET forms there, only the parameter ones are taken, not SET
+// TRANSACTION or SESSION CHARACTERISTICS.
+function parseAlterConfig(ctx: ParseContext<SqlTokenType>): AlterConfigAction | null {
+  if (ctx.eat("ident", "set") !== null) return { kind: "set", ...parseConfigSet(ctx) };
+  if (ctx.eat("ident", "reset") !== null) return { kind: "reset", name: parseConfigTarget(ctx) };
+  return null;
+}
+
+// `ALTER {ROLE | USER} …` once ALTER is consumed: `{role | ALL} [IN DATABASE
+// db] {SET … | RESET …}`, `role RENAME TO name`, or `role [WITH] option …`.
+// The role is a role spec, bar RENAME's, which PG will not take as one of the
+// pseudo-roles; ALL is reserved, so an unquoted one never names a role.
+function alterRoleRest(ctx: ParseContext<SqlTokenType>, start: Position, lead: "role" | "user"): Stmt {
+  ctx.next(); // ROLE / USER
+  const user = lead === "user";
+  const roleStart = ctx.position();
+  const tok = ctx.peek();
+  const name = ctx.eat("ident", "all") !== null ? null : parseRoleSpec(ctx);
+  const node = (action: AlterRoleAction, database?: string): Stmt => ({
+    kind: "alterRole",
+    user,
+    name,
+    ...(database !== undefined && { database }),
+    action,
+    span: ctx.spanFrom(start),
+  });
+  // `in` is reserved, so it can only open IN DATABASE here.
+  let database: string | undefined;
+  if (ctx.eat("ident", "in") !== null) {
+    ctx.parse(kw("database"));
+    database = ctx.parse(nameWord);
+  }
+  const config = parseAlterConfig(ctx);
+  if (config !== null) return node(config, database);
+  if (name === null || database !== undefined) {
+    const expected = database === undefined ? ["in", "set", "reset"] : ["set", "reset"];
+    return ctx.croak(`Expected ${quoteList(expected)} but found ${describeFound(ctx.peek())}`);
+  }
+  if (ctx.is("ident", "rename")) {
+    if (tok?.type === "ident" && ROLE_KEYWORDS.has(tok.value)) {
+      ctx.croak(`${tok.value.toUpperCase()} cannot be used as a role name here`, roleStart);
+    }
+    checkRoleName(ctx, tok, roleStart);
+    ctx.next(); // RENAME
+    if (ctx.eat("ident", "to") === null) ctx.croak(`Expected "to" but found ${describeFound(ctx.peek())}`);
+    const toStart = ctx.position();
+    const toTok = ctx.peek();
+    const to = ctx.parse(nameWord);
+    checkRoleName(ctx, toTok, toStart);
+    return node({ kind: "rename", to });
+  }
+  // `with` is reserved, so it can only open the list.
+  ctx.eat("ident", "with");
+  const options: RoleOption[] = [];
+  for (let option = parseRoleOption(ctx, true); option !== null; option = parseRoleOption(ctx, true)) {
+    options.push(option);
+  }
+  return node({ kind: "options", options });
+}
+
+// PG reserves the role names `public` and `none`, quoted or not, wherever a
+// role is named rather than specified: RENAME's two names here.
+function checkRoleName(ctx: ParseContext<SqlTokenType>, tok: Token<SqlTokenType> | null, at: Position): void {
+  const word = tok?.type === "ident" || tok?.type === "qident" ? tok.value : null;
+  if (word === "public" || word === "none") {
+    ctx.croak(`Role name "${word}" is reserved`, at);
+  }
+}
+
+// RENAME TO and OWNER TO on ALTER DATABASE and ALTER TABLESPACE, which build
+// the generic `alterObject` node these two kinds have always had, or null when
+// neither leads. With `ownerOption`, OWNER leads OWNER TO only before TO, as it
+// is a database option name too (`OWNER = role`).
+function alterRenameOwner(
+  ctx: ParseContext<SqlTokenType>,
+  start: Position,
+  objectType: string,
+  name: string,
+  ownerOption = false,
+): Stmt | null {
+  let action: AlterRenameTo | AlterOwnerTo;
+  if (ctx.is("ident", "rename")) action = parseRenameTo(ctx);
+  else if (ctx.is("ident", "owner") && (!ownerOption || isWordAhead(ctx, 1, "to"))) action = parseOwnerTo(ctx);
+  else return null;
+  return { kind: "alterObject", object: { objectType, name: [name] }, action, span: ctx.spanFrom(start) };
+}
+
+// `ALTER DATABASE name …` once ALTER is consumed: RENAME TO, OWNER TO, SET
+// TABLESPACE, REFRESH COLLATION VERSION, SET / RESET, or `[WITH] option …`, a
+// run of CREATE DATABASE's entries that PG lets be empty. RENAME, SET, RESET
+// and REFRESH are keywords to PG and never an option's name, so each commits
+// where it leads, and ends the option run elsewhere (see isDatabaseOptionStart).
+function alterDatabaseRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // DATABASE
+  const name = ctx.parse(nameWord);
+  const renameOwner = alterRenameOwner(ctx, start, "database", name, true);
+  if (renameOwner !== null) return renameOwner;
+  const node = (action: AlterDatabaseAction): Stmt => ({
+    kind: "alterDatabase",
+    name,
+    action,
+    span: ctx.spanFrom(start),
+  });
+  // SET TABLESPACE, unless isGenericSet reads a parameter named `tablespace`.
+  if (ctx.is("ident", "set") && isWordAhead(ctx, 1, "tablespace") && !isGenericSet(ctx, 1)) {
+    ctx.next(); // SET
+    return node(parseSetTablespace(ctx));
+  }
+  const config = parseAlterConfig(ctx);
+  if (config !== null) return node(config);
+  if (ctx.is("ident", "refresh")) {
+    ctx.parse(kwseq("refresh", "collation", "version"));
+    return node({ kind: "refreshCollationVersion" });
+  }
+  // `with` is reserved, so it can only open the list.
+  ctx.eat("ident", "with");
+  const options: RelationOption[] = [];
+  while (isDatabaseOptionStart(ctx)) options.push(parseDatabaseOption(ctx));
+  return node({ kind: "options", options });
+}
+
+// `ALTER TABLESPACE name {RENAME TO | OWNER TO | SET (option, …) | RESET
+// (name, …)}` once ALTER is consumed.
+function alterTablespaceRest(ctx: ParseContext<SqlTokenType>, start: Position): Stmt {
+  ctx.next(); // TABLESPACE
+  const name = ctx.parse(nameWord);
+  const renameOwner = alterRenameOwner(ctx, start, "tablespace", name);
+  if (renameOwner !== null) return renameOwner;
+  let action: AlterTablespaceAction;
+  if (ctx.eat("ident", "set") !== null) action = { kind: "setOptions", options: ctx.parse(relationOptions) };
+  else if (ctx.is("ident", "reset")) action = parseResetOptions(ctx);
+  else {
+    const expected = quoteList(["rename", "owner", "set", "reset"]);
+    return ctx.croak(`Expected ${expected} but found ${describeFound(ctx.peek())}`);
+  }
+  return { kind: "alterTablespace", name, action, span: ctx.spanFrom(start) };
+}
 
 // --- policies, publications and subscriptions ---
 //
@@ -7592,6 +7779,12 @@ const ALTER_TARGETS: DispatchMap<Stmt, [Position]> = {
     },
   },
   default: { parse: alterDefaultPrivilegesRest },
+  role: { parse: (ctx, start) => alterRoleRest(ctx, start, "role") },
+  // USER only; `ALTER USER MAPPING` is not supported and reads as a user named
+  // `mapping` followed by stray words, as on DROP.
+  user: { parse: (ctx, start) => alterRoleRest(ctx, start, "user") },
+  database: { parse: alterDatabaseRest },
+  tablespace: { parse: alterTablespaceRest },
   policy: { parse: alterPolicyRest },
   publication: { parse: alterPublicationRest },
   subscription: { parse: alterSubscriptionRest },
@@ -7732,6 +7925,15 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
   // USER only; `DROP USER MAPPING` is not supported and reads as a user named
   // `mapping` followed by stray words.
   user: listDrop("user", unqualName, { behavior: false }),
+  // `DROP TABLESPACE [IF EXISTS] name` — one tablespace, and no CASCADE / RESTRICT.
+  tablespace: {
+    parse: (ctx, start) => {
+      ctx.next(); // TABLESPACE
+      const ifExists = parseIfExists(ctx);
+      const names = [[ctx.parse(nameWord)]];
+      return dropNode(ctx, start, "tablespace", { concurrently: false, ifExists, names, behavior: null });
+    },
+  },
   policy: onTableDrop("policy"),
   publication: listDrop("publication", unqualName),
   // `DROP SUBSCRIPTION [IF EXISTS] name [CASCADE|RESTRICT]` — one subscription.
