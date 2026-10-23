@@ -315,8 +315,8 @@ describe("SQL-lite statement separators", () => {
   });
 
   it("diagnose() resyncs on ; and keeps the statements around a bad one", () => {
-    const { ast, errors } = sqlLite.diagnose("SELECT 1;; SELECT FROM; SELECT 2");
-    expect(errors.map((e) => e.message)).toEqual([expect.stringMatching(/but found "from" \(1:18\)/)]);
+    const { ast, errors } = sqlLite.diagnose("SELECT 1;; SELECT 1 +; SELECT 2");
+    expect(errors.map((e) => e.message)).toEqual([expect.stringMatching(/but found ";" \(1:21\)/)]);
     expect(stripSpans(ast)).toEqual([one, two]);
   });
 
