@@ -4312,6 +4312,8 @@ describe("SQL-lite privilege words", () => {
 // --- Phase 9: transaction control ---
 
 describe("SQL-lite transaction control", () => {
+  const bad = (src: string) => () => sqlLite.parse(src);
+
   it("parses BEGIN (with optional WORK) and its lack of modes", () => {
     expect(firstStmt("BEGIN WORK;")).toEqual({ kind: "begin", start: false, modes: [] });
   });
@@ -4338,6 +4340,65 @@ describe("SQL-lite transaction control", () => {
     expect(firstStmt("ROLLBACK TO SAVEPOINT sp1;")).toEqual({ kind: "rollback", chain: false, savepoint: "sp1" });
     expect(firstStmt("SAVEPOINT sp1;")).toEqual({ kind: "savepoint", name: "sp1" });
     expect(firstStmt("RELEASE sp1;")).toEqual({ kind: "releaseSavepoint", name: "sp1" });
+  });
+
+  it("parses END as COMMIT and ABORT as ROLLBACK", () => {
+    expect(firstStmt("END;")).toEqual({ kind: "commit", chain: false });
+    expect(firstStmt("END WORK;")).toEqual({ kind: "commit", chain: false });
+    expect(firstStmt("END TRANSACTION AND CHAIN;")).toEqual({ kind: "commit", chain: true });
+    expect(firstStmt("END AND NO CHAIN;")).toEqual({ kind: "commit", chain: false });
+    expect(firstStmt("ABORT;")).toEqual({ kind: "rollback", chain: false, savepoint: null });
+    expect(firstStmt("ABORT WORK AND CHAIN;")).toEqual({ kind: "rollback", chain: true, savepoint: null });
+    expect(firstStmt("ABORT TRANSACTION AND NO CHAIN;")).toEqual({ kind: "rollback", chain: false, savepoint: null });
+  });
+
+  it("rejects the forms END and ABORT do not share with COMMIT and ROLLBACK", () => {
+    expect(bad("ABORT TO SAVEPOINT sp1;")).toThrow(/Expected ";" but found "to"/);
+    expect(bad("ABORT PREPARED 'tx1';")).toThrow(/Expected ";" but found "prepared"/);
+    expect(bad("END PREPARED 'tx1';")).toThrow(/Expected ";" but found "prepared"/);
+    expect(bad("END AND;")).toThrow(/Expected "chain" but found ";"/);
+  });
+
+  it("parses PREPARE TRANSACTION, COMMIT PREPARED and ROLLBACK PREPARED", () => {
+    expect(firstStmt("PREPARE TRANSACTION 'tx1';")).toEqual({ kind: "prepareTransaction", gid: "tx1" });
+    expect(firstStmt("COMMIT PREPARED 'tx1';")).toEqual({ kind: "commitPrepared", gid: "tx1" });
+    expect(firstStmt("ROLLBACK PREPARED $$tx1$$;")).toEqual({ kind: "rollbackPrepared", gid: "tx1" });
+  });
+
+  it("still reads PREPARE transaction AS … as a statement named transaction", () => {
+    expect(firstStmt("PREPARE transaction AS SELECT 1;")).toMatchObject({ kind: "prepare", name: "transaction" });
+    expect(firstStmt("PREPARE transaction (int) AS SELECT $1;")).toMatchObject({
+      kind: "prepare",
+      name: "transaction",
+      types: [{ name: "int" }],
+    });
+  });
+
+  it("rejects a two-phase statement without its identifier string", () => {
+    expect(bad("COMMIT PREPARED;")).toThrow(/Expected a string but found ";"/);
+    expect(bad("ROLLBACK PREPARED tx1;")).toThrow(/Expected a string but found "tx1"/);
+    expect(bad("COMMIT WORK PREPARED 'tx1';")).toThrow(/Expected ";" but found "prepared"/);
+    // Without a string, TRANSACTION is a statement name that needs AS.
+    expect(bad("PREPARE TRANSACTION tx1;")).toThrow(/Expected "as" but found "tx1"/);
+  });
+
+  it("keeps abort, prepared and chain unreserved as names and aliases", () => {
+    for (const word of ["abort", "prepared", "chain"]) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [{ expr: name(word), alias: null }],
+        from: [tableFrom([word])],
+      });
+      expect(firstStmt(`SELECT a ${word} FROM t;`).columns[0]).toEqual({ expr: name("a"), alias: word });
+      expect(firstStmt(`CREATE TABLE t (${word} int);`).items[0]).toMatchObject({ name: word });
+    }
+    expect(firstStmt("PREPARE prepared AS SELECT 1;")).toMatchObject({ kind: "prepare", name: "prepared" });
+  });
+
+  it("leaves a CASE's END to the expression", () => {
+    const [query, end] = parse("SELECT CASE WHEN a THEN 1 END FROM t; END;");
+    expect(query).toMatchObject({ kind: "select", columns: [{ expr: { kind: "case" } }] });
+    expect(end).toEqual({ kind: "commit", chain: false });
+    expect(() => sqlLite.parse("SELECT 1 END;")).toThrow(/Expected ";" but found "end"/);
   });
 });
 
@@ -4617,6 +4678,64 @@ describe("SQL-lite DO / DEALLOCATE", () => {
   it("parses DEALLOCATE name and DEALLOCATE ALL", () => {
     expect(firstStmt("DEALLOCATE PREPARE my_stmt;")).toEqual({ kind: "deallocate", name: "my_stmt" });
     expect(firstStmt("DEALLOCATE ALL;")).toEqual({ kind: "deallocate", name: null });
+  });
+});
+
+// --- LISTEN / NOTIFY / UNLISTEN, LOAD and DISCARD ---
+
+describe("SQL-lite LISTEN, NOTIFY, UNLISTEN, LOAD and DISCARD", () => {
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses LISTEN, NOTIFY with and without a payload, and UNLISTEN", () => {
+    expect(firstStmt("LISTEN channel_a;")).toEqual({ kind: "listen", channel: "channel_a" });
+    expect(firstStmt('LISTEN "Chan";')).toEqual({ kind: "listen", channel: "Chan" });
+    expect(firstStmt("NOTIFY channel_a;")).toEqual({ kind: "notify", channel: "channel_a" });
+    expect(firstStmt("NOTIFY channel_a, 'payload text';")).toEqual({
+      kind: "notify",
+      channel: "channel_a",
+      payload: "payload text",
+    });
+    expect(firstStmt("UNLISTEN channel_a;")).toEqual({ kind: "unlisten", channel: "channel_a" });
+    expect(firstStmt("UNLISTEN *;")).toEqual({ kind: "unlisten", channel: null });
+  });
+
+  it("rejects malformed LISTEN, NOTIFY and UNLISTEN statements", () => {
+    expect(bad("LISTEN;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("LISTEN *;")).toThrow(/Expected a name but found "\*"/);
+    expect(bad("LISTEN a.b;")).toThrow(/Expected ";" but found "."/);
+    expect(bad("NOTIFY c,;")).toThrow(/Expected a payload string but found ";"/);
+    expect(bad("NOTIFY c, 42;")).toThrow(/Expected a payload string but found "42"/);
+    expect(bad("NOTIFY c 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(bad("UNLISTEN;")).toThrow(/Expected a name but found ";"/);
+  });
+
+  it("parses LOAD and every DISCARD target", () => {
+    expect(firstStmt("LOAD 'auto_explain';")).toEqual({ kind: "load", file: "auto_explain" });
+    expect(firstStmt("DISCARD ALL;")).toEqual({ kind: "discard", target: "all" });
+    expect(firstStmt("DISCARD PLANS;")).toEqual({ kind: "discard", target: "plans" });
+    expect(firstStmt("DISCARD SEQUENCES;")).toEqual({ kind: "discard", target: "sequences" });
+    expect(firstStmt("DISCARD TEMP;")).toEqual({ kind: "discard", target: "temp" });
+    expect(firstStmt("DISCARD TEMPORARY;")).toEqual({ kind: "discard", target: "temp" });
+  });
+
+  it("rejects malformed LOAD and DISCARD statements", () => {
+    expect(bad("LOAD auto_explain;")).toThrow(/Expected a file name but found "auto_explain"/);
+    expect(bad("DISCARD;")).toThrow(/Expected "all", "plans", "sequences", "temp" or "temporary" but found ";"/);
+    expect(bad("DISCARD cache;")).toThrow(/but found "cache"/);
+  });
+
+  it("keeps listen, notify, unlisten, load and discard unreserved as names and aliases", () => {
+    for (const word of ["listen", "notify", "unlisten", "load", "discard", "temporary"]) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [{ expr: name(word), alias: null }],
+        from: [tableFrom([word])],
+      });
+      expect(firstStmt(`SELECT a ${word} FROM t;`).columns[0]).toEqual({ expr: name("a"), alias: word });
+      expect(firstStmt(`CREATE TABLE t (${word} int);`).items[0]).toMatchObject({ name: word });
+    }
+    expect(firstStmt("LISTEN listen;")).toEqual({ kind: "listen", channel: "listen" });
+    expect(firstStmt("NOTIFY notify;")).toEqual({ kind: "notify", channel: "notify" });
+    expect(firstStmt("UNLISTEN unlisten;")).toEqual({ kind: "unlisten", channel: "unlisten" });
   });
 });
 
@@ -8438,6 +8557,123 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
     expect(bad("VACUUM VERBOSE FREEZE;")).toThrow(/Expected a name but found "freeze" \(1:15\)/);
     expect(bad("VACUUM ANALYZE VERBOSE t;")).toThrow(/Expected a name but found "verbose"/);
     expect(bad("ANALYZE VERBOSE VERBOSE;")).toThrow(/Expected a name but found "verbose"/);
+  });
+});
+
+// --- CHECKPOINT, CLUSTER and REINDEX ---
+
+describe("SQL-lite CHECKPOINT, CLUSTER and REINDEX", () => {
+  const verbose = { name: "verbose", value: null };
+  const bad = (src: string) => () => sqlLite.parse(src);
+
+  it("parses CHECKPOINT", () => {
+    expect(firstStmt("CHECKPOINT;")).toEqual({ kind: "checkpoint" });
+    expect(bad("CHECKPOINT now;")).toThrow(/Expected ";" but found "now"/);
+  });
+
+  it("parses CLUSTER with and without a table, index and options", () => {
+    expect(firstStmt("CLUSTER;")).toEqual({ kind: "cluster", options: [] });
+    expect(firstStmt("CLUSTER VERBOSE;")).toEqual({ kind: "cluster", options: [verbose] });
+    expect(firstStmt("CLUSTER VERBOSE users;")).toEqual({ kind: "cluster", options: [verbose], table: ["users"] });
+    expect(firstStmt("CLUSTER s.users USING users_pkey;")).toEqual({
+      kind: "cluster",
+      options: [],
+      table: ["s", "users"],
+      index: "users_pkey",
+    });
+    // The PG 17 option list, with or without a table.
+    expect(firstStmt("CLUSTER (VERBOSE);")).toEqual({ kind: "cluster", options: [verbose] });
+    expect(firstStmt("CLUSTER (VERBOSE) users USING users_pkey;")).toEqual({
+      kind: "cluster",
+      options: [verbose],
+      table: ["users"],
+      index: "users_pkey",
+    });
+    // The pre-8.3 `index ON table` form.
+    expect(firstStmt("CLUSTER VERBOSE users_pkey ON s.users;")).toEqual({
+      kind: "cluster",
+      options: [verbose],
+      table: ["s", "users"],
+      index: "users_pkey",
+    });
+  });
+
+  it("rejects malformed CLUSTER statements", () => {
+    expect(bad("CLUSTER users USING;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("CLUSTER VERBOSE VERBOSE;")).toThrow(/Expected a name but found "verbose"/);
+    expect(bad("CLUSTER (VERBOSE) verbose;")).toThrow(/Expected a name but found "verbose"/);
+    expect(bad("CLUSTER VERBOSE concurrently;")).toThrow(/Expected a name but found "concurrently"/);
+    expect(bad("CLUSTER users USING verbose;")).toThrow(/Expected a name but found "verbose"/);
+    expect(bad("CLUSTER users_pkey ON verbose;")).toThrow(/Expected a name but found "verbose"/);
+    // The old ON form takes neither the option list nor a qualified index.
+    expect(bad("CLUSTER (VERBOSE) users_pkey ON users;")).toThrow(/Expected ";" but found "on"/);
+    expect(bad("CLUSTER s.users_pkey ON users;")).toThrow(/Expected ";" but found "on"/);
+    expect(bad("CLUSTER a, b;")).toThrow(/Expected ";" but found ","/);
+  });
+
+  it("parses REINDEX on every target, with options and CONCURRENTLY", () => {
+    expect(firstStmt("REINDEX TABLE users;")).toEqual({
+      kind: "reindex",
+      options: [],
+      target: "table",
+      name: ["users"],
+    });
+    expect(firstStmt("REINDEX INDEX CONCURRENTLY s.users_email_idx;")).toEqual({
+      kind: "reindex",
+      options: [],
+      target: "index",
+      concurrently: true,
+      name: ["s", "users_email_idx"],
+    });
+    expect(firstStmt("REINDEX (VERBOSE, TABLESPACE fast) SCHEMA public;")).toEqual({
+      kind: "reindex",
+      options: [verbose, { name: "tablespace", value: name("fast") }],
+      target: "schema",
+      name: ["public"],
+    });
+    expect(firstStmt("REINDEX (VERBOSE) DATABASE mydb;")).toEqual({
+      kind: "reindex",
+      options: [verbose],
+      target: "database",
+      name: ["mydb"],
+    });
+    // Quoted, a flag word is a name.
+    expect(firstStmt('REINDEX INDEX CONCURRENTLY "concurrently";')).toMatchObject({ name: ["concurrently"] });
+    // DATABASE and SYSTEM may leave the (current) database's name off.
+    expect(firstStmt("REINDEX SYSTEM;")).toEqual({ kind: "reindex", options: [], target: "system" });
+    expect(firstStmt("REINDEX DATABASE CONCURRENTLY;")).toEqual({
+      kind: "reindex",
+      options: [],
+      target: "database",
+      concurrently: true,
+    });
+  });
+
+  it("rejects malformed REINDEX statements", () => {
+    expect(bad("REINDEX users;")).toThrow(
+      /Expected "index", "table", "schema", "database" or "system" but found "users"/,
+    );
+    expect(bad("REINDEX SCHEMA;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("REINDEX TABLE;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("REINDEX INDEX CONCURRENTLY;")).toThrow(/Expected a name but found ";"/);
+    expect(bad("REINDEX TABLE CONCURRENTLY concurrently;")).toThrow(/Expected a name but found "concurrently"/);
+    expect(bad("REINDEX DATABASE CONCURRENTLY concurrently;")).toThrow(/Expected a name but found "concurrently"/);
+    expect(bad("REINDEX INDEX CONCURRENTLY verbose;")).toThrow(/Expected a name but found "verbose"/);
+    expect(bad("REINDEX SCHEMA s.t;")).toThrow(/Expected ";" but found "."/);
+    expect(bad("REINDEX DATABASE a b;")).toThrow(/Expected ";" but found "b"/);
+  });
+
+  it("keeps checkpoint, cluster, reindex and the target words unreserved as names and aliases", () => {
+    for (const word of ["checkpoint", "cluster", "reindex", "system", "plans", "sequences"]) {
+      expect(firstStmt(`SELECT ${word} FROM ${word};`)).toMatchObject({
+        columns: [{ expr: name(word), alias: null }],
+        from: [tableFrom([word])],
+      });
+      expect(firstStmt(`SELECT a ${word} FROM t;`).columns[0]).toEqual({ expr: name("a"), alias: word });
+      expect(firstStmt(`CREATE TABLE t (${word} int);`).items[0]).toMatchObject({ name: word });
+    }
+    expect(firstStmt("CLUSTER cluster USING reindex;")).toMatchObject({ table: ["cluster"], index: "reindex" });
+    expect(firstStmt("REINDEX TABLE reindex;")).toMatchObject({ name: ["reindex"] });
   });
 });
 
