@@ -14403,6 +14403,21 @@ describe("SQL-lite column STORAGE and COMPRESSION", () => {
     ]);
   });
 
+  it("reads them ahead of a column's OPTIONS, foreign tables included", () => {
+    expect(
+      firstStmt("CREATE FOREIGN TABLE ft (a int STORAGE plain COMPRESSION lz4 OPTIONS (x 'y') NOT NULL) SERVER s;")
+        .items,
+    ).toEqual([
+      {
+        ...plainColumn("a", "int", { storage: "plain", compression: "lz4", options: [{ name: "x", value: "y" }] }),
+        constraints: [{ kind: "notNull" }],
+      },
+    ]);
+    expect(parseFails("CREATE TABLE t (a int OPTIONS (x 'y') STORAGE plain);")).toThrow(
+      /Expected "," but found "storage"/,
+    );
+  });
+
   it("rejects them out of order or with an unknown storage mode", () => {
     expect(parseFails("CREATE TABLE t (a text COMPRESSION lz4 STORAGE main);")).toThrow(
       /Expected "," but found "storage"/,
