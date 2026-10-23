@@ -410,7 +410,7 @@ export const PG_BATTERY: BatteryRow[] = [
     ],
     ["update", "both", "UPDATE users SET name = 'x' WHERE id = 1;"],
     ["update", "both", "UPDATE users SET deleted_at = now() WHERE id = 42;"],
-    ["update", "node", "UPDATE accounts SET balance = balance - 100.00, updated_at = DEFAULT WHERE id = 7;"],
+    ["update", "both", "UPDATE accounts SET balance = balance - 100.00, updated_at = DEFAULT WHERE id = 7;"],
     [
       "update",
       "both",
@@ -428,9 +428,9 @@ export const PG_BATTERY: BatteryRow[] = [
       "UPDATE employees SET (salary, title) = (SELECT salary, title FROM proposals p WHERE p.emp_id = employees.id) WHERE dept = 'eng';",
     ],
     ["update", "sql-lite", "UPDATE t SET (a, b) = ROW(1, 2);"],
-    ["update", "neither", "UPDATE films SET kind = 'Dramatic' WHERE CURRENT OF c_films;"],
+    ["update", "sql-lite", "UPDATE films SET kind = 'Dramatic' WHERE CURRENT OF c_films;"],
     ["update", "both", "UPDATE users SET last_login = now() WHERE id = $1 RETURNING id, last_login;"],
-    ["update", "node", "UPDATE ONLY parent_table SET flag = true;"],
+    ["update", "both", "UPDATE ONLY parent_table SET flag = true;"],
     [
       "update",
       "both",
@@ -455,9 +455,9 @@ export const PG_BATTERY: BatteryRow[] = [
     ["delete", "both", "DELETE FROM users WHERE id = 1;"],
     ["delete", "both", "DELETE FROM sessions;"],
     ["delete", "sql-lite", "DELETE FROM orders o USING customers c WHERE o.customer_id = c.id AND c.banned;"],
-    ["delete", "neither", "DELETE FROM films WHERE CURRENT OF c_films;"],
+    ["delete", "sql-lite", "DELETE FROM films WHERE CURRENT OF c_films;"],
     ["delete", "sql-lite", "DELETE FROM tasks WHERE status = 'done' RETURNING *;"],
-    ["delete", "node", "DELETE FROM ONLY parent_table WHERE created < '2020-01-01';"],
+    ["delete", "both", "DELETE FROM ONLY parent_table WHERE created < '2020-01-01';"],
     [
       "delete",
       "both",
@@ -526,8 +526,8 @@ export const PG_BATTERY: BatteryRow[] = [
     ["copy", "sql-lite", "COPY t FROM STDIN WITH (FORMAT csv, ON_ERROR ignore);"],
     ["truncate", "both", "TRUNCATE users;"],
     ["truncate", "both", "TRUNCATE TABLE a, b RESTART IDENTITY CASCADE;"],
-    ["truncate", "node", "TRUNCATE ONLY parent CONTINUE IDENTITY RESTRICT;"],
-    ["truncate", "node", "TRUNCATE TABLE ONLY orders, order_items RESTART IDENTITY CASCADE;"],
+    ["truncate", "both", "TRUNCATE ONLY parent CONTINUE IDENTITY RESTRICT;"],
+    ["truncate", "both", "TRUNCATE TABLE ONLY orders, order_items RESTART IDENTITY CASCADE;"],
   ]),
   ...section("transactions and session", [
     ["txn", "both", "BEGIN;"],
