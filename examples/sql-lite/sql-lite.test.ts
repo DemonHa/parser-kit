@@ -31,6 +31,16 @@ const str = (value: string) => ({ kind: "string", value });
 const bin = (op: string, left: unknown, right: unknown) => ({ kind: "binary", op, left, right });
 const star = (table: string[] | null = null) => ({ kind: "star", table });
 const col = (expr: unknown, alias: string | null = null) => ({ expr, alias });
+
+// Matches an "Expected …" message naming each of `keys` among its
+// alternatives, in any order and alongside others, and (when given) followed
+// by `but found <found>`. Keyword dispatch lists grow as statements are added,
+// so these tests pin the alternatives that matter, not the full ordered list.
+const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const expectsKeys = (keys: string[], found?: string) => {
+  const tail = found === undefined ? "" : `[^\\n]*but found ${escapeRe(found)}`;
+  return new RegExp(keys.map((key) => `(?=[^\\n]*Expected [^\\n]*"${escapeRe(key)}"${tail})`).join(""));
+};
 // A fully-defaulted SELECT node; spread overrides in for the fields under test.
 const sel = (over: Record<string, unknown>) => ({
   kind: "select",
@@ -338,7 +348,25 @@ describe("SQL-lite ALTER TABLE (Phase 6 actions)", () => {
 
   it("rejects an unknown ALTER TABLE action", () => {
     expect(() => sqlLite.parse("ALTER TABLE t frobnicate;")).toThrow(
-      /Expected "add", "drop", "alter", "rename", "owner", "replica", "set", "reset", "validate", "enable", "disable", "cluster", "attach" or "detach" but found "frobnicate"/,
+      expectsKeys(
+        [
+          "add",
+          "drop",
+          "alter",
+          "rename",
+          "owner",
+          "replica",
+          "set",
+          "reset",
+          "validate",
+          "enable",
+          "disable",
+          "cluster",
+          "attach",
+          "detach",
+        ],
+        '"frobnicate"',
+      ),
     );
   });
 });
@@ -452,7 +480,10 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
       /Expected "exists" but found "exist"/,
     );
     expect(() => sqlLite.parse("ALTER frobnicate t;")).toThrow(
-      /Expected "table", "schema", "domain", "type", "index", "function", "aggregate", "view", "materialized" or "sequence" but found "frobnicate"/,
+      expectsKeys(
+        ["table", "schema", "domain", "type", "index", "function", "aggregate", "view", "materialized", "sequence"],
+        '"frobnicate"',
+      ),
     );
   });
 });
@@ -632,7 +663,27 @@ describe("SQL-lite DROP object types", () => {
     const fails = (text: string) => () => sqlLite.parse(text);
     expect(fails("DROP TRIGGER t;")).toThrow(/Expected "on" but found ";"/);
     expect(fails("DROP frobnicate x;")).toThrow(
-      /Expected "table", "view", "index", "type", "sequence", "schema", "materialized", "function", "procedure", "aggregate", "trigger", "domain", "extension", "database", "role" or "user" but found "frobnicate"/,
+      expectsKeys(
+        [
+          "table",
+          "view",
+          "index",
+          "type",
+          "sequence",
+          "schema",
+          "materialized",
+          "function",
+          "procedure",
+          "aggregate",
+          "trigger",
+          "domain",
+          "extension",
+          "database",
+          "role",
+          "user",
+        ],
+        '"frobnicate"',
+      ),
     );
     expect(fails("DROP AGGREGATE a;")).toThrow(/Expected "\(" but found ";"/);
     expect(fails("DROP MATERIALIZED t;")).toThrow(/Expected "view" but found "t"/);
@@ -696,7 +747,7 @@ describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
 
   it("rejects OR REPLACE before a non-replaceable object", () => {
     expect(() => sqlLite.parse("CREATE OR REPLACE TABLE t (id int);")).toThrow(
-      /Expected "view", "materialized", "function", "procedure", "aggregate" or "trigger"/,
+      expectsKeys(["view", "materialized", "function", "procedure", "aggregate", "trigger"], '"table"'),
     );
   });
 });
@@ -3392,14 +3443,33 @@ describe("SQL-lite keyword dispatch maps", () => {
 
   it("names the keyword-led CREATE targets in the join form", () => {
     expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
-      /Expected "table" or "unique" or "type" or "sequence" or "domain" or "database" or "schema" or "extension" or "tablespace" or "role" or "user" but found "frobnicate"/,
+      expectsKeys(
+        [
+          "table",
+          "unique",
+          "type",
+          "sequence",
+          "domain",
+          "database",
+          "schema",
+          "extension",
+          "tablespace",
+          "role",
+          "user",
+        ],
+        '"frobnicate"',
+      ),
+    );
+    expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
+      /Expected ("[a-z ]+" or )+"[a-z ]+" but found "frobnicate"/,
     );
   });
 
   it("names the table-item alternatives in the join form", () => {
     expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(
-      /Expected "constraint" or "primary key" or "unique" or "check" or "foreign key" or "like" or "exclude" or a name but found "42"/,
+      expectsKeys(["constraint", "primary key", "unique", "check", "foreign key", "like", "exclude"], '"42"'),
     );
+    expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(/Expected ("[a-z ]+" or )+a name but found "42"/);
   });
 
   // A record literal inherits `constructor` and `__proto__`, so a lead word
@@ -4818,7 +4888,7 @@ describe("SQL-lite EXCLUDE table constraints", () => {
       /Expected a name but found "\)"/,
     );
     expect(() => sqlLite.parse("CREATE TABLE t (CONSTRAINT c 42);")).toThrow(
-      /Expected "primary key" or "unique" or "check" or "foreign key" or "exclude" but found "42"/,
+      expectsKeys(["primary key", "unique", "check", "foreign key", "exclude"], '"42"'),
     );
     expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE (a);")).toThrow(/Expected "with" but found "\)"/);
     expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE USING gist (a WITH b);")).toThrow(
@@ -5143,12 +5213,10 @@ describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
   it("rejects an unknown action, a misplaced word and a valued RESET", () => {
     expect(fails("ALTER SCHEMA s SET SCHEMA t;")).toThrow(/Expected "rename" or "owner" but found "set"/);
     expect(fails("ALTER DOMAIN d frobnicate;")).toThrow(
-      /Expected "set", "drop", "add", "rename", "owner" or "validate" but found "frobnicate"/,
+      expectsKeys(["set", "drop", "add", "rename", "owner", "validate"], '"frobnicate"'),
     );
-    expect(fails("ALTER TYPE t frobnicate;")).toThrow(
-      /Expected "add", "rename", "owner" or "set" but found "frobnicate"/,
-    );
-    expect(fails("ALTER INDEX i frobnicate;")).toThrow(/Expected "rename", "set" or "reset" but found "frobnicate"/);
+    expect(fails("ALTER TYPE t frobnicate;")).toThrow(expectsKeys(["add", "rename", "owner", "set"], '"frobnicate"'));
+    expect(fails("ALTER INDEX i frobnicate;")).toThrow(expectsKeys(["rename", "set", "reset"], '"frobnicate"'));
     expect(fails("ALTER DOMAIN d SET frob;")).toThrow(/Expected "default", "not" or "schema" but found "frob"/);
     expect(fails("ALTER DOMAIN d DROP frob;")).toThrow(/Expected "default", "not" or "constraint" but found "frob"/);
     expect(fails("ALTER DOMAIN d ADD UNIQUE (a);")).toThrow(/Expected "check" but found "unique"/);
@@ -5353,7 +5421,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
 
   it("rejects an unknown action, a misplaced word and a combined RENAME or SET SCHEMA", () => {
     expect(fails("ALTER FUNCTION f frobnicate;")).toThrow(
-      /Expected "rename", "owner", "set", "immutable", .*, "cost" or "rows" but found "frobnicate"/,
+      expectsKeys(["rename", "owner", "set", "immutable", "cost", "rows"], '"frobnicate"'),
     );
     expect(fails("ALTER FUNCTION f(int) LANGUAGE sql;")).toThrow(/Expected "rename", .* but found "language"/);
     expect(fails("ALTER FUNCTION f NOT NULL;")).toThrow(/Expected "leakproof" but found "null"/);
@@ -5370,7 +5438,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
       /Expected "rename", "owner" or "set" but found "immutable"/,
     );
     expect(fails("ALTER VIEW v frobnicate;")).toThrow(
-      /Expected "rename", "owner", "set", "reset" or "alter" but found "frobnicate"/,
+      expectsKeys(["rename", "owner", "set", "reset", "alter"], '"frobnicate"'),
     );
     expect(fails("ALTER MATERIALIZED VIEW m ALTER c DROP DEFAULT;")).toThrow(
       /Expected "rename", "owner", "set" or "reset" but found "alter"/,
@@ -5387,7 +5455,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
       /RENAME cannot be combined with other ALTER MATERIALIZED VIEW actions/,
     );
     expect(fails("ALTER SEQUENCE s frobnicate;")).toThrow(
-      /Expected "rename", "owner", "set", "as", .*, "no" or "owned" but found "frobnicate"/,
+      expectsKeys(["rename", "owner", "set", "as", "no", "owned"], '"frobnicate"'),
     );
     expect(fails("ALTER SEQUENCE s NO frob;")).toThrow(/Expected "minvalue", "maxvalue" or "cycle" but found "frob"/);
     expect(fails("ALTER SEQUENCE s SET frob;")).toThrow(/Expected "schema" but found "frob"/);
@@ -5739,12 +5807,12 @@ describe("SQL-lite generated identity and stored columns and column collation", 
   });
 
   it("rejects a malformed GENERATED or COLLATE", () => {
-    expect(bad("GENERATED ALWAYS AS (a)")).toThrow(/Expected "stored" but found "\)"/);
+    expect(bad("GENERATED ALWAYS AS (a)")).toThrow(expectsKeys(["stored"], '")"'));
     expect(bad("GENERATED SOMETIMES AS IDENTITY")).toThrow(
       /Expected "always" or "by default" but found "sometimes" \(1:32\)/,
     );
     // A malformed clause is a plain syntax error first, as in PG.
-    expect(bad("GENERATED BY DEFAULT AS (a)")).toThrow(/Expected "stored" but found "\)"/);
+    expect(bad("GENERATED BY DEFAULT AS (a)")).toThrow(expectsKeys(["stored"], '")"'));
     expect(bad("GENERATED BY DEFAULT AS (a) STORED")).toThrow(
       /for a generated column, GENERATED ALWAYS must be specified \(1:32\)/,
     );
@@ -5943,7 +6011,7 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
     // A schema element is one of the CREATE kinds PG admits there, or GRANT.
     // The croak points at the target word, past CREATE and OR REPLACE.
     expect(bad("CREATE SCHEMA s CREATE frobnicate;")).toThrow(
-      /Expected "table", "unique", "index", "sequence", "view" or "trigger" but found "frobnicate" \(1:23\)/,
+      expectsKeys(["table", "unique", "index", "sequence", "view", "trigger"], '"frobnicate" (1:23)'),
     );
     expect(bad("CREATE SCHEMA s CREATE SCHEMA t CREATE TABLE u (a int);")).toThrow(/or "trigger" but found "schema"/);
     expect(bad("CREATE SCHEMA s CREATE DATABASE d;")).toThrow(/or "trigger" but found "database"/);
@@ -7004,7 +7072,7 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
     );
     // PG's SET WITHOUT OIDS and ENABLE RULE are valid there but not parsed here.
     expect(fails("ALTER TABLE t SET WITHOUT OIDS;")).toThrow(/Expected "cluster" but found "oids"/);
-    expect(fails("ALTER TABLE t ENABLE RULE r;")).toThrow(/Expected "replica", "always" or "trigger" but found "rule"/);
+    expect(fails("ALTER TABLE t ENABLE RULE r;")).toThrow(expectsKeys(["replica", "always", "trigger"], '"rule"'));
     expect(fails("ALTER TABLE t DISABLE TRIGGER;")).toThrow(/Expected "all", "user" or a name but found ";"/);
     expect(fails("ALTER TABLE t ENABLE TRIGGER select;")).toThrow(
       /Expected "all", "user" or a name but found "select"/,
@@ -7013,7 +7081,7 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
     // REPLICA and ALWAYS take a trigger's name only, as in PG.
     expect(fails("ALTER TABLE t ENABLE REPLICA TRIGGER ALL;")).toThrow(/Expected a name but found "all"/);
     expect(fails("ALTER TABLE t ENABLE ALWAYS TRIGGER USER;")).toThrow(/Expected a name but found "user"/);
-    expect(fails("ALTER TABLE t DISABLE REPLICA TRIGGER x;")).toThrow(/Expected "trigger" but found "replica"/);
+    expect(fails("ALTER TABLE t DISABLE REPLICA TRIGGER x;")).toThrow(expectsKeys(["trigger"], '"replica"'));
     expect(fails("ALTER TABLE t DROP CONSTRAINT;")).toThrow(/Expected a name but found ";"/);
     expect(fails("ALTER TABLE t VALIDATE c;")).toThrow(/Expected "constraint" but found "c"/);
     expect(fails("ALTER TABLE t CLUSTER i;")).toThrow(/Expected "on" but found "i"/);

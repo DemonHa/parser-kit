@@ -45,8 +45,10 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 | `corpus.ts` | The statements the benchmark measures and the parity golden pins |
 | `parity.test.ts` + `parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus a supplemental list |
 | `pg-coverage.ts` + `pg-coverage.test.ts` | The PostgreSQL coverage battery: 599 statements with the bucket each one lands in |
+| `pg-dump-corpus.ts` + `pg-dump-corpus.test.ts` | The pg_dump corpus: whether each statement of the dumps in `fixtures/pg-dump/` parses |
+| `psql-split.ts` | A test helper that splits a dump file into statements the way psql does |
 | `sql-lite.bench.ts` | Throughput over the corpus, per category |
-| `sql-lite.large.bench.ts` | Throughput on 64 KB / 256 KB / 1 MB multi-statement files |
+| `sql-lite.large.bench.ts` | Throughput on 64 KB / 256 KB / 1 MB multi-statement files, and on the pagila schema dump |
 | `sql-lite.workloads.bench.ts` | Throughput on real-world workloads |
 
 ## PostgreSQL coverage
@@ -89,6 +91,26 @@ The test fails if any statement changes bucket. To print the table above:
 
 ```sh
 PG_COVERAGE_REPORT=1 pnpm vitest run examples/sql-lite/pg-coverage.test.ts
+```
+
+### pg_dump corpus
+
+`pg-dump-corpus.test.ts` runs real pg_dump output through `sqlLite.parse`, one statement at a time. `psql-split.ts` splits each file the way psql does: it respects strings, dollar quotes and `BEGIN ATOMIC` bodies, and it sets aside `COPY … FROM stdin` data blocks and `\` meta-command lines (`\connect`, `\restrict`, …), which are counted rather than parsed. Every statement's outcome is pinned in `pg-dump-corpus.ts`, so a statement that starts or stops parsing fails the test. The dumps live in `fixtures/pg-dump/`:
+
+- `pagila-schema.sql` is the [pagila](https://github.com/devrimgunduz/pagila) sample database's schema (pg_dump 15beta2 of a 12.11 server), vendored unmodified under the PostgreSQL License (`pagila-LICENSE.txt`).
+- `handwritten-pg17.sql` is written by hand in the shape pg_dumpall/pg_dump 17.6 produce. It covers what the sample dump lacks: `\restrict`, roles, row-level security and policies, default privileges, publications, identity columns, `ALTER INDEX … ATTACH PARTITION`, `BEGIN ATOMIC` bodies and COPY blocks.
+
+| File | Statements | Parse | Rate | COPY blocks | Meta-commands |
+|---|---:|---:|---:|---:|---:|
+| `handwritten-pg17.sql` | 110 | 63 | 57.3% | 4 | 7 |
+| `pagila-schema.sql` | 388 | 208 | 53.6% | 0 | 0 |
+| **Total** | **498** | **271** | **54.4%** | **4** | **7** |
+
+To print the table, or to rewrite `pg-dump-corpus.ts` after a grammar change (review the diff: no row may move to `fail`):
+
+```sh
+PG_DUMP_CORPUS_REPORT=1 pnpm vitest run examples/sql-lite/pg-dump-corpus.test.ts
+PG_DUMP_CORPUS_WRITE=1 pnpm vitest run examples/sql-lite/pg-dump-corpus.test.ts
 ```
 
 ### Not yet supported
@@ -228,7 +250,7 @@ The bulk `INSERT` is the one workload where node-sql-parser wins. Nearly all of 
 | 256 KB file (6,889 statements) | 3.01 | 0.97 | 3.09× |
 | 1 MB file (27,557 statements) | 0.73 | 0.25 | 2.98× |
 
-"Relative" is sql-lite's speed-up over node-sql-parser.
+"Relative" is sql-lite's speed-up over node-sql-parser. `sql-lite.large.bench.ts` also has a sql-lite-only group that parses the pagila schema dump statement by statement, unsupported statements included. node-sql-parser rejects most pg_dump DDL, so there is no comparison.
 
 ### Methodology
 
@@ -256,3 +278,4 @@ The repo-wide workflow is in [CONTRIBUTING.md](../../CONTRIBUTING.md). Specific 
 - **Prove new keywords stay unreserved.** PostgreSQL leaves most keywords usable as names, and so does this grammar: only the words in `RESERVED` are refused as bare names. Every feature that matches a new word by value comes with a "keeps … unreserved as names and aliases" test showing the word still works as a column, table and alias (for example `SELECT rows, ordinality FROM t AS rows;`). Don't add to `RESERVED` to make a parse work.
 - **Pin observable output in the parity golden.** `parity.test.ts` serialises the full AST, spans included, for every `corpus.ts` row and its own `SUPPLEMENTAL` / `MULTI_LINE` / `LEXER_EDGE_CASES` lists, plus `diagnose()` output for `MALFORMED`. New node shapes go in `SUPPLEMENTAL`, not `corpus.ts`: the benchmark's group names count the corpus's shared rows, `bench-baseline.json` keys on those names, and a new `pg: true` corpus row renames them, which silently disconnects `pnpm bench:compare`. When output is *meant* to move, regenerate with `pnpm test -- -u` (the `--` matters) and call the diff out in review. Never regenerate to make a refactor pass.
 - **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README. Update the "Not yet supported", "Known wrong ASTs" and "Accepted, but PostgreSQL rejects" lists too: they aren't pinned by any test.
+- **Update the pg_dump corpus.** If a change makes a dump statement parse (or stop parsing), `pg-dump-corpus.test.ts` fails the same way. Regenerate `pg-dump-corpus.ts` with `PG_DUMP_CORPUS_WRITE=1`, check that no row moved to `fail`, and update the [pg_dump corpus](#pg_dump-corpus) table from `PG_DUMP_CORPUS_REPORT=1`.
