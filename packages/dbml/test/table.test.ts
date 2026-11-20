@@ -159,6 +159,12 @@ describe("Column types", () => {
 
   it("reads a `[` opening a line right after the type as an array suffix, as @dbml/core does", () => {
     expect(column("v int\n[]").dataType.arraySizes).toEqual([null]);
+    expect(column("v int[]\n[]").dataType.arraySizes).toEqual([null, null]);
+    expect(column("v varchar(1)\n  // a comment line\n[]").dataType).toEqual({
+      name: qn("varchar"),
+      args: [{ kind: "number", value: 1 }],
+      arraySizes: [null],
+    });
     expect(column("v int\n\n  [3]\n  [] [pk]")).toEqual({
       type: "column",
       name: id("v"),

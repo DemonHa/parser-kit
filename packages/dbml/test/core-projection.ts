@@ -220,7 +220,8 @@ const properties = (metadata: Metadata | undefined): Record<string, ProjectedPro
  * by its column (`integer`, `real`, `string`, `datetime`, `bool`,
  * `expression`, …). It keeps no value for an enum member: in a column of that
  * enum's type the value is left out, in any other column it is an empty
- * expression.
+ * expression. (So an empty backtick expression, which the corpus doesn't
+ * hold, would read as an enum member here.)
  */
 const field = ({ value, type }: { value?: unknown; type: string }): ProjectedField => {
   if (value === undefined || (type === "expression" && value === "")) return { enumValue: true };

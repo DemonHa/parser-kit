@@ -126,7 +126,10 @@ export interface ProjectedCheck {
 export type Cardinality = "1" | "*" | "0..1" | "0..*";
 
 export interface ProjectedEndpoint {
-  /** As written, `null` when unqualified (the model doesn't default an endpoint's schema). */
+  /**
+   * As written, `null` when unqualified: the model doesn't default an
+   * endpoint's schema, except a partial column's own in its inline refs.
+   */
   schema: string | null;
   table: string;
   columns: string[];
@@ -204,7 +207,7 @@ export const projectDocument = (doc: DbmlDocument): ProjectedDocument => {
 
   const tables = of("table");
   const enums = of("enum");
-  const scope: Scope = { resolveTable: tableResolver(tables), enumOf: enumResolver(enums) };
+  const scope: Scope = { resolveTable: tableResolver(tables), ...enumResolver(enums) };
   const partials = new Map(of("tablePartial").map((partial) => [partial.name.value, partial]));
   const projected = tables.map((table) => projectTable(table, partials, scope));
   const project = of("project")[0];
@@ -227,8 +230,10 @@ export const projectDocument = (doc: DbmlDocument): ProjectedDocument => {
 interface Scope {
   /** The table a name refers to, with a table alias resolved. */
   resolveTable: (name: QualifiedName) => { schema: string | null; table: string };
-  /** The declared enum a column type names, if any. */
-  enumOf: (type: DataType) => { schema: string | null; name: string } | undefined;
+  /** The enum an unqualified name is the alias of, if any, as the enum writes its name. */
+  enumAlias: (name: string) => QualifiedName | undefined;
+  /** Whether an enum of this name is declared in this schema (`public` when `null`). */
+  isEnum: (schema: string | null, name: string) => boolean;
 }
 
 // --- Tables and partials ---
@@ -411,21 +416,24 @@ const projectColumn = (column: Column, scope: Scope): ProjectedColumn => {
 /**
  * `@dbml/core`'s column type. `type_name` is the name as written, unquoted,
  * followed by its arguments joined by `,` and its array suffixes; `args` is
- * the arguments alone, and only when no array suffix follows them. A type
- * naming a declared enum (or its alias) is that enum's bare name with its
- * schema apart; any other schema-qualified type keeps its schema in
- * `type_name` too.
+ * the arguments alone, and only when no array suffix follows them. An enum
+ * alias is first replaced by the enum's name and schema (none for `public`).
+ * Then a bare type
+ * (no arguments, no array suffix) naming a declared enum keeps its schema
+ * apart; any other schema-qualified type has its schema in `type_name` too.
  */
 const projectType = (dataType: DataType, scope: Scope): ProjectedColumn["type"] => {
   const args = dataType.args === null ? null : dataType.args.map(typeArg).join(",");
   const arrays = dataType.arraySizes.map((size) => `[${size === null ? "" : numberText(size)}]`).join("");
-  const suffix = `${args === null ? "" : `(${args})`}${arrays}`;
-  const enumType = arrays === "" ? scope.enumOf(dataType) : undefined;
-  if (enumType) return { schema: enumType.schema, name: `${enumType.name}${suffix}`, args };
-  const schema = dataType.name.schema?.value ?? null;
+  const alias = dataType.name.schema === null ? scope.enumAlias(dataType.name.name.value) : undefined;
+  const { schema, name } = alias ?? dataType.name;
+  // An alias takes the enum's schema, except `public`, which it leaves unwritten.
+  const schemaName = alias && schema?.value === DEFAULT_SCHEMA ? null : (schema?.value ?? null);
+  const bare = args === null && arrays === "";
+  const prefix = schemaName === null || (bare && scope.isEnum(schemaName, name.value)) ? "" : `${schemaName}.`;
   return {
-    schema,
-    name: `${schema === null ? "" : `${schema}.`}${dataType.name.name.value}${suffix}`,
+    schema: schemaName,
+    name: `${prefix}${name.value}${args === null ? "" : `(${args})`}${arrays}`,
     args: arrays === "" ? args : null,
   };
 };
@@ -500,28 +508,13 @@ const tableResolver = (tables: readonly Table[]): Scope["resolveTable"] => {
   };
 };
 
-/**
- * Finds the enum a column type names: `status` or `s.status` matching an
- * enum's name in that schema (`public` when unqualified), or an unqualified
- * enum alias. The result has `@dbml/core`'s spelling: the enum's own name,
- * with the schema as the type writes it, or for an alias as the enum writes
- * it (`null` when unqualified).
- */
-const enumResolver = (enums: readonly Enum[]): Scope["enumOf"] => {
-  const key = (schema: string, name: string) => JSON.stringify([schema, name]);
-  const names = new Set<string>();
+/** Looks up declared enums: by schema and name, and by alias. */
+const enumResolver = (enums: readonly Enum[]): Pick<Scope, "enumAlias" | "isEnum"> => {
+  const key = (schema: string | null, name: string) => JSON.stringify([schema ?? DEFAULT_SCHEMA, name]);
+  const names = new Set(enums.map((element) => key(element.name.schema?.value ?? null, element.name.name.value)));
   const aliases = new Map<string, QualifiedName>();
-  for (const element of enums) {
-    names.add(key(element.name.schema?.value ?? DEFAULT_SCHEMA, element.name.name.value));
-    if (element.alias) aliases.set(element.alias.value, element.name);
-  }
-  return ({ name, args }) => {
-    if (args !== null) return undefined;
-    if (names.has(key(name.schema?.value ?? DEFAULT_SCHEMA, name.name.value)))
-      return { schema: name.schema?.value ?? null, name: name.name.value };
-    const target = name.schema === null ? aliases.get(name.name.value) : undefined;
-    return target && { schema: target.schema?.value ?? null, name: target.name.value };
-  };
+  for (const element of enums) if (element.alias) aliases.set(element.alias.value, element.name);
+  return { enumAlias: (name) => aliases.get(name), isEnum: (schema, name) => names.has(key(schema, name)) };
 };
 
 // --- Refs ---

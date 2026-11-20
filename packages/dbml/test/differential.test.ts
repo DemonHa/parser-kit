@@ -47,12 +47,9 @@ const coreProjection = (source: string): ProjectedDocument =>
 const SEMANTIC_CODES = new Set([
   3003, // DUPLICATE_NAME
   3012, // DUPLICATE_TABLE_SETTING
-  3015, // DUPLICATE_TABLEGROUP_ELEMENT_NAME
-  3016, // DUPLICATE_TABLEGROUP_FIELD_NAME
   3018, // EMPTY_TABLE
-  3023, // DUPLICATE_COLUMN_NAME
+  3023, // DUPLICATE_COLUMN_NAME (also a duplicate enum value)
   3024, // DUPLICATE_COLUMN_SETTING
-  3029, // DUPLICATE_ENUM_ELEMENT_NAME
   3031, // DUPLICATE_ENUM_ELEMENT_SETTING
   3033, // EMPTY_ENUM
   3036, // DUPLICATE_REF_SETTING
@@ -61,7 +58,6 @@ const SEMANTIC_CODES = new Set([
   3056, // DUPLICATE_INDEX_SETTING
   3057, // DUPLICATE_INDEX_COLUMN
   3061, // PROJECT_REDEFINED
-  3069, // DUPLICATE_TABLE_PARTIAL_ELEMENT_NAME
   3070, // DUPLICATE_TABLE_PARTIAL_SETTING
   3074, // DUPLICATE_TABLE_PARTIAL_INJECTION_NAME
   3081, // DUPLICATE_CHECK_SETTING
@@ -275,17 +271,20 @@ records U(id, score, status, label, created) {
   b
 }
 
-enum public.e {
+enum public.e as E {
   x
 }
 
 Table t {
   w St [default: St.a]
+  w2 St[]
+  w3 St(2)
   x s.status
   y s.status[]
   z e
   v public.e
   u e(1)
+  u2 E[3]
   p pg.uuid
   q "pg"."int 4"
 }
@@ -409,7 +408,12 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
   {
     reason: "Chained column type suffixes (`int(1)(2)`, `int[](1)`) and comma-separated array sizes (`int[1,2]`).",
     ours: "rejects",
-    documents: ["Table t {\n  c int(1)(2)\n}\n", "Table t {\n  c int[](1)\n}\n", "Table t {\n  c int[1,2]\n}\n"],
+    documents: [
+      "Table t {\n  c int(1)(2)\n}\n",
+      "Table t {\n  c int[](1)\n}\n",
+      "Table t {\n  c int[1,2]\n}\n",
+      "Table t {\n  c int\n  [1,2]\n}\n",
+    ],
   },
   {
     reason: "YAML front matter (`---` … `---`), which `@dbml/core` uses for architecture files.",
@@ -438,6 +442,7 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
       "Table t {\n  id int\n  indexes {\n    id// c\n    [desc]\n  }\n}\n",
       "Table t {\r\n  id int\r\n  indexes {\r\n    id\r\n    [desc]\r\n  }\r\n}\r\n",
       "Table t {\r\n  tags text\r\n  []\r\n}\r\n",
+      "Table t {\n  tags text// c\n  []\n}\n",
     ],
   },
   {
@@ -548,9 +553,10 @@ describe("differential: MALFORMED is rejected by both parsers", () => {
     expect(coreParses(sample.dbml)).toBe(allowed.has(name));
   });
 
-  it("lists only MALFORMED entries in the known differences", () => {
+  it("lists only MALFORMED entries in the known differences, under ones this package rejects", () => {
     const names = new Set(MALFORMED.map((sample) => sample.name));
     expect([...allowed].filter((name) => !names.has(name))).toEqual([]);
+    expect(KNOWN_DIFFERENCES.filter((difference) => difference.malformed && difference.ours !== "rejects")).toEqual([]);
   });
 });
 
@@ -567,7 +573,9 @@ describe("differential: known differences still hold", () => {
 
 describe("differential: corpus mutants get the same verdict from both parsers", () => {
   const all = mutants({ withPartials: coreMergesPartials });
-  const allowed = allowlist((difference) => difference.mutants);
+  const allowed = new Map(
+    KNOWN_DIFFERENCES.flatMap((difference) => (difference.mutants ?? []).map((id) => [id, difference.ours] as const)),
+  );
 
   it("generates several hundred mutants", () => {
     expect(all.length).toBeGreaterThan(500);
@@ -575,7 +583,7 @@ describe("differential: corpus mutants get the same verdict from both parsers", 
 
   it("lists only existing mutants in the known differences", () => {
     const ids = new Set(mutants({ withPartials: true }).map(({ id }) => id));
-    expect([...allowed].filter((id) => !ids.has(id))).toEqual([]);
+    expect([...allowed.keys()].filter((id) => !ids.has(id))).toEqual([]);
   });
 
   it("agrees on every mutant outside the known differences", () => {
@@ -583,7 +591,10 @@ describe("differential: corpus mutants get the same verdict from both parsers", 
       const ours = accepts(source);
       const core = coreVerdict(source);
       const agree = ours === (core !== "rejects");
-      return agree !== allowed.has(id) ? [] : [{ id, ours, core, source }];
+      // An allowlisted mutant must still disagree, the way its entry says.
+      const expected = allowed.get(id);
+      const ok = expected === undefined ? agree : !agree && ours === (expected === "accepts");
+      return ok ? [] : [{ id, ours, core, source }];
     });
     expect(disagreements).toEqual([]);
   });
