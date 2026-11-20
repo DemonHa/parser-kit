@@ -1,6 +1,6 @@
 {
   "name": "@parser-kit/sql",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "A typed PostgreSQL 17 parser built on @parser-kit/core: DDL, DML, queries and whole psql/pg_dump scripts to a span-annotated AST, with error recovery, and back to SQL.",
   "keywords": [
     "sql",
