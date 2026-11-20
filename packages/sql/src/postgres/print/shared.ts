@@ -20,6 +20,10 @@ import { typeName } from "./types";
 const BARE_WORD = /^[a-z_][a-z0-9_$]*$/;
 const label = (name: string, bareAllowed = true): string => (bareAllowed && BARE_WORD.test(name) ? name : quoted(name));
 
+/** `-0` for a negative zero with no text of its own, which the number printer would write as `0`. */
+export const signedZero = (value: number, raw?: string): string | null =>
+  Object.is(value, -0) && raw === undefined ? "-0" : null;
+
 // A word value: bare unless it would read as a boolean.
 const optionScalar = (v: RelationOptionScalar): Doc => {
   switch (v.kind) {
@@ -32,6 +36,8 @@ const optionScalar = (v: RelationOptionScalar): Doc => {
     }
     case "string":
       return str(v.value);
+    case "number":
+      return signedZero(v.value, v.raw) ?? expr(v);
     default:
       return expr(v);
   }
@@ -63,11 +69,11 @@ export const genericOptions = (options: readonly GenericOption[]): Doc => [
   parenList(options.map((o) => `${label(o.name)} ${str(o.value)}`)),
 ];
 
-// ADD, SET and DROP before a string are the ALTER form's actions, so an option
-// of one of those names is quoted when no action leads it.
-const ALTER_OPTION_ACTIONS = new Set(["add", "set", "drop"]);
-
-/** `OPTIONS ([ADD | SET] name 'value' | DROP name, …)`: an ALTER's generic options. */
+/**
+ * `OPTIONS ([ADD | SET] name 'value' | DROP name, …)`: an ALTER's generic
+ * options. ADD, SET and DROP are actions only when no string follows them,
+ * so an option of one of those names needs no quoting.
+ */
 export const alterGenericOptions = (options: readonly AlterGenericOption[]): Doc => [
   kw("OPTIONS"),
   " ",
@@ -75,10 +81,7 @@ export const alterGenericOptions = (options: readonly AlterGenericOption[]): Doc
     options.map((o) =>
       o.action === "drop"
         ? `${kw("DROP")} ${label(o.name)}`
-        : `${o.action !== undefined ? `${kw(o.action.toUpperCase())} ` : ""}${label(
-            o.name,
-            o.action !== undefined || !ALTER_OPTION_ACTIONS.has(o.name),
-          )} ${str(o.value)}`,
+        : `${o.action !== undefined ? `${kw(o.action.toUpperCase())} ` : ""}${label(o.name)} ${str(o.value)}`,
     ),
   ),
 ];

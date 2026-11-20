@@ -391,14 +391,12 @@ describe("stringify on hand-built trees", () => {
   });
 
   it("throws NotPrintableError for a statement family not printed yet", () => {
-    // The first of these whose family doesn't print it yet, whichever families land first.
-    const pending = new Set<string>(FAMILIES.flatMap((family) => [...family.pending]));
-    const [stmt] = ["CREATE ROLE r", "CREATE SEQUENCE s", "SET x = 1"]
-      .flatMap((sql) => postgres.parse(sql))
-      .filter((s) => pending.has(s.kind));
-    if (stmt !== undefined) {
+    // Any kind a family doesn't print yet; the handler throws before it reads the node.
+    const kind = FAMILIES.flatMap((family) => [...family.pending])[0];
+    if (kind !== undefined) {
+      const stmt = { kind } as Stmt;
       expect(() => stringify(stmt)).toThrow(NotPrintableError);
-      expect(() => stringify(stmt)).toThrow(`A "${stmt.kind}" statement is not yet printable`);
+      expect(() => stringify(stmt)).toThrow(`A "${kind}" statement is not yet printable`);
     }
     // Nested in a query, as a data-modifying CTE body, it throws all the same.
     const [cte] = postgres.parse("WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d");

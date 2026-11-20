@@ -26,7 +26,7 @@ import type {
   TableConstraintAttrs,
   TableItem,
 } from "../ast";
-import { clause, commaList, ident, kw, parenList, parens, qualified, quoted } from "./context";
+import { clause, commaList, ident, kw, lastText, parenList, parens, qualified, quoted } from "./context";
 import { bExpr, expr } from "./expr";
 import { printQuery } from "./query";
 import { defineFamily, statementPrinter } from "./registry";
@@ -40,6 +40,7 @@ import {
   sequenceOption,
   sequenceOptions,
   setSchema,
+  signedZero,
 } from "./shared";
 import { typeName } from "./types";
 
@@ -98,10 +99,13 @@ const indexElement = (e: Expr): Doc =>
   e.kind === "collate" ? [element(e.expr), " ", kw("COLLATE"), " ", collation(e.collation)] : element(e);
 
 // An operator class follows its element's expression, so a word that would
-// continue that expression is quoted (`a "between"`). The others are quoted
-// by `ident` already (reserved words, IS, ISNULL, LIKE, …).
+// continue that expression is quoted (`a "between"`, `f(a) "over" (…)`). The
+// others are quoted by `ident` already (reserved words, IS, ISNULL, LIKE, …).
 const opclass = (parts: readonly string[]): string =>
-  parts.map((p, i) => (i === 0 && p === "between" ? quoted(p) : ident(p))).join(".");
+  parts.map((p, i) => (i === 0 && CONTINUING_WORDS.has(p) ? quoted(p) : ident(p))).join(".");
+// BETWEEN continues any expression; OVER and FILTER a call, when a `(`
+// (the operator class's options) follows.
+const CONTINUING_WORDS = new Set(["between", "over", "filter"]);
 
 // --- constraints ---
 
@@ -358,7 +362,10 @@ const createTable = (t: CreateTable): Doc => {
 
 const createTableAs = (t: CreateTableAs): Doc => {
   const head = [createHead(t.modifiers, t.ifNotExists, t.name), t.columns !== null ? [" ", names(t.columns)] : ""];
-  const query = t.query.kind === "execute" ? statementPrinter.print(t.query) : printQuery(t.query);
+  let query = t.query.kind === "execute" ? statementPrinter.print(t.query) : printQuery(t.query);
+  // A query ending in IS JSON would read the WITH of WITH [NO] DATA as its own
+  // WITH UNIQUE, so it is parenthesised (the parentheses leave the tree as is).
+  if (t.withData !== null && /(^|\s)(json|value|object|array|scalar)$/i.test(lastText(query))) query = parens(query);
   return withClauses(head, [
     ...storageClauses(t),
     clause(kw("AS"), query),
@@ -404,6 +411,9 @@ const createIndex = (i: CreateIndex): Doc => {
 // --- ALTER TABLE ---
 
 const alterColumn = (column: string, rest: Doc): Doc => [kw("ALTER COLUMN"), " ", ident(column), " ", rest];
+
+const statistics = (value: number | null): string =>
+  value === null ? kw("DEFAULT") : (signedZero(value) ?? `${value}`);
 
 const optionalIfExists = (ifExists: boolean | undefined): string => (ifExists ? ` ${kw("IF EXISTS")}` : "");
 
@@ -470,7 +480,7 @@ const alterAction = (a: AlterAction): Doc => {
     case "dropIdentity":
       return alterColumn(a.column, `${kw("DROP IDENTITY")}${optionalIfExists(a.ifExists)}`);
     case "setStatistics":
-      return alterColumn(a.column, `${kw("SET STATISTICS")} ${a.value === null ? kw("DEFAULT") : a.value}`);
+      return alterColumn(a.column, `${kw("SET STATISTICS")} ${statistics(a.value)}`);
     case "setStorage":
       return alterColumn(a.column, `${kw("SET STORAGE")} ${kw((a.storage ?? "default").toUpperCase())}`);
     case "setCompression":
@@ -582,7 +592,7 @@ const alterIndexAction = (a: AlterIndexAction): Doc => {
     case "attachPartition":
       return `${kw("ATTACH PARTITION")} ${qualified(a.partition)}`;
     case "setStatistics":
-      return `${kw("ALTER COLUMN")} ${a.column} ${kw("SET STATISTICS")} ${a.value === null ? kw("DEFAULT") : a.value}`;
+      return `${kw("ALTER COLUMN")} ${a.column} ${kw("SET STATISTICS")} ${statistics(a.value)}`;
     default:
       return alterAction(a);
   }
