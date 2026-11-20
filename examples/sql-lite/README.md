@@ -54,6 +54,7 @@ The statements are read by the same rules as `sqlLite`'s, so a script differs fr
 
 - **Spans.** Statements, expressions, column definitions and constraints have a `span: { start, end }`. Structural parts such as select items, FROM items, CTE entries, `ORDER BY` items, locking clauses and assignments don't. Each end is a `{ row, col }`, with a 1-based `row` and a 0-based `col` (the `(1:26)` in error messages). A span starts and ends at real tokens, so a comment after a node is outside its span. `stripSpans` from `@parser-kit/core` removes them recursively, and the unit tests compare span-stripped trees.
 - **Absent fields.** The fields of the original node shapes are always present, with `null` (or `false`) when the clause isn't written: `alias: null`, `where: null`, `ifExists: false`. Fields added since are optional, and they are **left out** when the clause is absent, never `null`. A flag typed `?: true` (`natural?: true` on a join, `withTies?: true` beside `limit`, `only?: true` on a target, `notValid?: true` on a constraint, `variadic?: true` on a call) is either `true` or missing. A `?: boolean` field is present only when the clause is written, and is `false` when its negative spelling is (`NOT MATERIALIZED`, `NOT DEFERRABLE`, `NO INDENT`, `ASYMMETRIC`). Test such a field with `in` or `=== true`/`=== false`, not by comparing to `null`.
+- **Implicit values.** A value PostgreSQL supplies for a left-out clause part is a node marked `implicit: true`, so it can be told from a written one. The only one is the count of 1 in a count-less `FETCH FIRST ROW ONLY` / `FETCH NEXT ROWS WITH TIES`: `{ kind: "number", value: 1, implicit: true }`. PostgreSQL gives that constant no location, so its span is the `ROW` / `ROWS` word, the real token standing where the count would be written. A written count, `FETCH FIRST 1 ROW ONLY` included, has no `implicit` key.
 - **Numbers.** A number is `{ kind: "number", value: number }`. It gets a `raw?: string` holding the literal's text (`_` separators dropped, and the sign included where the grammar folds one in) when the value's magnitude is 2^53 or more (`9007199254740993`, `1e16`, `1.5e300`), where a double may not hold every digit, or when it overflows to ±Infinity (`1e400`, which JSON would write as `null`). Other numbers keep double precision only: `0.1000000000000000055511151231257827` rounds, and `1e-400` reads as `0`.
 - **Comments** are dropped from the token stream the grammar sees (`sqlParseLexer`). The exported `sqlLexer` still emits `comment` tokens, for highlighters and formatters that tokenize directly.
 - **Strings** are decoded. `E'\x41'`, `U&'\0041'` and `'A'` all give `{ kind: "string", value: "A" }`, and `'foo'` + newline + `'bar'` gives `"foobar"`. `N'…'` is a `typedLiteral` of type `bpchar`, as PostgreSQL reads it.
@@ -94,7 +95,7 @@ The target is PostgreSQL 17's `gram.y`. The lists below are grouped the way the 
 - Subqueries and derived tables, including `(VALUES …)`, `(TABLE …)` and parenthesised set operations as expression subqueries.
 - `ONLY` and the inheritance `*`, alias column lists, column definition lists for record-returning functions (`f() AS x(a int)`), `TABLESAMPLE … REPEATABLE`, `ROWS FROM (…)` and `WITH ORDINALITY`.
 - `GROUP BY [DISTINCT | ALL]` with `ROLLUP` / `CUBE` / `GROUPING SETS` and `()`, `HAVING`, `WINDOW`, `ORDER BY … USING op` and `NULLS FIRST | LAST`.
-- `LIMIT` / `OFFSET` / `FETCH {FIRST | NEXT} … {ROWS ONLY | WITH TIES}`, with `withTies` recorded.
+- `LIMIT` / `OFFSET` / `FETCH {FIRST | NEXT} … {ROWS ONLY | WITH TIES}`, with `withTies` recorded. A count-less `FETCH FIRST ROW ONLY` gets the count of 1 PostgreSQL reads, marked `implicit` (see [AST conventions](#ast-conventions)).
 - Every locking clause (`FOR [NO KEY] UPDATE`, `FOR [KEY] SHARE`, `OF`, `NOWAIT`, `SKIP LOCKED`, `FOR READ ONLY`), before or after the limit.
 - `UNION` / `INTERSECT` / `EXCEPT [ALL | DISTINCT]` with PostgreSQL's precedence (`INTERSECT` binds tighter).
 - CTEs can be `RECURSIVE`, `[NOT] MATERIALIZED`, use `SEARCH` and `CYCLE`, and be data-modifying. A `WITH` may lead any DML statement.
@@ -165,18 +166,18 @@ The target is PostgreSQL 17's `gram.y`. The lists below are grouped the way the 
 
 **Other schema objects**
 
-- Views: `CREATE [OR REPLACE] [TEMP] [RECURSIVE] VIEW`, materialized views (`UNLOGGED`, `USING`, `TABLESPACE`, `WITH [NO] DATA`), and `ALTER` on both (rename, `SET SCHEMA`, `OWNER TO`, `SET` / `RESET (…)`, and `SET TABLESPACE` for materialized views).
-- Sequences, domains, schemas (with schema elements), databases, extensions and tablespaces: `CREATE`, `ALTER` and `DROP`. `ALTER EXTENSION` covers `ADD` / `DROP` member, `SET SCHEMA` and `UPDATE`.
-- Types: enum, composite (without a per-attribute `COLLATE`), range, base (`CREATE TYPE t (INPUT = …)`) and shell (`CREATE TYPE t`). `ALTER TYPE` supports `ADD VALUE`, `RENAME VALUE`, `RENAME`, `OWNER TO` and `SET SCHEMA`.
+- Views: `CREATE [OR REPLACE] [TEMP] [RECURSIVE] VIEW`, materialized views (`UNLOGGED`, `USING`, `TABLESPACE`, `WITH [NO] DATA`), and `ALTER` on both (rename, `SET SCHEMA`, `OWNER TO`, `SET` / `RESET (…)`). A view also takes `ALTER [COLUMN] … SET | DROP DEFAULT`. A materialized view also takes the table actions PostgreSQL allows on one: `SET TABLESPACE`, `CLUSTER ON`, `SET WITHOUT CLUSTER`, `SET ACCESS METHOD`, `REPLICA IDENTITY`, and `ALTER [COLUMN] … SET STATISTICS | STORAGE | COMPRESSION` and `SET | RESET (…)`.
+- Sequences, domains, schemas (with schema elements), databases, extensions and tablespaces: `CREATE`, `ALTER` and `DROP`. `ALTER SEQUENCE` takes `SET LOGGED | UNLOGGED` too. `ALTER EXTENSION` covers `ADD` / `DROP` member, `SET SCHEMA` and `UPDATE`.
+- Types: enum, composite (with a per-attribute `COLLATE`), range, base (`CREATE TYPE t (INPUT = …)`) and shell (`CREATE TYPE t`). `ALTER TYPE` supports `ADD VALUE`, `RENAME VALUE`, `RENAME`, `OWNER TO` and `SET SCHEMA`.
 - Routines: functions, procedures and aggregates, with SQL-standard bodies (`RETURN expr`, `BEGIN ATOMIC … END`). Also triggers, including `CREATE CONSTRAINT TRIGGER`, `REFERENCING OLD | NEW TABLE` and `WHEN`.
 - Policies, publications and subscriptions: `CREATE`, `ALTER` and `DROP`.
 - The long tail: `CAST`, `COLLATION`, `CONVERSION`, `STATISTICS`, `EVENT TRIGGER`, `LANGUAGE`, `ACCESS METHOD`, `TEXT SEARCH {PARSER | DICTIONARY | TEMPLATE | CONFIGURATION}`, and `OPERATOR [CLASS | FAMILY]` (`CREATE` and `DROP`). Generic `ALTER … RENAME TO | OWNER TO | SET SCHEMA` covers those kinds, plus procedures, routines, rules, triggers and large objects, as far as PostgreSQL allows each.
 - `COMMENT ON` every object kind, and `SECURITY LABEL [FOR provider] ON` the kinds PostgreSQL labels.
-- `DROP` for every object kind above except `RULE`, `TRANSFORM` and `ROUTINE`.
+- `DROP` for every object kind above except `RULE` and `TRANSFORM`. `DROP ROUTINE` takes signatures as `DROP FUNCTION` / `PROCEDURE` do.
 
 **Roles and privileges**
 
-- `CREATE` / `ALTER` / `DROP ROLE` and `USER`, and `CREATE GROUP`. `ALTER ROLE` covers options, `RENAME` and `[IN DATABASE] SET` / `RESET`.
+- `CREATE` / `ALTER` / `DROP ROLE` and `USER`, and `CREATE` / `DROP GROUP`. `ALTER ROLE` covers options, `RENAME` and `[IN DATABASE] SET` / `RESET`.
 - `GRANT` / `REVOKE` on every object kind, routines with argument lists included (`ON FUNCTION f(int)`), `ALL … IN SCHEMA`, column privileges, `GRANTED BY`, and role membership with `WITH ADMIN | INHERIT | SET`.
 - `ALTER DEFAULT PRIVILEGES`, `DROP OWNED`, `REASSIGN OWNED`.
 
@@ -186,8 +187,9 @@ The target is PostgreSQL 17's `gram.y`. The lists below are grouped the way the 
 - Aggregates: `JSON_OBJECTAGG(k VALUE v …)` and `JSON_ARRAYAGG(v [ORDER BY …] …)`, with `FILTER` and `OVER`.
 - Query functions: `JSON_VALUE`, `JSON_QUERY` and `JSON_EXISTS`, with `PASSING`, `RETURNING`, the wrapper and `QUOTES` clauses, and `ON EMPTY` / `ON ERROR`, each taking only the clauses PostgreSQL gives it.
 - `JSON_TABLE` as a FROM item, with `FOR ORDINALITY`, regular, `EXISTS` and `NESTED [PATH] … COLUMNS (…)` columns.
-- `JSON(v [WITH | WITHOUT UNIQUE [KEYS]])` and `JSON_SERIALIZE(v [RETURNING t])`. `JSON_SCALAR(x)` takes no clause and is a plain `call` node.
-- The callee names stay unreserved. A call written with none of its clauses is a plain `call` node (see [Known wrong ASTs](#known-wrong-asts)), and so is a quoted or qualified name.
+- `JSON(v [WITH | WITHOUT UNIQUE [KEYS]])`, `JSON_SCALAR(x)` and `JSON_SERIALIZE(v [RETURNING t])`.
+- Each name is a PostgreSQL column-name keyword, and follows gram.y as one. Bare and followed by `(`, it always opens its SQL/JSON form, written with clauses or not: `json_array(1, 2)`, `JSON_OBJECT()` and `JSON_VALUE(j, '$')` give their SQL/JSON nodes. A call shape outside the form is an error (`json_objectagg(k, v)`, `json_arrayagg(DISTINCT a)`, `json_array(a => 1)`). The one plain `call` is JSON_OBJECT's legacy form, `json_object('{a,1}')` / `json_object(keys, values)`, which PostgreSQL also builds as an ordinary function call. A quoted or qualified name is an ordinary function. The names stay usable as column, table and alias names.
+- In `FROM`, each SQL/JSON function but `JSON_TABLE` is a table function, its aggregates without `FILTER` or `OVER`. `JSON_TABLE` is a FROM item of its own, and nowhere else, `ROWS FROM` included.
 
 **XML**
 
@@ -225,7 +227,7 @@ So sql-lite accepts 604 of the 609 statements (99.2%), and node-sql-parser accep
 - `ALTER SYSTEM`.
 - `CREATE RULE` and `CREATE TRANSFORM`.
 
-"Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+"Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. Known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts) (there are none at present).
 
 The test fails if any statement changes bucket. To print the table above:
 
@@ -260,14 +262,13 @@ Every item here was checked against the current grammar and fails to parse.
 **Statements**
 
 - `CREATE RULE` (and `DROP RULE`), `CREATE TRANSFORM` (and `DROP TRANSFORM`), `ALTER SYSTEM`.
-- `ALTER GROUP … ADD | DROP USER`, `DROP GROUP`, `DROP ROUTINE`.
+- `ALTER GROUP … ADD | DROP USER`.
 - `USE db` is a MySQL-ism with no PostgreSQL equivalent. It is rejected **on purpose**, and `pg-coverage.test.ts` pins that.
 
 **Actions on objects that are otherwise supported**
 
 - `ALTER TYPE … ADD | DROP | ALTER | RENAME ATTRIBUTE`, and `ALTER TYPE … SET (…)`.
-- `COLLATE` on a composite type's attribute (`CREATE TYPE c AS (a text COLLATE "C")`).
-- `ALTER MATERIALIZED VIEW` table-style actions: `CLUSTER ON`, `SET WITHOUT CLUSTER`, `ALTER COLUMN … SET STATISTICS | STORAGE | (…)`, `SET ACCESS METHOD`. Also `ALTER SEQUENCE … SET LOGGED | UNLOGGED`.
+- An action list on `ALTER SEQUENCE` (`OWNER TO r, SET LOGGED`). Each action works alone.
 - `ADD CONSTRAINT … UNIQUE | PRIMARY KEY USING INDEX idx`.
 - `ALTER FUNCTION … RESET`, and `ALTER PROCEDURE` / `ALTER ROUTINE` attributes (`SECURITY DEFINER`, `IMMUTABLE`, …). Their `RENAME` / `OWNER TO` / `SET SCHEMA` work.
 - `… [NO] DEPENDS ON EXTENSION` on functions, procedures, triggers, indexes and materialized views.
@@ -306,10 +307,7 @@ Every item here was checked against the current grammar and fails to parse.
 
 ### Known wrong ASTs
 
-These parse without error, but the tree they produce is wrong:
-
-- **A `FETCH` with no count records no `limit`.** `FETCH FIRST ROW ONLY` and `FETCH NEXT ROWS WITH TIES` give `limit: null`, the same as no limit at all. PostgreSQL reads a count of 1.
-- **A SQL/JSON function written with none of its clauses is a plain `call` node.** `json_array(1, 2)`, `JSON_OBJECT()`, `json_arrayagg(v)`, `JSON_VALUE(j, '$')`, `JSON(j)` and `JSON_SERIALIZE(j)` give `{ kind: "call" }`, where PostgreSQL parses each as the SQL/JSON construct. The new node kind appears only once a clause (`VALUE`, `RETURNING`, `ON NULL`, …) is written. `JSON_SCALAR(x)` is always a `call`. The exception is the two-argument `json_object(k, v)`, which PostgreSQL also reads as an ordinary call.
+No input is known to parse into the wrong tree. Report one as a bug.
 
 Numbers below 2^53 in magnitude keep only double precision (see [AST conventions](#ast-conventions)). That is a documented limitation of the number node, not a wrong tree.
 
@@ -335,7 +333,7 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
   - `SET TIME ZONE` with a non-reserved keyword as the zone (`SET TIME ZONE zone`);
   - configuration parameter names that are `type_func_name` keywords (`SET outer = 1`, `SHOW authorization`);
   - `COPY binary FROM stdin` copies a table named `binary`, where `BINARY` is a `type_func_name` keyword in PostgreSQL.
-- **SQL/JSON names in call shapes PostgreSQL forbids.** `json_array`, `json_arrayagg`, `json_object`, `json_objectagg` (and in PostgreSQL 17 also `json_scalar`, `json_serialize`, `json_value`, `json_query`, `json_exists`) can't be ordinary function names there. Here they still parse as calls: `json_objectagg(k, v)`, `json_arrayagg(DISTINCT a)`, `json_array(a => 1)`, `json_value(a)`.
+- **Column-name keywords as routine or type names.** PostgreSQL never takes a bare SQL/JSON or XML function name (`json_array`, `xmlelement`, …) as a `func_name` or a type name. Here those positions still take one: `CALL json_array()`, `CREATE FUNCTION json_value() …`, `x::xmlelement`. In an expression or a `FROM` item, the bare name followed by `(` is always the keyword form, as in PostgreSQL.
 - **`CREATE INDEX IF NOT EXISTS ON t (…)`** with no index name.
 - **`CREATE OR REPLACE MATERIALIZED VIEW`.**
 - **Publication and subscription `WITH (…)` lists** take the general option shape, so `ns.name` keys and parenthesised values parse. PostgreSQL's `definition` has neither.
@@ -379,7 +377,9 @@ sql-lite isn't published yet, so these breaks come before any 0.x release. They 
   - bare `isnull`, `notnull` and `overlaps` as aliases (`SELECT a overlaps FROM t`, `FROM t isnull`). `AS overlaps` still works;
   - `normalize(x, 'NFC')` and other non-keyword forms;
   - `substring(x SIMILAR p)` without `ESCAPE`;
-  - bare `xmlattributes(…)` / `xmlnamespaces(…)` outside XMLELEMENT / XMLTABLE, `xmltable(…)` in an expression, and XML function names in ordinary call shapes (`xmlparse(x)`, `xmlpi(x)`). These used to parse as plain calls.
+  - bare `xmlattributes(…)` / `xmlnamespaces(…)` outside XMLELEMENT / XMLTABLE, `xmltable(…)` in an expression, and XML function names in ordinary call shapes (`xmlparse(x)`, `xmlpi(x)`). These used to parse as plain calls;
+  - SQL/JSON function names in call shapes their gram.y forms don't take: `json_objectagg(k, v)`, `json_arrayagg(DISTINCT a)`, `json_arrayagg(a, b)`, `json_array(a => 1)`, `json_array(*)`, `json_value(a)`, `json_exists()`, `json_scalar(a, b)`, `json()`, a `FILTER` / `OVER` on a non-aggregate (`json_array(1) OVER ()`), and `DISTINCT`, `VARIADIC`, `*`, `ORDER BY` or `OVER` on the legacy `json_object(…)` call. These used to parse as plain calls. A quoted or qualified name still does;
+  - `json_table(…)` in an expression or in `ROWS FROM`, and a bare `json_table(…)` in `FROM` without its path string and `COLUMNS` (`FROM json_table(a, b)`), which used to parse as a table-function call.
 - **Types:** interval field specs outside PostgreSQL's thirteen (`DAY TO YEAR`, `MONTH TO DAY`), a precision on anything but `SECOND`, `int ARRAY[]`, `int ARRAY[3][4]`, `RETURNS SETOF SETOF int`.
 - **DDL:**
   - in a column or domain `DEFAULT`: `IS` tests other than `DISTINCT FROM`, `AT TIME ZONE`, `NOT` / `AND` / `OR`, `LIKE` / `ILIKE` / `SIMILAR TO`, `IN`, `BETWEEN` and `= ANY (…)` (each still parses in parentheses);
@@ -398,6 +398,9 @@ sql-lite isn't published yet, so these breaks come before any 0.x release. They 
 
 **Trees that changed shape:**
 
+- A count-less `FETCH FIRST ROW ONLY` / `FETCH NEXT ROWS WITH TIES` gives `limit: { kind: "number", value: 1, implicit: true }`, not `limit: null`.
+- A bare SQL/JSON function written with none of its clauses gives its SQL/JSON node, not a `call`: `json_array(1, 2)` is a `jsonArray`, `JSON_OBJECT()` a `jsonObject` with no entries, `json_arrayagg(x ORDER BY x)` a `jsonArrayAgg`, `JSON_VALUE(j, '$')` a `jsonValue`, `json(x)` a `jsonParse`, `json_serialize(x)` a `jsonSerialize`, and `JSON_SCALAR(x)` the new `jsonScalar`. So does one written as a `FROM` item (`FROM json_array(1, 2)`). JSON_OBJECT's legacy form stays a `call`.
+
 - Operator precedence follows PostgreSQL. `-2 ^ 2` is `(-2) ^ 2`, `-x COLLATE "C"` is `(-x) COLLATE "C"`, and chained `AT TIME ZONE` nests to the left.
 - `2^-2` lexes as the single operator `^-`, as in PostgreSQL. `2 ^ -2` (spaced) is unchanged.
 - `INTERSECT` binds tighter than `UNION` / `EXCEPT`, so `SELECT 1 UNION SELECT 2 INTERSECT SELECT 3` is `1 ∪ (2 ∩ 3)`. A tail after a set operation moved from the right arm to the `setOp` node.
@@ -412,7 +415,8 @@ sql-lite isn't published yet, so these breaks come before any 0.x release. They 
 
 - `Assignment.value` is `Expr | DefaultValue`, `SetStmt.values` is `Expr[] | "default" | "fromCurrent"`, and `CreateTableAs.query` is `Query | Execute`.
 - A `comment` statement is `{ kind: "comment" } & ObjectRef & { comment }`, so its `name` is optional (`COMMENT ON CAST` has none).
-- `Query` has a new kind, `tableCmd`. `Expr` has `fieldSelect`, `arraySubquery`, `isNormalized`, `isDocument`, `normalize`, `collationFor`, `substringSimilar`, `atLocal` and the `xml*` nodes. `Stmt` has many new kinds. `Expr` also has the SQL/JSON nodes (`jsonObject`, `jsonArray`, `jsonArrayQuery`, `jsonObjectAgg`, `jsonArrayAgg`, `jsonValue`, `jsonQuery`, `jsonExists`, `jsonParse`, `jsonSerialize`), and FROM items have `jsonTable` and `xmlTable`.
+- `Query` has a new kind, `tableCmd`. `Expr` has `fieldSelect`, `arraySubquery`, `isNormalized`, `isDocument`, `normalize`, `collationFor`, `substringSimilar`, `atLocal` and the `xml*` nodes. `Stmt` has many new kinds. `Expr` also has the SQL/JSON nodes (`jsonObject`, `jsonArray`, `jsonArrayQuery`, `jsonObjectAgg`, `jsonArrayAgg`, `jsonValue`, `jsonQuery`, `jsonExists`, `jsonParse`, `jsonScalar`, `jsonSerialize`), and FROM items have `jsonTable` and `xmlTable`.
+- The `number` node has an optional `implicit: true`. A composite `createType`'s `attributes` are `ColumnDefinition`s, with an optional `collate`. `AlterViewAction` adds the materialized view's table actions (`setStatistics`, `setStorage`, `setCompression`, `setColumnOptions`, `resetColumnOptions`, `clusterOn`, `setWithoutCluster`, `setAccessMethod`, `replicaIdentity`), and `AlterSequenceAction` adds `setLogged` and `setUnlogged`.
 - `anyAll.op` can be `like`, `ilike`, `not like` or `not ilike`. `unary`, `binary` and `anyAll` can carry `opSchema`.
 - `sqlLiteScript` returns `ScriptItem[]`, not `Stmt[]`.
 

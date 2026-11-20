@@ -954,6 +954,51 @@ describe("SQL-lite DROP object types", () => {
     });
   });
 
+  // PG's `DROP ROUTINE function_with_argtypes_list`, as DROP FUNCTION / PROCEDURE.
+  it("drops routines with optional signatures", () => {
+    expect(drop("DROP ROUTINE IF EXISTS f(int, text), s.g, h() CASCADE;")).toEqual({
+      kind: "drop",
+      objectType: "routine",
+      concurrently: false,
+      ifExists: true,
+      names: [["f"], ["s", "g"], ["h"]],
+      behavior: "cascade",
+      signatures: [{ star: false, args: [arg("int"), arg("text")] }, null, { star: false, args: [] }],
+    });
+    expect(drop("DROP ROUTINE r(INOUT a int) RESTRICT;")).toMatchObject({
+      objectType: "routine",
+      behavior: "restrict",
+      signatures: [{ star: false, args: [arg("int", { mode: "inout", name: "a" })] }],
+    });
+    expect(() => parse("DROP ROUTINE;")).toThrow(ParseError);
+    expect(() => parse("DROP ROUTINE CONCURRENTLY f;")).toThrow(ParseError);
+    expect(() => parse("DROP ROUTINE f(*);")).toThrow(ParseError);
+  });
+
+  // PG's `DROP GROUP_P [IF EXISTS] role_list`, DROP ROLE's older spelling.
+  it("drops groups like roles, with no CASCADE or RESTRICT", () => {
+    expect(drop("DROP GROUP IF EXISTS a, b;")).toEqual({
+      kind: "drop",
+      objectType: "group",
+      concurrently: false,
+      ifExists: true,
+      names: [["a"], ["b"]],
+      behavior: null,
+    });
+    expect(drop("DROP GROUP g;")).toMatchObject({ objectType: "group", ifExists: false, names: [["g"]] });
+    expect(() => parse("DROP GROUP g CASCADE;")).toThrow(/Expected ";" but found "cascade"/);
+    expect(() => parse("DROP GROUP;")).toThrow(ParseError);
+  });
+
+  it("keeps routine unreserved as a name", () => {
+    expect(firstStmt("SELECT routine FROM routine;")).toMatchObject({
+      columns: [col(name("routine"))],
+      from: [{ kind: "table", name: ["routine"], alias: null }],
+    });
+    expect(drop("DROP ROUTINE routine(routine);")).toMatchObject({ names: [["routine"]] });
+    expect(drop("DROP GROUP routine;")).toMatchObject({ names: [["routine"]] });
+  });
+
   it("drops aggregates by their (*) or typed signature", () => {
     expect(drop("DROP AGGREGATE IF EXISTS myavg(*), s.agg(int);")).toEqual({
       kind: "drop",
@@ -1172,6 +1217,38 @@ describe("SQL-lite CREATE TYPE composite / range", () => {
         { name: "y", type: { name: "float8", args: [], array: false } },
       ],
     });
+  });
+
+  // PG's TableFuncElement: `ColId Typename opt_collate_clause`.
+  it("takes a COLLATE on a composite type's attribute", () => {
+    expect(firstStmt('CREATE TYPE c AS (a text COLLATE "C", b int, d text COLLATE pg_catalog."default");')).toEqual({
+      kind: "createType",
+      form: "composite",
+      name: ["c"],
+      attributes: [
+        { name: "a", type: { name: "text", args: [], array: false }, collate: ["C"] },
+        { name: "b", type: { name: "int", args: [], array: false } },
+        { name: "d", type: { name: "text", args: [], array: false }, collate: ["pg_catalog", "default"] },
+      ],
+    });
+    expect(firstStmt("CREATE TYPE c AS ();")).toEqual({
+      kind: "createType",
+      form: "composite",
+      name: ["c"],
+      attributes: [],
+    });
+    expect(() => parse("CREATE TYPE c AS (a text COLLATE);")).toThrow(/Expected a name but found "\)"/);
+    expect(() => parse('CREATE TYPE c AS (a COLLATE "C");')).toThrow(ParseError);
+    // RETURNS TABLE's columns are func_type alone, with no COLLATE.
+    expect(() => parse('CREATE FUNCTION f() RETURNS TABLE (a text COLLATE "C") AS $$ $$ LANGUAGE sql;')).toThrow(
+      /Expected "," but found "collate"/,
+    );
+  });
+
+  it("keeps a composite attribute called collate usable when quoted", () => {
+    expect(firstStmt('CREATE TYPE c AS ("collate" text COLLATE "C");').attributes).toEqual([
+      { name: "collate", type: { name: "text", args: [], array: false }, collate: ["C"] },
+    ]);
   });
 
   it("parses a range type option list", () => {
@@ -3285,8 +3362,40 @@ describe("SQL-lite FETCH / OFFSET row words", () => {
     });
   });
 
-  it("accepts FETCH with an omitted count", () => {
-    expect(firstStmt("SELECT 1 FETCH FIRST ROW ONLY;")).toMatchObject({ limit: null });
+  // PG reads a left-out count as 1 (gram.y's makeIntConst(1)), so the limit is
+  // a number node marked implicit, not the null of no limit at all.
+  it("reads FETCH with an omitted count as an implicit 1", () => {
+    const one = { kind: "number", value: 1, implicit: true };
+    expect(firstStmt("SELECT 1 FETCH FIRST ROW ONLY;")).toEqual(sel({ columns: [col(num(1))], limit: one }));
+    expect(firstStmt("SELECT 1 ORDER BY 1 FETCH NEXT ROWS WITH TIES;")).toEqual(
+      sel({ columns: [col(num(1))], orderBy: [{ expr: num(1), dir: null, nulls: null }], limit: one, withTies: true }),
+    );
+    expect(firstStmt("SELECT 1 OFFSET 2 ROWS FETCH FIRST ROWS ONLY;")).toMatchObject({ limit: one, offset: num(2) });
+    // Over a set operation the implicit count lands on the setOp node too.
+    expect(firstStmt("SELECT 1 UNION SELECT 2 FETCH NEXT ROW ONLY;")).toMatchObject({ kind: "setOp", limit: one });
+  });
+
+  it("keeps an explicit FETCH count as written, with no implicit flag", () => {
+    expect(firstStmt("SELECT 1 FETCH FIRST 1 ROW ONLY;").limit).toEqual(num(1));
+    expect(firstStmt("SELECT 1 FETCH NEXT (2 + 3) ROWS ONLY;").limit).toEqual(bin("+", num(2), num(3)));
+  });
+
+  // PG gives the constant no location; the span is the ROW / ROWS word, the
+  // real token standing where the count would be written.
+  it("spans an implicit FETCH count over its ROW or ROWS word", () => {
+    const [stmt] = sqlLite.parse("SELECT 1 FETCH FIRST ROW ONLY;") as Record<string, any>[];
+    expect(stmt!.limit).toEqual({
+      kind: "number",
+      value: 1,
+      implicit: true,
+      span: { start: { row: 1, col: 21 }, end: { row: 1, col: 24 } },
+    });
+    const [ties] = sqlLite.parse("SELECT 1 ORDER BY 1\nFETCH NEXT  rows WITH TIES") as Record<string, any>[];
+    expect(ties!.limit.span).toEqual({ start: { row: 2, col: 12 }, end: { row: 2, col: 16 } });
+  });
+
+  it("still rejects a FETCH missing its ROW or ROWS word", () => {
+    expect(() => parse("SELECT 1 FETCH FIRST 1 ONLY;")).toThrow(/Expected "row" or "rows" but found "only"/);
   });
 });
 
@@ -9435,8 +9544,9 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
     expect(fails("ALTER VIEW v frobnicate;")).toThrow(
       expectsKeys(["rename", "owner", "set", "reset", "alter"], '"frobnicate"'),
     );
+    // A materialized view has no column default to drop.
     expect(fails("ALTER MATERIALIZED VIEW m ALTER c DROP DEFAULT;")).toThrow(
-      /Expected "rename", "owner", "set" or "reset" but found "alter"/,
+      /Expected "set" or "reset" but found "drop"/,
     );
     expect(fails("ALTER MATERIALIZED m RENAME TO n;")).toThrow(/Expected "view" but found "m"/);
     expect(fails("ALTER VIEW v SET frob;")).toThrow(/Expected "\(" or "schema" but found "frob"/);
@@ -9453,7 +9563,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
       expectsKeys(["rename", "owner", "set", "as", "no", "owned"], '"frobnicate"'),
     );
     expect(fails("ALTER SEQUENCE s NO frob;")).toThrow(/Expected "minvalue", "maxvalue" or "cycle" but found "frob"/);
-    expect(fails("ALTER SEQUENCE s SET frob;")).toThrow(/Expected "schema" but found "frob"/);
+    expect(fails("ALTER SEQUENCE s SET frob;")).toThrow(/Expected "schema", "logged" or "unlogged" but found "frob"/);
     expect(fails("ALTER SEQUENCE s RESTART RENAME TO t;")).toThrow(/Expected ";" but found "rename"/);
   });
 });
@@ -12903,7 +13013,7 @@ describe("SQL-lite ALTER INDEX ATTACH PARTITION, ALL IN TABLESPACE and matview S
     // SET TABLESPACE is a materialized view's, not a plain view's.
     expect(fails("ALTER VIEW v SET TABLESPACE x;")).toThrow(/Expected "\(" or "schema" but found "tablespace"/);
     expect(fails("ALTER MATERIALIZED VIEW v SET frob;")).toThrow(
-      /Expected "\(", "schema" or "tablespace" but found "frob"/,
+      /Expected "\(", "schema", "tablespace", "without" or "access" but found "frob"/,
     );
   });
 
@@ -12925,6 +13035,134 @@ describe("SQL-lite ALTER INDEX ATTACH PARTITION, ALL IN TABLESPACE and matview S
 });
 
 // --- multi-column UPDATE assignments ---
+
+describe("SQL-lite ALTER MATERIALIZED VIEW table actions and ALTER SEQUENCE SET LOGGED", () => {
+  const stmt = (text: string) => firstStmt(text) as any;
+  const fails = (text: string) => () => sqlLite.parse(text);
+  const mv = (actions: unknown[]) => ({
+    kind: "alterView",
+    materialized: true,
+    ifExists: false,
+    name: ["mv"],
+    actions,
+  });
+
+  // tablecmds.c allows each of these on a materialized view (ATT_MATVIEW).
+  it("takes CLUSTER ON and SET WITHOUT CLUSTER", () => {
+    expect(stmt("ALTER MATERIALIZED VIEW mv CLUSTER ON mv_idx, SET WITHOUT CLUSTER;")).toEqual(
+      mv([{ kind: "clusterOn", index: "mv_idx" }, { kind: "setWithoutCluster" }]),
+    );
+  });
+
+  it("takes the column statistics, storage, compression and option actions", () => {
+    expect(
+      stmt(
+        "ALTER MATERIALIZED VIEW mv ALTER COLUMN a SET STATISTICS 200, ALTER b SET STATISTICS DEFAULT, " +
+          "ALTER c SET STORAGE external, ALTER COLUMN d SET COMPRESSION lz4, ALTER e SET (n_distinct = -1), " +
+          "ALTER f RESET (n_distinct);",
+      ),
+    ).toEqual(
+      mv([
+        { kind: "setStatistics", column: "a", value: 200 },
+        { kind: "setStatistics", column: "b", value: null },
+        { kind: "setStorage", column: "c", storage: "external" },
+        { kind: "setCompression", column: "d", method: "lz4" },
+        { kind: "setColumnOptions", column: "e", options: [{ name: "n_distinct", value: num(-1) }] },
+        { kind: "resetColumnOptions", column: "f", options: [{ name: "n_distinct", value: null }] },
+      ]),
+    );
+    expect(stmt("ALTER MATERIALIZED VIEW mv ALTER c SET STORAGE DEFAULT, ALTER c SET COMPRESSION DEFAULT;")).toEqual(
+      mv([
+        { kind: "setStorage", column: "c", storage: null },
+        { kind: "setCompression", column: "c", method: null },
+      ]),
+    );
+  });
+
+  it("takes SET ACCESS METHOD and REPLICA IDENTITY", () => {
+    expect(stmt("ALTER MATERIALIZED VIEW mv SET ACCESS METHOD heap2, REPLICA IDENTITY USING INDEX i;")).toEqual(
+      mv([
+        { kind: "setAccessMethod", method: "heap2" },
+        { kind: "replicaIdentity", mode: "usingIndex", index: "i" },
+      ]),
+    );
+    expect(stmt("ALTER MATERIALIZED VIEW IF EXISTS mv SET ACCESS METHOD DEFAULT;")).toEqual({
+      ...mv([{ kind: "setAccessMethod", method: null }]),
+      ifExists: true,
+    });
+  });
+
+  it("mixes the new actions with the ones it already took", () => {
+    expect(
+      stmt("ALTER MATERIALIZED VIEW mv SET (fillfactor = 70), CLUSTER ON i, SET TABLESPACE ts, OWNER TO r;"),
+    ).toEqual(
+      mv([
+        { kind: "setOptions", options: [{ name: "fillfactor", value: num(70) }] },
+        { kind: "clusterOn", index: "i" },
+        { kind: "setTablespace", tablespace: "ts" },
+        { kind: "ownerTo", owner: "r" },
+      ]),
+    );
+  });
+
+  // What tablecmds.c refuses on a materialized view, and on a plain view.
+  it("rejects the table actions PG refuses on a view or materialized view", () => {
+    expect(fails("ALTER MATERIALIZED VIEW mv ALTER c SET DEFAULT 1;")).toThrow(
+      /Expected "\(", "statistics", "storage" or "compression" but found "default"/,
+    );
+    expect(fails("ALTER MATERIALIZED VIEW mv ALTER c SET NOT NULL;")).toThrow(/but found "not"/);
+    expect(fails("ALTER MATERIALIZED VIEW mv ALTER c TYPE int;")).toThrow(/Expected "set" or "reset" but found "type"/);
+    expect(fails("ALTER MATERIALIZED VIEW mv ALTER 1 SET STATISTICS 5;")).toThrow(/Expected a name but found "1"/);
+    expect(fails("ALTER MATERIALIZED VIEW mv SET LOGGED;")).toThrow(/but found "logged"/);
+    expect(fails("ALTER MATERIALIZED VIEW mv SET WITHOUT OIDS;")).toThrow(/Expected "cluster" but found "oids"/);
+    expect(fails("ALTER MATERIALIZED VIEW mv CLUSTER i;")).toThrow(/Expected "on" but found "i"/);
+    expect(fails("ALTER MATERIALIZED VIEW mv ENABLE TRIGGER ALL;")).toThrow(/but found "enable"/);
+    expect(fails("ALTER MATERIALIZED VIEW mv ADD COLUMN c int;")).toThrow(/but found "add"/);
+    expect(fails("ALTER VIEW v CLUSTER ON i;")).toThrow(/but found "cluster"/);
+    expect(fails("ALTER VIEW v SET WITHOUT CLUSTER;")).toThrow(/Expected "\(" or "schema" but found "without"/);
+    expect(fails("ALTER VIEW v SET ACCESS METHOD heap;")).toThrow(/Expected "\(" or "schema" but found "access"/);
+    expect(fails("ALTER VIEW v ALTER c SET STATISTICS 1;")).toThrow(/Expected "default" but found "statistics"/);
+    expect(fails("ALTER VIEW v REPLICA IDENTITY FULL;")).toThrow(/but found "replica"/);
+  });
+
+  it("takes SET LOGGED and SET UNLOGGED on a sequence", () => {
+    expect(stmt("ALTER SEQUENCE s SET LOGGED;")).toEqual({
+      kind: "alterSequence",
+      ifExists: false,
+      name: ["s"],
+      action: { kind: "setLogged" },
+    });
+    expect(stmt("ALTER SEQUENCE IF EXISTS app.s SET UNLOGGED;")).toEqual({
+      kind: "alterSequence",
+      ifExists: true,
+      name: ["app", "s"],
+      action: { kind: "setUnlogged" },
+    });
+    expect(stmt("ALTER SEQUENCE s SET SCHEMA t;").action).toEqual({ kind: "setSchema", schema: "t" });
+    expect(fails("ALTER SEQUENCE s SET TABLESPACE t;")).toThrow(
+      /Expected "schema", "logged" or "unlogged" but found "tablespace"/,
+    );
+  });
+
+  it("keeps the action words unreserved as names", () => {
+    const words = ["cluster", "without", "access", "method", "replica", "identity", "logged", "unlogged", "storage"];
+    expect(firstStmt(`SELECT ${words.join(", ")} FROM t;`).columns.map((c: any) => c.expr)).toEqual(
+      words.map((word) => name(word)),
+    );
+    // As the altered column and index names too.
+    expect(stmt("ALTER MATERIALIZED VIEW cluster ALTER storage SET STORAGE main, CLUSTER ON without;")).toEqual({
+      ...mv([
+        { kind: "setStorage", column: "storage", storage: "main" },
+        { kind: "clusterOn", index: "without" },
+      ]),
+      name: ["cluster"],
+    });
+    expect(stmt("ALTER SEQUENCE logged SET UNLOGGED;")).toMatchObject({
+      name: ["logged"],
+      action: { kind: "setUnlogged" },
+    });
+  });
+});
 
 describe("SQL-lite multi-column UPDATE assignments", () => {
   const setOf = (src: string) => firstStmt(`UPDATE t SET ${src};`).set;
@@ -16399,31 +16637,182 @@ describe("SQL-lite SQL/JSON functions", () => {
       value: v(x),
       returning: { type: ct("text") },
     });
-    // No clause at all: JSON_SCALAR is always an ordinary call node.
-    expect(colExpr("JSON_SCALAR(x + 1)")).toEqual(call("json_scalar", [bin("+", x, num(1))]));
+    // JSON_SCALAR takes one expression and no clause, as gram.y's JsonScalarExpr.
+    expect(colExpr("JSON_SCALAR(x + 1)")).toEqual({ kind: "jsonScalar", value: bin("+", x, num(1)) });
   });
 
-  it("keeps a call with no SQL/JSON clause an ordinary call", () => {
-    // The legacy json_object(text[]) and json_object(keys, values).
+  // gram.y has a production for each bare name, so a call written with none of
+  // its clauses is still the SQL/JSON node.
+  it("makes the SQL/JSON node of a call written with no clause", () => {
+    expect(colExpr("JSON_ARRAY(1, 2, 'x')")).toEqual({
+      kind: "jsonArray",
+      elements: [v(num(1)), v(num(2)), v(str("x"))],
+    });
+    expect(colExpr("json_array()")).toEqual({ kind: "jsonArray", elements: [] });
+    expect(colExpr("JSON_OBJECT()")).toEqual({ kind: "jsonObject", entries: [] });
+    expect(colExpr("json_arrayagg(x)")).toEqual({ kind: "jsonArrayAgg", value: v(x) });
+    expect(colExpr("JSON_ARRAYAGG(x ORDER BY x)")).toEqual({
+      kind: "jsonArrayAgg",
+      value: v(x),
+      orderBy: [{ expr: x, dir: null, nulls: null }],
+    });
+    expect(colExpr("json_objectagg(k : x)")).toEqual({ kind: "jsonObjectAgg", key: name("k"), value: v(x) });
+    expect(colExpr("JSON_VALUE(doc, '$')")).toEqual({ kind: "jsonValue", context: v(name("doc")), path: str("$") });
+    expect(colExpr("json_query(doc, '$')")).toEqual({ kind: "jsonQuery", context: v(name("doc")), path: str("$") });
+    expect(colExpr("json_exists(doc, '$.a')")).toEqual({
+      kind: "jsonExists",
+      context: v(name("doc")),
+      path: str("$.a"),
+    });
+    expect(colExpr("JSON(x)")).toEqual({ kind: "jsonParse", value: v(x) });
+    expect(colExpr("json_serialize(x)")).toEqual({ kind: "jsonSerialize", value: v(x) });
+    expect(colExpr("json_scalar(x)")).toEqual({ kind: "jsonScalar", value: x });
+    // The aggregates still take FILTER and OVER.
+    expect(colExpr("json_arrayagg(x) FILTER (WHERE x > 0) OVER w")).toEqual({
+      kind: "window",
+      fn: { kind: "aggFilter", fn: { kind: "jsonArrayAgg", value: v(x) }, where: bin(">", x, num(0)) },
+      name: "w",
+      partitionBy: null,
+      orderBy: null,
+      frame: null,
+    });
+  });
+
+  // gram.y's `JSON_OBJECT '(' func_arg_list ')'`, which PG builds as a FuncCall:
+  // the legacy json_object(text[]) and json_object(keys text[], values text[]).
+  it("keeps JSON_OBJECT's legacy forms ordinary calls", () => {
     expect(colExpr("json_object('{a,1,b,2}')")).toEqual(call("json_object", [str("{a,1,b,2}")]));
     expect(colExpr("json_object(k, v)")).toEqual(call("json_object", [name("k"), name("v")]));
-    expect(colExpr("JSON_ARRAY(1, 2, 'x')")).toEqual(call("json_array", [num(1), num(2), str("x")]));
-    expect(colExpr("JSON_ARRAYAGG(x ORDER BY x)")).toEqual(
-      call("json_arrayagg", [x], { orderBy: [{ expr: x, dir: null, nulls: null }] }),
+    expect(colExpr("JSON_OBJECT(ARRAY['a', 'b'], ARRAY['1', '2'])")).toEqual(
+      call("json_object", [
+        { kind: "array", elements: [str("a"), str("b")] },
+        { kind: "array", elements: [str("1"), str("2")] },
+      ]),
     );
-    expect(colExpr("json_exists(doc, '$.a')")).toEqual(call("json_exists", [name("doc"), str("$.a")]));
-    expect(colExpr("json(x)")).toEqual(call("json", [x]));
-    expect(colExpr("json_object()")).toEqual(call("json_object", []));
+    // func_arg_list takes named arguments, unlike the constructor.
+    expect(colExpr('json_object(keys => k, "values" := v)')).toEqual(
+      call("json_object", [
+        { kind: "namedArg", name: "keys", value: name("k") },
+        { kind: "namedArg", name: "values", value: name("v") },
+      ]),
+    );
+    // Only a VALUE or `:` after the first argument makes the constructor; the
+    // two lists never mix.
+    expect(bad("SELECT json_object(k, 'b' VALUE 1) FROM t;")).toThrow(/Expected "\)" but found "value"/);
+    expect(bad("SELECT json_object(k => 1 VALUE 2) FROM t;")).toThrow(/Expected "\)" but found "value"/);
+    // A legacy call takes none of func_application's extras.
+    expect(bad("SELECT json_object(DISTINCT a) FROM t;")).toThrow(/but found "distinct"/);
+    expect(bad("SELECT json_object(VARIADIC a) FROM t;")).toThrow(/but found "variadic"/);
+    expect(bad("SELECT json_object(*) FROM t;")).toThrow(/but found "\*"/);
+    expect(bad("SELECT json_object(a ORDER BY a) FROM t;")).toThrow(/Expected "\)" but found "order"/);
+    expect(bad("SELECT json_object(a, b) OVER () FROM t;")).toThrow(/but found "\("/);
+  });
+
+  // Each name is a col_name_keyword, which PG never reads as a bare function
+  // name: a shape outside its production is a syntax error.
+  it("rejects the call shapes PG forbids for the SQL/JSON names", () => {
+    expect(bad("SELECT json_objectagg(k, v) FROM t;")).toThrow(/Expected "value" or ":" but found ","/);
+    expect(bad("SELECT json_objectagg() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT json_objectagg(k VALUE v, k2 VALUE v2) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT json_arrayagg(DISTINCT a) FROM t;")).toThrow(/but found "distinct"/);
+    expect(bad("SELECT json_arrayagg(a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT json_arrayagg() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT json_arrayagg(a) WITHIN GROUP (ORDER BY a) FROM t;")).toThrow(ParseError);
+    expect(bad("SELECT json_array(a => 1) FROM t;")).toThrow(/Expected "\)" but found "=>"/);
+    expect(bad("SELECT json_array(*) FROM t;")).toThrow(/but found "\*"/);
+    expect(bad("SELECT json_array(VARIADIC a) FROM t;")).toThrow(/but found "variadic"/);
+    expect(bad("SELECT json_array(1 ORDER BY 1) FROM t;")).toThrow(/Expected "\)" but found "order"/);
+    expect(bad("SELECT json_array(NULL ON NULL) FROM t;")).toThrow(/Expected "\)" but found "on"/);
+    expect(bad("SELECT json_array(1) OVER () FROM t;")).toThrow(ParseError);
+    expect(bad("SELECT json_value(a) FROM t;")).toThrow(/Expected "," but found "\)"/);
+    expect(bad("SELECT json_query(a, b, c) FROM t;")).toThrow(/but found ","/);
+    expect(bad("SELECT json_exists() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT json_value(doc => 1, '$') FROM t;")).toThrow(/but found "=>"/);
+    expect(bad("SELECT json() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT json(a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT json_scalar() FROM t;")).toThrow(/but found "\)"/);
+    expect(bad("SELECT json_scalar(a FORMAT JSON) FROM t;")).toThrow(/Expected "\)" but found "format"/);
+    expect(bad("SELECT json_scalar(a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(bad("SELECT json_serialize(a, b) FROM t;")).toThrow(/but found ","/);
+    // JSON_TABLE is a FROM item of its own, nowhere else.
+    expect(bad("SELECT json_table(a, b) FROM t;")).toThrow(/JSON_TABLE is allowed only as a FROM item of its own/);
+    expect(bad("SELECT * FROM ROWS FROM (json_table(doc, '$' COLUMNS (a int)));")).toThrow(
+      /JSON_TABLE is allowed only as a FROM item of its own/,
+    );
+    expect(bad("SELECT * FROM json_table(x, y) j;")).toThrow(/Expected a string constant as the JSON_TABLE path/);
+    expect(bad("SELECT * FROM json_table(x, '$') j;")).toThrow(/Expected "columns" but found "\)"/);
+  });
+
+  it("keeps a quoted or qualified SQL/JSON name an ordinary function", () => {
+    expect(colExpr('"json_array"(1, 2)')).toEqual(call("json_array", [num(1), num(2)]));
+    expect(colExpr("pg_catalog.json_objectagg(k, v)")).toEqual(
+      call("pg_catalog.json_objectagg", [name("k"), name("v")]),
+    );
+    expect(colExpr('"json_arrayagg"(DISTINCT a) OVER ()')).toMatchObject({
+      kind: "window",
+      fn: call("json_arrayagg", [name("a")], { distinct: true }),
+    });
+    expect(colExpr("s.json_scalar(a => 1)")).toEqual(
+      call("s.json_scalar", [{ kind: "namedArg", name: "a", value: num(1) }]),
+    );
+    expect(firstStmt('SELECT * FROM "json_table"(x, y) j;').from).toEqual([
+      { kind: "function", call: call("json_table", [x, name("y")]), alias: "j" },
+    ]);
+    // A clause makes no SQL/JSON form of one.
+    expect(bad("SELECT \"json_object\"('a' VALUE 1);")).toThrow(/Expected "\)" but found "value"/);
+    expect(bad("SELECT pg_catalog.json_value(doc, '$' RETURNING int);")).toThrow(/Expected "\)" but found "returning"/);
     // Other json functions are untouched.
     expect(colExpr("json_array_length(x)")).toEqual(call("json_array_length", [x]));
     expect(colExpr("json_build_object('a', 1)")).toEqual(call("json_build_object", [str("a"), num(1)]));
-    // A quoted or qualified name is an ordinary function, clause or not.
-    expect(bad("SELECT \"json_object\"('a' VALUE 1);")).toThrow(/Expected "\)" but found "value"/);
-    expect(bad("SELECT pg_catalog.json_value(doc, '$' RETURNING int);")).toThrow(/Expected "\)" but found "returning"/);
-    // So is a FROM call to json_table without COLUMNS.
-    expect(firstStmt("SELECT * FROM json_table(x, y) j;").from).toEqual([
-      { kind: "function", call: call("json_table", [x, name("y")]), alias: "j" },
+    // And `json` still names the type.
+    expect(colExpr("json '{}'")).toEqual({ kind: "typedLiteral", type: ct("json"), value: "{}" });
+    expect(colExpr("x::json")).toEqual({ kind: "cast", expr: x, type: ct("json") });
+  });
+
+  // gram.y's func_table is func_expr_windowless, which takes every SQL/JSON
+  // function, its aggregates without FILTER or OVER.
+  it("makes the SQL/JSON node of a FROM call", () => {
+    expect(firstStmt("SELECT * FROM json_array(1, 2) a, json_object('{a,1}') o, json_arrayagg(x) g;").from).toEqual([
+      { kind: "function", call: { kind: "jsonArray", elements: [v(num(1)), v(num(2))] }, alias: "a" },
+      { kind: "function", call: call("json_object", [str("{a,1}")]), alias: "o" },
+      { kind: "function", call: { kind: "jsonArrayAgg", value: v(x) }, alias: "g" },
     ]);
+    expect(firstStmt("SELECT * FROM ROWS FROM (json_scalar(1), f(2));").from).toEqual([
+      { kind: "rowsFrom", calls: [{ kind: "jsonScalar", value: num(1) }, call("f", [num(2)])], alias: null },
+    ]);
+    expect(bad("SELECT * FROM json_arrayagg(x) OVER ();")).toThrow(ParseError);
+    expect(bad("SELECT * FROM json_objectagg(k, v);")).toThrow(/Expected "value" or ":" but found ","/);
+  });
+
+  it("keeps the SQL/JSON function names unreserved as names and aliases", () => {
+    for (const word of [
+      "json",
+      "json_array",
+      "json_arrayagg",
+      "json_exists",
+      "json_object",
+      "json_objectagg",
+      "json_query",
+      "json_scalar",
+      "json_serialize",
+      "json_table",
+      "json_value",
+    ]) {
+      expect(firstStmt(`SELECT ${word}, t.${word} FROM ${word};`)).toMatchObject({
+        columns: [col(name(word)), col(name("t", word))],
+        from: [{ kind: "table", name: [word], alias: null }],
+      });
+      expect(firstStmt(`SELECT a AS ${word}, b ${word} FROM t ${word};`)).toMatchObject({
+        columns: [col(name("a"), word), col(name("b"), word)],
+        from: [{ kind: "table", name: ["t"], alias: word }],
+      });
+      expect(firstStmt(`CREATE TABLE ${word} (${word} int);`)).toMatchObject({
+        name: [word],
+        items: [{ name: word }],
+      });
+      // Only a `(` straight after the bare name opens the keyword form.
+      expect(colExpr(`${word} + 1`)).toEqual(bin("+", name(word), num(1)));
+    }
   });
 
   it("parses JSON_TABLE in FROM with an alias, a join and LATERAL", () => {
@@ -16588,11 +16977,9 @@ describe("SQL-lite SQL/JSON functions", () => {
     expect(colExpr('JSON(x FORMAT JSON ENCODING "UTF16")')).toMatchObject({ value: { format: { encoding: "utf16" } } });
     expect(bad("SELECT JSON(x WITH KEYS) FROM t;")).toThrow(/Expected "unique" but found "keys"/);
     expect(bad("SELECT JSON_SERIALIZE(x RETURNING) FROM t;")).toThrow(/but found "\)"/);
-    // A clause after a named, VARIADIC or `*` argument is no SQL/JSON form.
-    expect(bad("SELECT JSON_ARRAY(a => 1 RETURNING jsonb) FROM t;")).toThrow(/Expected "\)" but found "returning"/);
-    expect(bad("SELECT JSON_ARRAYAGG(DISTINCT x RETURNING jsonb) FROM t;")).toThrow(
-      /Expected "\)" but found "returning"/,
-    );
+    // No SQL/JSON form takes a named, VARIADIC or `*` argument, or DISTINCT.
+    expect(bad("SELECT JSON_ARRAY(a => 1 RETURNING jsonb) FROM t;")).toThrow(/Expected "\)" but found "=>"/);
+    expect(bad("SELECT JSON_ARRAYAGG(DISTINCT x RETURNING jsonb) FROM t;")).toThrow(/but found "distinct"/);
     // JSON_TABLE needs its COLUMNS, holding at least one column, and is a FROM item only.
     expect(bad("SELECT * FROM JSON_TABLE(doc, '$' AS p);")).toThrow(/Expected "columns" but found "\)"/);
     expect(bad("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS ());")).toThrow(/but found "\)"/);
@@ -16610,7 +16997,9 @@ describe("SQL-lite SQL/JSON functions", () => {
       /Expected "error" but found "empty"/,
     );
     expect(bad("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a int)) WITH ORDINALITY;")).toThrow(/but found "with"/);
-    expect(bad("SELECT JSON_TABLE(doc, '$' COLUMNS (a int)) FROM t;")).toThrow(/Expected "\)" but found "columns"/);
+    expect(bad("SELECT JSON_TABLE(doc, '$' COLUMNS (a int)) FROM t;")).toThrow(
+      /JSON_TABLE is allowed only as a FROM item of its own/,
+    );
   });
 
   it("keeps the SQL/JSON clause words unreserved as names and aliases", () => {
