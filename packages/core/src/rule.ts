@@ -23,6 +23,11 @@ export const matchesFirst = <TT extends string>(
   );
 };
 
+/**
+ * Output sink for the `print` hooks on {@link Rule} and `custom()`.
+ *
+ * @deprecated Exists only for the unused printing hooks. Printing will be provided by `@parser-kit/core/print`; those hooks were never wired up and will be removed before 1.0, along with this type.
+ */
 export interface Printer {
   write(text: string): void;
 }
@@ -34,13 +39,29 @@ export interface Rule<T, TT extends string = string> {
   parse(ctx: ParseContext<TT>): T;
   first(): readonly FirstEntry<TT>[];
   expected(labels?: TypeLabels): string;
+  /**
+   * Transform the parsed value. `fn` also receives the span the rule matched.
+   *
+   * @param inverse **Deprecated.** Never called, only stored as the new rule's `inverse`.
+   * Pass `fn` alone. Printing will be provided by `@parser-kit/core/print`; this argument was never wired up and will be removed before 1.0.
+   */
   map<U>(fn: (value: T, span: Span) => U, inverse?: (value: U) => T): Rule<U, TT>;
   describe(display: string): Rule<T, TT>;
+  /**
+   * Never called by parser-kit.
+   *
+   * @deprecated Printing will be provided by `@parser-kit/core/print`; this hook was never wired up and will be removed before 1.0.
+   */
   print?(value: T, out: Printer): void;
   /** True when the rule can succeed without consuming input (e.g. optional). */
   readonly nullable?: boolean;
   /** Set by attempt(): oneOf/optional try the rule with backtracking. */
   readonly backtracks?: boolean;
+  /**
+   * The `inverse` passed to `map()`. Never read by parser-kit.
+   *
+   * @deprecated Printing will be provided by `@parser-kit/core/print`; this hook was never wired up and will be removed before 1.0.
+   */
   readonly inverse?: (value: unknown) => unknown;
 }
 
@@ -356,7 +377,9 @@ interface RuleImpl<T, TT extends string> {
   expected(labels?: TypeLabels): string;
   nullable?: boolean;
   backtracks?: boolean;
+  /** @deprecated Printing will be provided by `@parser-kit/core/print`; this hook was never wired up and will be removed before 1.0. */
   print?(value: T, out: Printer): void;
+  /** @deprecated Printing will be provided by `@parser-kit/core/print`; this hook was never wired up and will be removed before 1.0. */
   inverse?: (value: unknown) => unknown;
 }
 

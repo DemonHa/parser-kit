@@ -513,6 +513,7 @@ export function custom<T, TT extends string = string>(
   meta: {
     expected: string;
     first: readonly FirstEntry<TT>[];
+    /** @deprecated Never called by parser-kit. Printing will be provided by `@parser-kit/core/print`; this option was never wired up and will be removed before 1.0. */
     print?: (value: T, out: Printer) => void;
   },
 ): Rule<T, TT> {
