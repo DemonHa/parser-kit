@@ -9,6 +9,7 @@ import type {
   IndexOrder,
   Setting,
   Table,
+  TablePartial,
 } from "../src/index";
 import { id, only, parse, parseError, span } from "./helpers";
 
@@ -274,6 +275,20 @@ describe("checks", () => {
     expect(block.entries[0]!.span).toEqual(span(4, 4, 4, 24));
     expect(block.entries[0]!.expression.span).toEqual(span(4, 4, 4, 12));
     expect(block.entries[0]!.settings[0]!.span).toEqual(span(4, 14, 4, 23));
+  });
+});
+
+describe("indexes and checks in a table partial", () => {
+  it("parses them like in a table", () => {
+    const p = only(
+      "TablePartial p {\n  a int [check: `a > 0`]\n  indexes {\n    (a) [unique]\n  }\n  checks {\n    `a < 9`\n  }\n}",
+      "tablePartial",
+    ) as TablePartial;
+    expect(p.items.map((item) => item.type)).toEqual(["column", "indexes", "checks"]);
+    expect((p.items[1] as Indexes).entries).toEqual([{ fields: [comp(col("a"))], settings: [{ kind: "unique" }] }]);
+    expect((p.items[2] as Checks).entries).toEqual([
+      { expression: { kind: "expression", value: "a < 9" }, settings: [] },
+    ]);
   });
 });
 

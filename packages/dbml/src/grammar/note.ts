@@ -1,12 +1,22 @@
-import { custom, type Span } from "@parser-kit/core";
+import { custom, type Position, type Span } from "@parser-kit/core";
 import {
   type Ctx,
+  colorSetting,
+  defineElement,
   expectPunc,
   expectSpace,
+  fail,
+  type Ident,
   isPunc,
   isWord,
   peekPastNewlines,
+  type QualifiedName,
+  readHeaderSettings,
+  readNone,
   readNoteString,
+  readQualifiedName,
+  type Setting,
+  type SettingsSpec,
   type StringValue,
   skipNewlines,
   type TT,
@@ -53,3 +63,45 @@ export const noteItem = custom<Note, TT>(
   },
   { expected: '"Note"', first: [{ type: "ident", value: "note" }] },
 );
+
+// A sticky note, a top-level element: `Note name [settings] { '…' }`. Only
+// the top level reads `note` this way; in a body, `note` is the note item or
+// a name (see `isNoteItem`).
+
+export interface StickyNote {
+  type: "stickyNote";
+  name: QualifiedName;
+  settings: Setting[];
+  value: StringValue;
+  span: Span;
+}
+
+// `color` takes a color or the word `none`.
+const stickyColorSetting = (ctx: Ctx, key: Ident, start: Position): Setting => {
+  const token = ctx.peek();
+  if (token?.type === "color") return colorSetting(ctx, key, start);
+  if (!isWord(token, "none")) fail(ctx, 'a color or "none"');
+  const value = readNone(ctx);
+  return { kind: "property", key: { ...key, value: key.value.toLowerCase() }, value, span: ctx.spanFrom(start) };
+};
+
+/** What a sticky note's settings list accepts. */
+export const STICKY_NOTE_SETTINGS: SettingsSpec = {
+  display: "a sticky note setting",
+  flags: {},
+  values: { color: stickyColorSetting },
+  custom: true,
+};
+
+export const stickyNoteElement = defineElement("note", "Note", (ctx, start): StickyNote => {
+  skipNewlines(ctx);
+  const name = readQualifiedName(ctx, "a sticky note name");
+  const { settings, settingsAllowed } = readHeaderSettings(ctx, STICKY_NOTE_SETTINGS);
+  if (!isPunc(ctx.peek(), "{")) fail(ctx, settingsAllowed ? '"[" or "{"' : '"{"');
+  ctx.next();
+  skipNewlines(ctx);
+  const value = readNoteString(ctx);
+  skipNewlines(ctx);
+  expectPunc(ctx, "}");
+  return { type: "stickyNote", name, settings, value, span: ctx.spanFrom(start) };
+});

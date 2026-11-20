@@ -20,7 +20,7 @@ exist yet are the ones still to be written.
     (`dedentNote`).
   - `grammar/` — one module per construct (`table.ts`, `column.ts`, `ref.ts`,
     `enum.ts`, `project.ts`, `note.ts`, `indexes.ts`, `group.ts`,
-    `partial.ts`, `records.ts`), the shared rules in `common.ts` (names,
+    `partial.ts`, `injection.ts`, `records.ts`), the shared rules in `common.ts` (names,
     strings, values, the settings framework, the `{ … }` body reader and
     `defineElement`), and two registries: `root.ts` (`ELEMENTS`, the top-level
     elements, plus the top-level loop and its recovery) and `table-items.ts`

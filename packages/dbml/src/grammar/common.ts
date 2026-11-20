@@ -286,11 +286,17 @@ export const atNumber = (ctx: Ctx): boolean => {
   return token !== null && (token.type === "number" || isPunc(token, "-") || isPunc(token, "+"));
 };
 
-/** A number with an optional leading `-` or `+` (spaces may separate the sign). */
-export const readNumber = (ctx: Ctx): NumberValue => {
+/**
+ * A number with an optional leading `-` or `+` (spaces may separate the sign,
+ * and line breaks too with `breaksAfterSign`).
+ */
+export const readNumber = (ctx: Ctx, breaksAfterSign = false): NumberValue => {
   const start = ctx.position();
   let sign = "";
-  if (isPunc(ctx.peek(), "-") || isPunc(ctx.peek(), "+")) sign = ctx.next()!.value;
+  if (isPunc(ctx.peek(), "-") || isPunc(ctx.peek(), "+")) {
+    sign = ctx.next()!.value;
+    if (breaksAfterSign) skipNewlines(ctx);
+  }
   if (ctx.peek()?.type !== "number") fail(ctx, "a number");
   const text = ctx.next()!.value;
   const magnitude = Number(text);
@@ -298,6 +304,18 @@ export const readNumber = (ctx: Ctx): NumberValue => {
   const written = sign + text;
   const exact = Number.isSafeInteger(value) && written === String(value);
   return { kind: "number", value, ...(!exact && { raw: written }), span: ctx.spanFrom(start) };
+};
+
+/** True when an enum value (`enum.value`, `schema.enum.value`) comes next: a name, then a dot. */
+export const atEnumConstant = (ctx: Ctx): boolean => isName(ctx.peek()) && isPunc(peekPastNewlines(ctx, 1), ".");
+
+/** An enum value, `enum.value` or `schema.enum.value`; line breaks may surround the dots. */
+export const readEnumConstant = (ctx: Ctx): EnumConstant => {
+  const path = [readIdent(ctx)];
+  while (path.length < 3 && eatDot(ctx)) {
+    path.push(readIdent(ctx, "an enum value"));
+  }
+  return { kind: "enumConstant", path, span: ctx.spanFrom(path[0]!.span.start) };
 };
 
 export const isBooleanWord = (token: Tok | null): boolean => isWord(token, "true") || isWord(token, "false");
@@ -313,14 +331,21 @@ export const readColor = (ctx: Ctx): ColorValue => {
   return { kind: "color", value: token.value, span: { ...token.position } };
 };
 
-/** What a custom property may hold: a string, a number, a boolean or a color. */
+/** The word `none` (any case): `@dbml/core` takes it as a custom property value and as a sticky note's `color`. */
+export const readNone = (ctx: Ctx): IdentifierValue => {
+  const value = identFrom(ctx.next()!);
+  return { kind: "identifier", value, span: value.span };
+};
+
+/** What a custom property may hold: a string, a number, a boolean, a color or `none`. */
 export const readPropertyValue = (ctx: Ctx): Value => {
   const token = ctx.peek();
   if (isString(token)) return stringFrom(ctx.next()!);
   if (atNumber(ctx)) return readNumber(ctx);
   if (isBooleanWord(token)) return readBoolean(ctx);
   if (token?.type === "color") return readColor(ctx);
-  return fail(ctx, "a string, a number, a boolean or a color");
+  if (isWord(token, "none")) return readNone(ctx);
+  return fail(ctx, 'a string, a number, a boolean, a color or "none"');
 };
 
 // --- Settings ---
@@ -331,6 +356,7 @@ export type Setting =
   | { kind: "null"; not: boolean; span: Span }
   | { kind: "unique"; bare?: true; span: Span }
   | { kind: "increment" | "inactive"; span: Span }
+  | { kind: "example"; span: Span }
   | { kind: "default"; value: Value; span: Span }
   | { kind: "note"; value: StringValue; span: Span }
   | { kind: "ref"; relation: Relation; target: Endpoint; span: Span }
@@ -348,7 +374,7 @@ export type Setting =
  * value, keyed by their lowercase words (`"primary key"`); `values` are
  * `key: value` settings keyed by their lowercase key. With `custom`, any other
  * `key: value` is a `property` (custom properties: a key of one or more words
- * and a string, number, boolean or color value).
+ * and a string, number, boolean, color or `none` value).
  */
 export interface SettingsSpec {
   /** What one setting of this context is called in error messages (`a column setting`). */
@@ -448,6 +474,28 @@ export const readOptionalSettings = (ctx: Ctx, spec: SettingsSpec): Setting[] =>
   if (!isPunc(ctx.peek(), "[")) return [];
   expectSpace(ctx);
   return readSettings(ctx, spec);
+};
+
+/**
+ * The settings list of an element header, if one comes next, and the line
+ * breaks before its `{`. `@dbml/core` reads a `[` after a line break that
+ * directly follows the name as part of that name, so the list may start on a
+ * later line only when a space or a comment ends the name's line. (The lexer
+ * drops a `\r` like a space, so a CRLF line ending counts as one here;
+ * `@dbml/core` does not count it.) `settingsAllowed` says whether a `[` could
+ * still have come where the cursor stops, for the caller's error message.
+ */
+export const readHeaderSettings = (
+  ctx: Ctx,
+  spec: SettingsSpec,
+): { settings: Setting[]; hasSettings: boolean; settingsAllowed: boolean } => {
+  const spacedBreak = isNewline(ctx.peek()) && !touches(ctx.lastEnd(), ctx.peek());
+  if (spacedBreak && isPunc(peekPastNewlines(ctx), "[")) skipNewlines(ctx);
+  const hasSettings = isPunc(ctx.peek(), "[");
+  const settings = readOptionalSettings(ctx, spec);
+  const settingsAllowed = !hasSettings && (spacedBreak || !isNewline(ctx.peek()));
+  skipNewlines(ctx);
+  return { settings, hasSettings, settingsAllowed };
 };
 
 // --- Bodies ---

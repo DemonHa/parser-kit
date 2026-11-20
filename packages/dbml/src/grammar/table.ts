@@ -4,7 +4,6 @@ import {
   defineElement,
   fail,
   type Ident,
-  isNewline,
   isPunc,
   isWord,
   noteSetting,
@@ -13,12 +12,11 @@ import {
   quoteOptions,
   readAlias,
   readBody,
-  readOptionalSettings,
+  readHeaderSettings,
   readQualifiedName,
   type Setting,
   type SettingsSpec,
   skipNewlines,
-  touches,
 } from "./common";
 import { readTableItem, type TableItem } from "./table-items";
 
@@ -48,17 +46,7 @@ export const tableElement = defineElement("table", "Table", (ctx, start): Table 
   const name = readQualifiedName(ctx, "a table name");
   if (isWord(peekPastNewlines(ctx), "as")) skipNewlines(ctx);
   const alias = readAlias(ctx);
-  // `@dbml/core` reads a `[` after a line break that directly follows the
-  // name or alias as part of that name, so the settings list may start on a
-  // later line only when a space or a comment ends the name's line. (The
-  // lexer drops a `\r` like a space, so a CRLF line ending counts as one
-  // here; `@dbml/core` does not count it.)
-  const spacedBreak = isNewline(ctx.peek()) && !touches(ctx.lastEnd(), ctx.peek());
-  if (spacedBreak && isPunc(peekPastNewlines(ctx), "[")) skipNewlines(ctx);
-  const hasSettings = isPunc(ctx.peek(), "[");
-  const settings = readOptionalSettings(ctx, TABLE_SETTINGS);
-  const settingsAllowed = !hasSettings && (spacedBreak || !isNewline(ctx.peek()));
-  skipNewlines(ctx);
+  const { settings, hasSettings, settingsAllowed } = readHeaderSettings(ctx, TABLE_SETTINGS);
   if (!isPunc(ctx.peek(), "{")) {
     const options = [alias === null && !hasSettings && '"as"', settingsAllowed && '"["', '"{"'];
     fail(ctx, quoteOptions(options.filter((option): option is string => option !== false)));
