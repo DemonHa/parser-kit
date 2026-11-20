@@ -8,7 +8,7 @@
 export interface CoverageOptions {
   /** The discriminant that names a node's variant, e.g. `"kind"` or `"type"`. */
   key: string;
-  /** Every variant the printer should handle. Listed ones never printed are reported even if the corpus lacks them. */
+  /** Every variant the printer should handle. Listed ones never printed are reported even if the corpus lacks them. Number tags are listed as strings. */
   kinds?: readonly string[];
   /** Fields never worth reading. Default `["span"]`. */
   ignore?: readonly string[];
@@ -18,8 +18,9 @@ export interface CoverageReport {
   /** Variants never printed: their discriminant was never read. */
   kinds: string[];
   /**
-   * Fields present on some node and never read, as `variant.field`. A record
-   * without a discriminant is named by where it sits (`select.items.alias`).
+   * Fields present (and not `undefined`) on some node and never read, as
+   * `variant.field`. A record without a discriminant is named by where the
+   * printer first reached it (`select.items.alias`).
    */
   fields: string[];
 }
@@ -60,12 +61,12 @@ export const fieldCoverage = (options: CoverageOptions): FieldCoverage => {
     let name = label;
     if (!Array.isArray(target)) {
       const tag = (target as Record<string, unknown>)[key];
-      if (typeof tag === "string") {
-        name = tag;
-        kinds.add(tag);
+      if (typeof tag === "string" || typeof tag === "number") {
+        name = String(tag);
+        kinds.add(name);
       }
-      for (const field of Object.keys(target)) {
-        if (field !== key && !ignore.has(field)) seen.add(`${name}.${field}`);
+      for (const [field, value] of Object.entries(target)) {
+        if (field !== key && !ignore.has(field) && value !== undefined) seen.add(`${name}.${field}`);
       }
     }
     // The proxy wraps an empty stand-in and forwards reads to the real node.

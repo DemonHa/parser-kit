@@ -56,7 +56,7 @@ export const quoting = (rules: QuotingRules): Quote => {
   const close = rules.close ?? open;
   const esc = rules.escape ?? "double";
   if (typeof esc !== "function" && close.length !== 1) {
-    throw new TypeError(`quoting: the "${esc}" escape needs a one-character closing quote; pass an escape function`);
+    throw new TypeError("quoting: built-in escapes need a one-character closing quote");
   }
   const encode =
     typeof esc === "function"

@@ -60,8 +60,8 @@ describe("quoting", () => {
   });
 
   it("needs an escape function for a multi-character closing quote", () => {
-    expect(() => quoting({ quote: "[[", close: "]]" })).toThrow(/one-character closing quote/);
-    expect(() => quoting({ quote: "'''", escape: "backslash" })).toThrow(/one-character closing quote/);
+    expect(() => quoting({ quote: "[[", close: "]]" })).toThrow("one-character closing quote");
+    expect(() => quoting({ quote: "'''", escape: "backslash" })).toThrow("one-character closing quote");
     const triple = quoting({ quote: "'''", escape: (s) => s.replace(/'/g, "\\'") });
     expect(triple("a'")).toBe("'''a\\''''");
   });

@@ -25,6 +25,7 @@ export {
   softline,
 } from "./doc";
 export {
+  type Context,
   type Precedence,
   type PrecedenceGroup,
   type PrecedenceKey,

@@ -114,6 +114,14 @@ describe("fieldCoverage", () => {
     expect(coverage.report()).toEqual({ kinds: [], fields: [] });
   });
 
+  it("names numeric variants and skips fields set to undefined", () => {
+    type N = { n: 1; a: string; b?: string } | { n: 2 };
+    const p = definePrinter<N>()("n", { 1: (x) => x.a, 2: () => "" });
+    const coverage = fieldCoverage({ key: "n", kinds: ["1", "2"] });
+    render(p(coverage.track<N>({ n: 1, a: "x", b: undefined })));
+    expect(coverage.report()).toEqual({ kinds: ["2"], fields: [] });
+  });
+
   it("reads frozen trees without breaking proxy invariants", () => {
     const coverage = fieldCoverage({ key: "kind" });
     const frozen = Object.freeze({

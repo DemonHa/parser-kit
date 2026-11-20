@@ -13,7 +13,17 @@ import {
   skip,
   stripSpans,
 } from "../index";
-import { type Doc, definePrinter, group, indent, line, precedence, render } from "./index";
+import {
+  type Doc,
+  definePrinter,
+  extendPrinter,
+  group,
+  indent,
+  line,
+  type NodePrinter,
+  precedence,
+  render,
+} from "./index";
 
 // A grammar on core's default Pratt nodes (`type: "unary" | "binary"`), with
 // one group of every shape `precedence` reads: right-, left- and
@@ -117,7 +127,7 @@ const key = (n: Node) =>
 // The return type breaks the cycle between `prec` and `print` for inference.
 const prec = precedence<Node>(table, { key, print: (n): Doc => print(n) });
 
-const print = definePrinter<Node>()("type", {
+const print: NodePrinter<Node, "type"> = definePrinter<Node>()("type", {
   name: (n) => n.value,
   unary: (n) => [n.op, n.op === "not" ? " " : "", prec.child(n, n.operand, "right")],
   binary: (n) => group([prec.child(n, n.left, "left"), " ", n.op, indent([line, prec.child(n, n.right, "right")])]),
@@ -130,6 +140,18 @@ const print = definePrinter<Node>()("type", {
     prec.child(n, n.lo, "right"),
     " & ",
     prec.child(n, n.hi, "right"),
+  ],
+});
+
+// The same printer, passing each handler's `print` through.
+const viaPrint: NodePrinter<Node, "type"> = definePrinter<Node>()("type", {
+  ...print.handlers,
+  binary: (n, p) => [
+    prec.child(n, n.left, "left", undefined, p),
+    " ",
+    n.op,
+    " ",
+    prec.child(n, n.right, "right", undefined, p),
   ],
 });
 
@@ -293,22 +315,50 @@ describe("precedence", () => {
     expect(p.parens(and, { k: "in", l: x }, "left")).toBe(false);
   });
 
-  it("wraps before a postfix whose token an infix group also takes", () => {
+  it("rejects a postfix and a tighter infix sharing a token, unless guards tell them apart", () => {
     // Where the postfix's bp is too low, pratt offers its token to infix
-    // lookup: in `a + b!` the `!` is the bp-20 infix inside `+`'s operand.
-    type E = { k: "x" } | { k: "add"; l: E; r: E } | { k: "fact"; e: E };
-    const t = {
-      infix: [
-        { ops: ["+"], bp: 10, nodes: ["add"] },
-        { ops: ["!"], bp: 20 },
-      ],
-      postfix: [{ match: { first: () => [{ value: "!" }] }, bp: 5, nodes: ["fact"], rhs: "none" as const }],
-    };
-    const p = precedence<E>(t, { key: (n) => (n.k === "x" ? null : n.k), print: () => "" });
-    const x: E = { k: "x" };
-    const add: E = { k: "add", l: x, r: x };
-    expect(p.parens({ k: "fact", e: add }, add, "left")).toBe(true);
-    expect(p.parens({ k: "fact", e: x }, x, "left")).toBe(false);
+    // lookup, so `!` would mean different things at different depths, and
+    // even adding parentheses could change the parse.
+    const bang = { first: () => [{ value: "!" }] };
+    const opts = { key: () => null, print: () => "" };
+    expect(() =>
+      precedence({ infix: [{ ops: ["!"], bp: 20 }], postfix: [{ match: bang, bp: 5, nodes: ["fact"] }] }, opts),
+    ).toThrow("a postfix (bp 5) and a tighter infix (bp 20) share a token");
+    // A looser infix on the same token is unreachable: the postfix always wins.
+    expect(() =>
+      precedence({ infix: [{ ops: ["!"], bp: 3 }], postfix: [{ match: bang, bp: 5, nodes: ["fact"] }] }, opts),
+    ).not.toThrow();
+    expect(() =>
+      precedence(
+        { infix: [{ ops: ["!"], bp: 20, when: () => true }], postfix: [{ match: bang, bp: 5, nodes: ["fact"] }] },
+        opts,
+      ),
+    ).not.toThrow();
+  });
+
+  it("ignores a tail given for a plain ops group, whose tail the parser derives", () => {
+    const pow = { infix: [{ ops: ["^"], bp: 13, assoc: "right" as const, nodes: { "^": 14 }, rhs: 14 }] };
+    const p = precedence<Node>(pow, { key, print });
+    const inner = parse("a ^ a");
+    expect(p.parens({ type: "binary", op: "^", left: inner, right: parse("a") }, inner, "left")).toBe(true);
+  });
+
+  it("prints through a handler's own print, so extended printers keep their overrides", () => {
+    const upper = extendPrinter(viaPrint, { name: (n) => n.value.toUpperCase() });
+    expect(render(upper(parse("a + a * a")), {})).toBe("A + A * A");
+    expect(render(viaPrint(parse("(a + a) * a")), {})).toBe("(a + a) * a");
+  });
+
+  it("resets to the full table on a null context, and reads a parent outside the context from it", () => {
+    const lt: typeof table = { infix: [table.infix![2]!, table.infix![4]!] };
+    const b = precedence<Node, "b">(table, { key, print, contexts: { b: lt } });
+    const sum = parse("a + a");
+    expect(render(b.operand(parse("a * a"), 0, "b"), {})).toBe("(a * a)");
+    expect(render(b.operand(parse("a * a"), 0, null), {})).toBe("a * a");
+    // `~` isn't in the b table; its bounds still see `+` as allowed there.
+    const bt = parse("a ~ a + a & a") as Extract<Node, { type: "between" }>;
+    expect(b.parens(bt, sum, "right", "b")).toBe(false);
+    expect(() => b.operand(sum, 0, "c" as "b")).toThrow('no context "c"');
   });
 
   it("takes a custom wrapper and open atoms", () => {

@@ -99,6 +99,9 @@ describe("definePrinter", () => {
     type Bool = { ok: true } | { ok: false };
     // @ts-expect-error — booleans can't key a handler table.
     definePrinter<Bool>()("ok", {});
+    type Tpl = { kind: `x-${string}` } | { kind: "b" };
+    // @ts-expect-error — a template-literal pattern names many kinds.
+    definePrinter<Tpl>()("kind", { b: () => "" });
     type Num = { n: 1 } | { n: 2 };
     definePrinter<Num>()("n", { 1: () => "one", 2: () => "two" });
     expectTypeOf(definePrinter<Node>()("kind", { a: (n) => n.x, b: (n) => String(n.y) })).toEqualTypeOf<

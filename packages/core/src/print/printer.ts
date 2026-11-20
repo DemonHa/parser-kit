@@ -25,13 +25,12 @@ export type Handlers<T, K extends keyof T> = {
  * else an error message: a wide `string` or a boolean discriminant would drop
  * the required keys and, with them, exhaustiveness.
  */
-export type CheckedHandlers<T, K extends keyof T> = string extends T[K]
-  ? "definePrinter: the discriminant must be string or number literals, not string"
-  : number extends T[K]
-    ? "definePrinter: the discriminant must be string or number literals, not number"
-    : [Exclude<T[K], string | number>] extends [never]
-      ? Handlers<T, K>
-      : "definePrinter: the discriminant must be string or number literals";
+export type CheckedHandlers<T, K extends keyof T> = [Exclude<T[K], string | number> | Wide<T[K]>] extends [never]
+  ? Handlers<T, K>
+  : "definePrinter: the discriminant must be string or number literals";
+
+/** The members of `V` that name many keys: `string`, `number`, `` `x-${string}` ``. */
+type Wide<V> = V extends PropertyKey ? (Record<never, never> extends Record<V, true> ? V : never) : never;
 
 /** A printer for union `T`: call it with a node. */
 export interface NodePrinter<T, K extends keyof T> {

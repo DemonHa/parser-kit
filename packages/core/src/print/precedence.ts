@@ -13,8 +13,10 @@
 //   parse accepts (child lbp >= parent rhs), and the child's tail must stop
 //   wherever the parent's does (no operator bp lies between the two tails).
 // Where the table can't tell (an unknown tail, a custom parse's associativity),
-// it errs towards parentheses, which never change a parse. A key the table
-// doesn't name is an error, not a guess.
+// it errs towards parentheses. A key the table doesn't name is an error, not a
+// guess, and so is a table where an operator token means different things at
+// different bps (a postfix and a tighter infix sharing a token, unguarded):
+// there even parentheses can change the parse.
 import type { Doc } from "./doc";
 
 /** A first-set entry of a `match` rule, as `Rule.first()` returns it. */
@@ -31,6 +33,7 @@ export interface PrecedenceGroup {
   readonly match?: { first(): readonly FirstLike[] };
   readonly assoc?: "left" | "right" | "nonassoc";
   readonly parse?: unknown;
+  readonly when?: unknown;
   readonly nodes?: readonly string[] | Readonly<Record<string, number | "none">>;
   readonly rhs?: number | "none";
 }
@@ -78,17 +81,26 @@ export interface PrecedenceOptions<T, C extends string> {
  */
 export type Side = "left" | "right" | "inner";
 
+/**
+ * The operator table a position is parsed with: a name from `contexts`, `null`
+ * for the full table (where the grammar goes back to it: call arguments, a
+ * subquery), or `undefined` to keep the enclosing operand's.
+ */
+export type Context<C extends string> = C | null | undefined;
+
 export interface Precedence<T, C extends string = never> {
   /**
    * Prints `child`, an operand of `parent`, wrapped only if the parser needs
    * it. A context applies to everything printed inside the child too, until a
-   * pair of parentheses restores the full table.
+   * pair of parentheses or a `null` context restores the full table. `print`
+   * replaces the `print` option for this call: pass a handler's own so a
+   * printer built by `extendPrinter` keeps its overrides.
    */
-  child(parent: T, child: T, side: Side, context?: C): Doc;
+  child(parent: T, child: T, side: Side, context?: Context<C>, print?: (node: T) => Doc): Doc;
   /** Prints `node` where the grammar parses an operand at `minBp` (default 0, a whole expression). */
-  operand(node: T, minBp?: number, context?: C): Doc;
+  operand(node: T, minBp?: number, context?: Context<C>, print?: (node: T) => Doc): Doc;
   /** Whether `child` needs wrapping as that operand of `parent`. */
-  parens(parent: T, child: T, side: Side, context?: C): boolean;
+  parens(parent: T, child: T, side: Side, context?: Context<C>): boolean;
 }
 
 interface Entry {
@@ -96,8 +108,6 @@ interface Entry {
   rhs: number | undefined;
   /** False for a group that may reject a chain of itself (nonassoc, or a custom parse with no `assoc`). */
   chain: boolean;
-  /** For a postfix: the highest bp of an infix group its token also starts, which takes it where the postfix declines. */
-  steal: number;
 }
 
 interface Level {
@@ -127,13 +137,16 @@ const index = (table: PrecedenceTable, atoms: Readonly<Record<string, number>>) 
     }
   };
   const tailOf = (r: number | "none" | undefined) => (r === "none" ? INF : r);
-  // Each key of `nodes` with its own tail, or the group's.
-  const named = (g: PrecedenceGroup, entry: Entry, keys = g.nodes) => {
+  // Each key of `nodes` with its own tail, or the group's (always, when the
+  // parser derives it).
+  const named = (g: PrecedenceGroup, entry: Entry, keys = g.nodes, derived = false) => {
     if (Array.isArray(keys)) for (const k of keys) add(nodes, k, entry);
-    else for (const k in keys) add(nodes, k, { ...entry, rhs: tailOf((keys as Record<string, number | "none">)[k]) });
+    else
+      for (const k in keys)
+        add(nodes, k, derived ? entry : { ...entry, rhs: tailOf((keys as Record<string, number | "none">)[k]) });
   };
   for (const g of table.prefix ?? []) {
-    const entry = { lbp: INF, rhs: g.bp, chain: true, steal: -INF };
+    const entry = { lbp: INF, rhs: g.bp, chain: true };
     if (g.nodes) named(g, entry);
     else for (const op of g.ops ?? []) add(prefixes, op, entry);
   }
@@ -144,18 +157,24 @@ const index = (table: PrecedenceTable, atoms: Readonly<Record<string, number>>) 
     const simple = g.ops !== undefined && g.parse === undefined;
     // A plain `ops` group's tail is what the parser does, whatever `rhs` says.
     const entry: Entry = simple
-      ? { lbp: g.bp, rhs: g.assoc === "right" ? g.bp : g.bp + 1, chain: g.assoc !== "nonassoc", steal: -INF }
-      : { lbp: g.bp, rhs: tailOf(g.rhs), chain: g.assoc === "left" || g.assoc === "right", steal: -INF };
-    named(g, entry, g.nodes ?? (simple ? g.ops : []));
+      ? { lbp: g.bp, rhs: g.assoc === "right" ? g.bp : g.bp + 1, chain: g.assoc !== "nonassoc" }
+      : { lbp: g.bp, rhs: tailOf(g.rhs), chain: g.assoc === "left" || g.assoc === "right" };
+    named(g, entry, g.nodes ?? (simple ? g.ops : []), simple);
   }
   for (const g of table.postfix ?? []) {
     bps.push(g.bp);
+    // Where a postfix declines for want of bp, pratt offers its token to infix
+    // lookup: a tighter infix group on the same token makes the token's meaning
+    // depend on where it sits. Guards are assumed to tell the two apart.
     const own = firstOf(g);
-    let steal = -INF;
-    for (const i of infix) if (firstOf(i).some((e) => own.some((o) => overlap(e, o)))) steal = Math.max(steal, i.bp);
-    named(g, { lbp: g.bp, rhs: tailOf(g.rhs), chain: true, steal });
+    for (const i of infix) {
+      if (i.bp > g.bp && !i.when && !g.when && firstOf(i).some((e) => own.some((o) => overlap(e, o)))) {
+        throw new Error(`precedence: a postfix (bp ${g.bp}) and a tighter infix (bp ${i.bp}) share a token`);
+      }
+    }
+    named(g, { lbp: g.bp, rhs: tailOf(g.rhs), chain: true });
   }
-  for (const k in atoms) add(nodes, k, { lbp: INF, rhs: atoms[k], chain: true, steal: -INF });
+  for (const k in atoms) add(nodes, k, { lbp: INF, rhs: atoms[k], chain: true });
   bps.sort((a, b) => a - b);
   return {
     has: (key: PrecedenceKey) => key === null || (typeof key === "string" ? nodes.has(key) : prefixes.has(key.prefix)),
@@ -167,7 +186,7 @@ const index = (table: PrecedenceTable, atoms: Readonly<Record<string, number>>) 
 
 const tail = (e: Entry) => e.rhs ?? -INF;
 /** An entry that binds nothing and is bound by nothing: a node the context's table can't build. */
-const FORBIDDEN: Entry = { lbp: -INF, rhs: undefined, chain: false, steal: INF };
+const FORBIDDEN: Entry = { lbp: -INF, rhs: undefined, chain: false };
 
 /**
  * Derives parenthesisation from a Pratt table: the same groups (and binding
@@ -195,42 +214,48 @@ export const precedence = <T, C extends string = never>(
   const entry = (node: T, at: Level): Entry | null => {
     const k = key(node);
     if (!main.has(k)) {
-      throw new Error(`precedence: no group builds ${JSON.stringify(k)}; name it in "nodes", or key atoms null`);
+      throw new Error(`precedence: no group builds ${JSON.stringify(k)}`);
     }
     return at.get(k);
   };
 
   // The context of the operand being printed: set by `child` / `operand`,
   // inherited by calls inside it that name none, reset by parentheses.
-  let current: C | undefined;
-  const level = (context?: C): Level => {
-    const name = context ?? current;
-    return name === undefined ? main : levels.get(name)!;
+  let current: C | null = null;
+  const name = (context: Context<C>) => (context === undefined ? current : context);
+  const level = (context: Context<C>): Level => {
+    const n = name(context);
+    if (n === null) return main;
+    const at = levels.get(n);
+    if (!at) throw new Error(`precedence: no context "${n}"`);
+    return at;
   };
 
-  const parens = (parent: T, child: T, side: Side, context?: C): boolean => {
+  const parens = (parent: T, child: T, side: Side, context?: Context<C>): boolean => {
     const at = level(context);
     const c = entry(child, at);
-    const p = entry(parent, at);
+    // A parent outside the context's table is the node that opened the
+    // context (a BETWEEN around its b_expr bounds): read it from the main one.
+    const outer = entry(parent, main);
+    const inside = at.get(key(parent));
+    const p = inside === FORBIDDEN ? outer : inside;
     if (c === null || side === "inner") return false;
     if (p === null) return true;
-    if (side === "left") {
-      return Math.max(p.lbp, p.steal) >= tail(c) || c.lbp < p.lbp || (c.lbp === p.lbp && !(c.chain && p.chain));
-    }
+    if (side === "left") return p.lbp >= tail(c) || c.lbp < p.lbp || (c.lbp === p.lbp && !(c.chain && p.chain));
     return c.lbp < (p.rhs ?? INF) || at.norm(tail(c)) < at.norm(tail(p));
   };
 
-  const operandParens = (node: T, minBp: number, context?: C): boolean => {
+  const operandParens = (node: T, minBp: number, context: Context<C>): boolean => {
     const at = level(context);
     const c = entry(node, at);
     return c !== null && (c.lbp < minBp || at.norm(tail(c)) < at.norm(minBp));
   };
 
-  const emit = (node: T, wrapped: boolean, context?: C): Doc => {
+  const emit = (node: T, wrapped: boolean, context: Context<C>, using = print): Doc => {
     const outer = current;
-    current = wrapped ? undefined : (context ?? current);
+    current = wrapped ? null : name(context);
     try {
-      const d = print(node);
+      const d = using(node);
       return wrapped ? wrap(d) : d;
     } finally {
       current = outer;
@@ -239,7 +264,7 @@ export const precedence = <T, C extends string = never>(
 
   return {
     parens,
-    child: (parent, child, side, context) => emit(child, parens(parent, child, side, context), context),
-    operand: (node, minBp = 0, context) => emit(node, operandParens(node, minBp, context), context),
+    child: (parent, child, side, context, using) => emit(child, parens(parent, child, side, context), context, using),
+    operand: (node, minBp = 0, context, using) => emit(node, operandParens(node, minBp, context), context, using),
   };
 };
