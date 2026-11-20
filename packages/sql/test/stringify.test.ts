@@ -141,6 +141,7 @@ describe("stringify round trips", () => {
     ...WIDTHS.map((width) => ({ width })),
     { keywordCase: "lower", identifierQuote: "always", strings: "escape" },
     { width: 40, keywordCase: "lower", identifierQuote: "always", strings: "escape", indent: "\t" },
+    { semicolons: "never" },
   ];
   for (const o of options) {
     it(`P1: parses back to the same tree with ${JSON.stringify({ ...o, width: String(o.width) })}`, () => {
@@ -340,8 +341,12 @@ describe("stringify on hand-built trees", () => {
     const position = `SELECT POSITION('a' IN (b COLLATE "C")), POSITION('a' IN b || c);`;
     expect(print(position)).toBe(position);
     // A reserved-to-PG or function-only word is quoted as a column or table name.
-    const names = 'SELECT "system_user", "collation" FROM "similar";';
+    const names = 'SELECT "collation" FROM "similar";';
     expect(print(names)).toBe(names);
+    // …except the three PG reads as functions bare, which the tree can't tell from columns.
+    expect(print('SELECT "system_user", current_schema FROM "current_catalog";')).toBe(
+      'SELECT system_user, current_schema FROM "current_catalog";',
+    );
   });
 
   it("quotes a name PostgreSQL would read as its own syntax there", () => {

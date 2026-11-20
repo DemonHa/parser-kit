@@ -119,6 +119,7 @@ export const cases = [
   "SELECT 1 FROM t GROUP BY (rollup(a)) + 1, (cube(a))::int, (rollup(a)) IS NULL, rollup, cube + 1;",
   `SELECT "national" 'x', 1::"national", "nullif"(1), nullif(1, 2), "operator"(1), EXTRACT("value" FROM a) FROM JSON_TABLE(js, '$' COLUMNS ("nested" path, "nested" "path" PATH '$')) AS j;`,
   `SELECT JSON_QUERY(j, (p IS JSON) WITH WRAPPER), JSON_QUERY(j, (p IS JSON ARRAY) WITHOUT WRAPPER), "collation".foo '1', 'x'::"collation".foo;`,
+  "SELECT * FROM orders WHERE status = 'paid' AND created_at >= '2024-01-01' AND customer_id = 42 AND total > 100 OR a * b + c * d - e > f;",
 ];
 
 // Variants of the nested unions the printer reads (beyond expressions, FROM

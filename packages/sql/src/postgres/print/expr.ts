@@ -4,8 +4,8 @@
 // Parentheses come from the grammar's own Pratt tables through `precedence`:
 // a binary node is keyed by its operator, an operator node by the key its
 // group lists in `nodes`, and an atom by null. Positions the grammar parses
-// with its restricted `b_expr` table (POSITION's first operand, BETWEEN's lower
-// bound, XMLTABLE's PATH and DEFAULT) print in the `b` context, which wraps
+// with its restricted `b_expr` table (POSITION's operands, BETWEEN's lower
+// bound, XMLTABLE's PATH and DEFAULT, XMLNAMESPACES URIs) print in the `b` context, which wraps
 // whatever that table can't build. Positions that take a bare atom (PG's
 // c_expr: XMLEXISTS's path, a JSON_OBJECT key before VALUE) wrap anything that
 // isn't one.
@@ -68,11 +68,12 @@ import { typeName } from "./types";
 // group, and every key a custom group lists in `nodes`. A binary node with any
 // other operator is the generic catch-all's (`op`), as is one spelled
 // `OPERATOR(…)`.
-const NAMED_INFIX = new Set<string>();
+// Each with its group's bp, which a binary chain compares.
+const NAMED_INFIX = new Map<string, number>();
 for (const g of expressionTable.infix) {
-  if ("ops" in g && g.ops && !g.parse) for (const op of g.ops) NAMED_INFIX.add(op);
+  if ("ops" in g && g.ops && !g.parse) for (const op of g.ops) NAMED_INFIX.set(op, g.bp);
   const nodes = (g as { nodes?: readonly string[] | Record<string, unknown> }).nodes;
-  if (nodes) for (const k of Array.isArray(nodes) ? nodes : Object.keys(nodes)) NAMED_INFIX.add(k);
+  if (nodes) for (const k of Array.isArray(nodes) ? nodes : Object.keys(nodes)) NAMED_INFIX.set(k, g.bp);
 }
 // The prefix operators the grammar reads by value. Any other one can only be
 // written `OPERATOR(op) x`.
@@ -211,8 +212,11 @@ const right = (parent: Expr, child: Expr): Doc =>
 
 // --- names and calls ---
 
+const BARE_FUNCTIONS = new Set(["current_schema", "current_catalog", "system_user"]);
+
 type Call = Extract<Expr, { kind: "call" }>;
 type Binary = Extract<Expr, { kind: "binary" }>;
+const binaryBp = (b: Binary): number | undefined => NAMED_INFIX.get(binaryKey(b.op, b.opSchema));
 type Unary = Extract<Expr, { kind: "unary" }>;
 type Postfix = Extract<Expr, { kind: "cast" | "collate" | "atTimeZone" | "atLocal" }>;
 
@@ -227,7 +231,7 @@ const prefixed = (n: Unary, operand: Doc): Doc => {
 };
 
 // A run of `::` casts, COLLATE and AT TIME ZONE / AT LOCAL (`x::int::text`),
-// walked in a loop for the same reason.
+// walked in a loop, as a binary chain is, so a long one doesn't run out of stack.
 const POSTFIX_KINDS = new Set<Expr["kind"]>(["cast", "collate", "atTimeZone", "atLocal"]);
 const postfixChain = (e: Postfix): Doc => {
   const spine: Postfix[] = [e];
@@ -547,7 +551,10 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   string: (e) => str(e.value),
   bool: (e) => kw(e.value ? "TRUE" : "FALSE"),
   null: () => kw("NULL"),
-  name: (e) => qualified(e.parts),
+  // `current_schema`, `current_catalog` and `system_user` bare are PG's
+  // functions; quoted, columns. The tree can't tell them apart, so a lone one
+  // in an expression keeps the common meaning and prints bare.
+  name: (e) => (e.parts.length === 1 && BARE_FUNCTIONS.has(e.parts[0]!) ? e.parts[0]! : qualified(e.parts)),
   param: (e) => `$${e.name}`,
   star: (e) => (e.table === null ? "*" : [qualified(e.table), ".*"]),
   bitString: (e) => `${kw(e.hex ? "X" : "B")}'${e.value}'`,
@@ -575,13 +582,18 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
     for (let i = spine.length - 1; i >= 0; i--) doc = prefixed(spine[i]!, doc);
     return doc;
   },
-  // A left-deep chain (`a OR b OR c …`, as generated filters run to thousands
-  // of terms) is walked in a loop rather than recursed into, one group for the
-  // whole chain: what `left` would print unwrapped joins the chain.
+  // A left-deep chain of one tier (`a OR b OR c …`, as generated filters run
+  // to thousands of terms) is walked in a loop rather than recursed into, one
+  // group for the whole chain. A tighter left operand (the `=` of `a = 1 AND
+  // b`) is no part of it: it prints through `left`, as a group of its own.
   binary: (e) => {
     const spine: Binary[] = [e];
     let node = e;
-    while (node.left.kind === "binary" && !prec.parens(node, node.left, "left")) {
+    while (
+      node.left.kind === "binary" &&
+      binaryBp(node.left) === binaryBp(node) &&
+      !prec.parens(node, node.left, "left")
+    ) {
       node = node.left;
       spine.push(node);
     }

@@ -622,7 +622,7 @@ WITH "recursive" AS (SELECT 1) SELECT 1;
 SELECT "interval" '1', a::interval, a::"between", "row" 'x';
 
 -- SELECT "system_user", "current_catalog", "current_schema", "collation", "isnull" FROM "similar" AS "full";
-SELECT "system_user", "current_catalog", "current_schema", "collation", "isnull"
+SELECT system_user, current_catalog, current_schema, "collation", "isnull"
 FROM "similar" AS "full";
 
 -- SELECT JSON_OBJECT('a' VALUE (x IS JSON) WITH UNIQUE KEYS), JSON((x IS JSON OBJECT) WITHOUT UNIQUE KEYS), JSON_OBJECTAGG(k VALUE (v IS JSON) WITH UNIQUE KEYS) FROM t;
@@ -653,6 +653,16 @@ SELECT
   JSON_QUERY(j, (p IS JSON ARRAY) WITHOUT WRAPPER),
   "collation".foo '1',
   'x'::collation.foo;
+
+-- SELECT * FROM orders WHERE status = 'paid' AND created_at >= '2024-01-01' AND customer_id = 42 AND total > 100 OR a * b + c * d - e > f;
+SELECT *
+FROM orders
+WHERE
+  status = 'paid' AND
+    created_at >= '2024-01-01' AND
+    customer_id = 42 AND
+    total > 100 OR
+    a * b + c * d - e > f;
 
 -- SELECT * FROM users u;
 SELECT * FROM users AS u;
