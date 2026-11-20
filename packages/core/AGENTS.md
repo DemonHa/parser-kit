@@ -103,8 +103,9 @@ Vitest, co-located as `*.test.ts` per module, plus the `packages/sql/test/`,
 feature:
 
 - Add unit tests at the level it lives (lexer / combinator / pratt / rule /
-  grammar) **and** exercise it end-to-end in one of the two grammars if it's
-  user-facing — the two grammars are the genericity guard. `@parser-kit/sql` and
+  grammar) **and** exercise it end-to-end in one of the grammars
+  (`packages/sql`, `packages/dbml`, `examples/js-lite`) if it's user-facing —
+  the grammars are the genericity guard. `@parser-kit/sql` and
   `@parser-kit/dbml` are published consumers of core, so a core change that
   moves their output is a user-visible change in those packages too.
 - **Keep every feature opt-in.** The kit's tests must stay green, and so must

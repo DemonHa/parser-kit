@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Packs every package the way the release does, and checks what a consumer would get. Run after `pnpm build`; CI's
-# "Package" job runs it.
+# Packs every package the way the release does, and checks what a consumer
+# would get. Run after `pnpm build`; CI's "Package" job runs it.
 #
 # Each tarball must resolve catalog: and workspace: specifiers, ship only what
 # consumers need, and import cleanly from ESM, CJS and TypeScript. Only
@@ -78,19 +78,23 @@ verify packages/dbml parser-kit-dbml '^package/(build/|src/|LICENSE$|README\.md$
 # `$WORK/manifest.json` is still dbml's, the last one `verify` extracted.
 node -e '
   const m = require(process.argv[1]);
-  if (m.private) throw new Error("@parser-kit/dbml: the packed manifest is private");
+  const fail = (msg) => { console.error(`::error::@parser-kit/dbml: ${msg}`); process.exit(1); };
+  if (m.private) fail("the packed manifest is private");
   for (const field of ["dependencies", "peerDependencies", "optionalDependencies", "bundleDependencies", "bundledDependencies"]) {
     const names = Object.keys(m[field] ?? {});
     const allowed = field === "dependencies" ? ["@parser-kit/core"] : [];
     const extra = names.filter((name) => !allowed.includes(name));
-    if (extra.length) throw new Error(`@parser-kit/dbml: unexpected ${field} ${extra}`);
+    if (extra.length) fail(`unexpected ${field} ${extra}`);
   }
   console.log("Manifest ok: @parser-kit/dbml depends on @parser-kit/core only");
 ' "$WORK/manifest.json"
 mkdir -p "$WORK/dbml"
 tar -xzf "$PACK"/parser-kit-dbml-*.tgz -C "$WORK/dbml"
-if grep -rlE "['\"]@dbml/" "$WORK/dbml/package/build" "$WORK/dbml/package/src"; then
-  echo "::error::@parser-kit/dbml: a published file imports @dbml/core or @dbml/parse"
+# grep exits 0 on a match, 1 on none and 2 on an error (a missing directory).
+status=0
+grep -rlE "['\"]@dbml/" "$WORK/dbml/package/build" "$WORK/dbml/package/src" || status=$?
+if [ "$status" -ne 1 ]; then
+  echo "::error::@parser-kit/dbml: a published file imports @dbml/core or @dbml/parse (or grep failed)"
   exit 1
 fi
 
