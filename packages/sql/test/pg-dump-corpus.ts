@@ -1,4 +1,4 @@
-// The recorded outcome of `sqlLite.parse` on every statement of the pg_dump
+// The recorded outcome of `postgres.parse` on every statement of the pg_dump
 // files in `fixtures/pg-dump/`, split the way psql splits them
 // (`psql-split.ts`). `pg-dump-corpus.test.ts` re-measures each statement and
 // fails when one moves, so newly supported DDL shows up as a diff here, and a
@@ -8,7 +8,7 @@
 // Each row is `[outcome, line, head]`: whether the statement parses, the line
 // it starts on, and its first 80 characters with whitespace collapsed.
 
-/** `"ok"` when `sqlLite.parse` accepts the statement, `"fail"` when it throws. */
+/** `"ok"` when `postgres.parse` accepts the statement, `"fail"` when it throws. */
 export type DumpOutcome = "ok" | "fail";
 
 export type DumpRow = [outcome: DumpOutcome, line: number, head: string];

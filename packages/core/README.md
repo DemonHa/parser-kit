@@ -12,7 +12,7 @@ npm install @parser-kit/core   # or: pnpm add / yarn add / bun add
 
 Ships ESM and CommonJS builds with bundled type declarations. Node >= 18, zero runtime dependencies.
 
-The kit knows nothing about any particular language. Two grammars in the repo parse real languages with the same engine: [`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite) (a JavaScript subset) and [`@parser-kit/sql`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql) (PostgreSQL 17, published as its own package).
+The kit knows nothing about any particular language. Two grammars in the repo parse real languages with the same engine: [`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite) (a JavaScript subset) and [`@parser-kit/sql`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql) (PostgreSQL 17, published as its own package, with the grammar in `src/postgres/`).
 
 ```ts
 import { bindTokens, defineGrammar, defineLexer, field, type Infer, readers, seq, skip } from "@parser-kit/core";
@@ -48,6 +48,7 @@ grammar.parse("answer 42");         // → ParseError: Expected ":" but found "4
 - [Combinators](#combinators) — `seq`, `oneOf`, `optional`, `delimited`, …
 - [Expressions: `pratt`](#expressions-pratt) — precedence climbing
 - [Grammars: `defineExpression` / `defineGrammar`](#grammars-defineexpression--definegrammar)
+- [Printing: `@parser-kit/core/print`](#printing-parser-kitcoreprint) — a document IR and width-aware renderer
 - [The example grammars](#the-example-grammars) — how to learn the kit by reading
 - [Design notes & current limits](#design-notes--current-limits)
 
@@ -229,16 +230,54 @@ Every grammar exposes:
 
 **Strict list closes** — `defineGrammar({ ..., strictDelimited: true })` makes a `delimited()` list that reaches end of input before its close token fail with `Expected <close> but found end of input`. By default the list ends there as if closed, so `(a, b` at the end of the input parses as a complete list. A grammar that requires a terminator after every construct never notices, because the terminator check fails first. A grammar whose last statement needs no terminator wants the flag. It is off by default, and with it off nothing changes.
 
+## Printing: `@parser-kit/core/print`
+
+An opt-in entry point for the other direction, AST → text. It holds a Wadler/Leijen-style document IR (the model prettier uses) and a renderer that lays a document out for a line width. You write the printer by hand, one function per node, and build docs instead of strings. The entry is about 1.3 KB minified and gzipped, and nothing in the parsing API imports it, so parse-only bundles don't grow.
+
+```ts
+import { doc, render } from "@parser-kit/core/print";
+const { group, indent, line, softline, join, block, list } = doc;
+
+const call = (name: string, args: doc.Doc[]) =>
+  group([name, "(", indent([softline, join([",", line], args)]), softline, ")"]);
+
+render(call("f", ["alpha", "beta"]), { width: 80 });   // "f(alpha, beta)"
+render(call("f", ["alpha", "beta"]), { width: 10 });   // "f(\n  alpha,\n  beta\n)"
+
+// Fixed shapes: an indented body, and a settings list that vanishes when empty.
+const column = ["id int", list(" [", ["pk", "increment"], "]", { empty: "omit" })];
+render(block("Table users", [column]), { width: Infinity, indent: "\t" });
+// "Table users {\n\tid int [pk, increment]\n}"
+```
+
+A `Doc` is a string, an array of docs (concatenation), or a command:
+
+| Builder | Meaning |
+|---|---|
+| `group(doc, { shouldBreak? })` | Lay `doc` out flat if it fits in the rest of the line, else break every line directly inside it. Nested groups decide for themselves, outermost first. |
+| `indent(doc)` | One more indentation level for the line breaks inside `doc`. |
+| `line` / `softline` | A space / nothing when the enclosing group is flat, a newline when it is broken. |
+| `hardline` | Always a newline. Every group around it breaks (except from inside the broken branch of an `ifBreak`, which a flat group never prints). |
+| `nbsp` | A space that never breaks, for places where a newline would change meaning. |
+| `ifBreak(broken, flat?)` | Pick a doc by the enclosing group's mode (trailing commas, optional parentheses). |
+| `join(sep, docs)` | `docs` with `sep` between them. |
+| `block(header, items, { open?, close? })` | `header {`, one indented item per line, `}`. Prints `header {}` when empty, and no leading space when `header` is empty. |
+| `list(open, items, close, { separator?, empty? })` | `[a, b]` flat, one item per line broken. `empty: "omit"` prints nothing for an empty list. |
+
+`render(doc, { width = 80, indent = 2 })` returns the text. `indent` is a number of spaces or a string such as `"\t"`. **`width: Infinity`** lays every group out flat and skips width measurement altogether, which is the fast path for one-line output. Only hard lines, groups that must break (built with `shouldBreak`, or containing a hard line), and lines outside every group still break. As in prettier, a `line` that is not inside any group always breaks, so wrap a doc in `group()` to get it on one line. Text width is its `.length` (an indent string's too, so a tab counts as one column), and a `"\n"` inside a string is written as is, with no indentation after it. Spaces and tabs before each line break the doc makes, and at the end of the output, are dropped. Rendering is iterative, so a deeply nested doc can't overflow the stack.
+
+`list` is a group, so it breaks when it doesn't fit. For a language where newlines carry meaning (DBML settings lists, for instance), render at `width: Infinity`, or concatenate the parts yourself, so only the hard lines you placed break.
+
 ## The example grammars
 
 Two real grammars double as the kit's genericity/integration tests and as the fastest way to learn it — read their `grammar.ts` top to bottom.
 
 - **[`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite)** — a JavaScript subset (`const`/`let`, `function`, `if`/`else`, `while`, `return`, blocks, expression statements, full expression precedence, arrays, arrow functions). Exercises what DBML doesn't: root-rule dispatch, newlines as whitespace, the whole `pratt()` table, load-bearing `attempt()` backtracking, and the template-literal *mode*.
-- **[`packages/sql/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql)** — the PostgreSQL 17 grammar published as `@parser-kit/sql`: DDL, DML, queries and psql scripts, with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, a full Pratt operator table with keyword operators, hand-written `custom()` rules and `diagnose()` recovery. The best reference for a folding lexer, keyword tiers and `word()`/`phrase()` keyword matching.
+- **[`packages/sql/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql)** — the PostgreSQL 17 grammar published as `@parser-kit/sql` (`postgres.parse`, grammar in [`src/postgres/grammar.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/sql/src/postgres/grammar.ts)): DDL, DML, queries and psql scripts, with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, a full Pratt operator table with keyword operators, hand-written `custom()` rules and `diagnose()` recovery. The best reference for a folding lexer, keyword tiers and `word()`/`phrase()` keyword matching.
 
 ## Design notes & current limits
 
-- **Stringify/printing**: printers are written by hand, not derived from the grammar. A separate, opt-in `@parser-kit/core/print` entry will provide the building blocks. The `Rule.print` / `Rule.inverse` hooks, `custom(…, { print })`, the second argument to `map(fn, inverse)` and the `Printer` type are deprecated: nothing ever called them, and they will be removed before 1.0.
+- **Stringify/printing**: printers are written by hand, not derived from the grammar. The separate, opt-in [`@parser-kit/core/print`](#printing-parser-kitcoreprint) entry provides the building blocks. The `Rule.print` / `Rule.inverse` hooks, `custom(…, { print })`, the second argument to `map(fn, inverse)` and the `Printer` type are deprecated: nothing ever called them, and they will be removed before 1.0.
 - **Tokenization is context-sensitive when you opt in**: readers dispatch on the current character, but [modes, transitions, and `LexContext`](#context-sensitive-lexing-modes--transitions) give the lexer/parser interplay that JS regex-vs-division and template literals need. A mode-free lexer stays a plain context-free tokenizer.
 - **`InputStream` ships a string implementation only** — the interface is the contract, but there's no streaming/incremental reader yet.
 - **`oneOf` validation** runs at definition time when possible; branches behind `lazy()` forward references are validated on first parse instead.
@@ -260,7 +299,7 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the change workflow.
 
 ### Benchmarks
 
-The benchmarks live with the SQL grammar, in [`packages/sql/bench/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql/bench). [`sql-lite.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/sql/bench/sql-lite.bench.ts) pits `@parser-kit/sql` against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from its tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles.
+The parser benchmarks live with the SQL grammar, in [`packages/sql/bench/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql/bench). [`postgres.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/sql/bench/postgres.bench.ts) pits `@parser-kit/sql` against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from its tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles. [`packages/core/bench/render.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/core/bench/render.bench.ts) measures `render` on a 1,000-statement doc, at `width: Infinity` and at two finite widths.
 
 ```sh
 pnpm bench          # run once, print the table

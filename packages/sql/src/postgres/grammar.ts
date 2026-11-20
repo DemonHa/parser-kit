@@ -30,7 +30,7 @@ import {
 } from "@parser-kit/core";
 import { copyDataError, routineDepth, type SqlTokenType, sqlParseLexer, sqlScriptParseLexer } from "./lexer";
 
-// SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
+// This grammar parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
 // (enum, composite, RANGE) / [MATERIALIZED] VIEW / SEQUENCE / DOMAIN, ALTER
 // TABLE, DROP family, TRUNCATE, COMMENT ON — plus a DML core — SELECT (with
@@ -75,16 +75,21 @@ import { copyDataError, routineDepth, type SqlTokenType, sqlParseLexer, sqlScrip
 // Recursive nodes (Expr) are declared by hand, exactly as js-lite does; the
 // rules below still produce every value.
 
+// `name` holds one element per part of a dotted name (`pg_catalog.int4` is
+// `["pg_catalog", "int4"]`, a quoted `"a.b"` is `["a.b"]`); a multi-word
+// keyword spelling is one part (`["double precision"]`).
 // `setof` and `quoted` are omitted when absent. `setof` is PG's `SETOF type`,
 // which its Typename takes wherever a type is written (whether a cast or a
 // column can use one is decided after parsing). `quoted` marks a quoted name
 // that would be a keyword spelling of a built-in type unquoted (see
-// KEYWORD_TYPE_NAMES): `char` is bpchar and `int` is int4, while `"char"` is
-// the one-byte internal type and `"int"` is looked up as written. Any other
+// isQuotedKeywordType): `char` is bpchar and `int` is int4, while `"char"` is
+// the one-byte internal type and `"int"` is looked up as written; likewise
+// `double precision` is float8, while `"double precision"` is one name looked
+// up as written, so only the flag tells their `["double precision"]` apart. Any other
 // name means the same quoted or not, as does every qualified one
 // (`pg_catalog.char` is `"char"`), so it carries no flag.
 export type ColType = {
-  name: string;
+  name: string[];
   args: number[];
   array: boolean;
   setof?: true;
@@ -107,9 +112,13 @@ export type Expr =
   // `raw` is the literal's text (its `_` separators dropped, its sign included
   // where the grammar folds one in), present only when `value` can't stand for
   // it: a whole number beyond `Number.isSafeInteger` (which every double from
-  // 2^53 up is, so `1.5e300` has one too), or a value that overflowed to
-  // ±Infinity (which JSON would write as `null`). PG keeps every digit of
-  // both (as `bigint` or `numeric`); `raw` lets a caller do the same.
+  // 2^53 up is, so `1.5e300` has one too), a value that overflowed to
+  // ±Infinity (which JSON would write as `null`), or any decimal spelling
+  // other than the digits `String(value)` gives back (`1.0`, `1.50`, `5.`,
+  // `1e2`, `007`). PG keeps every digit, and types a literal with a `.` or an
+  // exponent `numeric` with the scale as written (`1/2` is 0 but `1.0/2` is
+  // 0.5); `raw` lets a caller do the same. A `0x`/`0o`/`0b` integer has none
+  // unless its value is past the safe integers.
   // `implicit` marks a count the source leaves out and PG reads as a constant:
   // the 1 of a count-less `FETCH FIRST ROW ONLY`. Its span is the ROW or ROWS
   // word that stands where the count would be written.
@@ -126,7 +135,7 @@ export type Expr =
   // is omitted entirely on a call that has none of these.
   | {
       kind: "call";
-      name: string;
+      name: string[];
       args: Expr[];
       distinct?: true;
       all?: true;
@@ -872,8 +881,9 @@ export type AlterSequenceAction =
 // type [COLLATE collation]` (PG's TableFuncElement).
 export type CompositeAttr = { name: string; type: ColType };
 // A `name = value` option in a `RANGE` type body (`SUBTYPE = float8`, …). `value`
-// is the raw (possibly qualified) name / type on the right of the `=`.
-export type RangeOption = { name: string; value: string };
+// is the (possibly qualified) name / type on the right of the `=`, one element
+// per part.
+export type RangeOption = { name: string; value: string[] };
 export type CreateType =
   | { kind: "createType"; form: "enum"; name: string[]; values: string[]; span: Span }
   | { kind: "createType"; form: "composite"; name: string[]; attributes: ColumnDefinition[]; span: Span }
@@ -1300,11 +1310,11 @@ export type AlterExtensionAction =
   | { kind: "update"; version?: string };
 
 // The SET / RESET of a role's or database's parameter defaults: SET as the SET
-// statement's `name` and `values`, RESET as the RESET statement's `name` ("all"
-// for RESET ALL).
+// statement's `name` and `values`, RESET as the RESET statement's `name`
+// (`["all"]` for RESET ALL).
 export type AlterConfigAction =
-  | { kind: "set"; name: string; values: Expr[] | "default" | "fromCurrent" }
-  | { kind: "reset"; name: string };
+  | { kind: "set"; name: string[]; values: Expr[] | "default" | "fromCurrent" }
+  | { kind: "reset"; name: string[] };
 // ALTER ROLE's `options` are CREATE ROLE's, bar the membership ones (IN ROLE,
 // ROLE, ADMIN, and the undocumented USER that PG keeps for ALTER GROUP), which
 // are not taken; PG lets the run be empty.
@@ -1340,7 +1350,7 @@ export type FunctionOption =
   | { kind: "cost"; value: Expr }
   | { kind: "rows"; value: Expr }
   | { kind: "window" }
-  | { kind: "set"; parameter: string; value: FunctionSetValue };
+  | { kind: "set"; parameter: string[]; value: FunctionSetValue };
 
 // `RETURN expr`: a SQL-standard routine body of its own, or one statement of
 // a `BEGIN ATOMIC` body.
@@ -1670,14 +1680,15 @@ export type Transaction =
 
 // SET [SESSION|LOCAL] { name {=|TO} value[, …] | name FROM CURRENT | TIME ZONE
 // value | ROLE|SCHEMA|NAMES|… value | SESSION AUTHORIZATION value }. `name` is
-// the dotted config parameter, or the special form's words ("time zone",
-// "session authorization", …); `values` is the value list, "default" for the
+// the config parameter, one element per dotted part (`["my", "guc"]`), or the
+// special form's words as one element (`["time zone"]`, `["session
+// authorization"]`, …); `values` is the value list, "default" for the
 // DEFAULT keyword (and for `TIME ZONE LOCAL` or a bare `NAMES`, which PG treats
 // the same way), or "fromCurrent".
 export type SetStmt = {
   kind: "set";
   scope: "session" | "local" | null;
-  name: string;
+  name: string[];
   values: Expr[] | "default" | "fromCurrent";
   span: Span;
 };
@@ -1702,11 +1713,12 @@ export type SetConstraints = {
 };
 
 // SHOW {name | ALL | TIME ZONE | TRANSACTION ISOLATION LEVEL | SESSION
-// AUTHORIZATION} — `name` is "all" for SHOW ALL, and the words of a multi-word
-// form joined by spaces ("time zone", …).
-export type Show = { kind: "show"; name: string; span: Span };
+// AUTHORIZATION} — `name` is the parameter's dotted parts as SET's is,
+// `["all"]` for SHOW ALL, and a multi-word form's words joined by spaces as
+// one element (`["time zone"]`, …).
+export type Show = { kind: "show"; name: string[]; span: Span };
 // RESET, with the same targets as SHOW.
-export type Reset = { kind: "reset"; name: string; span: Span };
+export type Reset = { kind: "reset"; name: string[]; span: Span };
 
 // DO [LANGUAGE lang] 'body' — the body is one (dollar-quoted) string, kept opaque
 // like a function body; LANGUAGE may precede or follow the code.
@@ -1751,7 +1763,7 @@ export type Lock = {
   span: Span;
 };
 // CALL name ( [arg, …] ) — the argument list is always written, possibly empty.
-// Not kind "call", which is the expression node (whose `name` is joined).
+// Not kind "call", which is the expression node.
 // `variadic` is as on that node: present only when the last argument follows
 // VARIADIC.
 export type CallProcedure = { kind: "callProcedure"; name: string[]; args: Expr[]; variadic?: true; span: Span };
@@ -1855,7 +1867,7 @@ export type CopyLocation =
 // collects them. `legacy` is present only when any of that spelling is written,
 // a bare `WITH` with no option after it included.
 //
-// `data` is set by `sqlLiteScript` alone, on a `FROM STDIN` copy whose rows
+// `data` is set by `postgres.parseScript` alone, on a `FROM STDIN` copy whose rows
 // follow it in the script: the lines up to the `\.` terminator, verbatim and
 // undecoded. The span stays the statement's own; it doesn't cover the rows.
 export type Copy = {
@@ -1873,7 +1885,7 @@ export type Copy = {
 };
 
 // A psql meta-command line in a script (`\connect db`, `\restrict key`), as
-// `sqlLiteScript` returns it. `command` is the name without its backslash, up
+// `postgres.parseScript` returns it. `command` is the name without its backslash, up
 // to the first space or backslash as psql reads it (`connect`, `.`, `dt+`);
 // `args` is the rest of the line, trimmed and unparsed — psql's own argument
 // syntax (quoting, `:var` interpolation, backticks) is not modelled.
@@ -1884,7 +1896,7 @@ export type PsqlMeta = {
   span: Span;
 };
 
-/** What `sqlLiteScript` returns, in source order. */
+/** What `postgres.parseScript` returns, in source order. */
 export type ScriptItem = Stmt | PsqlMeta;
 
 export type Stmt =
@@ -2577,7 +2589,7 @@ export type Merge = {
   span: Span;
 };
 
-// The statements PG's PreparableStmt admits, as far as sql-lite parses them:
+// The statements PG's PreparableStmt admits, as far as this grammar parses them:
 // what PREPARE, EXPLAIN and COPY (…) take as their query.
 export type Preparable = Query | Insert | Update | Delete | Merge;
 
@@ -2790,11 +2802,21 @@ const parenQuery = seq(skip(punc("(")), field("q", query), skip(punc(")"))).map(
 
 // The number node for a literal's text and any sign the grammar folds into it,
 // `raw` attached only when `value` loses the text (see the `number` member of
-// `Expr`). The sign is applied after decoding: `Number("-0x10")` is NaN.
+// `Expr`). The sign is applied after decoding: `Number("-0x10")` is NaN. A
+// value past the safe integers or overflowed to ±Infinity loses digits; a
+// fraction or exponent loses the type and scale PG reads from it (`1.0`, `5.`,
+// `1e2`); and any other decimal text `String` doesn't give back for the value
+// (`007`) keeps its text too. A
+// radix integer (`0x1F`, `0o17`, `0b101`) is an integer to PG either way.
+const RADIX_PREFIX = /^0[box]/i;
+const DECIMAL_DIGITS = /^[0-9]+$/;
 const numberNode = (text: string, span: Span, sign = ""): Extract<Expr, { kind: "number" }> => {
   const magnitude = Number(text);
   const value = sign === "-" ? -magnitude : magnitude;
-  const lossy = !Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value));
+  const lossy =
+    !Number.isFinite(value) ||
+    (Number.isInteger(value) && !Number.isSafeInteger(value)) ||
+    (!RADIX_PREFIX.test(text) && (!DECIMAL_DIGITS.test(text) || text !== String(magnitude)));
   return { kind: "number", value, ...(lossy && { raw: sign + text }), span };
 };
 const numberLit = token("number").map((node, span): Expr => numberNode(node.value, span));
@@ -2818,7 +2840,7 @@ const stringConstant = custom<Expr, SqlTokenType>(
     const prefix = { start: span.start, end: { row: span.start.row, col: span.start.col + 1 } };
     return {
       kind: "typedLiteral",
-      type: { name: "bpchar", args: [], array: false, span: prefix },
+      type: { name: ["bpchar"], args: [], array: false, span: prefix },
       value: tok.value,
       span,
     };
@@ -3094,7 +3116,7 @@ function parseSubstring(ctx: ParseContext<SqlTokenType>, start: Position): Expr 
     args.push(ctx.parse(functionArg));
   }
   expectClose(ctx);
-  return { kind: "call", name: "substring", args, span: ctx.spanFrom(start) };
+  return { kind: "call", name: ["substring"], args, span: ctx.spanFrom(start) };
 }
 
 // OVERLAY(value PLACING placing FROM from [FOR for_]). Not a SPECIAL_CALLS
@@ -3121,7 +3143,7 @@ function parseNormalize(ctx: ParseContext<SqlTokenType>, start: Position): Expr 
   const value = ctx.parse(expression);
   if (ctx.eat("punc", ",") === null) {
     expectClose(ctx);
-    return { kind: "call", name: "normalize", args: [value], span: ctx.spanFrom(start) };
+    return { kind: "call", name: ["normalize"], args: [value], span: ctx.spanFrom(start) };
   }
   const form = ctx.eat("ident", NORMAL_FORMS);
   if (form === null) ctx.croak(`Expected "nfc", "nfd", "nfkc" or "nfkd" but found ${describeFound(ctx.peek())}`);
@@ -3195,7 +3217,7 @@ function parseXmlConcat(ctx: ParseContext<SqlTokenType>, start: Position): Expr 
   const args = [ctx.parse(expression)];
   while (ctx.eat("punc", ",") !== null) args.push(ctx.parse(expression));
   expectClose(ctx);
-  return { kind: "call", name: "xmlconcat", args, span: ctx.spanFrom(start) };
+  return { kind: "call", name: ["xmlconcat"], args, span: ctx.spanFrom(start) };
 }
 
 // XMLELEMENT(NAME name [, XMLATTRIBUTES(…)] [, content, …]). The attributes
@@ -3692,7 +3714,7 @@ const parseJsonObject: JsonCallHandler = (ctx, start) => {
   const args = [first];
   while (ctx.eat("punc", ",") !== null) args.push(parseCallArg(ctx, expression));
   expectClose(ctx);
-  return { kind: "call", name: "json_object", args, span: ctx.spanFrom(start) };
+  return { kind: "call", name: ["json_object"], args, span: ctx.spanFrom(start) };
 };
 
 // JSON_ARRAY(value [FORMAT JSON], … [clauses]), JSON_ARRAY([RETURNING type])
@@ -4185,7 +4207,7 @@ const columnRef = custom<Expr, SqlTokenType>(
       }
       const call: Expr = {
         kind: "call",
-        name: parts.join("."),
+        name: parts,
         args,
         ...(quantifier === "distinct" && { distinct: true }),
         ...(quantifier === "all" && { all: true }),
@@ -4464,6 +4486,11 @@ const MULTI_WORD_TYPES: ReadonlyMap<string, readonly (readonly string[])[]> = ne
   ["interval", INTERVAL_TAILS],
 ]);
 
+// Every multi-word spelling above as typeRef names it (`"double precision"`).
+const MULTI_WORD_TYPE_NAMES: ReadonlySet<string> = new Set(
+  [...MULTI_WORD_TYPES].flatMap(([lead, tails]) => tails.map((tail) => [lead, ...tail].join(" "))),
+);
+
 // The two types whose precision PG spells *before* the rest of the name. For
 // every other multi-word type the args trail the whole name (`character
 // varying(10)`, `interval day to second(3)`), so reading them early would accept
@@ -4672,10 +4699,10 @@ function typeNameLiteral(
     if (typmod !== null && (word === "interval" || ARGS_BEFORE_TAIL.has(word))) return null;
   }
   const type: ColType = {
-    name: parts.join("."),
+    name: parts,
     args: typmod ?? [],
     array: false,
-    ...(!bare && parts.length === 1 && KEYWORD_TYPE_NAMES.has(parts[0]!) && { quoted: true }),
+    ...(isQuotedKeywordType(bare, parts) && { quoted: true }),
     span: ctx.spanFrom(start),
   };
   ctx.next(); // the string literal
@@ -4753,9 +4780,15 @@ const KEYWORD_TYPE_NAMES: ReadonlySet<string> = new Set([
   "nchar",
 ]);
 
+// Whether a type name read as `parts` is one quoted part that, unquoted, would
+// be a keyword spelling of a built-in type: a KEYWORD_TYPE_NAMES word or a
+// multi-word spelling (`"double precision"`), which ColType's `quoted` marks.
+const isQuotedKeywordType = (bare: boolean, parts: string[]): boolean =>
+  !bare && parts.length === 1 && (KEYWORD_TYPE_NAMES.has(parts[0]!) || MULTI_WORD_TYPE_NAMES.has(parts[0]!));
+
 // The args are hoisted out of wherever PG puts them, so the name is always the
 // words alone: `timestamp(3) with time zone` is
-// `{ name: "timestamp with time zone", args: [3] }`.
+// `{ name: ["timestamp with time zone"], args: [3] }`.
 //
 // A leading SETOF is taken whenever a non-reserved word or a quoted name follows
 // it (`c setof generated …` is a SETOF of `generated` now, which PG rejects
@@ -4778,21 +4811,22 @@ const typeRef = custom<ColType, SqlTokenType>(
     // quoted `"double"` or a dotted `pg_catalog.double` is an ordinary name.
     const bare = ctx.peek()?.type === "ident";
     const parts = ctx.parse(qualName);
-    const words = [parts.join(".")];
+    let name = parts;
     let args: number[] | null = null;
     if (bare && parts.length === 1) {
       const lead = parts[0]!;
       if (ARGS_BEFORE_TAIL.has(lead) && ctx.is("punc", "(")) args = ctx.parse(typeArgs);
-      words.push(...eatTypeTail(ctx, lead));
+      const tail = eatTypeTail(ctx, lead);
+      if (tail.length > 0) name = [[lead, ...tail].join(" ")];
     }
     if (args === null && ctx.is("punc", "(")) args = ctx.parse(typeArgs);
     const array = ctx.parse(arraySuffix);
     return {
-      name: words.join(" "),
+      name,
       args: args ?? [],
       array,
       ...(setof && { setof: true }),
-      ...(!bare && parts.length === 1 && KEYWORD_TYPE_NAMES.has(parts[0]!) && { quoted: true }),
+      ...(isQuotedKeywordType(bare, parts) && { quoted: true }),
       span: ctx.spanFrom(start),
     };
   },
@@ -6582,8 +6616,8 @@ function rangeDatums(ctx: ParseContext<SqlTokenType>): PartitionRangeDatum[] {
 // what PG's PartitionBoundSpec action enforces for a hash bound: both names,
 // each once, nothing else. The value checks, `remainder < modulus` among them, are PG's
 // analysis-time ones; with no analysis pass, this is the only place they can be
-// made. PG takes each value as an unsigned int4 literal; the option list keeps
-// only the number, so `4.0` and `4e0` pass for 4 here, but the int4 range holds.
+// made. PG takes each value as an unsigned int4 literal; only each number's
+// `value` is checked here, so `4.0` and `4e0` pass for 4, but the int4 range holds.
 const INT4_MAX = 2 ** 31 - 1;
 
 function hashBound(ctx: ParseContext<SqlTokenType>, start: Position): PartitionBound {
@@ -6965,7 +6999,7 @@ function parseRangeOptions(ctx: ParseContext<SqlTokenType>): RangeOption[] {
   do {
     const name = ctx.parse(nameWord);
     if (ctx.eat("op", "=") === null) ctx.croak(`Expected "=" but found ${describeFound(ctx.peek())}`);
-    options.push({ name, value: ctx.parse(qualName).join(".") });
+    options.push({ name, value: ctx.parse(qualName) });
   } while (ctx.eat("punc", ",") !== null);
   expectClose(ctx);
   return options;
@@ -7603,8 +7637,9 @@ function parseSecurityKind(ctx: ParseContext<SqlTokenType>): boolean {
 
 // --- configuration parameters (SET / SHOW / RESET, and a routine's SET) ---
 
-// A dotted config parameter name (`search_path`, `my.custom.guc`) → one string.
-const configName = sepBy(nameWord, P(".")).map((parts) => parts.join("."));
+// A dotted config parameter name (`search_path`, `my.custom.guc`), one element
+// per part.
+const configName = sepBy(nameWord, P("."));
 
 // Whether the token `n` ahead is the bare (unquoted) word `value`.
 const isWordAhead = (ctx: ParseContext<SqlTokenType>, n: number, value: string): boolean => {
@@ -7724,7 +7759,7 @@ const isGenericSet = (ctx: ParseContext<SqlTokenType>, at = 0): boolean => {
   );
 };
 
-type ConfigSet = { name: string; values: Expr[] | "default" | "fromCurrent" };
+type ConfigSet = { name: string[]; values: Expr[] | "default" | "fromCurrent" };
 
 // PG's set_rest_more, shared by the SET statement and a routine's SET option:
 // `name {= | TO} {value[, …] | DEFAULT}`, `name FROM CURRENT`, or one of the
@@ -7739,24 +7774,24 @@ function parseConfigSet(ctx: ParseContext<SqlTokenType>): ConfigSet {
       case "time":
         if (!isWordAhead(ctx, 1, "zone")) break;
         ctx.parse(kwseq("time", "zone"));
-        return { name: "time zone", values: zoneValue(ctx) };
+        return { name: ["time zone"], values: zoneValue(ctx) };
       case "schema":
         ctx.next();
-        return { name: "schema", values: [configString(ctx)] };
+        return { name: ["schema"], values: [configString(ctx)] };
       case "names":
         // `NAMES` alone, like `NAMES DEFAULT`, resets the client encoding.
         ctx.next();
-        if (ctx.is("string")) return { name: "names", values: [ctx.parse(stringLit)] };
+        if (ctx.is("string")) return { name: ["names"], values: [ctx.parse(stringLit)] };
         ctx.eat("ident", "default");
-        return { name: "names", values: "default" };
+        return { name: ["names"], values: "default" };
       case "role":
         ctx.next();
-        return { name: "role", values: [configWord(ctx)] };
+        return { name: ["role"], values: [configWord(ctx)] };
       case "session":
         if (!isWordAhead(ctx, 1, "authorization")) break;
         ctx.parse(kwseq("session", "authorization"));
-        if (ctx.eat("ident", "default") !== null) return { name: "session authorization", values: "default" };
-        return { name: "session authorization", values: [configWord(ctx)] };
+        if (ctx.eat("ident", "default") !== null) return { name: ["session authorization"], values: "default" };
+        return { name: ["session authorization"], values: [configWord(ctx)] };
       case "xml": {
         if (!isWordAhead(ctx, 1, "option")) break;
         ctx.parse(kwseq("xml", "option"));
@@ -7766,12 +7801,12 @@ function parseConfigSet(ctx: ParseContext<SqlTokenType>): ConfigSet {
           return ctx.croak(`Expected "document" or "content" but found ${describeFound(tok)}`);
         }
         ctx.next();
-        return { name: "xml option", values: [{ kind: "name", parts: [tok.value], span: ctx.spanFrom(start) }] };
+        return { name: ["xml option"], values: [{ kind: "name", parts: [tok.value], span: ctx.spanFrom(start) }] };
       }
       case "transaction":
         if (!isWordAhead(ctx, 1, "snapshot")) break;
         ctx.parse(kwseq("transaction", "snapshot"));
-        return { name: "transaction snapshot", values: [configString(ctx)] };
+        return { name: ["transaction snapshot"], values: [configString(ctx)] };
     }
   }
   const name = ctx.parse(configName);
@@ -7790,19 +7825,19 @@ function parseConfigSet(ctx: ParseContext<SqlTokenType>): ConfigSet {
 // TRANSACTION ISOLATION LEVEL, SESSION AUTHORIZATION, joined by spaces), or a
 // parameter name. Each form's lead word is also a parameter name, so the form
 // is taken only when its second word follows.
-function parseConfigTarget(ctx: ParseContext<SqlTokenType>): string {
-  if (ctx.eat("ident", "all") !== null) return "all";
+function parseConfigTarget(ctx: ParseContext<SqlTokenType>): string[] {
+  if (ctx.eat("ident", "all") !== null) return ["all"];
   if (ctx.is("ident", "time") && isWordAhead(ctx, 1, "zone")) {
     ctx.parse(kwseq("time", "zone"));
-    return "time zone";
+    return ["time zone"];
   }
   if (ctx.is("ident", "transaction") && isWordAhead(ctx, 1, "isolation")) {
     ctx.parse(kwseq("transaction", "isolation", "level"));
-    return "transaction isolation level";
+    return ["transaction isolation level"];
   }
   if (ctx.is("ident", "session") && isWordAhead(ctx, 1, "authorization")) {
     ctx.parse(kwseq("session", "authorization"));
-    return "session authorization";
+    return ["session authorization"];
   }
   return ctx.parse(configName);
 }
@@ -12764,7 +12799,7 @@ function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[],
   const { args, variadic } = parseCallArgList(ctx);
   return {
     kind: "call",
-    name: nameParts.join("."),
+    name: nameParts,
     args,
     ...(variadic && { variadic: true }),
     span: ctx.spanFrom(start),
@@ -13995,7 +14030,7 @@ const reindexStmt = custom<Stmt, SqlTokenType>(
   { expected: '"reindex"', first: [{ type: "ident", value: "reindex" }] },
 );
 
-// PG's ExplainableStmt, as far as sql-lite parses it: a preparable statement
+// PG's ExplainableStmt, as far as this grammar parses it: a preparable statement
 // (the same set as PREPARE's), CREATE TABLE AS, CREATE MATERIALIZED VIEW,
 // DECLARE (a cursor), or EXECUTE.
 const EXPLAINABLE =
@@ -14485,10 +14520,10 @@ const script = custom<Stmt[], SqlTokenType>((ctx) => ctx.parse(statements).filte
 
 // --- psql scripts ---
 //
-// `sqlLiteScript` parses a whole file as psql would run it: statements, the
+// `postgresScriptGrammar` parses a whole file as psql would run it: statements, the
 // meta-command lines between them, and each `COPY … FROM STDIN`'s rows (the
 // script lexer reads those, see `sqlScriptParseLexer`). Statements are read by
-// the same rule as `sqlLite`'s, so a script differs from plain SQL only in what
+// the same rule as `postgresGrammar`'s, so a script differs from plain SQL only in what
 // sits between statements.
 
 // psql ends a command name at whitespace or another backslash, so `\\` is the
@@ -14563,7 +14598,7 @@ const scriptRoot = custom<ScriptItem[], SqlTokenType>(
 
 // --- grammar ---
 
-export const sqlLite = defineGrammar({
+export const postgresGrammar = defineGrammar({
   lexer: sqlParseLexer,
   root: script,
   recovery: { sync: [{ type: "punc", value: ";", consume: true }] },
@@ -14578,11 +14613,11 @@ export const sqlLite = defineGrammar({
   strictDelimited: true,
 });
 
-// `sqlLite` for whole psql scripts, pg_dump output included: the same
+// `postgresGrammar` for whole psql scripts, pg_dump output included: the same
 // statements and options, plus meta-command lines (`psqlMeta` items) and COPY
 // rows (`Copy.data`). Recovery also resumes at a meta-command line, which ends
 // a statement left unfinished before it.
-export const sqlLiteScript = defineGrammar({
+export const postgresScriptGrammar = defineGrammar({
   lexer: sqlScriptParseLexer,
   root: scriptRoot,
   recovery: {

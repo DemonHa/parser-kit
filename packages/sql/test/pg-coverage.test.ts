@@ -1,7 +1,7 @@
 import { stripSpans } from "@parser-kit/core";
 import { Parser } from "node-sql-parser";
 import { describe, expect, it } from "vitest";
-import { sqlLite } from "../src/index";
+import { postgres } from "../src/postgres/index";
 import { type Bucket, PG_BATTERY } from "./pg-coverage";
 
 // Re-measures the PostgreSQL coverage battery in `pg-coverage.ts` and pins
@@ -23,7 +23,7 @@ const accepts = (parse: () => unknown): boolean => {
 };
 
 const measure = (sql: string): Bucket => {
-  const lite = accepts(() => sqlLite.parse(sql));
+  const lite = accepts(() => postgres.parse(sql));
   const node = accepts(() => nodeParser.astify(sql, { database: "PostgreSQL" }));
   if (lite && node) return "both";
   if (lite) return "sql-lite";
@@ -57,7 +57,7 @@ describe("PostgreSQL coverage battery", () => {
   });
 
   it("rejects USE, a MySQL-ism PostgreSQL has no equivalent of, on purpose", () => {
-    expect(() => sqlLite.parse("USE app;")).toThrow(/Expected a statement but found "use"/);
+    expect(() => postgres.parse("USE app;")).toThrow(/Expected a statement but found "use"/);
   });
 });
 
@@ -66,7 +66,7 @@ describe("PostgreSQL coverage battery", () => {
 // structure PostgreSQL gives the statement (one type name, one call with its
 // modifiers, a distinct-from test rather than equality).
 describe("PostgreSQL coverage battery: AST spot checks", () => {
-  const firstColumn = (sql: string) => (stripSpans(sqlLite.parse(sql)) as any)[0].columns;
+  const firstColumn = (sql: string) => (stripSpans(postgres.parse(sql)) as any)[0].columns;
 
   const battery = (fragment: string) => {
     const row = PG_BATTERY.find((r) => r.sql.includes(fragment));
@@ -76,25 +76,25 @@ describe("PostgreSQL coverage battery: AST spot checks", () => {
 
   it("reads multi-word cast targets as one type name", () => {
     const [withTz, , withoutTz] = firstColumn(battery("now()::timestamp with time zone"));
-    expect(withTz.expr).toMatchObject({ kind: "cast", type: { name: "timestamp with time zone" } });
-    expect(withoutTz.expr).toMatchObject({ kind: "cast", type: { name: "time without time zone" } });
+    expect(withTz.expr).toMatchObject({ kind: "cast", type: { name: ["timestamp with time zone"] } });
+    expect(withoutTz.expr).toMatchObject({ kind: "cast", type: { name: ["time without time zone"] } });
   });
 
   it("marks DISTINCT and ORDER BY inside an aggregate call", () => {
     const [, distinct] = firstColumn(battery("count(DISTINCT user_id)"));
     expect(distinct.expr).toEqual({
       kind: "call",
-      name: "count",
+      name: ["count"],
       args: [{ kind: "name", parts: ["user_id"] }],
       distinct: true,
     });
 
     const [agg] = firstColumn(battery("array_agg(DISTINCT tag ORDER BY tag)"));
-    expect(agg.expr).toMatchObject({ name: "array_agg", distinct: true, orderBy: [{ expr: { parts: ["tag"] } }] });
+    expect(agg.expr).toMatchObject({ name: ["array_agg"], distinct: true, orderBy: [{ expr: { parts: ["tag"] } }] });
   });
 
   it("keeps IS [NOT] DISTINCT FROM apart from equality", () => {
-    const [stmt] = stripSpans(sqlLite.parse(battery("a IS DISTINCT FROM b"))) as any[];
+    const [stmt] = stripSpans(postgres.parse(battery("a IS DISTINCT FROM b"))) as any[];
     expect(stmt.where).toMatchObject({
       op: "or",
       left: { kind: "isDistinct", negated: false },
@@ -103,7 +103,7 @@ describe("PostgreSQL coverage battery: AST spot checks", () => {
   });
 
   it("keeps character varying(n) as one parameterised column type", () => {
-    const [stmt] = stripSpans(sqlLite.parse(battery("name character varying(255)"))) as any[];
-    expect(stmt.items[1].dataType).toEqual({ name: "character varying", args: [255], array: false });
+    const [stmt] = stripSpans(postgres.parse(battery("name character varying(255)"))) as any[];
+    expect(stmt.items[1].dataType).toEqual({ name: ["character varying"], args: [255], array: false });
   });
 });

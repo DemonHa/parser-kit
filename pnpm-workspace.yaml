@@ -17,6 +17,7 @@ catalog:
 
   # Build / test tooling
   tsc-alias: "^1.8.10"
+  esbuild: "^0.28.2"
   vitest: "^3.2.4"
 
   # Benchmark comparison baseline
