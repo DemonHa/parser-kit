@@ -30,7 +30,7 @@ import {
   render,
 } from "@parser-kit/core/print";
 import type { ColType, Copy, Expr, PsqlMeta, ScriptItem, Stmt } from "../ast";
-import { NotPrintableError, type StringifyOptions, withOptions } from "./context";
+import { inRoutineStatement, NotPrintableError, type StringifyOptions, withOptions } from "./context";
 import { dmlFamily } from "./dml";
 import { expr } from "./expr";
 import { flat } from "./flat";
@@ -83,13 +83,20 @@ void exclusive;
 const distinctKinds: [Extract<Expr["kind"], Stmt["kind"]>] extends [never] ? true : never = true;
 void distinctKinds;
 
-/** A statement, without its `;`. A kind no family names is a compile error here. */
-export const printStatement: NodePrinter<Stmt, "kind"> = definePrinter<Stmt>()("kind", {
+const families = {
   ...handlersOf(queryFamily),
   ...handlersOf(dmlFamily),
   ...handlersOf(tablesFamily),
   ...handlersOf(objectsFamily),
   ...handlersOf(rolesFamily),
+};
+
+/** A statement, without its `;`. A kind no family names is a compile error here. */
+export const printStatement: NodePrinter<Stmt, "kind"> = definePrinter<Stmt>()("kind", {
+  ...families,
+  // psql reads these statements by a heuristic of their own (`inRoutineStatement`).
+  createFunction: (n, print) => inRoutineStatement(() => families.createFunction(n, print)),
+  createProcedure: (n, print) => inRoutineStatement(() => families.createProcedure(n, print)),
 });
 
 statementPrinter.print = printStatement;
@@ -147,28 +154,37 @@ export const stringify = (node: StringifyInput, options?: StringifyOptions): str
       .join("\n");
   });
 
-// A COPY's rows: verbatim lines, then the `\.` line that ends them. A row that
-// is itself `\.` would end them early, and rows after anything but
-// `COPY … FROM STDIN` would be read as SQL, so neither can be printed.
+const isCopyIn = (stmt: Printable<Copy>): boolean => stmt.direction === "from" && stmt.location.kind === "stdin";
+
+// A COPY's rows: verbatim lines, then the `\.` line that ends them (psql
+// splits them at `\n` alone). A row that is itself `\.` would end them
+// early, and rows after anything but `COPY … FROM STDIN` would be read as SQL,
+// so neither can be printed.
 const copyData = (stmt: Printable<Copy>, data: string): string => {
-  if (stmt.direction !== "from" || stmt.location.kind !== "stdin") {
-    throw new TypeError("COPY data can only follow a COPY … FROM STDIN");
-  }
+  if (!isCopyIn(stmt)) throw new TypeError("COPY data can only follow a COPY … FROM STDIN");
   const rows = data === "" || data.endsWith("\n") ? data : `${data}\n`;
-  if (/^\\\.\r?$/m.test(rows)) throw new TypeError('COPY data holds a "\\." line, which would end it early');
+  if (rows.split("\n").some((row) => row === "\\." || row === "\\.\r")) {
+    throw new TypeError('COPY data holds a "\\." line, which would end it early');
+  }
   return `${rows}\\.`;
 };
 
-// A meta-command line: psql reads it to the end of the line.
+// A meta-command line: psql reads its name up to whitespace or a backslash,
+// and its arguments to the end of the line.
 const psqlMeta = (meta: Printable<PsqlMeta>): string => {
-  if (/[\r\n]/.test(meta.command + meta.args)) throw new TypeError("A psql meta-command must fit on one line");
+  if (!/^[^\s\\]+$/.test(meta.command)) {
+    throw new TypeError(`A psql meta-command needs a name with no whitespace or backslash, not "${meta.command}"`);
+  }
+  if (meta.args.includes("\n")) throw new TypeError("A psql meta-command must fit on one line");
   return meta.args === "" ? `\\${meta.command}` : `\\${meta.command} ${meta.args}`;
 };
 
 /**
  * Prints `parseScript`'s items back as a psql script: each statement laid out
  * as `stringify` lays it out and ended by `;`, each meta-command on a line of
- * its own, and a COPY's rows (`Copy.data`) after it, ended by a `\.` line.
+ * its own, and a COPY's rows (`Copy.data`) after it, ended by a `\.` line. A
+ * `COPY … FROM STDIN` with no `data` gets an empty block, as psql reads rows
+ * after every one.
  */
 export const stringifyScript = (items: StringifyScriptInput, options?: StringifyScriptOptions): string =>
   withOptions(options, () => {
@@ -177,7 +193,10 @@ export const stringifyScript = (items: StringifyScriptInput, options?: Stringify
       .map((item) => {
         if (item.kind === "psqlMeta") return psqlMeta(item);
         const text = layout([printStatement(item as Stmt), ";"]);
-        return item.kind === "copy" && item.data !== undefined ? `${text}\n${copyData(item, item.data)}` : text;
+        // psql reads rows after every COPY … FROM STDIN, so one without
+        // `data` (from `parse`, or last in a script) gets an empty block.
+        if (item.kind !== "copy" || (item.data === undefined && !isCopyIn(item))) return text;
+        return `${text}\n${copyData(item, item.data ?? "")}`;
       })
       .join("\n");
   });

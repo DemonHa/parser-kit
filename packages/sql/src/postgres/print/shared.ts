@@ -17,7 +17,18 @@ import type {
   SequenceOption,
 } from "../ast";
 import { RESERVED } from "../grammar";
-import { commaList, ident, isColNameKeyword, kw, parenList, parens, qualified, quoted, str } from "./context";
+import {
+  bareAllowed,
+  commaList,
+  ident,
+  isColNameKeyword,
+  kw,
+  parenList,
+  parens,
+  qualified,
+  quoted,
+  str,
+} from "./context";
 import { expr } from "./expr";
 import { typeName } from "./types";
 
@@ -78,6 +89,7 @@ export const optionValue = (v: RelationOptionValue, style: OptionStyle): Doc => 
       // col_name keyword (`between`, `values`), bar NONE, its own keyword there.
       const bare =
         BARE_WORD.test(word) &&
+        bareAllowed(word) &&
         word !== "true" &&
         word !== "false" &&
         (style.reservedValues ? word === "none" || !isColNameKeyword(word) : word === "on" || !reserved(word));
@@ -93,7 +105,10 @@ export const optionValue = (v: RelationOptionValue, style: OptionStyle): Doc => 
 /** One `[namespace.]name [[=] value]` entry. */
 export const relationOption = (o: RelationOption, style: OptionStyle): Doc => {
   const word = (w: string): string => {
-    const bare = BARE_WORD.test(w) && (style.reservedNames || w === "analyze" || w === "analyse" || !reserved(w));
+    const bare =
+      BARE_WORD.test(w) &&
+      bareAllowed(w) &&
+      (style.reservedNames || w === "analyze" || w === "analyse" || !reserved(w));
     return !bare ? quoted(w) : style.keywords ? kw(w.toUpperCase()) : w;
   };
   const name = o.namespace !== undefined ? `${word(o.namespace)}.${word(o.name)}` : word(o.name);
@@ -164,7 +179,8 @@ export const partitionKey = (k: PartitionKey): Doc => [
  * `identifierQuote` is "always").
  */
 // (`ident("a")` comes back quoted only under identifierQuote: "always".)
-export const optionLabel = (name: string): string => (BARE_WORD.test(name) && ident("a") === "a" ? name : quoted(name));
+export const optionLabel = (name: string): string =>
+  BARE_WORD.test(name) && bareAllowed(name) && ident("a") === "a" ? name : quoted(name);
 
 // The CURRENT_ / SESSION_ pseudo-roles, which are keywords where a role is
 // specified. A role really named one of them has the same tree, so it prints

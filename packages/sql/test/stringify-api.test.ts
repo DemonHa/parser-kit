@@ -140,6 +140,58 @@ describe("postgres.stringifyScript", () => {
     );
   });
 
+  const roundTrips = (text: string) => {
+    const items = postgres.parseScript(text);
+    for (const width of WIDTHS) {
+      for (const identifierQuote of ["minimal", "always"] as const) {
+        const printed = postgres.stringifyScript(items, { width, identifierQuote });
+        expect(stripSpans(postgres.parseScript(printed)), printed).toStrictEqual(stripSpans(items));
+      }
+    }
+  };
+
+  it("splits COPY rows at \\n alone, as psql does", () => {
+    for (const rows of ["a\r\\.\n", "\\.\rfoo\n", "a\u2028\\.\n", "\\.x\n \\.\n"]) {
+      roundTrips(`COPY t FROM stdin;\n${rows}\\.\nSELECT 1;\n`);
+    }
+  });
+
+  it("writes an empty block after a COPY … FROM STDIN with no rows", () => {
+    expect(postgres.stringifyScript(postgres.parseScript("COPY t FROM stdin"))).toBe("COPY t FROM STDIN;\n\\.");
+    const stmts = postgres.parse("COPY t FROM STDIN; COPY t TO STDOUT; SELECT 1");
+    const printed = postgres.stringifyScript(stmts);
+    expect(printed).toBe("COPY t FROM STDIN;\n\\.\nCOPY t TO STDOUT;\nSELECT 1;");
+    expect(stripSpans(postgres.parseScript(printed))).toStrictEqual(
+      stripSpans([{ ...stmts[0]!, data: "" }, stmts[1]!, stmts[2]!]),
+    );
+  });
+
+  // psql counts a bare `begin` in a CREATE FUNCTION / PROCEDURE as opening a
+  // BEGIN ATOMIC body; the rows of a COPY after it would then be read as SQL.
+  it("quotes a name begin in a routine statement, so the statements after it frame right", () => {
+    for (const routine of [
+      'CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT "begin" FROM t; END;',
+      "CREATE FUNCTION \"begin\"() RETURNS int LANGUAGE sql AS 'SELECT 1';",
+      "CREATE FUNCTION \"begin\".f() RETURNS int LANGUAGE sql AS 'SELECT 1';",
+      "CREATE PROCEDURE \"begin\"() LANGUAGE sql AS 'SELECT 1';",
+      'CREATE FUNCTION f() RETURNS int RETURN "begin";',
+      "CREATE OR REPLACE FUNCTION f() RETURNS int LANGUAGE sql SET search_path = \"begin\" AS 'SELECT 1';",
+      "CREATE FUNCTION f() RETURNS \"begin\" LANGUAGE sql AS 'SELECT 1';",
+      "CREATE FUNCTION f(\"begin\" int) RETURNS int LANGUAGE sql AS 'SELECT 1';",
+    ]) {
+      roundTrips(`${routine}\nCOPY t FROM stdin;\n1\n\\.\nSELECT 1;\n`);
+    }
+    // Elsewhere `begin` stays bare.
+    expect(postgres.stringify(postgres.parse('SELECT "begin" FROM "begin"'))).toBe("SELECT begin FROM begin;");
+  });
+
+  it("keeps a meta-command's lone \\r, and refuses names psql would read differently", () => {
+    roundTrips("\\echo a\rb\nSELECT 1;\n");
+    for (const command of ["", "a b", "a\\b", "a\tb"]) {
+      expect(() => postgres.stringifyScript([{ kind: "psqlMeta", command, args: "" }])).toThrow(TypeError);
+    }
+  });
+
   it("is typed with the AST types and its options", () => {
     expectTypeOf(postgres.stringify).returns.toEqualTypeOf<string>();
     expectTypeOf(postgres.stringifyScript).parameter(0).toEqualTypeOf<postgresEntry.StringifyScriptInput>();

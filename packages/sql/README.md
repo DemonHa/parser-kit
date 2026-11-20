@@ -140,7 +140,9 @@ postgres.stringifyScript(items);
 // "\\connect app\nCOPY t (a, b) FROM STDIN;\n1\tx\n\\.\nSELECT 1;"
 ```
 
-`stringify` prints the same COPY without its rows, since the server never receives them as SQL. `stringifyScript` throws a `TypeError` for what it can't write: rows on a COPY that isn't `FROM STDIN`, a row that is exactly `\.`, or a meta-command holding a line break.
+A `COPY … FROM STDIN` with no `data` (from `parse`, or one at the end of a script) gets an empty block, since psql reads rows after every one. `stringify` prints the same COPY without its rows, since the server never receives them as SQL. `stringifyScript` throws a `TypeError` for what it can't write: rows on a COPY that isn't `FROM STDIN`, a row that is exactly `\.`, or a meta-command whose name holds whitespace or a backslash, or whose arguments hold a line break.
+
+psql counts every bare `begin` in a `CREATE FUNCTION` / `CREATE PROCEDURE` as opening a `BEGIN ATOMIC` body, so the printer quotes a name `begin` there (`"begin"`), in `stringify`'s output too.
 
 ### What is guaranteed
 

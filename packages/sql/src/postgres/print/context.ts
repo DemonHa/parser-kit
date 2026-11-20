@@ -42,6 +42,7 @@ const state = {
   lower: false,
   always: false,
   escape: false,
+  routine: false,
 };
 
 /** Runs `print` with `options` in effect, restoring the previous ones after (calls may nest). */
@@ -58,6 +59,25 @@ export const withOptions = <T>(options: StringifyOptions | undefined, print: () 
     state.escape = saved.escape;
   }
 };
+
+/**
+ * Runs `print` for a CREATE [OR REPLACE] FUNCTION / PROCEDURE statement. psql
+ * (and `parseScript`) counts every bare `begin` outside parentheses in one as
+ * opening a `BEGIN ATOMIC` body, whose `;`s don't end the statement, so a name
+ * `begin` is quoted there, or the statements after it would be split wrongly.
+ */
+export const inRoutineStatement = <T>(print: () => T): T => {
+  const saved = state.routine;
+  state.routine = true;
+  try {
+    return print();
+  } finally {
+    state.routine = saved;
+  }
+};
+
+/** Whether a word may be written bare where it reads as a name: not `begin` in a routine statement. */
+export const bareAllowed = (word: string): boolean => !(state.routine && word === "begin");
 
 /** A keyword, or a run of keywords, written upper-case in the source. */
 export const kw = (text: string): string => (state.lower ? text.toLowerCase() : text);
@@ -107,9 +127,17 @@ const quoteRoutine = quoting({ ...rules, reserved: reservedRoutine });
 // The common case, a bare word, without the general rules' per-character scan.
 const BARE_WORD = /^[a-z_][a-z0-9_$]*$/;
 const minimal = (name: string): string =>
-  BARE_WORD.test(name) && !reservedRoutine(name) ? name : quoteRoutine(name, "minimal");
+  !bareAllowed(name)
+    ? quoteName(name, "always")
+    : BARE_WORD.test(name) && !reservedRoutine(name)
+      ? name
+      : quoteRoutine(name, "minimal");
 const minimalName = (name: string): string =>
-  BARE_WORD.test(name) && !reservedName(name) ? name : quoteName(name, "minimal");
+  !bareAllowed(name)
+    ? quoteName(name, "always")
+    : BARE_WORD.test(name) && !reservedName(name)
+      ? name
+      : quoteName(name, "minimal");
 
 /** A table, column, alias or other object name. */
 export const ident = (name: string): string => (state.always ? quoteName(name, "always") : minimalName(name));
