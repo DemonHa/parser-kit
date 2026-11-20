@@ -7,6 +7,7 @@ import type { Stmt } from "../src/postgres/ast";
 import { postgres } from "../src/postgres/index";
 import { NotPrintableError, type StringifyOptions, stringify } from "../src/postgres/print/index";
 import { CORPUS } from "./corpus";
+import { COMMENT_CASES, withComments } from "./format-cases";
 import { LEXER_EDGE_CASES, MALFORMED, MULTI_LINE, SUPPLEMENTAL } from "./parity-corpus";
 import { PG_BATTERY } from "./pg-coverage";
 import { splitPsqlScript } from "./psql-split";
@@ -37,6 +38,10 @@ import * as tables from "./stringify-cases/tables";
 //      are counted as skipped, so coverage grows by itself as statement
 //      families land. Sources of more than one statement are also printed
 //      whole, with the statements' separators.
+//   3. Formatter meaning-preservation. `postgres.format` of every source both
+//      parsers accept, as written and with a comment before every token (plus
+//      the comment cases), gives PostgreSQL the same statement trees at every
+//      layout, comments and all.
 //
 // The comparison is of libpg_query's full JSON parse tree for each statement,
 // not its fingerprint: a fingerprint ignores constants, which would hide `1.0`
@@ -579,6 +584,38 @@ describe("libpg_query differential", () => {
     // An entry whose source left the corpus, or is no longer printable, would
     // otherwise go unchecked.
     expect(PRINTER_DIFFERENCES.map(({ sql }) => sql).filter((sql) => !compared.has(sql))).toEqual([]);
+  });
+
+  it("formats SQL, comments and all, that PostgreSQL parses to the same trees", () => {
+    const allowed = new Map(PRINTER_DIFFERENCES.map((entry) => [entry.sql, entry.paths]));
+    const failures: string[] = [];
+    let formatted = 0;
+    for (const sql of [...SOURCES, ...COMMENT_CASES]) {
+      let expected: unknown[];
+      try {
+        // COPY rows and meta-commands are psql's, not PostgreSQL's.
+        const items = postgres.parseScript(sql);
+        if (items.some((item) => item.kind === "psqlMeta" || (item.kind === "copy" && item.location.kind === "stdin")))
+          continue;
+        expected = pgTrees(sql);
+        if (items.length !== expected.length) continue; // a statement-count disagreement, checked above
+      } catch {
+        continue; // rejected by either parser: checked above
+      }
+      for (const text of [sql, withComments(sql)]) {
+        if (text === null) continue;
+        formatted++;
+        for (const options of OPTIONS) {
+          const out = postgres.format(text, options);
+          const problem = printedProblem(expected, out, allowed.get(sql));
+          if (problem !== undefined)
+            failures.push(`${text}\n  ${optionsLabel(options)}\n    formatted: ${out}\n    ${problem}`);
+        }
+      }
+    }
+    report(`format: ${formatted} sources formatted`);
+    expect(formatted).toBeGreaterThan(2000);
+    expect(failures).toEqual([]);
   });
 
   it("lists each source once", () => {

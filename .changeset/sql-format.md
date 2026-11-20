@@ -1,0 +1,5 @@
+---
+"@parser-kit/sql": minor
+---
+
+Add `postgres.format(text, options?)`, a text-to-text formatter that keeps comments. It parses a psql script as `parseScript` does and prints it as `stringifyScript` does, taking the same options, and puts every comment back. A comment between statements stays where it was: after the statement's `;` when it starts on the line that statement ends on, otherwise on a line of its own. A comment inside a statement moves to just before that statement. One blank line is kept where the source had any. Comments are copied verbatim (line endings become `\n`). `format` never changes meaning: the output parses back to the same items, spans aside. It keeps every comment's text and is idempotent. The formatter comes with the `postgres` object of the root and `@parser-kit/sql/postgres` entries, adding about 1 KB minified and gzipped. The parse-only `@parser-kit/sql/postgres/parser` entry doesn't include it. `FormatOptions` is exported from `@parser-kit/sql/postgres`. Parsing is unchanged: the parse lexers report the comments they skip only while `format` runs, and the AST holds none.

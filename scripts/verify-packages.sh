@@ -131,8 +131,9 @@ if (postgres.stringify(postgres.parse("select a,b from t where x=1")) !== "SELEC
 if (postgres.stringify(stmt, { width: 1 }) !== "SELECT\n  1 AS one;") throw new Error("sql: ESM pretty stringify failed");
 const script = "\\connect db\nCOPY t FROM STDIN;\n1\n\\.\nSELECT 1;";
 if (postgres.stringifyScript(postgres.parseScript(script)) !== script) throw new Error("sql: ESM stringifyScript failed");
+if (postgres.format("select 1; -- one\n/* two */ select 2") !== "SELECT 1; -- one\n/* two */\nSELECT 2;\n") throw new Error("sql: ESM format failed");
 if (typeof sql.NotPrintableError !== "function") throw new Error("sql: ESM NotPrintableError missing");
-if ("stringify" in parser || parser.parse !== postgres.parse) throw new Error("sql: ESM /postgres/parser is not the parse-only object");
+if ("stringify" in parser || "format" in parser || parser.parse !== postgres.parse) throw new Error("sql: ESM /postgres/parser is not the parse-only object");
 console.log(`ESM ok: core ${Object.keys(core).length} exports, sql parses and prints from the root and /postgres, parses from /postgres/parser`);
 JS
 
@@ -157,8 +158,9 @@ if (postgres.stringify(postgres.parse("select a,b from t where x=1")) !== "SELEC
 if (postgres.stringify(stmt, { width: 1 }) !== "SELECT\n  1 AS one;") throw new Error("sql: CJS pretty stringify failed");
 const script = "\\connect db\nCOPY t FROM STDIN;\n1\n\\.\nSELECT 1;";
 if (postgres.stringifyScript(postgres.parseScript(script)) !== script) throw new Error("sql: CJS stringifyScript failed");
+if (postgres.format("select 1; -- one\n/* two */ select 2") !== "SELECT 1; -- one\n/* two */\nSELECT 2;\n") throw new Error("sql: CJS format failed");
 if (typeof sql.NotPrintableError !== "function") throw new Error("sql: CJS NotPrintableError missing");
-if ("stringify" in parser || parser.parse !== postgres.parse) throw new Error("sql: CJS /postgres/parser is not the parse-only object");
+if ("stringify" in parser || "format" in parser || parser.parse !== postgres.parse) throw new Error("sql: CJS /postgres/parser is not the parse-only object");
 try {
   postgres.parse("SELECT FROM WHERE");
   throw new Error("sql: CJS parse accepted malformed input");
@@ -223,6 +225,8 @@ export const all: ScriptItem[] = [...stmts, ...items, ...pg.postgres.diagnose("x
 const options: pg.StringifyOptions = { width: 80, keywordCase: "lower" };
 export const text: string = postgres.stringify(stmts, options) + pg.postgres.stringifyScript(items, { indent: "\t" });
 export const isError: boolean = new pg.NotPrintableError("x") instanceof Error;
+const formatOptions: pg.FormatOptions = { width: 80, indent: "\t" };
+export const formatted: string = postgres.format("SELECT 1 -- one", formatOptions);
 export const parser: pg.PostgresParser = (await import("@parser-kit/sql/postgres/parser")).postgres;
 export { tokens };
 TS
@@ -231,7 +235,7 @@ import sql = require("@parser-kit/sql");
 import pg = require("@parser-kit/sql/postgres");
 const stmts: sql.Postgres.Stmt[] = sql.postgres.parse("SELECT 1");
 export const items: pg.ScriptItem[] = [...stmts, ...pg.postgres.diagnoseScript("x").ast];
-export const text: string = sql.postgres.stringify(stmts, { semicolons: "never" });
+export const text: string = sql.postgres.stringify(stmts, { semicolons: "never" }) + sql.postgres.format("SELECT 1");
 import parser = require("@parser-kit/sql/postgres/parser");
 export const parsed: parser.Stmt[] = parser.postgres.parse("SELECT 1");
 TS
@@ -242,11 +246,11 @@ echo "TypeScript ok: @parser-kit/sql, /postgres and /postgres/parser types resol
 # TypeScript's legacy `node` resolution ignores `exports`; `typesVersions`
 # maps the subpath for it.
 cat > legacy.ts <<'TS'
-import { type Stmt, type StringifyOptions, postgres } from "@parser-kit/sql/postgres";
+import { type FormatOptions, type Stmt, type StringifyOptions, postgres } from "@parser-kit/sql/postgres";
 import { postgres as parser } from "@parser-kit/sql/postgres/parser";
 export const stmts: Stmt[] = parser.parse("SELECT 1");
 const options: StringifyOptions = { width: 80 };
-export const text: string = postgres.stringify(stmts, options);
+export const text: string = postgres.stringify(stmts, options) + postgres.format("SELECT 1", { width: 80 } satisfies FormatOptions);
 TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --target es2022 --module commonjs --moduleResolution node --ignoreDeprecations 5.0 \
   legacy.ts
@@ -319,8 +323,8 @@ echo "Size ok: @parser-kit/core/print is $PRINT_SIZE bytes min+gz (budget $PRINT
 # Size budgets for the SQL entries, measured the same way. The parse-only
 # entry (/postgres/parser) holds the grammar alone; the printer comes with the
 # `postgres` object of the root and /postgres entries, since an object's
-# methods can't be tree-shaken apart. Its own budget is the difference, and
-# it includes @parser-kit/core/print.
+# methods can't be tree-shaken apart, and so does the formatter (`format`).
+# Their own budget is the difference, and it includes @parser-kit/core/print.
 size_of() {
   echo "export * from \"$1\";" > size-entry.mjs
   "$ROOT/node_modules/.bin/esbuild" size-entry.mjs --bundle --minify --format=esm --log-level=error | gzip -9 | wc -c
@@ -339,7 +343,7 @@ ROOT_SIZE=$(size_of "@parser-kit/sql")
 check_size "@parser-kit/sql/postgres/parser" "$PARSER_SIZE" 58368
 check_size "@parser-kit/sql/postgres" "$POSTGRES_SIZE" 86016
 check_size "@parser-kit/sql" "$ROOT_SIZE" 86016
-check_size "the PostgreSQL printer (/postgres less /postgres/parser)" $((POSTGRES_SIZE - PARSER_SIZE)) 27648
+check_size "the PostgreSQL printer and formatter (/postgres less /postgres/parser)" $((POSTGRES_SIZE - PARSER_SIZE)) 28672
 # @parser-kit/dbml's whole entry, @parser-kit/core included (about 13.3 KB at
 # its first release).
 check_size "@parser-kit/dbml" "$(size_of "@parser-kit/dbml")" 16384

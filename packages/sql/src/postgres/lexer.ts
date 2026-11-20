@@ -7,6 +7,7 @@ import {
   type Position,
   type Reader,
   readers,
+  type Span,
   type Token,
   type TokenStream,
 } from "@parser-kit/core";
@@ -64,6 +65,31 @@ const isBinaryDigit = (char: string) => /[01]/.test(char);
 const isSpace = (char: string) => WHITESPACE.test(char);
 const isNewline = (char: string) => char === "\n" || char === "\r";
 
+// --- comments set aside ---
+// The parse lexers drop every comment, and three readers skip comments inside
+// other tokens: a string continuation (`'a' -- x ⏎ 'b'`), a UESCAPE tail and
+// the line after a `COPY … FROM STDIN;`. While `collectComments` runs, each
+// comment the lexers pass over is also reported here by span, for
+// `postgres.format`, with the span of each `;` token (a statement's span
+// ends at its last token's body, short of a closing quote). Nothing else is
+// affected, and the AST doesn't change.
+let commentSink: ((span: Span, semicolon?: boolean) => void) | undefined;
+const report = (spans: readonly Span[]) => {
+  for (const span of spans) commentSink?.(span);
+};
+/** Runs `run` (a parse), returning its result and the spans of the comments and `;`s its lexers read. */
+export const collectComments = <T>(run: () => T): { result: T; comments: Span[]; semicolons: Span[] } => {
+  const comments: Span[] = [];
+  const semicolons: Span[] = [];
+  const outer = commentSink;
+  commentSink = (span, semicolon) => (semicolon ? semicolons : comments).push(span);
+  try {
+    return { result: run(), comments, semicolons };
+  } finally {
+    commentSink = outer;
+  }
+};
+
 // PG's {quotecontinue}, tried with the cursor just past a closing `'`: two
 // string constants separated by whitespace that contains at least one newline
 // are one constant (`'foo'` newline `'bar'` is `foobar`), and a `--` comment
@@ -75,19 +101,23 @@ const readQuoteContinuation = (stream: InputStream): boolean => {
   if (first !== "-" && !isSpace(first)) return false; // the common case: no snapshot
   stream.snapshot();
   let newline = false;
+  const comments: Span[] = [];
   for (;;) {
     const char = stream.peek();
     if (char === "-") {
+      const start = stream.position();
       stream.next();
       // A lone `-` is an operator, so there is no continuation: `'a'⏎-'b'`
       // must not go on to the quote test below.
       if (stream.peek() !== "-") break;
       while (stream.peek() !== "" && !isNewline(stream.peek())) stream.next();
+      comments.push({ start, end: stream.position() });
       continue;
     }
     if (!isSpace(char)) {
       if (newline && char === "'") {
         stream.next();
+        report(comments);
         return true;
       }
       break;
@@ -345,12 +375,16 @@ const readUescapeTail = (stream: InputStream): string | null => {
   // Skip whitespace and both comment forms; false when a `-` or `/` turned out
   // not to start one, or a block comment never closed. Either way the tail is
   // declined, and the main readers lex — or croak on — what is there.
+  const comments: Span[] = [];
   const skipSpace = (): boolean => {
     for (;;) {
       const char = stream.peek();
+      const start = stream.position();
       if (isSpace(char)) {
         stream.next();
-      } else if (char === "-") {
+        continue;
+      }
+      if (char === "-") {
         stream.next();
         if (stream.peek() !== "-") return false;
         while (stream.peek() !== "" && !isNewline(stream.peek())) stream.next();
@@ -362,6 +396,7 @@ const readUescapeTail = (stream: InputStream): string | null => {
       } else {
         return true;
       }
+      comments.push({ start, end: stream.position() });
     }
   };
   // `InputStream` has a single snapshot slot, so this clobbers the caller's —
@@ -379,6 +414,7 @@ const readUescapeTail = (stream: InputStream): string | null => {
   }
   if (!skipSpace() || stream.peek() !== "'") return decline();
   // The tail is committed from here: no path below restores the cursor.
+  report(comments);
   const start = stream.position();
   // Read the whole `'…'`, not one character, so that a croak below resumes
   // *past* it. Croaking with the closing quote unconsumed would leave it to
@@ -874,6 +910,7 @@ const withoutComments = (tokens: TokenStream<SqlTokenType>): TokenStream<SqlToke
   const peek = () => {
     let token = tokens.peek();
     while (token !== null && token.type === "comment") {
+      commentSink?.(token.position);
       tokens.next();
       token = tokens.peek();
     }
@@ -882,7 +919,9 @@ const withoutComments = (tokens: TokenStream<SqlTokenType>): TokenStream<SqlToke
   return {
     next: () => {
       peek();
-      return tokens.next();
+      const token = tokens.next();
+      if (token?.type === "punc" && token.value === ";") commentSink?.(token.position, true);
+      return token;
     },
     peek,
     eof: () => peek() === null,
@@ -1062,7 +1101,11 @@ const readCopyData = (stream: InputStream): Token<SqlTokenType> => {
     stream.next();
     const comment = stream.peek() === "-";
     stream.reload();
-    if (comment) while (stream.peek() !== "" && stream.peek() !== "\n") stream.next();
+    if (comment) {
+      const start = stream.position();
+      while (stream.peek() !== "" && stream.peek() !== "\n") stream.next();
+      report([{ start, end: stream.position() }]);
+    }
   }
   if (stream.peek() !== "" && stream.peek() !== "\n") {
     const start = stream.position();

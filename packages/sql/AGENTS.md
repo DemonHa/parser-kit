@@ -22,8 +22,8 @@ internals and grammar-authoring gotchas.
   types; the `@parser-kit/sql/postgres` subpath export). The root `index.ts`
   exposes each dialect's AST types as a namespace (`Postgres.Stmt`) so that
   dialects' same-named types don't collide.
-- `src/postgres/print/` — the printer, AST back to SQL (internal: not on the
-  `postgres` object or any entry yet). `context.ts` holds the options and the
+- `src/postgres/print/` — the printer, AST back to SQL, public only as the
+  `postgres` object's `stringify` / `stringifyScript` / `format`. `context.ts` holds the options and the
   lexical rules (keywords, name quoting, strings), `expr.ts` every expression,
   `types.ts` type names, and each statement family has a module declared with
   `defineFamily` (`registry.ts`): `query.ts` (queries and FROM items),
@@ -41,11 +41,18 @@ internals and grammar-authoring gotchas.
   `FunctionArg`, the rename / owner / schema actions, `AlterConfigAction`);
   the first family that prints one puts its printer in a shared module
   (`print/shared.ts`) for the others to import, rather than in its own.
+  `format.ts` is `postgres.format`: it parses a script with
+  `collectComments` (`lexer.ts`), which has the parse lexers report each
+  comment they skip and each `;` by span, and places the comments around the
+  printed statements by span. The AST never holds comments, so a reader that
+  skips a comment inside another token must report it too.
 - `test/` — unit tests (`postgres.test.ts`), the entry-surface pin
   (`entry.test.ts`), the parity harness and its goldens, the PostgreSQL coverage
   battery (`pg-coverage.ts`) and the pg_dump corpus (`pg-dump-corpus.ts`,
   `fixtures/pg-dump/`, pagila vendored under the PostgreSQL License) and
   `psql-split.ts`, the psql-style statement splitter the corpus test uses.
+  `format.test.ts` holds `postgres.format` to its guarantees (same items back,
+  every comment kept, idempotent) over the corpora and `format-cases.ts`.
   `stringify.test.ts` round-trips the corpus, the parity lists, the accepted
   battery rows, the pg_dump statements that parse and each family's cases in
   `stringify-cases/` through the printer (`stringify.<family>.golden.sql` pin
