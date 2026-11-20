@@ -1,4 +1,4 @@
-import { custom, type Infer, type Position, type Span, type Token } from "@parser-kit/core";
+import { custom, type Infer, ParseError, type Position, type Span, type Token } from "@parser-kit/core";
 import { type Ctx, fail, isName, isNewline, isPunc, isWord, quoteOptions, skipNewlines, type TT } from "./common";
 import { enumElement } from "./enum";
 import { tableGroupElement } from "./group";
@@ -46,9 +46,9 @@ const EXPECTED_ELEMENT = quoteOptions(ELEMENTS.map((element) => `"${element.disp
 // before that place gets the answer without rescanning, and a line of stray
 // `} Table t` runs stays linear whatever ends it.
 interface ScanCache {
-  /** The token the last scan stopped at (a `{`, a `:`, a line break or the end of input). */
+  /** Where the last scan stopped: at a `{`, a `:`, a line break or the end of input, or at a lexer error. */
   until: Position | null;
-  stop: "{" | ":" | "end";
+  stop: "{" | ":" | "end" | "error";
 }
 
 const before = (a: Position, b: Position): boolean => a.row < b.row || (a.row === b.row && a.col < b.col);
@@ -57,37 +57,43 @@ const startsElement = (ctx: Ctx, token: Token<TT>, cache?: ScanCache): boolean =
   const element = ELEMENTS.find((candidate) => isWord(token, candidate.keyword));
   if (element === undefined) return false;
   const ref = element.keyword === "ref";
-  // A lookahead that runs into a lexer error records it and gives up here,
-  // answering yes (the element then reports what follows) without caching:
-  // the scan never saw where the line ends.
-  const peekAt = (n: number): Token<TT> | null | "error" => {
+  // A lookahead that runs into a lexer error records it and gives up there,
+  // answering yes (the element then reports what follows). The cache keeps
+  // that answer too, for later keywords before the error: inside an open `[`
+  // a scan crosses lines, and would otherwise rerun to the same place.
+  const peekAt = (n: number): Token<TT> | null | ParseError => {
     try {
       return ctx.peekAhead(n);
     } catch (error) {
-      if (!report(ctx, error)) throw error;
-      return "error";
+      if (!(error instanceof ParseError) || !report(ctx, error)) throw error;
+      return error;
     }
   };
   if (!ref && element.keyword !== "project") {
     const name = peekAt(1);
-    if (name === "error") return true;
+    if (name instanceof ParseError) return true;
     if (!isName(name)) return false;
   }
   if (cache?.until != null && before(token.position.start, cache.until)) {
-    return cache.stop === "{" || (cache.stop === ":" && ref);
+    return cache.stop === "{" || cache.stop === "error" || (cache.stop === ":" && ref);
   }
   // A `:` inside a settings list (`Table t [note: 'x'] {`) doesn't count.
   let depth = 0;
   for (let n = 1; ; n++) {
     const next = peekAt(n);
-    if (next === "error") return true;
     const stop = (at: ScanCache["stop"]): boolean => {
       if (cache !== undefined) {
-        cache.until = next === null ? { row: Number.POSITIVE_INFINITY, col: 0 } : next.position.start;
+        cache.until =
+          next === null
+            ? { row: Number.POSITIVE_INFINITY, col: 0 }
+            : next instanceof ParseError
+              ? next.start
+              : next.position.start;
         cache.stop = at;
       }
-      return at === "{" || (at === ":" && ref);
+      return at === "{" || at === "error" || (at === ":" && ref);
     };
+    if (next instanceof ParseError) return stop("error");
     if (next === null || isNewline(next)) return stop("end");
     if (isPunc(next, "{")) return stop("{");
     if (isPunc(next, "[") || isPunc(next, "(")) depth++;

@@ -645,6 +645,13 @@ describe("Recovery cost", () => {
     expect(goesOn.errors).toHaveLength(1);
   });
 
+  it("doesn't rescan to each lexer error a keyword's scan runs into", () => {
+    // Inside an open `[` the scans cross lines; each used to run on to the next
+    // lexer error not yet met, and each element then failed at once (~10 s).
+    const { errors } = dbml.diagnose(`${"} Table t [\n".repeat(16_000)}${"$\n".repeat(16_000)}`);
+    expect(errors.length).toBeGreaterThan(16_000);
+  });
+
   it("handles many keyword-led lines after a string left open in a list", () => {
     const { ast, errors } = dbml.diagnose(`Table t {\n  id int [note: 'x\n${"  ref int\n".repeat(16_000)}}\n`);
     expect(errors).toHaveLength(1);
