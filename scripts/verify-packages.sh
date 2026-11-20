@@ -67,9 +67,11 @@ verify() {
 verify packages/core parser-kit-core "" build/esm/print/index.js build/cjs/print/index.js \
   build/esm/print/index.d.ts build/cjs/print/index.d.ts build/esm/print/testing.js build/cjs/print/testing.js \
   build/esm/print/testing.d.ts build/cjs/print/testing.d.ts
-# Each SQL dialect is also a subpath export (`@parser-kit/sql/postgres`).
+# Each SQL dialect is also a subpath export (`@parser-kit/sql/postgres`), with
+# a parse-only entry that leaves the printer out (`@parser-kit/sql/postgres/parser`).
 verify packages/sql parser-kit-sql "" build/esm/postgres/index.js build/cjs/postgres/index.js \
-  build/esm/postgres/index.d.ts build/cjs/postgres/index.d.ts
+  build/esm/postgres/index.d.ts build/cjs/postgres/index.d.ts build/esm/postgres/parser.js \
+  build/cjs/postgres/parser.js build/esm/postgres/parser.d.ts build/cjs/postgres/parser.d.ts
 # @parser-kit/dbml's tarball is held to an allowlist of what consumers need.
 verify packages/dbml parser-kit-dbml '^package/(build/|src/|LICENSE$|README\.md$|CHANGELOG\.md$|package\.json$)'
 # @dbml/core and @dbml/parse are test and bench baselines, so they may only be
@@ -113,18 +115,25 @@ import { definePrinter, doc, precedence, quoting, render } from "@parser-kit/cor
 import { fieldCoverage } from "@parser-kit/core/print/testing";
 import * as sql from "@parser-kit/sql";
 import { postgres } from "@parser-kit/sql/postgres";
+import { postgres as parser } from "@parser-kit/sql/postgres/parser";
 if (!core.defineGrammar) throw new Error("core: ESM export missing");
 if (render(doc.group(["a", doc.line, "b"]), { width: 1 }) !== "a\nb") throw new Error("core/print: ESM render failed");
 if (typeof definePrinter !== "function" || typeof precedence !== "function") throw new Error("core/print: ESM export missing");
 if (quoting({ quote: '"' })("a") !== '"a"') throw new Error("core/print: ESM quoting failed");
 if (fieldCoverage({ key: "kind" }).report().fields.length !== 0) throw new Error("core/print/testing: ESM failed");
-if (Object.keys(sql).join() !== "postgres") throw new Error(`sql: unexpected ESM exports ${Object.keys(sql)}`);
+if (Object.keys(sql).sort().join() !== "NotPrintableError,postgres") throw new Error(`sql: unexpected ESM exports ${Object.keys(sql)}`);
 if (sql.postgres !== postgres) throw new Error("sql: the root and /postgres entries load separate copies");
 const [stmt] = postgres.parse("SELECT 1 AS one");
 if (stmt?.kind !== "select") throw new Error("sql: ESM parse failed");
 if (postgres.parseScript("\\connect db\nSELECT 1;\n").length !== 2) throw new Error("sql: ESM script parse failed");
 if (postgres.diagnose("SELECT FROM WHERE").errors.length !== 1) throw new Error("sql: ESM diagnose failed");
-console.log(`ESM ok: core ${Object.keys(core).length} exports, sql parses from the root and /postgres`);
+if (postgres.stringify(postgres.parse("select a,b from t where x=1")) !== "SELECT a, b FROM t WHERE x = 1;") throw new Error("sql: ESM stringify failed");
+if (postgres.stringify(stmt, { width: 1 }) !== "SELECT\n  1 AS one;") throw new Error("sql: ESM pretty stringify failed");
+const script = "\\connect db\nCOPY t FROM STDIN;\n1\n\\.\nSELECT 1;";
+if (postgres.stringifyScript(postgres.parseScript(script)) !== script) throw new Error("sql: ESM stringifyScript failed");
+if (typeof sql.NotPrintableError !== "function") throw new Error("sql: ESM NotPrintableError missing");
+if ("stringify" in parser || parser.parse !== postgres.parse) throw new Error("sql: ESM /postgres/parser is not the parse-only object");
+console.log(`ESM ok: core ${Object.keys(core).length} exports, sql parses and prints from the root and /postgres, parses from /postgres/parser`);
 JS
 
 cat > cjs.cjs <<'JS'
@@ -133,16 +142,23 @@ const { definePrinter, doc, precedence, quoting, render } = require("@parser-kit
 const { fieldCoverage } = require("@parser-kit/core/print/testing");
 const sql = require("@parser-kit/sql");
 const { postgres } = require("@parser-kit/sql/postgres");
+const { postgres: parser } = require("@parser-kit/sql/postgres/parser");
 if (!core.defineGrammar) throw new Error("core: CJS export missing");
 if (render(doc.group(["a", doc.line, "b"]), { width: 1 }) !== "a\nb") throw new Error("core/print: CJS render failed");
 if (typeof definePrinter !== "function" || typeof precedence !== "function") throw new Error("core/print: CJS export missing");
 if (quoting({ quote: '"' })("a") !== '"a"') throw new Error("core/print: CJS quoting failed");
 if (fieldCoverage({ key: "kind" }).report().fields.length !== 0) throw new Error("core/print/testing: CJS failed");
-if (Object.keys(sql).join() !== "postgres") throw new Error(`sql: unexpected CJS exports ${Object.keys(sql)}`);
+if (Object.keys(sql).sort().join() !== "NotPrintableError,postgres") throw new Error(`sql: unexpected CJS exports ${Object.keys(sql)}`);
 if (sql.postgres !== postgres) throw new Error("sql: the root and /postgres entries load separate copies");
 const [stmt] = postgres.parse("SELECT 1 AS one");
 if (stmt?.kind !== "select") throw new Error("sql: CJS parse failed");
 if (postgres.diagnoseScript("\\connect db\nSELECT 1;\n").ast.length !== 2) throw new Error("sql: CJS script parse failed");
+if (postgres.stringify(postgres.parse("select a,b from t where x=1")) !== "SELECT a, b FROM t WHERE x = 1;") throw new Error("sql: CJS stringify failed");
+if (postgres.stringify(stmt, { width: 1 }) !== "SELECT\n  1 AS one;") throw new Error("sql: CJS pretty stringify failed");
+const script = "\\connect db\nCOPY t FROM STDIN;\n1\n\\.\nSELECT 1;";
+if (postgres.stringifyScript(postgres.parseScript(script)) !== script) throw new Error("sql: CJS stringifyScript failed");
+if (typeof sql.NotPrintableError !== "function") throw new Error("sql: CJS NotPrintableError missing");
+if ("stringify" in parser || parser.parse !== postgres.parse) throw new Error("sql: CJS /postgres/parser is not the parse-only object");
 try {
   postgres.parse("SELECT FROM WHERE");
   throw new Error("sql: CJS parse accepted malformed input");
@@ -150,7 +166,7 @@ try {
   // sql must share core's ParseError class, not bundle a copy of it.
   if (!(e instanceof core.ParseError)) throw e;
 }
-console.log(`CJS ok: core ${Object.keys(core).length} exports, sql parses from the root and /postgres`);
+console.log(`CJS ok: core ${Object.keys(core).length} exports, sql parses and prints from the root and /postgres, parses from /postgres/parser`);
 JS
 
 cat > dbml-esm.mjs <<'JS'
@@ -204,6 +220,10 @@ const stmts: Postgres.Stmt[] = postgres.parse("SELECT 1");
 const items: ScriptItem[] = pg.postgres.parseScript("SELECT 1");
 const tokens: pg.PostgresTokenType[] = ["ident"];
 export const all: ScriptItem[] = [...stmts, ...items, ...pg.postgres.diagnose("x").ast];
+const options: pg.StringifyOptions = { width: 80, keywordCase: "lower" };
+export const text: string = postgres.stringify(stmts, options) + pg.postgres.stringifyScript(items, { indent: "\t" });
+export const isError: boolean = new pg.NotPrintableError("x") instanceof Error;
+export const parser: pg.PostgresParser = (await import("@parser-kit/sql/postgres/parser")).postgres;
 export { tokens };
 TS
 cat > consumer.cts <<'TS'
@@ -211,20 +231,26 @@ import sql = require("@parser-kit/sql");
 import pg = require("@parser-kit/sql/postgres");
 const stmts: sql.Postgres.Stmt[] = sql.postgres.parse("SELECT 1");
 export const items: pg.ScriptItem[] = [...stmts, ...pg.postgres.diagnoseScript("x").ast];
+export const text: string = sql.postgres.stringify(stmts, { semicolons: "never" });
+import parser = require("@parser-kit/sql/postgres/parser");
+export const parsed: parser.Stmt[] = parser.postgres.parse("SELECT 1");
 TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
   consumer.mts consumer.cts
-echo "TypeScript ok: @parser-kit/sql and /postgres types resolve from ESM and CJS (nodenext)"
+echo "TypeScript ok: @parser-kit/sql, /postgres and /postgres/parser types resolve from ESM and CJS (nodenext)"
 
 # TypeScript's legacy `node` resolution ignores `exports`; `typesVersions`
 # maps the subpath for it.
 cat > legacy.ts <<'TS'
-import { type Stmt, postgres } from "@parser-kit/sql/postgres";
-export const stmts: Stmt[] = postgres.parse("SELECT 1");
+import { type Stmt, type StringifyOptions, postgres } from "@parser-kit/sql/postgres";
+import { postgres as parser } from "@parser-kit/sql/postgres/parser";
+export const stmts: Stmt[] = parser.parse("SELECT 1");
+const options: StringifyOptions = { width: 80 };
+export const text: string = postgres.stringify(stmts, options);
 TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --target es2022 --module commonjs --moduleResolution node --ignoreDeprecations 5.0 \
   legacy.ts
-echo "TypeScript ok: @parser-kit/sql/postgres types resolve under moduleResolution node"
+echo "TypeScript ok: @parser-kit/sql/postgres and /postgres/parser types resolve under moduleResolution node"
 
 cat > dbml-consumer.mts <<'TS'
 import type { ParseError } from "@parser-kit/core";
@@ -290,13 +316,30 @@ if [ "$PRINT_SIZE" -gt "$PRINT_BUDGET" ]; then
 fi
 echo "Size ok: @parser-kit/core/print is $PRINT_SIZE bytes min+gz (budget $PRINT_BUDGET)"
 
-# The same budget check for @parser-kit/dbml's whole entry, @parser-kit/core
-# included (about 13.3 KB at its first release).
-DBML_BUDGET=16384
-echo 'export * from "@parser-kit/dbml";' > dbml-entry.mjs
-DBML_SIZE=$("$ROOT/node_modules/.bin/esbuild" dbml-entry.mjs --bundle --minify --format=esm --log-level=error | gzip -9 | wc -c)
-if [ "$DBML_SIZE" -gt "$DBML_BUDGET" ]; then
-  echo "::error::@parser-kit/dbml is $DBML_SIZE bytes min+gz, over the $DBML_BUDGET byte budget"
-  exit 1
-fi
-echo "Size ok: @parser-kit/dbml is $DBML_SIZE bytes min+gz, @parser-kit/core included (budget $DBML_BUDGET)"
+# Size budgets for the SQL entries, measured the same way. The parse-only
+# entry (/postgres/parser) holds the grammar alone; the printer comes with the
+# `postgres` object of the root and /postgres entries, since an object's
+# methods can't be tree-shaken apart. Its own budget is the difference, and
+# it includes @parser-kit/core/print.
+size_of() {
+  echo "export * from \"$1\";" > size-entry.mjs
+  "$ROOT/node_modules/.bin/esbuild" size-entry.mjs --bundle --minify --format=esm --log-level=error | gzip -9 | wc -c
+}
+check_size() {
+  local name=$1 size=$2 budget=$3
+  if [ "$size" -gt "$budget" ]; then
+    echo "::error::$name is $size bytes min+gz, over the $budget byte budget"
+    exit 1
+  fi
+  echo "Size ok: $name is $size bytes min+gz (budget $budget)"
+}
+PARSER_SIZE=$(size_of "@parser-kit/sql/postgres/parser")
+POSTGRES_SIZE=$(size_of "@parser-kit/sql/postgres")
+ROOT_SIZE=$(size_of "@parser-kit/sql")
+check_size "@parser-kit/sql/postgres/parser" "$PARSER_SIZE" 58368
+check_size "@parser-kit/sql/postgres" "$POSTGRES_SIZE" 86016
+check_size "@parser-kit/sql" "$ROOT_SIZE" 86016
+check_size "the PostgreSQL printer (/postgres less /postgres/parser)" $((POSTGRES_SIZE - PARSER_SIZE)) 27648
+# @parser-kit/dbml's whole entry, @parser-kit/core included (about 13.3 KB at
+# its first release).
+check_size "@parser-kit/dbml" "$(size_of "@parser-kit/dbml")" 16384

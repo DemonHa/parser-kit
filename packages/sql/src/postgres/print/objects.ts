@@ -8,9 +8,8 @@
 // so it round-trips whatever it holds. The two-part `AS 'obj', 'symbol'` of a
 // C function is written as two string constants.
 //
-// Not printed yet, each throwing NotPrintableError:
-// - createForeignTable: its element list is CREATE TABLE's columns and
-//   constraints, which the tables family prints.
+// CREATE FOREIGN TABLE takes CREATE TABLE's elements and partition bounds,
+// printed by the tables family's element printers.
 import { type Doc, group, indent, join, line } from "@parser-kit/core/print";
 import type {
   AggregateOption,
@@ -59,6 +58,7 @@ import {
   sequenceOption,
   signature,
 } from "./shared";
+import { partitionBound, tableElements } from "./tables";
 import { typeName } from "./types";
 
 // The option lists the family prints (WITH / SET / RESET of storage
@@ -824,8 +824,26 @@ export const objectsFamily = defineFamily(
         words(kw("ALTER"), kw(n.object.objectType.toUpperCase()), ifExists(n.ifExists), objectRefName(n.object)),
         commonAlterAction(n.action),
       ),
+    // PARTITION OF's element list may be left out; the plain form's may be
+    // empty, `()`, but never left out.
+    createForeignTable: (n) =>
+      stmt(
+        [
+          words(
+            kw("CREATE FOREIGN TABLE"),
+            ifNotExists(n.ifNotExists),
+            qualified(n.name),
+            n.partitionOf !== undefined ? [kw("PARTITION OF"), " ", qualified(n.partitionOf.parent)] : "",
+          ),
+          n.partitionOf === undefined || n.items.length > 0 ? [" ", tableElements(n.items)] : "",
+        ],
+        n.partitionOf !== undefined && partitionBound(n.partitionOf.bound),
+        n.inherits !== undefined && [kw("INHERITS"), " ", parenList(n.inherits.map(qualified))],
+        [kw("SERVER"), " ", ident(n.server)],
+        n.options !== undefined && genericOptions(n.options),
+      ),
   },
-  ["createForeignTable"],
+  [],
 );
 
 // CREATE / ALTER DATABASE's options: a space-separated `name = value` run,

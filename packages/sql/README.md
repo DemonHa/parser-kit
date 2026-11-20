@@ -7,6 +7,7 @@ A fast, typed SQL parser for JavaScript and TypeScript, built with [`@parser-kit
 - **Nearly all of PostgreSQL 17.** It accepts 604 of the 609 statements in the [coverage battery](#compared-with-node-sql-parser) (node-sql-parser: 235), and every statement in the [pg_dump corpus](#pg_dump-corpus). See [PostgreSQL coverage](#postgresql-coverage) for what is still missing.
 - **Fast.** 2–5.5× faster than [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on most [benchmarks](#benchmarks) (about even on a bulk `INSERT`), measured only on input both parsers accept.
 - **Typed.** Every node is a discriminated union member (`Stmt`, `Query`, `Expr`, …), exported for `switch (node.kind)`.
+- **Prints back to SQL.** `postgres.stringify` turns any tree, parsed or built by hand, back into PostgreSQL, on one line or laid out for a line width, and the output parses back to the same tree. See [Printing SQL](#printing-sql).
 - **Dual ESM / CommonJS**, with type declarations. Node 18 or later.
 
 ## Install
@@ -30,6 +31,8 @@ Each dialect is one object. PostgreSQL's is `postgres`:
 | `postgres.parseScript(text)` | a whole psql script, pg_dump output included | `ScriptItem[]`, or throws a `ParseError` |
 | `postgres.diagnoseScript(text)` | the same, recovering at each `;` and meta-command line | `{ ast: ScriptItem[], errors: ParseError[] }` |
 | `postgres.lexer` / `postgres.scriptLexer` | tokens, comments included, for highlighters | a `Lexer<PostgresTokenType>` from `@parser-kit/core` |
+| `postgres.stringify(node, options?)` | statements, one statement, an expression or a type | SQL text (see [Printing SQL](#printing-sql)) |
+| `postgres.stringifyScript(items, options?)` | `parseScript`'s items | a psql script |
 
 `Diagnosis<T>` is `{ ast: T, errors: ParseError[] }`, the same for every dialect.
 
@@ -43,7 +46,7 @@ const ast = postgres.parse("SELECT id, count(DISTINCT tag) FROM posts WHERE crea
 // → Stmt[]: one node per statement, statements and expressions carrying a { start, end } span
 ```
 
-The root is a list of statements. `;` separates them, and the last one may leave it out. Empty statements (`;;`, a leading `;`, input that is only comments) produce no node, and `SELECT 1 SELECT 2` is still an error. Unquoted identifiers fold ASCII letters to lower case, as PostgreSQL does, and quoted ones keep their case. Keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is, and they are not kept in the AST. The node types (`Stmt`, `Query`, `Expr`, `ScriptItem`, …) are exported unqualified from `@parser-kit/sql/postgres`, and from the root as the `Postgres` namespace (`Postgres.Stmt`), since every dialect will have its own `Stmt`. `PostgresDialect`, `PostgresTokenType` (the token type) and `Diagnosis` come from both. The methods don't use `this`, so `const { parse } = postgres` and `sources.map(postgres.parse)` work.
+The root is a list of statements. `;` separates them, and the last one may leave it out. Empty statements (`;;`, a leading `;`, input that is only comments) produce no node, and `SELECT 1 SELECT 2` is still an error. Unquoted identifiers fold ASCII letters to lower case, as PostgreSQL does, and quoted ones keep their case. Keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is, and they are not kept in the AST. The node types (`Stmt`, `Query`, `Expr`, `ScriptItem`, …) are exported unqualified from `@parser-kit/sql/postgres`, and from the root as the `Postgres` namespace (`Postgres.Stmt`), since every dialect will have its own `Stmt`. `PostgresDialect`, `PostgresParser` (the [parse-only](#bundles-that-only-parse) object's type), `PostgresTokenType` (the token type), `Diagnosis` and `NotPrintableError` come from both; the printer's option and input types from the subpath only. The methods don't use `this`, so `const { parse, stringify } = postgres` and `sources.map(postgres.parse)` work.
 
 `parse` throws a `ParseError` (exported by `@parser-kit/core`) at the first problem:
 
@@ -76,6 +79,103 @@ postgres.parseScript("\\connect app\nCOPY t (a, b) FROM stdin;\n1\tx\n2\ty\n\\.\
 
 The statements are read by the same rules as `postgres.parse`'s, so a script differs from plain SQL only in what sits between statements. `diagnoseScript` also resumes at a meta-command line: a statement left unfinished before one is reported as an error, and the meta-command and what follows it are kept.
 
+## Printing SQL
+
+`postgres.stringify` prints a tree back as PostgreSQL. It takes what `parse` returns (a `Stmt[]`), a single statement, an expression or a type, parsed or built by hand (spans are optional). By default it writes each statement on one line, ended by `;`:
+
+```ts
+import { postgres } from "@parser-kit/sql/postgres";
+
+const [stmt] = postgres.parse("select id,name from users where id=$1");
+if (stmt?.kind === "select") stmt.limit = { kind: "number", value: 1 };
+
+postgres.stringify(stmt!);        // "SELECT id, name FROM users WHERE id = $1 LIMIT 1;"
+postgres.stringify(stmt!.where!); // "id = $1"
+```
+
+The output is canonical. Keyword case, quoting, spacing, parentheses and keyword spellings come from the options and the tree, never from the text the tree was parsed from: `cast(a as int)` prints as `a::int`, `END` as `COMMIT;`, and a name is quoted only when it has to be (`"MyTable"`, `"select"`).
+
+| Option | Default | |
+|---|---|---|
+| `width` | `Infinity` | The line width to lay the output out for. `Infinity` writes every statement on one line; a number (`80`) breaks clauses, lists and parentheses onto indented lines where a line would be longer. |
+| `indent` | `2` | One level of indentation when the output breaks: a number of spaces or a string (`"\t"`). |
+| `keywordCase` | `"upper"` | `"upper"` or `"lower"`. Names are never re-cased. |
+| `identifierQuote` | `"minimal"` | `"minimal"` quotes a name only when it must be (not a lower-case word, or a reserved one). `"always"` quotes every table, column and alias name; function and type names stay minimal, since quoting one can change it (`int` is `int4`, `"int"` is looked up as written). |
+| `semicolons` | `"always"` | When printing statements: `;` after every one, only `"between"` them, or `"never"` (several statements then don't parse back as one text). |
+| `strings` | `"standard"` | `"standard"` writes every string as `'…'` (`'` doubled), which is how a server with `standard_conforming_strings = on`, the default since PostgreSQL 9.1, reads it. `"escape"` writes one holding a backslash or a control character as `E'…'`, which every server reads the same way. |
+
+The options type is `StringifyOptions`, exported from `@parser-kit/sql/postgres`, as are `StringifyInput` (what `stringify` takes) and `NotPrintableError`.
+
+### Pretty printing
+
+Give a `width` to lay the output out for it. A group that fits stays on one line; one that doesn't breaks, its parts on indented lines:
+
+```ts
+postgres.stringify(postgres.parse(sql), { width: 60 });
+```
+
+```sql
+WITH
+  recent AS (
+    SELECT id, total
+    FROM orders
+    WHERE created_at > now() - INTERVAL '7 days'
+  )
+SELECT c.name, sum(r.total) AS revenue
+FROM recent AS r JOIN customers AS c ON c.id = r.id
+GROUP BY c.name
+ORDER BY revenue DESC
+LIMIT 10;
+```
+
+Each statement starts on a line of its own. A line is longer than `width` only where nothing in it can break (a long name or string).
+
+### Printing scripts
+
+`postgres.stringifyScript` prints `parseScript`'s items back as a psql script: each statement as `stringify` prints it, always ended by `;` (so it takes every option but `semicolons`), each meta-command on a line of its own, and each `COPY … FROM stdin`'s rows (`data`) after it, ended by a `\.` line:
+
+```ts
+const items = postgres.parseScript("\\connect app\ncopy t (a, b) from stdin;\n1\tx\n\\.\nselect 1;\n");
+postgres.stringifyScript(items);
+// "\\connect app\nCOPY t (a, b) FROM STDIN;\n1\tx\n\\.\nSELECT 1;"
+```
+
+A `COPY … FROM STDIN` with no `data` (from `parse`, or one at the end of a script) gets an empty block, since psql reads rows after every one. `stringify` prints the same COPY without its rows, since the server never receives them as SQL. `stringifyScript` throws a `TypeError` for what it can't write: rows on a COPY that isn't `FROM STDIN`, a row that is exactly `\.`, or a meta-command whose name holds whitespace or a backslash, or whose arguments hold a line break.
+
+psql counts every bare `begin` in a `CREATE FUNCTION` / `CREATE PROCEDURE` as opening a `BEGIN ATOMIC` body, so the printer quotes a name `begin` there (`"begin"`), in `stringify`'s output too.
+
+### What is guaranteed
+
+For every tree `postgres.parse` or `postgres.parseScript` returns, printing it and parsing the result gives the same tree back, spans aside, at any width and with any options (with `semicolons: "never"`, one statement at a time). Printing is also stable: printing the reparsed tree gives the same text. The tests check both over every statement the package's test corpora hold, about 2,300 of them including two pg_dump files, at widths `Infinity`, 80, 40 and 1 and with every non-default option.
+
+The same tree is not the same meaning if both spellings parse to one tree, so the output is also checked against PostgreSQL 17's own parser ([libpg_query](https://github.com/pganalyze/libpg_query)): for those statements, PostgreSQL reads the printed SQL to the same parse tree as the original, apart from a few listed differences, which come from the limits below.
+
+### Known limits
+
+- **Comments are dropped**, and so is the source's layout. A text-to-text formatter that keeps comments is planned.
+- **Spellings that share a tree print in one form.** Most of these mean the same to PostgreSQL: `cast(a AS t)` and `a::t`, `ABORT` and `ROLLBACK`, `FETCH FIRST n ROWS ONLY` and `LIMIT n`, `LIMIT ALL` and no limit, `int[3]` and `int[]`, `N'x'` and `bpchar 'x'`, a string's escape or dollar quoting (routine bodies are written `$$…$$`, `DO` bodies `'…'`). A few do not, so for these inputs the output can mean something different from the source:
+  - every entry under [Known wrong ASTs](#known-wrong-asts): a quoted special parameter name (`SET "time zone"`, `RESET "all"`, `SET schema = 'x'`), a parenthesised arm with its own `WITH`, and a lone quoted `"system_user"` / `"current_catalog"` / `"current_schema"`;
+  - a quoted role named `"current_user"`, `"current_role"` or `"session_user"`, which prints as the keyword;
+  - a call to a user function named `"rollup"` or `"cube"` directly in a `GROUPING SETS` list (`GROUPING SETS ("rollup"(a))`), which prints as the construct;
+  - an index element `(c COLLATE "C")` (an expression) and `c COLLATE "C"` (the column with its own collation); the second is printed;
+  - a quoted type name `"int"` or `"char"` in `DROP TYPE` / `DROP DOMAIN`, which prints as the built-in type (a cast keeps `::"int"`).
+
+  The special parameter names are the only ones of these PostgreSQL rejects when run; the rest change what a statement PostgreSQL runs does.
+- **Hand-built trees are printed as they are, not validated.** A shape the parser never produces (an empty list where one is required, an empty name, a call named `row`, `trim`, `position` or `extract` that isn't in that construct's shape) may print SQL that doesn't parse, or parses to a different tree. A number node with no `raw` must hold a finite `value`; `NaN` throws a `TypeError`.
+- **`NotPrintableError`** is thrown for a statement kind the parser reads but the printer can't print yet, rather than printing something wrong. Every statement kind prints today; it is there for kinds a later version learns to parse before it can print them.
+
+### Bundles that only parse
+
+The `postgres` object's methods can't be tree-shaken apart, so importing it brings the printer along (about 26 KB minified and gzipped, on top of the parser's 57 KB). Code that only parses can import `@parser-kit/sql/postgres/parser` instead: the same object without `stringify` and `stringifyScript` (its type is `PostgresParser`), with the same AST types, and without the printer.
+
+```ts
+import { postgres, type Stmt } from "@parser-kit/sql/postgres/parser";
+```
+
+### Coming from node-sql-parser
+
+`postgres.parse` is `astify` and `postgres.stringify` is `sqlify`, each on its own AST. `sqlify` writes one line, quoting table and alias names but not columns; the closest here is `postgres.stringify(ast, { identifierQuote: "always" })`, which quotes columns too.
+
 ## AST conventions
 
 - **Spans.** Statements, expressions, column definitions and constraints have a `span: { start, end }`. Structural parts such as select items, FROM items, CTE entries, `ORDER BY` items, locking clauses and assignments don't. Each end is a `{ row, col }`, with a 1-based `row` and a 0-based `col` (the `(1:26)` in error messages). A span starts and ends at real tokens, so a comment after a node is outside its span. `stripSpans` from `@parser-kit/core` removes them recursively, and the unit tests compare span-stripped trees.
@@ -105,16 +205,18 @@ The package lives at [`packages/sql`](https://github.com/DemonHa/parser-kit/tree
 | `src/postgres/lexer.ts` | Tokens: identifier folding (ASCII only, non-ASCII letters allowed), quoted and `U&"…"` identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` / `N'…'` strings with every escape PostgreSQL decodes, PostgreSQL numbers (`1e5`, `.5`, `5.`, `0xff`, `0o17`, `0b101`, `1_000`, with PostgreSQL 15+'s rejection of `123abc`), `$1` parameters, comments, and the operator reader. `sqlLexer` (public as `postgres.lexer`) emits `comment` tokens. The internal `sqlParseLexer`, which the grammar uses, drops them. `sqlScriptLexer` (public as `postgres.scriptLexer`) adds psql meta-command lines; the internal `sqlScriptParseLexer` wraps it and also reads COPY data blocks |
 | `src/postgres/grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, one rule per statement, and the two root grammars (SQL and psql scripts) |
 | `src/postgres/ast.ts` | The public AST types: an explicit, type-only list of `grammar.ts`'s exported types |
-| `src/postgres/index.ts` | The `postgres` dialect object and its public types: the `@parser-kit/sql/postgres` entry |
+| `src/postgres/parser.ts` | The parse-only `postgres` object and its public types: the `@parser-kit/sql/postgres/parser` entry |
+| `src/postgres/index.ts` | The `postgres` dialect object, the parse-only one plus the printer, and its public types: the `@parser-kit/sql/postgres` entry |
 | `src/dialect.ts` | Types every dialect shares (`Diagnosis`) |
 | `src/index.ts` | The package root, `@parser-kit/sql`: every dialect object, with each dialect's AST types as a namespace (`Postgres`) |
-| `src/postgres/print/` | The printer, AST back to SQL, one module per statement family. Internal for now: no entry exports it |
+| `src/postgres/print/` | The printer, AST back to SQL, one module per statement family. Public only through `postgres.stringify` and `postgres.stringifyScript` |
 | `test/postgres.test.ts` | Unit tests, one `describe` per feature |
-| `test/entry.test.ts` | Pins both entries' exports and the `postgres` object's shape |
+| `test/entry.test.ts` | Pins the three entries' exports and the `postgres` objects' shapes |
 | `test/psql-split.ts` | A test helper that splits a dump file into statements the way psql does |
 | `test/corpus.ts` | The statements the benchmark measures and the parity golden pins |
 | `test/parity.test.ts` + `test/parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus the lists in `test/parity-corpus.ts` |
 | `test/stringify.test.ts` + `test/stringify-cases/` + `test/stringify.*.golden.sql` | The printer's round trips over the corpus, the parity lists, the accepted coverage-battery rows, the pg_dump statements that parse and each statement family's own cases, and its width-80 output per family (`STRINGIFY_REPORT=1` prints the statements not yet printable) |
+| `test/stringify-api.test.ts` | The round trip through `postgres.stringify` and `postgres.stringifyScript`, whole pg_dump files included, and the script printer's framing |
 | `test/libpg-query.differential.test.ts` | The differential test against PostgreSQL 17's own parser (libpg_query): over the corpus, `postgres.parse` accepts what PostgreSQL accepts, and PostgreSQL parses every printable statement's output to the same tree as its source. Deliberate differences are listed in the file with their reasons (`LIBPG_QUERY_REPORT=1` prints the counts) |
 | `test/pg-coverage.ts` + `test/pg-coverage.test.ts` | The PostgreSQL coverage battery: 609 statements with the bucket each one lands in |
 | `test/pg-dump-corpus.ts` + `test/pg-dump-corpus.test.ts` | The pg_dump corpus: whether each statement of the dumps in `test/fixtures/pg-dump/` parses, and whether each file parses whole through `postgres.parseScript` |
