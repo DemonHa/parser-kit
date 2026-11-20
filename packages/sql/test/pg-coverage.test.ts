@@ -76,21 +76,21 @@ describe("PostgreSQL coverage battery: AST spot checks", () => {
 
   it("reads multi-word cast targets as one type name", () => {
     const [withTz, , withoutTz] = firstColumn(battery("now()::timestamp with time zone"));
-    expect(withTz.expr).toMatchObject({ kind: "cast", type: { name: "timestamp with time zone" } });
-    expect(withoutTz.expr).toMatchObject({ kind: "cast", type: { name: "time without time zone" } });
+    expect(withTz.expr).toMatchObject({ kind: "cast", type: { name: ["timestamp with time zone"] } });
+    expect(withoutTz.expr).toMatchObject({ kind: "cast", type: { name: ["time without time zone"] } });
   });
 
   it("marks DISTINCT and ORDER BY inside an aggregate call", () => {
     const [, distinct] = firstColumn(battery("count(DISTINCT user_id)"));
     expect(distinct.expr).toEqual({
       kind: "call",
-      name: "count",
+      name: ["count"],
       args: [{ kind: "name", parts: ["user_id"] }],
       distinct: true,
     });
 
     const [agg] = firstColumn(battery("array_agg(DISTINCT tag ORDER BY tag)"));
-    expect(agg.expr).toMatchObject({ name: "array_agg", distinct: true, orderBy: [{ expr: { parts: ["tag"] } }] });
+    expect(agg.expr).toMatchObject({ name: ["array_agg"], distinct: true, orderBy: [{ expr: { parts: ["tag"] } }] });
   });
 
   it("keeps IS [NOT] DISTINCT FROM apart from equality", () => {
@@ -104,6 +104,6 @@ describe("PostgreSQL coverage battery: AST spot checks", () => {
 
   it("keeps character varying(n) as one parameterised column type", () => {
     const [stmt] = stripSpans(sqlLite.parse(battery("name character varying(255)"))) as any[];
-    expect(stmt.items[1].dataType).toEqual({ name: "character varying", args: [255], array: false });
+    expect(stmt.items[1].dataType).toEqual({ name: ["character varying"], args: [255], array: false });
   });
 });

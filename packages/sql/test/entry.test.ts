@@ -1,5 +1,5 @@
 import { expect, expectTypeOf, it } from "vitest";
-import type { Expr, PsqlMeta, Query, ScriptItem, SqlTokenType, Stmt } from "../src/index";
+import type { ColType, Expr, PsqlMeta, Query, ScriptItem, SqlTokenType, Stmt } from "../src/index";
 import * as entry from "../src/index";
 
 // The package's public surface: `src/index.ts` is what `@parser-kit/sql`
@@ -25,5 +25,9 @@ it("exports the AST types the entry points produce", () => {
   expectTypeOf<PsqlMeta>().toMatchTypeOf<ScriptItem>();
   expectTypeOf<Extract<Stmt, { kind: "select" }>>().toMatchTypeOf<Query>();
   expectTypeOf<Extract<Expr, { kind: "number" }>["value"]>().toEqualTypeOf<number>();
+  expectTypeOf<Extract<Expr, { kind: "number" }>["raw"]>().toEqualTypeOf<string | undefined>();
+  // Qualified names keep one element per part.
+  expectTypeOf<Extract<Expr, { kind: "call" }>["name"]>().toEqualTypeOf<string[]>();
+  expectTypeOf<ColType["name"]>().toEqualTypeOf<string[]>();
   expectTypeOf<"ident">().toMatchTypeOf<SqlTokenType>();
 });
