@@ -1,7 +1,7 @@
 // A PostgreSQL coverage battery: realistic statements across the SQL command
 // reference (https://www.postgresql.org/docs/current/sql-commands.html) and the
 // query and expression chapters, each recorded with which of the two parsers
-// accepts it. `pg-coverage.test.ts` re-runs every row through `sqlLite.parse`
+// accepts it. `pg-coverage.test.ts` re-runs every row through `postgres.parse`
 // and node-sql-parser's PostgreSQL mode and fails when an outcome moves, so a
 // newly supported statement shows up as a diff here rather than going unnoticed.
 //
@@ -9,7 +9,7 @@
 // than 16: JSON_TABLE, MERGE ... RETURNING, AT LOCAL, ...); a handful would
 // still fail PostgreSQL's later analysis against a real schema. "Accepts" only
 // means "parses without throwing"; it says nothing about the AST being right.
-// The README's coverage section lists the known cases where sql-lite parses a
+// The README's coverage section lists the known cases where @parser-kit/sql parses a
 // statement into the wrong tree.
 //
 // This is deliberately not `corpus.ts`: the benchmark's group names, and so

@@ -1,19 +1,25 @@
 # AGENTS.md — @parser-kit/sql
 
 A typed SQL parser built on `@parser-kit/core`. Its only dialect so far is
-PostgreSQL 17 (`gram.y` is the target). The entry points are `sqlLite` (SQL as
-the server receives it) and `sqlLiteScript` (whole psql / pg_dump scripts); the
-names date from when this grammar was the `examples/sql-lite` example and are
-kept for now. See `README.md` here for the user-facing guide, the coverage
+PostgreSQL 17 (`gram.y` is the target), exposed as the `postgres` dialect
+object: `parse` / `diagnose` (SQL as the server receives it), `parseScript` /
+`diagnoseScript` (whole psql / pg_dump scripts) and the `lexer` /
+`scriptLexer` tokenizers. More dialects (MySQL next) will sit beside it as
+objects of the same shape, each in its own `src/<dialect>/` directory with its
+own subpath export. See `README.md` here for the user-facing guide, the coverage
 survey and the contributor checklist, and `../core/AGENTS.md` for the kit's
 internals and grammar-authoring gotchas.
 
 ## Layout
 
-- `src/` — the published code. `lexer.ts` (tokens, folding, strings, psql
-  script lexers), `grammar.ts` (AST types, reserved words, the Pratt table, one
-  rule per statement, the entry points), and `index.ts` (the package entry).
-- `test/` — unit tests (`sql-lite.test.ts`), the entry-surface pin
+- `src/` — the published code. `index.ts` is the package root
+  (`@parser-kit/sql`) and re-exports every dialect.
+- `src/postgres/` — the PostgreSQL dialect: `lexer.ts` (tokens, folding,
+  strings, psql script lexers), `grammar.ts` (AST types, reserved words, the
+  Pratt table, one rule per statement, the two root grammars) and `index.ts`
+  (the `postgres` object and its public types; the `@parser-kit/sql/postgres`
+  subpath export).
+- `test/` — unit tests (`postgres.test.ts`), the entry-surface pin
   (`entry.test.ts`), the parity harness and its goldens, the PostgreSQL coverage
   battery (`pg-coverage.ts`) and the pg_dump corpus (`pg-dump-corpus.ts`,
   `fixtures/pg-dump/`, pagila vendored under the PostgreSQL License) and
@@ -27,12 +33,15 @@ fixtures reach the tarball.
 
 ## Rules
 
-- **The public API is `src/index.ts`.** Removing or renaming an export, or
-  changing an AST node's shape, is a breaking change for npm consumers and needs
-  a changeset that says so. `test/entry.test.ts` pins the exported values.
-  `copyDataError` and `routineDepth` are exported only because `index.ts`
-  re-exports all of `lexer.ts`. They are grammar/lexer plumbing, and trimming
-  them is part of the pending multi-dialect API decision.
+- **The public API is `src/index.ts` and `src/postgres/index.ts`.** Removing
+  or renaming an export or a dialect method, or changing an AST node's shape, is
+  a breaking change for npm consumers and needs a changeset that says so.
+  `test/entry.test.ts` pins the exported values and the dialect object's keys.
+  Lexer and grammar plumbing (`sqlParseLexer`, `copyDataError`, `routineDepth`,
+  the root grammars) stays internal: export it from the dialect's `index.ts`
+  only on purpose. A new dialect gets its own directory, a subpath in
+  `package.json` `exports` and `typesVersions`, and a check in
+  `scripts/verify-packages.sh`.
 - **New AST fields are optional and left out when absent**, so trees for input
   that doesn't use the construct stay byte-identical (see the README's AST
   conventions).

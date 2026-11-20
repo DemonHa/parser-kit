@@ -1,10 +1,10 @@
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
-import { sqlLite } from "../src/index";
+import { postgres } from "../src/index";
 
-// Real-world workloads: sql-lite vs node-sql-parser on the shapes of SQL an
+// Real-world workloads: @parser-kit/sql vs node-sql-parser on the shapes of SQL an
 // application actually feeds a parser, rather than the one-construct-per-row
-// corpus `sql-lite.bench.ts` measures.
+// corpus `postgres.bench.ts` measures.
 //
 //   - an OLTP query mix (point lookups, pagination, small writes);
 //   - one analytics report (CTEs, window functions, joins, CASE);
@@ -131,14 +131,14 @@ const INVALID = [
   const valid = [...OLTP, ANALYTICS, MIGRATION, BULK_INSERT, WIDE_SELECT];
   for (const sql of valid) {
     for (const [name, parse] of [
-      ["sql-lite", (s: string) => sqlLite.parse(s)],
+      ["@parser-kit/sql", (s: string) => postgres.parse(s)],
       ["node-sql-parser", parseWithNode],
     ] as const) {
       if (!accepted(parse, sql)) throw new Error(`${name} rejects a workload input: ${sql.slice(0, 120)}`);
     }
   }
   for (const sql of INVALID) {
-    if (accepted((s) => sqlLite.parse(s), sql) || accepted(parseWithNode, sql)) {
+    if (accepted((s) => postgres.parse(s), sql) || accepted(parseWithNode, sql)) {
       throw new Error(`an INVALID input was accepted: ${sql}`);
     }
   }
@@ -159,8 +159,8 @@ const swallow = (parse: (sql: string) => unknown, sql: string) => {
 };
 
 describe(`workload: OLTP mix (${OLTP.length} statements)`, () => {
-  bench("sql-lite", () => {
-    for (const sql of OLTP) sqlLite.parse(sql);
+  bench("@parser-kit/sql", () => {
+    for (const sql of OLTP) postgres.parse(sql);
   });
   bench("node-sql-parser", () => {
     for (const sql of OLTP) parseWithNode(sql);
@@ -168,8 +168,8 @@ describe(`workload: OLTP mix (${OLTP.length} statements)`, () => {
 });
 
 describe("workload: analytics report (CTEs, windows, joins)", () => {
-  bench("sql-lite", () => {
-    sqlLite.parse(ANALYTICS);
+  bench("@parser-kit/sql", () => {
+    postgres.parse(ANALYTICS);
   });
   bench("node-sql-parser", () => {
     parseWithNode(ANALYTICS);
@@ -177,8 +177,8 @@ describe("workload: analytics report (CTEs, windows, joins)", () => {
 });
 
 describe(`workload: migration script (${MIGRATION_STATEMENTS.length} statements, one file)`, () => {
-  bench("sql-lite", () => {
-    sqlLite.parse(MIGRATION);
+  bench("@parser-kit/sql", () => {
+    postgres.parse(MIGRATION);
   });
   bench("node-sql-parser", () => {
     parseWithNode(MIGRATION);
@@ -186,8 +186,8 @@ describe(`workload: migration script (${MIGRATION_STATEMENTS.length} statements,
 });
 
 describe(`workload: bulk INSERT (${INSERT_ROWS} rows)`, () => {
-  bench("sql-lite", () => {
-    sqlLite.parse(BULK_INSERT);
+  bench("@parser-kit/sql", () => {
+    postgres.parse(BULK_INSERT);
   });
   bench("node-sql-parser", () => {
     parseWithNode(BULK_INSERT);
@@ -195,8 +195,8 @@ describe(`workload: bulk INSERT (${INSERT_ROWS} rows)`, () => {
 });
 
 describe(`workload: wide SELECT (${WIDE_COLUMNS} columns)`, () => {
-  bench("sql-lite", () => {
-    sqlLite.parse(WIDE_SELECT);
+  bench("@parser-kit/sql", () => {
+    postgres.parse(WIDE_SELECT);
   });
   bench("node-sql-parser", () => {
     parseWithNode(WIDE_SELECT);
@@ -204,8 +204,8 @@ describe(`workload: wide SELECT (${WIDE_COLUMNS} columns)`, () => {
 });
 
 describe(`workload: malformed input (${INVALID.length} statements, each throws)`, () => {
-  bench("sql-lite", () => {
-    for (const sql of INVALID) swallow((s) => sqlLite.parse(s), sql);
+  bench("@parser-kit/sql", () => {
+    for (const sql of INVALID) swallow((s) => postgres.parse(s), sql);
   });
   bench("node-sql-parser", () => {
     for (const sql of INVALID) swallow(parseWithNode, sql);

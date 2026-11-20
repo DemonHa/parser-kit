@@ -30,7 +30,7 @@ import {
 } from "@parser-kit/core";
 import { copyDataError, routineDepth, type SqlTokenType, sqlParseLexer, sqlScriptParseLexer } from "./lexer";
 
-// SQL-lite parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
+// This grammar parses a slice of PostgreSQL DDL — CREATE [TEMP | UNLOGGED] TABLE (incl. TABLE AS,
 // LIKE, INHERITS and the WITH / ON COMMIT / TABLESPACE clauses) / INDEX / TYPE
 // (enum, composite, RANGE) / [MATERIALIZED] VIEW / SEQUENCE / DOMAIN, ALTER
 // TABLE, DROP family, TRUNCATE, COMMENT ON — plus a DML core — SELECT (with
@@ -1823,7 +1823,7 @@ export type CopyLocation =
 // collects them. `legacy` is present only when any of that spelling is written,
 // a bare `WITH` with no option after it included.
 //
-// `data` is set by `sqlLiteScript` alone, on a `FROM STDIN` copy whose rows
+// `data` is set by `postgres.parseScript` alone, on a `FROM STDIN` copy whose rows
 // follow it in the script: the lines up to the `\.` terminator, verbatim and
 // undecoded. The span stays the statement's own; it doesn't cover the rows.
 export type Copy = {
@@ -1841,7 +1841,7 @@ export type Copy = {
 };
 
 // A psql meta-command line in a script (`\connect db`, `\restrict key`), as
-// `sqlLiteScript` returns it. `command` is the name without its backslash, up
+// `postgres.parseScript` returns it. `command` is the name without its backslash, up
 // to the first space or backslash as psql reads it (`connect`, `.`, `dt+`);
 // `args` is the rest of the line, trimmed and unparsed — psql's own argument
 // syntax (quoting, `:var` interpolation, backticks) is not modelled.
@@ -1852,7 +1852,7 @@ export type PsqlMeta = {
   span: Span;
 };
 
-/** What `sqlLiteScript` returns, in source order. */
+/** What `postgres.parseScript` returns, in source order. */
 export type ScriptItem = Stmt | PsqlMeta;
 
 export type Stmt =
@@ -2544,7 +2544,7 @@ export type Merge = {
   span: Span;
 };
 
-// The statements PG's PreparableStmt admits, as far as sql-lite parses them:
+// The statements PG's PreparableStmt admits, as far as this grammar parses them:
 // what PREPARE, EXPLAIN and COPY (…) take as their query.
 export type Preparable = Query | Insert | Update | Delete | Merge;
 
@@ -13914,7 +13914,7 @@ const reindexStmt = custom<Stmt, SqlTokenType>(
   { expected: '"reindex"', first: [{ type: "ident", value: "reindex" }] },
 );
 
-// PG's ExplainableStmt, as far as sql-lite parses it: a preparable statement
+// PG's ExplainableStmt, as far as this grammar parses it: a preparable statement
 // (the same set as PREPARE's), CREATE TABLE AS, CREATE MATERIALIZED VIEW,
 // DECLARE (a cursor), or EXECUTE.
 const EXPLAINABLE =
@@ -14404,10 +14404,10 @@ const script = custom<Stmt[], SqlTokenType>((ctx) => ctx.parse(statements).filte
 
 // --- psql scripts ---
 //
-// `sqlLiteScript` parses a whole file as psql would run it: statements, the
+// `postgresScriptGrammar` parses a whole file as psql would run it: statements, the
 // meta-command lines between them, and each `COPY … FROM STDIN`'s rows (the
 // script lexer reads those, see `sqlScriptParseLexer`). Statements are read by
-// the same rule as `sqlLite`'s, so a script differs from plain SQL only in what
+// the same rule as `postgresGrammar`'s, so a script differs from plain SQL only in what
 // sits between statements.
 
 // psql ends a command name at whitespace or another backslash, so `\\` is the
@@ -14482,7 +14482,7 @@ const scriptRoot = custom<ScriptItem[], SqlTokenType>(
 
 // --- grammar ---
 
-export const sqlLite = defineGrammar({
+export const postgresGrammar = defineGrammar({
   lexer: sqlParseLexer,
   root: script,
   recovery: { sync: [{ type: "punc", value: ";", consume: true }] },
@@ -14497,11 +14497,11 @@ export const sqlLite = defineGrammar({
   strictDelimited: true,
 });
 
-// `sqlLite` for whole psql scripts, pg_dump output included: the same
+// `postgresGrammar` for whole psql scripts, pg_dump output included: the same
 // statements and options, plus meta-command lines (`psqlMeta` items) and COPY
 // rows (`Copy.data`). Recovery also resumes at a meta-command line, which ends
 // a statement left unfinished before it.
-export const sqlLiteScript = defineGrammar({
+export const postgresScriptGrammar = defineGrammar({
   lexer: sqlScriptParseLexer,
   root: scriptRoot,
   recovery: {

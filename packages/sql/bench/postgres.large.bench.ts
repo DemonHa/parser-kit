@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
-import { sqlLite } from "../src/index";
+import { postgres } from "../src/index";
 import { splitPsqlScript } from "../test/psql-split";
 
-// Large-file throughput: how do sql-lite and node-sql-parser compare when fed a
+// Large-file throughput: how do @parser-kit/sql and node-sql-parser compare when fed a
 // single big multi-statement SQL blob (think a schema dump or migration file)?
 //
 // We only use statements *both* parsers accept so the numbers are apples-to-
@@ -74,8 +74,8 @@ for (const { sql } of BLOBS) {
   const bytes = Buffer.byteLength(sql, "utf8");
   const label = `${(bytes / 1024).toFixed(0)}KB file`;
   describe(label, () => {
-    bench("sql-lite", () => {
-      sqlLite.parse(sql);
+    bench("@parser-kit/sql", () => {
+      postgres.parse(sql);
     });
     bench("node-sql-parser", () => {
       parseWithNode(sql);
@@ -83,10 +83,10 @@ for (const { sql } of BLOBS) {
   });
 }
 
-// A real schema dump, sql-lite only: node-sql-parser rejects most of pg_dump's
+// A real schema dump, @parser-kit/sql only: node-sql-parser rejects most of pg_dump's
 // DDL, so there is nothing to compare against. Each statement of the vendored
 // pagila schema is parsed on its own, as `pg-dump-corpus.test.ts` does, and a
-// statement sql-lite doesn't support yet throws and is caught, so this times
+// statement @parser-kit/sql doesn't support yet throws and is caught, so this times
 // the whole file's worth of work, failures included. The time moves as more
 // of the dump parses; the pass rate is printed alongside.
 const PAGILA = splitPsqlScript(
@@ -95,7 +95,7 @@ const PAGILA = splitPsqlScript(
 
 const parses = (sql: string) => {
   try {
-    sqlLite.parse(sql);
+    postgres.parse(sql);
     return true;
   } catch {
     return false;
@@ -109,7 +109,7 @@ const parses = (sql: string) => {
 }
 
 describe(`pg_dump: pagila schema, ${PAGILA.length} statements`, () => {
-  bench("sql-lite", () => {
+  bench("@parser-kit/sql", () => {
     for (const sql of PAGILA) parses(sql);
   });
 });

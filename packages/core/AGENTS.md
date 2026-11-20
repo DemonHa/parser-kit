@@ -10,7 +10,7 @@ user-facing guide.
 ## Orientation
 
 Start with `README.md` (concepts + API) and then read `../../examples/js-lite/grammar.ts`
-and `../sql/src/grammar.ts` (the published `@parser-kit/sql`) top to bottom — the two
+and `../sql/src/postgres/grammar.ts` (the published `@parser-kit/sql`) top to bottom — the two
 grammars are the fastest way to learn the kit and are its genericity/integration tests.
 
 ## Public API

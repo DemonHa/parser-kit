@@ -43,7 +43,24 @@
         "default": "./build/cjs/index.js"
       }
     },
+    "./postgres": {
+      "import": {
+        "types": "./build/esm/postgres/index.d.ts",
+        "default": "./build/esm/postgres/index.js"
+      },
+      "require": {
+        "types": "./build/cjs/postgres/index.d.ts",
+        "default": "./build/cjs/postgres/index.js"
+      }
+    },
     "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "postgres": [
+        "./build/cjs/postgres/index.d.ts"
+      ]
+    }
   },
   "files": [
     "build",

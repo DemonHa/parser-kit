@@ -1,18 +1,12 @@
 import { createInputStream, ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
-import {
-  type Stmt,
-  sqlLexer,
-  sqlLite,
-  sqlLiteScript,
-  sqlParseLexer,
-  sqlScriptLexer,
-  sqlScriptParseLexer,
-} from "../src/index";
+import { postgres, type Stmt } from "../src/index";
+// The parse lexers are grammar plumbing, not public API: tested from source.
+import { sqlParseLexer, sqlScriptParseLexer } from "../src/postgres/lexer";
 
 // --- helpers ---
 
-const parse = (text: string) => stripSpans(sqlLite.parse(text)) as Record<string, any>[];
+const parse = (text: string) => stripSpans(postgres.parse(text)) as Record<string, any>[];
 const firstStmt = (text: string) => parse(text)[0]!;
 
 // Expressions are reached through a CHECK constraint, whose parenthesised body
@@ -22,7 +16,7 @@ const exprOf = (src: string) => {
   return (stmt as any).items[0].constraints[0].expr;
 };
 
-const lex = (text: string, lexer = sqlLexer) => {
+const lex = (text: string, lexer = postgres.lexer) => {
   const stream = lexer.tokenize(createInputStream(text));
   const out: { type: string; value: string }[] = [];
   let tok = stream.next();
@@ -133,7 +127,7 @@ describe("SQL-lite comments inside statements", () => {
   // comments removed: the grammar never sees them.
   const sameAs = (withComments: string, without: string) => expect(parse(withComments)).toEqual(parse(without));
 
-  it("drops comments from the parser's token stream but not from sqlLexer's", () => {
+  it("drops comments from the parser's token stream but not from postgres.lexer's", () => {
     const text = "a /* b /* nested */ c */ -- d\n e";
     expect(lex(text, sqlParseLexer)).toEqual([
       { type: "ident", value: "a" },
@@ -201,23 +195,23 @@ describe("SQL-lite comments inside statements", () => {
   });
 
   it("ends spans at the last real token, not at a following comment", () => {
-    const [stmt] = sqlLite.parse("SELECT a /* c */ FROM t WHERE b /* tail */;") as any[];
+    const [stmt] = postgres.parse("SELECT a /* c */ FROM t WHERE b /* tail */;") as any[];
     expect(stmt.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 31 } });
     expect(stmt.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 8 } });
     expect(stmt.where.span).toEqual({ start: { row: 1, col: 30 }, end: { row: 1, col: 31 } });
     // A list-shaped tail (the action list) ends at its last action too.
-    const [alter] = sqlLite.parse("ALTER TABLE t DROP COLUMN a, DROP COLUMN b /* c */ -- c\n;") as any[];
+    const [alter] = postgres.parse("ALTER TABLE t DROP COLUMN a, DROP COLUMN b /* c */ -- c\n;") as any[];
     expect(alter.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 42 } });
-    const [lead] = sqlLite.parse("/* lead */ SELECT 1 -- tail\n;") as any[];
+    const [lead] = postgres.parse("/* lead */ SELECT 1 -- tail\n;") as any[];
     expect(lead.span).toEqual({ start: { row: 1, col: 11 }, end: { row: 1, col: 19 } });
   });
 
   it("points errors at the token after a comment", () => {
-    expect(() => sqlLite.parse("SELECT /* c */ ,;")).toThrow(/but found "," \(1:15\)/);
-    expect(() => sqlLite.parse("SELECT 1 /* c */ 2;")).toThrow(/Expected ";" but found "2"/);
-    expect(() => sqlLite.parse("SELECT 1 -- tail\n2")).toThrow(/Expected ";" but found "2" \(2:0\)/);
+    expect(() => postgres.parse("SELECT /* c */ ,;")).toThrow(/but found "," \(1:15\)/);
+    expect(() => postgres.parse("SELECT 1 /* c */ 2;")).toThrow(/Expected ";" but found "2"/);
+    expect(() => postgres.parse("SELECT 1 -- tail\n2")).toThrow(/Expected ";" but found "2" \(2:0\)/);
     // An unclosed block comment is a lexer error, as in PG.
-    expect(() => sqlLite.parse("SELECT /* unclosed 1;")).toThrow(/Unterminated \/\* comment \(1:7\)/);
+    expect(() => postgres.parse("SELECT /* unclosed 1;")).toThrow(/Unterminated \/\* comment \(1:7\)/);
   });
 
   it("resumes after a lexer error hit while skipping comments", () => {
@@ -227,7 +221,7 @@ describe("SQL-lite comments inside statements", () => {
     expect(stream.peek()?.value).toBe("b");
     expect(stream.next()?.value).toBe("b");
     expect(stream.eof()).toBe(true);
-    const { ast, errors } = sqlLite.diagnose("SELECT /* a */ $ /* b */ $ ; SELECT 2;");
+    const { ast, errors } = postgres.diagnose("SELECT /* a */ $ /* b */ $ ; SELECT 2;");
     expect(errors.map((e) => e.message)).toEqual([
       'Unexpected character "$" (1:15)',
       'Unexpected character "$" (1:25)',
@@ -236,7 +230,7 @@ describe("SQL-lite comments inside statements", () => {
   });
 
   it("diagnose() recovers past a bad statement that contains comments", () => {
-    const { ast, errors } = sqlLite.diagnose("SELECT /* c */ FROM; -- next\nSELECT /* ok */ 1;");
+    const { ast, errors } = postgres.diagnose("SELECT /* c */ FROM; -- next\nSELECT /* ok */ 1;");
     expect(errors).toHaveLength(1);
     expect(stripSpans(ast)).toEqual([sel({ columns: [col(num(1))] })]);
   });
@@ -277,27 +271,27 @@ describe("SQL-lite statement separators", () => {
   });
 
   it("still requires ; between statements", () => {
-    expect(() => sqlLite.parse("SELECT 1 SELECT 2")).toThrow(/Expected ";" but found "select" \(1:9\)/);
-    expect(() => sqlLite.parse("SELECT 1 SELECT 2;")).toThrow(/Expected ";" but found "select" \(1:9\)/);
-    expect(() => sqlLite.parse("SELECT 1; SELECT 2 SELECT 3")).toThrow(/Expected ";" but found "select" \(1:19\)/);
+    expect(() => postgres.parse("SELECT 1 SELECT 2")).toThrow(/Expected ";" but found "select" \(1:9\)/);
+    expect(() => postgres.parse("SELECT 1 SELECT 2;")).toThrow(/Expected ";" but found "select" \(1:9\)/);
+    expect(() => postgres.parse("SELECT 1; SELECT 2 SELECT 3")).toThrow(/Expected ";" but found "select" \(1:19\)/);
     // An incomplete last statement still fails on its own terms at end of input.
-    expect(() => sqlLite.parse("SELECT 1 +")).toThrow(/but found end of input/);
-    expect(() => sqlLite.parse("SELECT 1; SELECT 'abc FROM t")).toThrow(/Unterminated/);
+    expect(() => postgres.parse("SELECT 1 +")).toThrow(/but found end of input/);
+    expect(() => postgres.parse("SELECT 1; SELECT 'abc FROM t")).toThrow(/Unterminated/);
   });
 
   it("rejects a list still open at the end of the input", () => {
     const open = /Expected "\)" but found end of input/;
-    expect(() => sqlLite.parse("INSERT INTO t (a, b) VALUES (1")).toThrow(
+    expect(() => postgres.parse("INSERT INTO t (a, b) VALUES (1")).toThrow(
       /Expected "\)" but found end of input \(1:30\)/,
     );
-    expect(() => sqlLite.parse("CREATE TABLE t (id int")).toThrow(open);
-    expect(() => sqlLite.parse("CREATE TABLE t (")).toThrow(open);
-    expect(() => sqlLite.parse("CREATE INDEX i ON t (a")).toThrow(open);
-    expect(() => sqlLite.parse("SELECT * FROM t WHERE a IN (1, 2")).toThrow(open);
-    expect(() => sqlLite.parse("DROP FUNCTION f(")).toThrow(open);
-    expect(() => sqlLite.parse("SELECT x::numeric(10")).toThrow(open);
-    expect(() => sqlLite.parse("SELECT ARRAY[1, 2")).toThrow(/Expected "]" but found end of input/);
-    expect(() => sqlLite.parse("SELECT f(1")).toThrow(open);
+    expect(() => postgres.parse("CREATE TABLE t (id int")).toThrow(open);
+    expect(() => postgres.parse("CREATE TABLE t (")).toThrow(open);
+    expect(() => postgres.parse("CREATE INDEX i ON t (a")).toThrow(open);
+    expect(() => postgres.parse("SELECT * FROM t WHERE a IN (1, 2")).toThrow(open);
+    expect(() => postgres.parse("DROP FUNCTION f(")).toThrow(open);
+    expect(() => postgres.parse("SELECT x::numeric(10")).toThrow(open);
+    expect(() => postgres.parse("SELECT ARRAY[1, 2")).toThrow(/Expected "]" but found end of input/);
+    expect(() => postgres.parse("SELECT f(1")).toThrow(open);
     // Closed, the same statements need no `;`.
     expect(firstStmt("CREATE TABLE t (id int)")).toMatchObject({ kind: "createTable" });
     expect(firstStmt("SELECT * FROM t WHERE a IN (1, 2)")).toMatchObject({ kind: "select" });
@@ -314,38 +308,38 @@ describe("SQL-lite statement separators", () => {
       start: { row, col },
       end: { row: endRow, col: endCol },
     });
-    const [bare] = sqlLite.parse("SELECT 1") as any[];
-    const [ended] = sqlLite.parse("SELECT 1;") as any[];
+    const [bare] = postgres.parse("SELECT 1") as any[];
+    const [ended] = postgres.parse("SELECT 1;") as any[];
     expect(bare.span).toEqual(span(1, 0, 1, 8));
     expect(ended.span).toEqual(bare.span);
-    const stmts = sqlLite.parse(";;\n  SELECT a FROM t;;\nSELECT 2 -- tail") as any[];
+    const stmts = postgres.parse(";;\n  SELECT a FROM t;;\nSELECT 2 -- tail") as any[];
     expect(stmts.map((s) => s.span)).toEqual([span(2, 2, 2, 17), span(3, 0, 3, 8)]);
   });
 
   it("diagnose() resyncs on ; and keeps the statements around a bad one", () => {
-    const { ast, errors } = sqlLite.diagnose("SELECT 1;; SELECT 1 +; SELECT 2");
+    const { ast, errors } = postgres.diagnose("SELECT 1;; SELECT 1 +; SELECT 2");
     expect(errors.map((e) => e.message)).toEqual([expect.stringMatching(/but found ";" \(1:21\)/)]);
     expect(stripSpans(ast)).toEqual([one, two]);
   });
 
   it("diagnose() reports a bad last statement without a ;", () => {
-    const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT 2 +");
+    const { ast, errors } = postgres.diagnose("SELECT 1;\nSELECT 2 +");
     expect(errors.map((e) => e.message)).toEqual([expect.stringMatching(/but found end of input/)]);
     expect(stripSpans(ast)).toEqual([one]);
   });
 
   it("diagnose() records a lexer error on the first token instead of throwing", () => {
-    const bare = sqlLite.diagnose("'abc");
+    const bare = postgres.diagnose("'abc");
     expect(bare.errors.map((e) => e.message)).toEqual(["Unterminated quoted string (1:0)"]);
     expect(bare.ast).toEqual([]);
-    const { ast, errors } = sqlLite.diagnose("X'G1'; SELECT 1");
+    const { ast, errors } = postgres.diagnose("X'G1'; SELECT 1");
     expect(errors.map((e) => e.message)).toEqual(['Invalid hexadecimal digit "G" (1:0)']);
     expect(stripSpans(ast)).toEqual([one]);
   });
 
   it("diagnose() reports the unclosed list when a bad table element's recovery runs past the ;", () => {
     // The element's skip stops only at `,` or `)`, so it consumes the `;`.
-    const { ast, errors } = sqlLite.diagnose("CREATE TABLE t (id;");
+    const { ast, errors } = postgres.diagnose("CREATE TABLE t (id;");
     expect(errors.map((e) => e.message)).toEqual([
       expect.stringMatching(/but found ";" \(1:18\)/),
       'Expected ")" but found end of input (1:19)',
@@ -354,7 +348,7 @@ describe("SQL-lite statement separators", () => {
   });
 
   it("diagnose() reports a missing ; between statements and resumes after the next ;", () => {
-    const { ast, errors } = sqlLite.diagnose("SELECT 1 SELECT 2; SELECT 3");
+    const { ast, errors } = postgres.diagnose("SELECT 1 SELECT 2; SELECT 3");
     expect(errors.map((e) => e.message)).toEqual(['Expected ";" but found "select" (1:9)']);
     expect(stripSpans(ast)).toEqual([sel({ columns: [col(num(3))] })]);
   });
@@ -417,7 +411,7 @@ describe("SQL-lite statements", () => {
   });
 
   it("rejects a bare reserved word as a name", () => {
-    expect(() => sqlLite.parse("CREATE TABLE t (select int);")).toThrow(/Expected a name but found "select"/);
+    expect(() => postgres.parse("CREATE TABLE t (select int);")).toThrow(/Expected a name but found "select"/);
   });
 
   it("parses CREATE [UNIQUE] INDEX with expressions and a partial WHERE", () => {
@@ -589,7 +583,7 @@ describe("SQL-lite ALTER TABLE (Phase 6 actions)", () => {
   });
 
   it("rejects an unknown ALTER TABLE action", () => {
-    expect(() => sqlLite.parse("ALTER TABLE t frobnicate;")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE t frobnicate;")).toThrow(
       expectsKeys(
         [
           "add",
@@ -687,21 +681,21 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
   });
 
   it("spans the whole statement, from ALTER through the last action", () => {
-    const [stmt] = sqlLite.parse("ALTER TABLE t ADD a int, DROP b;") as Record<string, any>[];
+    const [stmt] = postgres.parse("ALTER TABLE t ADD a int, DROP b;") as Record<string, any>[];
     expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 31 } });
   });
 
   it("rejects RENAME beside any other action, on either side", () => {
-    expect(() => sqlLite.parse("ALTER TABLE t RENAME TO u, ADD a int;")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE t RENAME TO u, ADD a int;")).toThrow(
       /RENAME cannot be combined with other ALTER TABLE actions \(1:14\)/,
     );
-    expect(() => sqlLite.parse("ALTER TABLE t ADD a int, RENAME COLUMN a TO b;")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE t ADD a int, RENAME COLUMN a TO b;")).toThrow(
       /RENAME cannot be combined with other ALTER TABLE actions \(1:25\)/,
     );
   });
 
   it("reports a combined RENAME over the whole action and recovers after it", () => {
-    const { ast, errors } = sqlLite.diagnose("ALTER TABLE t ADD a int, RENAME a TO b;\nSELECT 1;");
+    const { ast, errors } = postgres.diagnose("ALTER TABLE t ADD a int, RENAME a TO b;\nSELECT 1;");
     expect(errors.map((e) => ({ message: e.message, end: e.end }))).toEqual([
       { message: "RENAME cannot be combined with other ALTER TABLE actions (1:25)", end: { row: 1, col: 38 } },
     ]);
@@ -712,16 +706,16 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
   // stray one after a RENAME fails as a stray comma.
   it("rejects a stray comma after RENAME as a comma, not as a combination", () => {
     for (const text of ["ALTER TABLE t RENAME TO u,;", "ALTER TABLE t RENAME TO u, 42;"]) {
-      expect(() => sqlLite.parse(text)).toThrow(/Expected ";" but found "," \(1:25\)/);
+      expect(() => postgres.parse(text)).toThrow(/Expected ";" but found "," \(1:25\)/);
     }
   });
 
   it("rejects a trailing comma, a misspelt IF NOT EXISTS and an unknown ALTER target", () => {
-    expect(() => sqlLite.parse("ALTER TABLE t ADD a int,;")).toThrow(/Expected "add", "drop".* but found ";"/);
-    expect(() => sqlLite.parse("ALTER TABLE t ADD COLUMN IF NOT EXIST a int;")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE t ADD a int,;")).toThrow(/Expected "add", "drop".* but found ";"/);
+    expect(() => postgres.parse("ALTER TABLE t ADD COLUMN IF NOT EXIST a int;")).toThrow(
       /Expected "exists" but found "exist"/,
     );
-    expect(() => sqlLite.parse("ALTER frobnicate t;")).toThrow(
+    expect(() => postgres.parse("ALTER frobnicate t;")).toThrow(
       expectsKeys(
         ["table", "schema", "domain", "type", "index", "function", "aggregate", "view", "materialized", "sequence"],
         '"frobnicate"',
@@ -842,28 +836,30 @@ describe("SQL-lite ONLY on ALTER TABLE and CREATE INDEX", () => {
   });
 
   it("spans ALTER TABLE ONLY from ALTER and CREATE INDEX ON ONLY from after CREATE", () => {
-    const [alter] = sqlLite.parse("ALTER TABLE ONLY (t) ADD a int;") as Record<string, any>[];
+    const [alter] = postgres.parse("ALTER TABLE ONLY (t) ADD a int;") as Record<string, any>[];
     expect(alter!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 30 } });
-    const [star] = sqlLite.parse("ALTER TABLE t * ADD a int;") as Record<string, any>[];
+    const [star] = postgres.parse("ALTER TABLE t * ADD a int;") as Record<string, any>[];
     expect(star!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 25 } });
-    const [idx] = sqlLite.parse("CREATE INDEX i ON ONLY t (a);") as Record<string, any>[];
+    const [idx] = postgres.parse("CREATE INDEX i ON ONLY t (a);") as Record<string, any>[];
     expect(idx!.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 28 } });
   });
 
   it("rejects ONLY with a star, IF EXISTS after ONLY, and an unclosed parenthesis", () => {
-    expect(() => sqlLite.parse("ALTER TABLE ONLY t * ADD a int;")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE ONLY t * ADD a int;")).toThrow(
       /Expected "add", .* but found "\*" \(1:19\)/,
     );
-    expect(() => sqlLite.parse("ALTER TABLE ONLY (t) * ADD a int;")).toThrow(/but found "\*" \(1:21\)/);
-    expect(() => sqlLite.parse("ALTER TABLE ONLY IF EXISTS t ADD a int;")).toThrow(/but found "exists" \(1:20\)/);
-    expect(() => sqlLite.parse("ALTER TABLE ONLY (t ADD a int;")).toThrow(/Expected "\)" but found "add" \(1:20\)/);
-    expect(() => sqlLite.parse("ALTER TABLE ONLY;")).toThrow(/Expected a name but found ";" \(1:16\)/);
-    expect(() => sqlLite.parse("CREATE INDEX i ON ONLY t * (a);")).toThrow(/Expected "\(" but found "\*" \(1:25\)/);
+    expect(() => postgres.parse("ALTER TABLE ONLY (t) * ADD a int;")).toThrow(/but found "\*" \(1:21\)/);
+    expect(() => postgres.parse("ALTER TABLE ONLY IF EXISTS t ADD a int;")).toThrow(/but found "exists" \(1:20\)/);
+    expect(() => postgres.parse("ALTER TABLE ONLY (t ADD a int;")).toThrow(/Expected "\)" but found "add" \(1:20\)/);
+    expect(() => postgres.parse("ALTER TABLE ONLY;")).toThrow(/Expected a name but found ";" \(1:16\)/);
+    expect(() => postgres.parse("CREATE INDEX i ON ONLY t * (a);")).toThrow(/Expected "\(" but found "\*" \(1:25\)/);
     // ALTER INDEX, VIEW and SEQUENCE take a plain name in PG, without ONLY or `*`.
-    expect(() => sqlLite.parse("ALTER INDEX ONLY i RENAME TO j;")).toThrow(/Expected a name but found "only" \(1:12\)/);
-    expect(() => sqlLite.parse("ALTER VIEW v * RENAME TO w;")).toThrow(/but found "\*" \(1:13\)/);
-    expect(() => sqlLite.parse("ALTER SEQUENCE ONLY s RESTART;")).toThrow(/Expected a name but found "only" \(1:15\)/);
-    expect(() => sqlLite.parse("CREATE INDEX i ON ONLY (t (a);")).toThrow(/Expected "\)" but found "\(" \(1:26\)/);
+    expect(() => postgres.parse("ALTER INDEX ONLY i RENAME TO j;")).toThrow(
+      /Expected a name but found "only" \(1:12\)/,
+    );
+    expect(() => postgres.parse("ALTER VIEW v * RENAME TO w;")).toThrow(/but found "\*" \(1:13\)/);
+    expect(() => postgres.parse("ALTER SEQUENCE ONLY s RESTART;")).toThrow(/Expected a name but found "only" \(1:15\)/);
+    expect(() => postgres.parse("CREATE INDEX i ON ONLY (t (a);")).toThrow(/Expected "\)" but found "\(" \(1:26\)/);
   });
 });
 
@@ -1039,7 +1035,7 @@ describe("SQL-lite DROP object types", () => {
   });
 
   it("rejects malformed DROP statements", () => {
-    const fails = (text: string) => () => sqlLite.parse(text);
+    const fails = (text: string) => () => postgres.parse(text);
     expect(fails("DROP TRIGGER t;")).toThrow(/Expected "on" but found ";"/);
     expect(fails("DROP frobnicate x;")).toThrow(
       expectsKeys(
@@ -1125,7 +1121,7 @@ describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
   });
 
   it("rejects OR REPLACE before a non-replaceable object", () => {
-    expect(() => sqlLite.parse("CREATE OR REPLACE TABLE t (id int);")).toThrow(
+    expect(() => postgres.parse("CREATE OR REPLACE TABLE t (id int);")).toThrow(
       expectsKeys(["view", "materialized", "function", "procedure", "aggregate", "trigger"], '"table"'),
     );
   });
@@ -1395,7 +1391,7 @@ describe("SQL-lite CREATE TRIGGER", () => {
   });
 
   it("rejects a trigger without a timing keyword", () => {
-    expect(() => sqlLite.parse("CREATE TRIGGER t INSERT ON x EXECUTE FUNCTION f();")).toThrow(
+    expect(() => postgres.parse("CREATE TRIGGER t INSERT ON x EXECUTE FUNCTION f();")).toThrow(
       /Expected "before", "after" or "instead"/,
     );
   });
@@ -1428,7 +1424,7 @@ describe("SQL-lite expressions", () => {
   });
 
   it("rejects chained non-associative comparisons", () => {
-    expect(() => sqlLite.parse("CREATE TABLE t (c int CHECK (a < b < c));")).toThrow(/non-associative/);
+    expect(() => postgres.parse("CREATE TABLE t (c int CHECK (a < b < c));")).toThrow(/non-associative/);
     // The parenthesised form re-enters at bp 0 and parses.
     expect(exprOf("(a < b) = c")).toEqual(bin("=", bin("<", name("a"), name("b")), name("c")));
   });
@@ -1569,7 +1565,7 @@ describe("SQL-lite expression operators", () => {
   });
 
   it("reports the NOT dispatcher's extended keyword set", () => {
-    expect(() => sqlLite.parse("CREATE TABLE t (c int CHECK (a NOT frobnicate b));")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (c int CHECK (a NOT frobnicate b));")).toThrow(
       /Expected "like", "ilike", "similar", "between" or "in"/,
     );
   });
@@ -1704,7 +1700,7 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
   });
 
   it("reports a missing right operand at the token that should have started it", () => {
-    expect(() => sqlLite.parse("SELECT a ^ FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => postgres.parse("SELECT a ^ FROM t;")).toThrow(/Expected a name but found "from"/);
   });
 });
 
@@ -1714,7 +1710,7 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
 // place of `AS 'definition'`, on CREATE FUNCTION and CREATE PROCEDURE. The body
 // is SQL, so it is parsed, and it reads its own `;`s and END.
 describe("SQL-lite SQL-standard routine bodies", () => {
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const ret = (expr: unknown) => ({ kind: "return", expr });
   const atomic = (...statements: unknown[]) => ({ kind: "atomic", statements });
   const fn = (body: unknown, over: Record<string, unknown> = {}) => ({
@@ -1807,12 +1803,12 @@ describe("SQL-lite SQL-standard routine bodies", () => {
 
   it("spans the body from its first word through RETURN's expression or END", () => {
     const sql = "CREATE FUNCTION f() RETURNS int\nBEGIN ATOMIC\n  SELECT 1;\n  RETURN 2;\nEND;";
-    const [stmt] = sqlLite.parse(sql) as any[];
+    const [stmt] = postgres.parse(sql) as any[];
     expect(stmt.span.end).toEqual({ row: 5, col: 3 });
     expect(stmt.body.span).toEqual({ start: { row: 2, col: 0 }, end: { row: 5, col: 3 } });
     expect(stmt.body.statements[0].span).toEqual({ start: { row: 3, col: 2 }, end: { row: 3, col: 10 } });
     expect(stmt.body.statements[1].span).toEqual({ start: { row: 4, col: 2 }, end: { row: 4, col: 10 } });
-    const [single] = sqlLite.parse("CREATE FUNCTION f() RETURN a + 1;") as any[];
+    const [single] = postgres.parse("CREATE FUNCTION f() RETURN a + 1;") as any[];
     expect(single.body.span).toEqual({ start: { row: 1, col: 20 }, end: { row: 1, col: 32 } });
   });
 
@@ -1859,26 +1855,26 @@ describe("SQL-lite SQL-standard routine bodies", () => {
   it("parses a body in a psql script without splitting it at its `;`s", () => {
     const routine = "CREATE PROCEDURE p() BEGIN ATOMIC INSERT INTO t VALUES (1); SELECT 1; END;";
     const text = `${routine}\n\\connect db\nSELECT 2;\nEND;`;
-    const items = stripSpans(sqlLiteScript.parse(text));
+    const items = stripSpans(postgres.parseScript(text));
     expect(items).toEqual([
       firstStmt(routine),
       { kind: "psqlMeta", command: "connect", args: "db" },
       firstStmt("SELECT 2;"),
       { kind: "commit", chain: false },
     ]);
-    expect(stripSpans(sqlLiteScript.diagnose(text).ast)).toEqual(items);
+    expect(stripSpans(postgres.diagnoseScript(text).ast)).toEqual(items);
     // A COPY … FROM STDIN inside a body is part of the routine, so the lines
     // after it are SQL, not COPY rows (psql's heuristic too). A COPY after the
     // routine still takes its rows, CASE … END and parentheses in the body
     // notwithstanding.
     const replace = "CREATE OR REPLACE PROCEDURE p() BEGIN ATOMIC SELECT (CASE WHEN a THEN 1 END), f(end_); END;";
-    expect(stripSpans(sqlLiteScript.parse(`${replace}\nCOPY t FROM stdin;\n1\n\\.\nSELECT 2;`))).toEqual([
+    expect(stripSpans(postgres.parseScript(`${replace}\nCOPY t FROM stdin;\n1\n\\.\nSELECT 2;`))).toEqual([
       firstStmt(replace),
       { ...firstStmt("COPY t FROM stdin;"), data: "1\n" },
       firstStmt("SELECT 2;"),
     ]);
     expect(
-      stripSpans(sqlLiteScript.parse("CREATE PROCEDURE p() BEGIN ATOMIC COPY t FROM stdin; END;\nSELECT 2;")),
+      stripSpans(postgres.parseScript("CREATE PROCEDURE p() BEGIN ATOMIC COPY t FROM stdin; END;\nSELECT 2;")),
     ).toEqual([firstStmt("CREATE PROCEDURE p() BEGIN ATOMIC COPY t FROM stdin; END;"), firstStmt("SELECT 2;")]);
   });
 
@@ -1886,7 +1882,7 @@ describe("SQL-lite SQL-standard routine bodies", () => {
   // (or at the body's END), so the routine keeps the rest of its body.
   it("recovers inside a broken body in diagnose", () => {
     const body = (text: string) => {
-      const { ast, errors } = sqlLite.diagnose(`${text}\nSELECT 3;`);
+      const { ast, errors } = postgres.diagnose(`${text}\nSELECT 3;`);
       return { ast: stripSpans(ast), messages: errors.map((error) => error.message.replace(/ \(.*$/, "")) };
     };
     expect(body("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT FROM WHERE; SELECT 2; END;")).toEqual({
@@ -1919,7 +1915,7 @@ describe("SQL-lite SQL-standard routine bodies", () => {
   });
 
   it("keeps a body cut short by a meta-command line, reporting it once", () => {
-    const { ast, errors } = sqlLiteScript.diagnose(
+    const { ast, errors } = postgres.diagnoseScript(
       "CREATE PROCEDURE p() BEGIN ATOMIC SELECT 1;\n\\connect db\nSELECT 2;",
     );
     expect(stripSpans(ast)).toEqual([
@@ -1933,7 +1929,7 @@ describe("SQL-lite SQL-standard routine bodies", () => {
   });
 
   it("reports a lexer error in a body as it would outside one", () => {
-    const fails = (inner: string) => () => sqlLite.parse(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${inner} END;`);
+    const fails = (inner: string) => () => postgres.parse(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${inner} END;`);
     expect(fails("SELECT 1 \\ + 2;")).toThrow(/Unexpected character "\\"/);
     expect(fails("SELECT 1; SELECT \\ 2;")).toThrow(/Unexpected character "\\"/);
     expect(fails("SELECT 'abc;")).toThrow(/Unterminated/);
@@ -1942,7 +1938,7 @@ describe("SQL-lite SQL-standard routine bodies", () => {
     // A parser error before the bad text still comes first.
     expect(fails("SELECT 1 + + ) 'abc;")).toThrow(/but found "\)"/);
     const errorsOf = (text: string) => {
-      const { ast, errors } = sqlLite.diagnose(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${text} END;\nSELECT 4;`);
+      const { ast, errors } = postgres.diagnose(`CREATE FUNCTION f() RETURNS int BEGIN ATOMIC ${text} END;\nSELECT 4;`);
       return { ast: stripSpans(ast), messages: errors.map((error) => error.message.replace(/ \(.*$/, "")) };
     };
     const kept = (...statements: unknown[]) => [{ ...fn(atomic(...statements)), options: [] }, firstStmt("SELECT 4;")];
@@ -1973,7 +1969,7 @@ describe("SQL-lite SQL-standard routine bodies", () => {
   });
 
   it("reports a body left open at end of input and keeps the routine", () => {
-    const { ast, errors } = sqlLite.diagnose("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1;");
+    const { ast, errors } = postgres.diagnose("CREATE FUNCTION f() RETURNS int BEGIN ATOMIC SELECT 1;");
     expect(stripSpans(ast)).toEqual([{ ...fn(atomic(firstStmt("SELECT 1;"))), options: [] }]);
     expect(errors.map((error) => error.message)).toEqual([
       'Expected "end", "return" or a statement but found end of input (1:54)',
@@ -2039,8 +2035,8 @@ describe("SQL-lite precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts 
   it("rejects an AT with no TIME ZONE or no zone after it", () => {
     // `at` with neither TIME ZONE nor LOCAL after it is a bare alias, as in PG,
     // so the error falls on the zone that follows it.
-    expect(() => sqlLite.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected ";" but found "z"/);
-    expect(() => sqlLite.parse("SELECT a AT TIME ZONE FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => postgres.parse("SELECT -a AT 'z' FROM t;")).toThrow(/Expected ";" but found "z"/);
+    expect(() => postgres.parse("SELECT a AT TIME ZONE FROM t;")).toThrow(/Expected a name but found "from"/);
   });
 });
 
@@ -2114,8 +2110,8 @@ describe("SQL-lite generic operators", () => {
       name: "f",
       args: [{ kind: "namedArg", name: "a", value: num(1) }],
     });
-    expect(() => sqlLite.parse("SELECT a => 1 FROM t;")).toThrow(/Expected ";" but found "=>" \(1:9\)/);
-    expect(() => sqlLite.parse("SELECT a => ANY (b) FROM t;")).toThrow(/Expected ";" but found "=>"/);
+    expect(() => postgres.parse("SELECT a => 1 FROM t;")).toThrow(/Expected ";" but found "=>" \(1:9\)/);
+    expect(() => postgres.parse("SELECT a => ANY (b) FROM t;")).toThrow(/Expected ";" but found "=>"/);
   });
 
   it("parses PostgreSQL's built-in prefix operators", () => {
@@ -2132,10 +2128,10 @@ describe("SQL-lite generic operators", () => {
   });
 
   it("rejects an operator with no operand", () => {
-    expect(() => sqlLite.parse("SELECT a <-> FROM t;")).toThrow(/Expected a name but found "from" \(1:13\)/);
-    expect(() => sqlLite.parse("SELECT @ FROM t;")).toThrow(/Expected a name but found "from" \(1:9\)/);
+    expect(() => postgres.parse("SELECT a <-> FROM t;")).toThrow(/Expected a name but found "from" \(1:13\)/);
+    expect(() => postgres.parse("SELECT @ FROM t;")).toThrow(/Expected a name but found "from" \(1:9\)/);
     // `!` is no prefix operator, so it cannot open an expression.
-    expect(() => sqlLite.parse("SELECT ! a FROM t;")).toThrow(/but found "!" \(1:7\)/);
+    expect(() => postgres.parse("SELECT ! a FROM t;")).toThrow(/but found "!" \(1:7\)/);
   });
 
   it("lexes an unspaced trailing sign into the operator when PG does", () => {
@@ -2197,12 +2193,12 @@ describe("SQL-lite generic operators", () => {
     it("rejects an incomplete spelling", () => {
       // Only a complete `( [name .]… op )` is the operator; anything else
       // leaves `operator` an alias, with the `(` stranded after it.
-      expect(() => sqlLite.parse("SELECT a OPERATOR(pg_catalog.+ b FROM t;")).toThrow(
+      expect(() => postgres.parse("SELECT a OPERATOR(pg_catalog.+ b FROM t;")).toThrow(
         /Expected ";" but found "\(" \(1:17\)/,
       );
-      expect(() => sqlLite.parse("SELECT a OPERATOR(=>) b FROM t;")).toThrow(/Expected ";" but found "\("/);
-      expect(() => sqlLite.parse("SELECT a OPERATOR(select.+) b FROM t;")).toThrow(/Expected ";" but found "\("/);
-      expect(() => sqlLite.parse("SELECT a OPERATOR(pg_catalog.+) FROM t;")).toThrow(
+      expect(() => postgres.parse("SELECT a OPERATOR(=>) b FROM t;")).toThrow(/Expected ";" but found "\("/);
+      expect(() => postgres.parse("SELECT a OPERATOR(select.+) b FROM t;")).toThrow(/Expected ";" but found "\("/);
+      expect(() => postgres.parse("SELECT a OPERATOR(pg_catalog.+) FROM t;")).toThrow(
         /Expected a name but found "from" \(1:32\)/,
       );
     });
@@ -2233,8 +2229,8 @@ describe("SQL-lite generic operators", () => {
       });
       // `( * )` is an operator reference, so `operator(*)` opens a prefix — in an
       // index element too, where PG would read it as a call.
-      expect(() => sqlLite.parse("SELECT operator(*) FROM t;")).toThrow(/Expected a name but found "from"/);
-      expect(() => sqlLite.parse("CREATE INDEX ON t (operator(*));")).toThrow(/but found "\)" \(1:30\)/);
+      expect(() => postgres.parse("SELECT operator(*) FROM t;")).toThrow(/Expected a name but found "from"/);
+      expect(() => postgres.parse("CREATE INDEX ON t (operator(*));")).toThrow(/but found "\)" \(1:30\)/);
     });
   });
 });
@@ -2296,27 +2292,27 @@ describe("SQL-lite quantified operators", () => {
       anyAll("<>", "all", anyAll("=", "any", name("x"), name("a")), name("b")),
     );
     // A plain comparison still does not chain.
-    expect(() => sqlLite.parse("SELECT x = y = z FROM t;")).toThrow(/Operator "=" is non-associative \(1:13\)/);
-    expect(() => sqlLite.parse("SELECT x = ANY (a) = y = z FROM t;")).toThrow(
+    expect(() => postgres.parse("SELECT x = y = z FROM t;")).toThrow(/Operator "=" is non-associative \(1:13\)/);
+    expect(() => postgres.parse("SELECT x = ANY (a) = y = z FROM t;")).toThrow(
       /Operator "=" is non-associative \(1:23\)/,
     );
-    expect(() => sqlLite.parse("SELECT x < y >= ANY (a) FROM t;")).toThrow(/Operator ">=" is non-associative/);
+    expect(() => postgres.parse("SELECT x < y >= ANY (a) FROM t;")).toThrow(/Operator ">=" is non-associative/);
   });
 
   it("rejects a quantifier without a parenthesised operand, or with ESCAPE", () => {
-    expect(() => sqlLite.parse("SELECT x LIKE ANY (a, b) FROM t;")).toThrow(/Expected "\)" but found "," \(1:20\)/);
-    expect(() => sqlLite.parse("SELECT x ~ ANY y FROM t;")).toThrow(/Expected "\(" but found "y" \(1:15\)/);
+    expect(() => postgres.parse("SELECT x LIKE ANY (a, b) FROM t;")).toThrow(/Expected "\)" but found "," \(1:20\)/);
+    expect(() => postgres.parse("SELECT x ~ ANY y FROM t;")).toThrow(/Expected "\(" but found "y" \(1:15\)/);
     // SIMILAR TO has no quantified form in PG.
-    expect(() => sqlLite.parse("SELECT x SIMILAR TO ANY (a) FROM t;")).toThrow(/Expected a name but found "any"/);
+    expect(() => postgres.parse("SELECT x SIMILAR TO ANY (a) FROM t;")).toThrow(/Expected a name but found "any"/);
     // PG's quantified LIKE takes no ESCAPE clause.
-    expect(() => sqlLite.parse("SELECT * FROM t WHERE x LIKE ANY (a) ESCAPE '!';")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM t WHERE x LIKE ANY (a) ESCAPE '!';")).toThrow(
       /Expected ";" but found "escape"/,
     );
     // The b-expression has no quantified form, as in PG.
-    expect(() => sqlLite.parse("CREATE TABLE t (a int DEFAULT 1 + ANY (b));")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (a int DEFAULT 1 + ANY (b));")).toThrow(
       /Expected a name but found "any"/,
     );
-    expect(() => sqlLite.parse("CREATE TABLE t (a int DEFAULT 1 OPERATOR(+) ANY (b));")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (a int DEFAULT 1 OPERATOR(+) ANY (b));")).toThrow(
       /Expected a name but found "any" \(1:44\)/,
     );
   });
@@ -2344,13 +2340,13 @@ describe("SQL-lite ISNULL and NOTNULL", () => {
 
   it("rejects them where PG's grammar does", () => {
     // A b-expression has no NULL test, so a DEFAULT stops before it.
-    expect(() => sqlLite.parse("CREATE TABLE t (a int DEFAULT 1 ISNULL);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (a int DEFAULT 1 ISNULL);")).toThrow(
       /Expected "," but found "isnull" \(1:32\)/,
     );
     // Both are AS_LABEL keywords in PG: a bare alias never. (PG refuses them as
     // a table alias even after AS, which this grammar does not check.)
-    expect(() => sqlLite.parse("SELECT * FROM t isnull;")).toThrow(/Expected ";" but found "isnull" \(1:16\)/);
-    expect(() => sqlLite.parse("SELECT * FROM t notnull;")).toThrow(/Expected ";" but found "notnull"/);
+    expect(() => postgres.parse("SELECT * FROM t isnull;")).toThrow(/Expected ";" but found "isnull" \(1:16\)/);
+    expect(() => postgres.parse("SELECT * FROM t notnull;")).toThrow(/Expected ";" but found "notnull"/);
   });
 
   it("keeps isnull and notnull unreserved as names, and as aliases after AS", () => {
@@ -2374,7 +2370,7 @@ describe("SQL-lite ISNULL and NOTNULL", () => {
 describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   // The same column without stripSpans, for the span assertions.
-  const rawCol = (src: string) => (sqlLite.parse(`SELECT ${src} FROM t;`)[0] as any).columns[0].expr;
+  const rawCol = (src: string) => (postgres.parse(`SELECT ${src} FROM t;`)[0] as any).columns[0].expr;
   // The implicit `(a, b)` spelling; `explicitRow` is `ROW(a, b)`.
   const row = (...items: unknown[]) => ({ kind: "row", items, implicit: true });
   const explicitRow = (...items: unknown[]) => ({ kind: "row", items });
@@ -2423,7 +2419,7 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
       left: name("x"),
       right: row(name("a"), name("b")),
     });
-    expect(() => sqlLite.parse("SELECT x = ANY (a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
+    expect(() => postgres.parse("SELECT x = ANY (a, b) FROM t;")).toThrow(/Expected "\)" but found ","/);
     // The flag is what tells PG's `GROUP BY (a, b)` (grouping by a and by b)
     // from `GROUP BY ROW(a, b)` (grouping by one composite value).
     expect((firstStmt("SELECT a FROM t GROUP BY (a, b);") as any).groupBy).toEqual([row(name("a"), name("b"))]);
@@ -2500,8 +2496,8 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
   it("commits to a uniqueness clause on its lead word, as PG does", () => {
     // PG's grammar takes WITH / WITHOUT after IS JSON unconditionally, so neither
     // a bare-word alias nor a materialized view's data clause can follow it.
-    expect(() => sqlLite.parse("SELECT x IS JSON without FROM t;")).toThrow(/Expected "unique" but found "from"/);
-    expect(() => sqlLite.parse("CREATE MATERIALIZED VIEW mv AS SELECT x IS JSON WITH NO DATA;")).toThrow(
+    expect(() => postgres.parse("SELECT x IS JSON without FROM t;")).toThrow(/Expected "unique" but found "from"/);
+    expect(() => postgres.parse("CREATE MATERIALIZED VIEW mv AS SELECT x IS JSON WITH NO DATA;")).toThrow(
       /Expected "unique" but found "no"/,
     );
     // Spelled with AS, the alias is unambiguous; and the data clause still
@@ -2539,10 +2535,10 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
       col(name("c"), "json"),
     ]);
     expect((firstStmt("SELECT c json FROM t;") as any).columns).toEqual([col(name("c"), "json")]);
-    expect(() => sqlLite.parse("SELECT a overlaps FROM t;")).toThrow(/Expected ";" but found "overlaps" \(1:9\)/);
-    expect(() => sqlLite.parse("SELECT (a, b) overlaps FROM t;")).toThrow(/Expected ";" but found "overlaps"/);
-    expect(() => sqlLite.parse("SELECT (a, b) overlaps row FROM t;")).toThrow(/Expected ";" but found "overlaps"/);
-    expect(() => sqlLite.parse("SELECT * FROM t overlaps;")).toThrow(/Expected ";" but found "overlaps"/);
+    expect(() => postgres.parse("SELECT a overlaps FROM t;")).toThrow(/Expected ";" but found "overlaps" \(1:9\)/);
+    expect(() => postgres.parse("SELECT (a, b) overlaps FROM t;")).toThrow(/Expected ";" but found "overlaps"/);
+    expect(() => postgres.parse("SELECT (a, b) overlaps row FROM t;")).toThrow(/Expected ";" but found "overlaps"/);
+    expect(() => postgres.parse("SELECT * FROM t overlaps;")).toThrow(/Expected ";" but found "overlaps"/);
   });
 
   it("takes the item-type word after IS JSON unconditionally, as PG does", () => {
@@ -2553,36 +2549,36 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
   });
 
   it("rejects malformed rows and periods of the wrong arity", () => {
-    expect(() => sqlLite.parse("SELECT (a,) FROM t;")).toThrow(/but found "\)" \(1:10\)/);
-    expect(() => sqlLite.parse("SELECT (,b) FROM t;")).toThrow(/but found "," \(1:8\)/);
-    expect(() => sqlLite.parse("SELECT (a b) FROM t;")).toThrow(/Expected "\)" but found "b"/);
-    expect(() => sqlLite.parse("SELECT () FROM t;")).toThrow(/but found "\)" \(1:8\)/);
+    expect(() => postgres.parse("SELECT (a,) FROM t;")).toThrow(/but found "\)" \(1:10\)/);
+    expect(() => postgres.parse("SELECT (,b) FROM t;")).toThrow(/but found "," \(1:8\)/);
+    expect(() => postgres.parse("SELECT (a b) FROM t;")).toThrow(/Expected "\)" but found "b"/);
+    expect(() => postgres.parse("SELECT () FROM t;")).toThrow(/but found "\)" \(1:8\)/);
     // PG checks both arities in its grammar; the error covers the offending row.
-    expect(() => sqlLite.parse("SELECT (a, b, c) OVERLAPS (d, e) FROM t;")).toThrow(
+    expect(() => postgres.parse("SELECT (a, b, c) OVERLAPS (d, e) FROM t;")).toThrow(
       /Expected 2 items on the left of OVERLAPS but found 3 \(1:7\)/,
     );
-    expect(() => sqlLite.parse("SELECT (a) OVERLAPS (d, e) FROM t;")).toThrow(
+    expect(() => postgres.parse("SELECT (a) OVERLAPS (d, e) FROM t;")).toThrow(
       /Expected 2 items on the left of OVERLAPS but found 1 \(1:7\)/,
     );
-    expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (d) FROM t;")).toThrow(
+    expect(() => postgres.parse("SELECT (a, b) OVERLAPS (d) FROM t;")).toThrow(
       /Expected 2 items on the right of OVERLAPS but found 1 \(1:23\)/,
     );
-    expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS ROW() FROM t;")).toThrow(
+    expect(() => postgres.parse("SELECT (a, b) OVERLAPS ROW() FROM t;")).toThrow(
       /Expected 2 items on the right of OVERLAPS but found 0/,
     );
     // A row OVERLAPS row predicate does not chain: the second `overlaps` has no
     // row before it, and as an AS_LABEL keyword it cannot be a bare alias.
-    expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (c, d) OVERLAPS (e, f) FROM t;")).toThrow(
+    expect(() => postgres.parse("SELECT (a, b) OVERLAPS (c, d) OVERLAPS (e, f) FROM t;")).toThrow(
       /Expected ";" but found "overlaps" \(1:30\)/,
     );
     // A subquery is not a period.
-    expect(() => sqlLite.parse("SELECT (a, b) OVERLAPS (SELECT 1) FROM t;")).toThrow(/but found "select"/);
+    expect(() => postgres.parse("SELECT (a, b) OVERLAPS (SELECT 1) FROM t;")).toThrow(/but found "select"/);
   });
 
   it("rejects a dangling BETWEEN modifier or IS JSON clause", () => {
-    expect(() => sqlLite.parse("SELECT a BETWEEN SYMMETRIC AND 2 FROM t;")).toThrow(/but found "and"/);
-    expect(() => sqlLite.parse("SELECT x IS JSON WITH KEYS FROM t;")).toThrow(/Expected "unique" but found "keys"/);
-    expect(() => sqlLite.parse("SELECT x IS JSONB FROM t;")).toThrow(/Expected "null" but found "jsonb"/);
+    expect(() => postgres.parse("SELECT a BETWEEN SYMMETRIC AND 2 FROM t;")).toThrow(/but found "and"/);
+    expect(() => postgres.parse("SELECT x IS JSON WITH KEYS FROM t;")).toThrow(/Expected "unique" but found "keys"/);
+    expect(() => postgres.parse("SELECT x IS JSONB FROM t;")).toThrow(/Expected "null" but found "jsonb"/);
   });
 });
 
@@ -2745,9 +2741,9 @@ describe("SQL-lite expression special forms", () => {
 
   it("reports a helpful error when a special form is malformed", () => {
     // POSITION requires its IN separator.
-    expect(() => sqlLite.parse("SELECT POSITION(a b) FROM t;")).toThrow(/Expected .*"in"/i);
+    expect(() => postgres.parse("SELECT POSITION(a b) FROM t;")).toThrow(/Expected .*"in"/i);
     // A bare `$` is not a parameter and has no reader — a lex-level error.
-    expect(() => sqlLite.parse("SELECT $ FROM t;")).toThrow(ParseError);
+    expect(() => postgres.parse("SELECT $ FROM t;")).toThrow(ParseError);
   });
 });
 
@@ -2884,7 +2880,7 @@ describe("SQL-lite window functions", () => {
   });
 
   it("reports a helpful error on a malformed frame bound", () => {
-    expect(() => sqlLite.parse("SELECT sum(x) OVER (ORDER BY id ROWS UNBOUNDED) FROM t;")).toThrow(/following/);
+    expect(() => postgres.parse("SELECT sum(x) OVER (ORDER BY id ROWS UNBOUNDED) FROM t;")).toThrow(/following/);
   });
 });
 
@@ -2931,7 +2927,7 @@ describe("SQL-lite aggregate call modifiers", () => {
     // SUBSTRING's comma form from its second argument on — its first goes through
     // `expression`, so a named argument there is still rejected.
     expect(aggExpr("substring(s, a => 1)")).toEqual(call("substring", [name("s"), named("a", num(1))]));
-    expect(() => sqlLite.parse("SELECT substring(str => 'abc', from => 2) FROM t;")).toThrow(/but found "=>"/);
+    expect(() => postgres.parse("SELECT substring(str => 'abc', from => 2) FROM t;")).toThrow(/but found "=>"/);
     expect((firstStmt("SELECT * FROM generate_series(start => 1, stop => 5) g;") as any).from).toEqual([
       { kind: "function", call: call("generate_series", [named("start", num(1)), named("stop", num(5))]), alias: "g" },
     ]);
@@ -2994,10 +2990,10 @@ describe("SQL-lite aggregate call modifiers", () => {
   it("reports a helpful error on a truncated modifier", () => {
     // Both croak from inside `expression`, so the messages differ only in the
     // position — pin that, or either assertion would pass on the other's error.
-    expect(() => sqlLite.parse("SELECT array_agg(a ORDER BY) FROM t;")).toThrow(/but found "\)" \(1:27\)/);
-    expect(() => sqlLite.parse("SELECT f(a => ) FROM t;")).toThrow(/but found "\)" \(1:14\)/);
+    expect(() => postgres.parse("SELECT array_agg(a ORDER BY) FROM t;")).toThrow(/but found "\)" \(1:27\)/);
+    expect(() => postgres.parse("SELECT f(a => ) FROM t;")).toThrow(/but found "\)" \(1:14\)/);
     // A named argument's label is a name, so a reserved word needs quoting.
-    expect(() => sqlLite.parse("SELECT f(select => 1) FROM t;")).toThrow(/Expected a name but found "select"/);
+    expect(() => postgres.parse("SELECT f(select => 1) FROM t;")).toThrow(/Expected a name but found "select"/);
   });
 });
 
@@ -3052,7 +3048,7 @@ describe("SQL-lite FROM items: LATERAL, table functions, TABLESAMPLE", () => {
     // A plain table item is byte-identical to the pre-Phase-4 shape.
     expect(from("SELECT * FROM t;")).toEqual([{ kind: "table", name: ["t"], alias: null }]);
     // LATERAL must be followed by a subquery or a function call.
-    expect(() => sqlLite.parse("SELECT * FROM LATERAL t;")).toThrow(/subquery or function/);
+    expect(() => postgres.parse("SELECT * FROM LATERAL t;")).toThrow(/subquery or function/);
   });
 });
 
@@ -3210,29 +3206,29 @@ describe("SQL-lite FROM-item column-alias lists and ONLY", () => {
     expect(from('SELECT * FROM t AS "only" ("only");')).toEqual([
       { kind: "table", name: ["t"], alias: "only", columns: ["only"] },
     ]);
-    expect(() => sqlLite.parse("SELECT * FROM t only;")).toThrow(/Expected ";" but found "only"/);
+    expect(() => postgres.parse("SELECT * FROM t only;")).toThrow(/Expected ";" but found "only"/);
   });
 
   it("rejects an empty or malformed alias list and a misplaced or malformed ONLY", () => {
     // PG's list names at least one column.
-    expect(() => sqlLite.parse("SELECT * FROM t x ();")).toThrow(/Expected a name but found "\)"/);
-    expect(() => sqlLite.parse("SELECT * FROM t x (a,);")).toThrow(/Expected a name but found "\)"/);
-    expect(() => sqlLite.parse("SELECT * FROM t x (a b);")).toThrow(/Expected "\)" but found "b"/);
-    expect(() => sqlLite.parse("SELECT * FROM t x (a) (b);")).toThrow(/but found "\("/);
+    expect(() => postgres.parse("SELECT * FROM t x ();")).toThrow(/Expected a name but found "\)"/);
+    expect(() => postgres.parse("SELECT * FROM t x (a,);")).toThrow(/Expected a name but found "\)"/);
+    expect(() => postgres.parse("SELECT * FROM t x (a b);")).toThrow(/Expected "\)" but found "b"/);
+    expect(() => postgres.parse("SELECT * FROM t x (a) (b);")).toThrow(/but found "\("/);
     // The list needs an alias ahead of it on a subquery too, and comes before
     // TABLESAMPLE, never after it.
-    expect(() => sqlLite.parse("SELECT * FROM (SELECT 1) (a);")).toThrow(/but found "\("/);
-    expect(() => sqlLite.parse("SELECT * FROM t TABLESAMPLE system (1) x (a);")).toThrow(/but found "x"/);
+    expect(() => postgres.parse("SELECT * FROM (SELECT 1) (a);")).toThrow(/but found "\("/);
+    expect(() => postgres.parse("SELECT * FROM t TABLESAMPLE system (1) x (a);")).toThrow(/but found "x"/);
     // Only a function takes a typed column-definition list; on a table the
     // list is a name list, so the type word is where it stops.
-    expect(() => sqlLite.parse("SELECT * FROM t AS g (n int);")).toThrow(/Expected "\)" but found "int"/);
+    expect(() => postgres.parse("SELECT * FROM t AS g (n int);")).toThrow(/Expected "\)" but found "int"/);
     // ONLY takes a table name — not a subquery, a function or nothing at all —
     // and cannot follow LATERAL.
-    expect(() => sqlLite.parse("SELECT * FROM ONLY;")).toThrow(/Expected a name but found ";"/);
-    expect(() => sqlLite.parse("SELECT * FROM ONLY (SELECT 1) s;")).toThrow(/Expected a name but found "select"/);
-    expect(() => sqlLite.parse("SELECT * FROM ONLY f(1);")).toThrow(/but found "\("/);
-    expect(() => sqlLite.parse("SELECT * FROM ONLY (t x);")).toThrow(/Expected "\)" but found "x"/);
-    expect(() => sqlLite.parse("SELECT * FROM LATERAL ONLY t;")).toThrow(/Expected a name but found "only"/);
+    expect(() => postgres.parse("SELECT * FROM ONLY;")).toThrow(/Expected a name but found ";"/);
+    expect(() => postgres.parse("SELECT * FROM ONLY (SELECT 1) s;")).toThrow(/Expected a name but found "select"/);
+    expect(() => postgres.parse("SELECT * FROM ONLY f(1);")).toThrow(/but found "\("/);
+    expect(() => postgres.parse("SELECT * FROM ONLY (t x);")).toThrow(/Expected "\)" but found "x"/);
+    expect(() => postgres.parse("SELECT * FROM LATERAL ONLY t;")).toThrow(/Expected a name but found "only"/);
   });
 });
 
@@ -3471,19 +3467,19 @@ describe("SQL-lite set-operation precedence and query-level tails", () => {
   });
 
   it("ends a SELECT's span at its tail, and a set operation's at the tail after it", () => {
-    const [plain] = sqlLite.parse("SELECT a FROM t ORDER BY a LIMIT 1 FOR UPDATE;");
+    const [plain] = postgres.parse("SELECT a FROM t ORDER BY a LIMIT 1 FOR UPDATE;");
     expect(plain!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 45 } });
-    const [union] = sqlLite.parse("SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1;") as any[];
+    const [union] = postgres.parse("SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1;") as any[];
     expect(union.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 42 } });
     // The right-hand arm ends at its own last token, before the tail.
     expect(union.right.span).toEqual({ start: { row: 1, col: 15 }, end: { row: 1, col: 23 } });
     // A parenthesised query keeps its start and stretches to the tail written after it.
-    const [paren] = sqlLite.parse("(SELECT 1) ORDER BY 1;");
+    const [paren] = postgres.parse("(SELECT 1) ORDER BY 1;");
     expect(paren!.span).toEqual({ start: { row: 1, col: 1 }, end: { row: 1, col: 21 } });
   });
 
   it("rejects a repeated LIMIT, OFFSET or ORDER BY, within one tail or across parentheses", () => {
-    const bad = (sql: string) => () => sqlLite.parse(sql);
+    const bad = (sql: string) => () => postgres.parse(sql);
     expect(bad("SELECT 1 LIMIT 1 LIMIT 2;")).toThrow(/multiple LIMIT clauses not allowed \(1:17\)/);
     expect(bad("SELECT 1 LIMIT 1 FETCH FIRST 2 ROWS ONLY;")).toThrow(/multiple LIMIT clauses not allowed \(1:17\)/);
     expect(bad("SELECT 1 FETCH FIRST 2 ROWS ONLY LIMIT 1;")).toThrow(/multiple LIMIT clauses not allowed/);
@@ -3502,7 +3498,7 @@ describe("SQL-lite set-operation precedence and query-level tails", () => {
   });
 
   it("rejects WITH TIES without an ORDER BY", () => {
-    const bad = (sql: string) => () => sqlLite.parse(sql);
+    const bad = (sql: string) => () => postgres.parse(sql);
     expect(bad("SELECT 1 FETCH FIRST 2 ROWS WITH TIES;")).toThrow(
       /WITH TIES cannot be specified without ORDER BY clause \(1:9\)/,
     );
@@ -3517,7 +3513,7 @@ describe("SQL-lite set-operation precedence and query-level tails", () => {
   });
 
   it("rejects WITH TIES together with SKIP LOCKED", () => {
-    const bad = (sql: string) => () => sqlLite.parse(sql);
+    const bad = (sql: string) => () => postgres.parse(sql);
     expect(bad("SELECT 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES FOR UPDATE SKIP LOCKED;")).toThrow(
       /SKIP LOCKED and WITH TIES options cannot be used together \(1:20\)/,
     );
@@ -3540,7 +3536,7 @@ describe("SQL-lite set-operation precedence and query-level tails", () => {
   });
 
   it("rejects a misplaced or malformed tail clause", () => {
-    const bad = (sql: string) => () => sqlLite.parse(sql);
+    const bad = (sql: string) => () => postgres.parse(sql);
     // An arm takes no tail of its own: only parentheses give it one.
     expect(bad("SELECT 1 ORDER BY 1 UNION SELECT 2;")).toThrow(/Expected ";" but found "union"/);
     expect(bad("SELECT 1 LIMIT 1 UNION SELECT 2;")).toThrow(/Expected ";" but found "union"/);
@@ -3692,7 +3688,7 @@ describe("SQL-lite SELECT INTO and GROUP BY modifiers", () => {
     // A parenthesised expression is untouched: only the empty pair is claimed,
     // and an empty pair nested inside one is not an item of its own.
     expect(groupBy("(a)")).toEqual([name("a")]);
-    expect(() => sqlLite.parse("SELECT a FROM t GROUP BY (());")).toThrow(ParseError);
+    expect(() => postgres.parse("SELECT a FROM t GROUP BY (());")).toThrow(ParseError);
     // Inside GROUPING SETS the empty grouping stays an empty element list.
     expect(groupBy("GROUPING SETS (())")).toEqual([{ kind: "groupingSets", sets: [[]] }]);
   });
@@ -3718,17 +3714,17 @@ describe("SQL-lite SELECT INTO and GROUP BY modifiers", () => {
     // word has nowhere to go once the shape ahead of it has been consumed — as
     // a target name for the scope-word cases, as modifier-plus-target for the
     // repeated and doubled ones.
-    expect(() => sqlLite.parse("SELECT a INTO GLOBAL scratch FROM t;")).toThrow(/but found "scratch"/);
-    expect(() => sqlLite.parse("SELECT a INTO LOCAL scratch FROM t;")).toThrow(/but found "scratch"/);
-    expect(() => sqlLite.parse("SELECT a INTO GLOBAL TEMP FROM t;")).toThrow(/but found "temp"/);
-    expect(() => sqlLite.parse("SELECT a INTO TEMP TEMP scratch FROM t;")).toThrow(/but found "scratch"/);
-    expect(() => sqlLite.parse("SELECT a INTO UNLOGGED TEMP scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => postgres.parse("SELECT a INTO GLOBAL scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => postgres.parse("SELECT a INTO LOCAL scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => postgres.parse("SELECT a INTO GLOBAL TEMP FROM t;")).toThrow(/but found "temp"/);
+    expect(() => postgres.parse("SELECT a INTO TEMP TEMP scratch FROM t;")).toThrow(/but found "scratch"/);
+    expect(() => postgres.parse("SELECT a INTO UNLOGGED TEMP scratch FROM t;")).toThrow(/but found "scratch"/);
   });
 
   it("rejects a missing INTO target, a bare GROUP BY modifier and a malformed grouping", () => {
-    expect(() => sqlLite.parse("SELECT a INTO FROM t;")).toThrow(/Expected a name but found "from"/);
-    expect(() => sqlLite.parse("SELECT a FROM t GROUP BY DISTINCT;")).toThrow(/but found ";"/);
-    expect(() => sqlLite.parse("SELECT a FROM t GROUP BY (,);")).toThrow(ParseError);
+    expect(() => postgres.parse("SELECT a INTO FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => postgres.parse("SELECT a FROM t GROUP BY DISTINCT;")).toThrow(/but found ";"/);
+    expect(() => postgres.parse("SELECT a FROM t GROUP BY (,);")).toThrow(ParseError);
   });
 });
 
@@ -3826,22 +3822,22 @@ describe("SQL-lite ORDER BY USING and window frame EXCLUDE", () => {
 
   it("rejects USING with a direction or a non-operator, and EXCLUDE malformed or outside a frame", () => {
     // PG's sortby takes ASC/DESC *or* USING, never both.
-    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING < DESC;")).toThrow(/Expected ";" but found "desc"/);
-    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING b;")).toThrow(/Expected an operator but found "b"/);
+    expect(() => postgres.parse("SELECT a FROM t ORDER BY a USING < DESC;")).toThrow(/Expected ";" but found "desc"/);
+    expect(() => postgres.parse("SELECT a FROM t ORDER BY a USING b;")).toThrow(/Expected an operator but found "b"/);
     // `=>` is PG's named-argument token, not an operator, so it is no sort operator.
-    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING =>;")).toThrow(/Expected an operator but found "=>"/);
+    expect(() => postgres.parse("SELECT a FROM t ORDER BY a USING =>;")).toThrow(/Expected an operator but found "=>"/);
     // PG's `OPERATOR(schema.op)` spelling is out of scope, as it is everywhere else here.
-    expect(() => sqlLite.parse("SELECT a FROM t ORDER BY a USING OPERATOR(pg_catalog.<);")).toThrow(
+    expect(() => postgres.parse("SELECT a FROM t ORDER BY a USING OPERATOR(pg_catalog.<);")).toThrow(
       /Expected an operator but found "operator"/,
     );
-    expect(() => sqlLite.parse("SELECT sum(x) OVER (ROWS 1 PRECEDING EXCLUDE) FROM t;")).toThrow(
+    expect(() => postgres.parse("SELECT sum(x) OVER (ROWS 1 PRECEDING EXCLUDE) FROM t;")).toThrow(
       /Expected "current row" or "group" or "ties" or "no others" but found "\)"/,
     );
-    expect(() => sqlLite.parse("SELECT sum(x) OVER (ROWS 1 PRECEDING EXCLUDE NO) FROM t;")).toThrow(
+    expect(() => postgres.parse("SELECT sum(x) OVER (ROWS 1 PRECEDING EXCLUDE NO) FROM t;")).toThrow(
       /Expected "others" but found "\)"/,
     );
     // EXCLUDE belongs to the frame clause, so without one it has nowhere to go.
-    expect(() => sqlLite.parse("SELECT sum(x) OVER (ORDER BY id EXCLUDE TIES) FROM t;")).toThrow(
+    expect(() => postgres.parse("SELECT sum(x) OVER (ORDER BY id EXCLUDE TIES) FROM t;")).toThrow(
       /Expected "\)" but found "exclude"/,
     );
   });
@@ -3851,7 +3847,7 @@ describe("SQL-lite ORDER BY USING and window frame EXCLUDE", () => {
 
 describe("SQL-lite robustness", () => {
   it("diagnose() recovers to the next comma inside a bad column, keeping siblings and later statements", () => {
-    const { ast, errors } = sqlLite.diagnose("CREATE TABLE t (id int, 42 bad, ok text);\nDROP TABLE t;");
+    const { ast, errors } = postgres.diagnose("CREATE TABLE t (id int, 42 bad, ok text);\nDROP TABLE t;");
     expect(errors.length).toBeGreaterThanOrEqual(1);
 
     const stmts = stripSpans(ast) as any[];
@@ -3863,18 +3859,18 @@ describe("SQL-lite robustness", () => {
   });
 
   it("strict parse() throws on a malformed column with no recovery", () => {
-    expect(() => sqlLite.parse("CREATE TABLE t (id int, oops);")).toThrow(ParseError);
+    expect(() => postgres.parse("CREATE TABLE t (id int, oops);")).toThrow(ParseError);
   });
 
   it("reports the farthest failure across a backtracked branch", () => {
     // `IF NOT EXIST` is a typo: the IF-NOT-EXISTS attempt backtracks after
     // consuming `if not`, and the shallow error that surfaces ("expected `(`")
     // is replaced by the deeper one preferFarthest kept.
-    expect(() => sqlLite.parse("CREATE TABLE IF NOT EXIST foo (id int);")).toThrow(/exists/);
+    expect(() => postgres.parse("CREATE TABLE IF NOT EXIST foo (id int);")).toThrow(/exists/);
   });
 
   it("labels a non-statement start with the statement description", () => {
-    expect(() => sqlLite.parse("CREATE TABLE t (id int); frobnicate;")).toThrow(/Expected a statement/);
+    expect(() => postgres.parse("CREATE TABLE t (id int); frobnicate;")).toThrow(/Expected a statement/);
   });
 
   it("parses a realistic multi-statement DDL file", () => {
@@ -3891,7 +3887,7 @@ describe("SQL-lite robustness", () => {
       "ALTER TABLE person ADD COLUMN team_id int REFERENCES team (id) ON DELETE CASCADE;",
       "COMMENT ON TABLE person IS $doc$people we know$doc$;",
     ].join("\n");
-    const { ast, errors } = sqlLite.diagnose(ddl);
+    const { ast, errors } = postgres.diagnose(ddl);
     expect(errors).toEqual([]);
     expect((ast as Stmt[]).map((s) => s.kind)).toEqual([
       "createType",
@@ -3908,15 +3904,15 @@ describe("SQL-lite robustness", () => {
 describe("SQL-lite lexer errors inside backtracking", () => {
   // The INSERT column list is tried with backtracking. The lexer consumes
   // `X'G1` before croaking, so a rollback used to resurface as a parser error
-  // on the `)` that followed. sql-lite opts into lexer error propagation.
+  // on the `)` that followed. The grammar opts into lexer error propagation.
   it("reports a bad literal in an attempted branch as the lexer error", () => {
-    expect(() => sqlLite.parse("INSERT INTO t (a, X'G1') VALUES (1);")).toThrow(
+    expect(() => postgres.parse("INSERT INTO t (a, X'G1') VALUES (1);")).toThrow(
       /^Invalid hexadecimal digit "G" \(1:18\)$/,
     );
   });
 
   it("diagnose() records the lexer error once and resumes at the next statement", () => {
-    const { ast, errors } = sqlLite.diagnose("SELECT 1;\nINSERT INTO t (a, X'G1') VALUES (1);\nSELECT 2;");
+    const { ast, errors } = postgres.diagnose("SELECT 1;\nINSERT INTO t (a, X'G1') VALUES (1);\nSELECT 2;");
     expect(errors.map((error) => error.message)).toEqual(['Invalid hexadecimal digit "G" (2:18)']);
     expect((ast as Stmt[]).map((stmt) => stmt.kind)).toEqual(["select", "select"]);
   });
@@ -4083,26 +4079,26 @@ describe("SQL-lite TABLE name", () => {
       right: tableCmd(["u"]),
       orderBy: [{ expr: num(1), dir: null, nulls: null }],
     });
-    expect(() => sqlLite.parse("TABLE t FETCH FIRST 1 ROW WITH TIES;")).toThrow(
+    expect(() => postgres.parse("TABLE t FETCH FIRST 1 ROW WITH TIES;")).toThrow(
       /WITH TIES cannot be specified without ORDER BY clause/,
     );
   });
 
   it("spans from TABLE to the end of its tail", () => {
-    const [stmt] = sqlLite.parse("TABLE ONLY (t) LIMIT 1;");
+    const [stmt] = postgres.parse("TABLE ONLY (t) LIMIT 1;");
     expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 22 } });
-    expect(sqlLite.parse("TABLE t *;")[0]!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 9 } });
+    expect(postgres.parse("TABLE t *;")[0]!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 9 } });
   });
 
   it("rejects a missing name and anything PG's relation_expr doesn't take", () => {
-    expect(() => sqlLite.parse("TABLE;")).toThrow(/Expected a name but found ";"/);
-    expect(() => sqlLite.parse("TABLE ONLY;")).toThrow(/Expected a name but found ";"/);
-    expect(() => sqlLite.parse("TABLE ONLY t *;")).toThrow(/Expected ";" but found "\*"/);
-    expect(() => sqlLite.parse("TABLE ONLY (t;")).toThrow(/Expected "\)" but found ";"/);
+    expect(() => postgres.parse("TABLE;")).toThrow(/Expected a name but found ";"/);
+    expect(() => postgres.parse("TABLE ONLY;")).toThrow(/Expected a name but found ";"/);
+    expect(() => postgres.parse("TABLE ONLY t *;")).toThrow(/Expected ";" but found "\*"/);
+    expect(() => postgres.parse("TABLE ONLY (t;")).toThrow(/Expected "\)" but found ";"/);
     // No alias, column list or WHERE: it is `SELECT * FROM name`, not a FROM item.
-    expect(() => sqlLite.parse("TABLE t x;")).toThrow(/Expected ";" but found "x"/);
-    expect(() => sqlLite.parse("TABLE t WHERE a;")).toThrow(/Expected ";" but found "where"/);
-    expect(() => sqlLite.parse("TABLE f(1);")).toThrow(/Expected ";" but found "\("/);
+    expect(() => postgres.parse("TABLE t x;")).toThrow(/Expected ";" but found "x"/);
+    expect(() => postgres.parse("TABLE t WHERE a;")).toThrow(/Expected ";" but found "where"/);
+    expect(() => postgres.parse("TABLE f(1);")).toThrow(/Expected ";" but found "\("/);
   });
 });
 
@@ -4147,16 +4143,16 @@ describe("SQL-lite empty select list", () => {
     });
     expect(firstStmt("CREATE TABLE x AS SELECT WITH NO DATA;")).toMatchObject({ query: sel({}), withData: false });
     // The bare SELECT spans its keyword alone.
-    expect(sqlLite.parse("SELECT ;")[0]!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 6 } });
+    expect(postgres.parse("SELECT ;")[0]!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 6 } });
   });
 
   it("still requires a list after DISTINCT and an item after every comma", () => {
     // PG's DISTINCT form takes `target_list`, not `opt_target_list`.
-    expect(() => sqlLite.parse("SELECT DISTINCT FROM t;")).toThrow(/Expected a name but found "from"/);
-    expect(() => sqlLite.parse("SELECT DISTINCT ON (a) FROM t;")).toThrow(/Expected a name but found "from"/);
-    expect(() => sqlLite.parse("SELECT , FROM t;")).toThrow(/but found "," \(1:7\)/);
-    expect(() => sqlLite.parse("SELECT a, FROM t;")).toThrow(/Expected a name but found "from"/);
-    expect(() => sqlLite.parse("SELECT FROM;")).toThrow(/Expected a name but found ";"/);
+    expect(() => postgres.parse("SELECT DISTINCT FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => postgres.parse("SELECT DISTINCT ON (a) FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => postgres.parse("SELECT , FROM t;")).toThrow(/but found "," \(1:7\)/);
+    expect(() => postgres.parse("SELECT a, FROM t;")).toThrow(/Expected a name but found "from"/);
+    expect(() => postgres.parse("SELECT FROM;")).toThrow(/Expected a name but found ";"/);
   });
 });
 
@@ -4202,17 +4198,17 @@ describe("SQL-lite WITH … VALUES", () => {
   });
 
   it("rejects a second WITH on a parenthesised query, as PG does, at the outer WITH", () => {
-    expect(() => sqlLite.parse("WITH a AS (SELECT 1) (WITH b AS (SELECT 2) VALUES (1));")).toThrow(
+    expect(() => postgres.parse("WITH a AS (SELECT 1) (WITH b AS (SELECT 2) VALUES (1));")).toThrow(
       /multiple WITH clauses not allowed \(1:0\)/,
     );
-    expect(() => sqlLite.parse("WITH a AS (SELECT 1) ((WITH b AS (SELECT 2) TABLE t)) LIMIT 1;")).toThrow(
+    expect(() => postgres.parse("WITH a AS (SELECT 1) ((WITH b AS (SELECT 2) TABLE t)) LIMIT 1;")).toThrow(
       /multiple WITH clauses not allowed/,
     );
     // The inner WITH heads a whole set operation, which lands on its first arm.
-    expect(() => sqlLite.parse("WITH a AS (SELECT 1) (WITH b AS (SELECT 2) SELECT 1 UNION SELECT 2);")).toThrow(
+    expect(() => postgres.parse("WITH a AS (SELECT 1) (WITH b AS (SELECT 2) SELECT 1 UNION SELECT 2);")).toThrow(
       /multiple WITH clauses not allowed/,
     );
-    expect(() => sqlLite.parse("SELECT (WITH a AS (SELECT 1) (WITH b AS (SELECT 2) SELECT 3) LIMIT 1);")).toThrow(
+    expect(() => postgres.parse("SELECT (WITH a AS (SELECT 1) (WITH b AS (SELECT 2) SELECT 3) LIMIT 1);")).toThrow(
       /multiple WITH clauses not allowed/,
     );
   });
@@ -4324,20 +4320,20 @@ describe("SQL-lite parenthesised VALUES and set operations as subqueries", () =>
       col({ kind: "row", items: [sub, num(2)], implicit: true }),
     ]);
     // The inner subquery's span, not the outer parentheses'.
-    const [stmt] = sqlLite.parse("SELECT ((SELECT 1));") as any[];
+    const [stmt] = postgres.parse("SELECT ((SELECT 1));") as any[];
     expect(stmt.columns[0].expr.span).toEqual({ start: { row: 1, col: 8 }, end: { row: 1, col: 18 } });
   });
 
   it("spans a parenthesised set operation from its outer parenthesis", () => {
-    const [stmt] = sqlLite.parse("SELECT ((SELECT 1) UNION (SELECT 2));") as any[];
+    const [stmt] = postgres.parse("SELECT ((SELECT 1) UNION (SELECT 2));") as any[];
     expect(stmt.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 36 } });
   });
 
   it("rejects malformed parenthesised queries", () => {
-    expect(() => sqlLite.parse("SELECT (VALUES);")).toThrow(/Expected "\(" but found "\)"/);
-    expect(() => sqlLite.parse("SELECT ((SELECT 1) UNION SELECT 2;")).toThrow(/Expected "\)" but found ";"/);
-    expect(() => sqlLite.parse("SELECT ((SELECT 1) UNION);")).toThrow(/but found "\)"/);
-    expect(() => sqlLite.parse("SELECT 1 WHERE a IN (VALUES (1)) x;")).toThrow(/Expected ";" but found "x"/);
+    expect(() => postgres.parse("SELECT (VALUES);")).toThrow(/Expected "\(" but found "\)"/);
+    expect(() => postgres.parse("SELECT ((SELECT 1) UNION SELECT 2;")).toThrow(/Expected "\)" but found ";"/);
+    expect(() => postgres.parse("SELECT ((SELECT 1) UNION);")).toThrow(/but found "\)"/);
+    expect(() => postgres.parse("SELECT 1 WHERE a IN (VALUES (1)) x;")).toThrow(/Expected ";" but found "x"/);
   });
 });
 
@@ -4697,30 +4693,32 @@ describe("SQL-lite CTE materialization, SEARCH and CYCLE", () => {
   });
 
   it("rejects malformed materialization, SEARCH and CYCLE clauses", () => {
-    expect(() => sqlLite.parse("WITH a AS NOT (SELECT 1) SELECT 1;")).toThrow(/Expected "materialized" but found "\("/);
-    expect(() => sqlLite.parse("WITH a AS (SELECT 1) SEARCH FIRST BY id SET o SELECT 1;")).toThrow(
+    expect(() => postgres.parse("WITH a AS NOT (SELECT 1) SELECT 1;")).toThrow(
+      /Expected "materialized" but found "\("/,
+    );
+    expect(() => postgres.parse("WITH a AS (SELECT 1) SEARCH FIRST BY id SET o SELECT 1;")).toThrow(
       /Expected "depth" or "breadth" but found "first"/,
     );
-    expect(() => sqlLite.parse("WITH a AS (SELECT 1) SEARCH DEPTH BY id SET o SELECT 1;")).toThrow(
+    expect(() => postgres.parse("WITH a AS (SELECT 1) SEARCH DEPTH BY id SET o SELECT 1;")).toThrow(
       /Expected "first by"/,
     );
-    expect(() => sqlLite.parse("WITH a AS (SELECT 1) SEARCH DEPTH FIRST BY id SELECT 1;")).toThrow(
+    expect(() => postgres.parse("WITH a AS (SELECT 1) SEARCH DEPTH FIRST BY id SELECT 1;")).toThrow(
       /Expected "set" but found "select"/,
     );
     // TO without DEFAULT, a missing USING, and a non-constant mark value.
-    expect(() => sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c TO 1 USING p SELECT 1;")).toThrow(
+    expect(() => postgres.parse("WITH a AS (SELECT 1) CYCLE id SET c TO 1 USING p SELECT 1;")).toThrow(
       /Expected "default" but found "using"/,
     );
-    expect(() => sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c SELECT 1;")).toThrow(
+    expect(() => postgres.parse("WITH a AS (SELECT 1) CYCLE id SET c SELECT 1;")).toThrow(
       /Expected "using" but found "select"/,
     );
-    expect(() => sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c TO x DEFAULT 0 USING p SELECT 1;")).toThrow(
+    expect(() => postgres.parse("WITH a AS (SELECT 1) CYCLE id SET c TO x DEFAULT 0 USING p SELECT 1;")).toThrow(
       /Expected a constant but found "x"/,
     );
     // PG's order is SEARCH then CYCLE; the reverse leaves SEARCH where the
     // statement should start.
     expect(() =>
-      sqlLite.parse("WITH a AS (SELECT 1) CYCLE id SET c USING p SEARCH DEPTH FIRST BY id SET o SELECT 1;"),
+      postgres.parse("WITH a AS (SELECT 1) CYCLE id SET c USING p SEARCH DEPTH FIRST BY id SET o SELECT 1;"),
     ).toThrow(ParseError);
   });
 });
@@ -4803,11 +4801,11 @@ describe("SQL-lite INSERT / UPDATE / DELETE", () => {
 
 describe("SQL-lite DML robustness", () => {
   it("throws a descriptive error on a FROM with no table", () => {
-    expect(() => sqlLite.parse("SELECT * FROM;")).toThrow(ParseError);
+    expect(() => postgres.parse("SELECT * FROM;")).toThrow(ParseError);
   });
 
   it("recovers at the statement terminator and keeps later statements", () => {
-    const { ast, errors } = sqlLite.diagnose("SELECT * FRUM t;\nSELECT 1;");
+    const { ast, errors } = postgres.diagnose("SELECT * FRUM t;\nSELECT 1;");
     expect(errors.length).toBeGreaterThanOrEqual(1);
     const stmts = stripSpans(ast) as any[];
     // The malformed first statement is dropped; the following one survives.
@@ -4873,7 +4871,7 @@ describe("SQL-lite GRANT / REVOKE", () => {
   });
 
   it("throws a descriptive error when the TO grantee list is missing", () => {
-    expect(() => sqlLite.parse("GRANT SELECT ON t;")).toThrow(ParseError);
+    expect(() => postgres.parse("GRANT SELECT ON t;")).toThrow(ParseError);
   });
 });
 
@@ -4926,7 +4924,7 @@ describe("SQL-lite GRANT / REVOKE object kinds and options", () => {
       inSchema: null,
     });
     // A routine reference takes no argument defaults, as on DROP.
-    expect(() => sqlLite.parse("GRANT EXECUTE ON FUNCTION f(a int = 1) TO u;")).toThrow(/takes no argument defaults/);
+    expect(() => postgres.parse("GRANT EXECUTE ON FUNCTION f(a int = 1) TO u;")).toThrow(/takes no argument defaults/);
   });
 
   it("parses ALL … IN SCHEMA for every plural PG allows", () => {
@@ -4950,7 +4948,7 @@ describe("SQL-lite GRANT / REVOKE object kinds and options", () => {
       });
     }
     // A schema name has one part.
-    expect(() => sqlLite.parse("GRANT ALL ON ALL TABLES IN SCHEMA a.b TO u;")).toThrow(/Expected "to" but found "\."/);
+    expect(() => postgres.parse("GRANT ALL ON ALL TABLES IN SCHEMA a.b TO u;")).toThrow(/Expected "to" but found "\."/);
   });
 
   it("parses the foreign-data, large-object and parameter kinds", () => {
@@ -4992,8 +4990,8 @@ describe("SQL-lite GRANT / REVOKE object kinds and options", () => {
         grantees: ["u"],
       }),
     );
-    expect(() => sqlLite.parse("GRANT SELECT ON LARGE OBJECT lo TO u;")).toThrow(/Expected a number but found "lo"/);
-    expect(() => sqlLite.parse("GRANT USAGE ON FOREIGN TABLE t TO u;")).toThrow(
+    expect(() => postgres.parse("GRANT SELECT ON LARGE OBJECT lo TO u;")).toThrow(/Expected a number but found "lo"/);
+    expect(() => postgres.parse("GRANT USAGE ON FOREIGN TABLE t TO u;")).toThrow(
       /Expected "data" or "server" but found "table"/,
     );
   });
@@ -5016,7 +5014,7 @@ describe("SQL-lite GRANT / REVOKE object kinds and options", () => {
       });
     }
     for (const target of ["SCHEMA a.b", "DATABASE a.b", "LANGUAGE a.b", "TABLESPACE a.b"]) {
-      expect(() => sqlLite.parse(`GRANT USAGE ON ${target} TO u;`)).toThrow(/Expected "to" but found "\."/);
+      expect(() => postgres.parse(`GRANT USAGE ON ${target} TO u;`)).toThrow(/Expected "to" but found "\."/);
     }
   });
 
@@ -5180,7 +5178,7 @@ describe("SQL-lite GRANT / REVOKE object kinds and options", () => {
   });
 
   it("rejects what PG's grammar refuses", () => {
-    const fails = (text: string) => () => sqlLite.parse(text);
+    const fails = (text: string) => () => postgres.parse(text);
     // ALL is an object's; a role grant names roles, and its grantees take no GROUP.
     expect(fails("GRANT ALL TO u;")).toThrow(/Expected "on" but found "to"/);
     expect(fails("GRANT r TO GROUP u;")).toThrow(/Expected a name but found "group"/);
@@ -5278,7 +5276,7 @@ describe("SQL-lite ALTER DEFAULT PRIVILEGES", () => {
   });
 
   it("rejects malformed ALTER DEFAULT PRIVILEGES", () => {
-    const fails = (text: string) => () => sqlLite.parse(text);
+    const fails = (text: string) => () => postgres.parse(text);
     expect(fails("ALTER DEFAULT PRIVILEGES GRANT SELECT ON PROCEDURES TO u;")).toThrow(
       /Expected "tables", "functions", "routines", "sequences", "types" or "schemas" but found "procedures"/,
     );
@@ -5308,7 +5306,7 @@ describe("SQL-lite DROP OWNED", () => {
     });
     expect(firstStmt("DROP OWNED BY r;")).toEqual({ kind: "dropOwned", roles: ["r"], behavior: null });
     expect(firstStmt("DROP OWNED BY r RESTRICT;")).toEqual({ kind: "dropOwned", roles: ["r"], behavior: "restrict" });
-    expect(() => sqlLite.parse("DROP OWNED r;")).toThrow(/Expected "by" but found "r"/);
+    expect(() => postgres.parse("DROP OWNED r;")).toThrow(/Expected "by" but found "r"/);
   });
 });
 
@@ -5319,8 +5317,8 @@ describe("SQL-lite REASSIGN OWNED", () => {
       roles: ["a", "session_user"],
       newRole: "current_role",
     });
-    expect(() => sqlLite.parse("REASSIGN OWNED BY a;")).toThrow(/Expected "to" but found ";"/);
-    expect(() => sqlLite.parse("REASSIGN OWNED BY a TO b, c;")).toThrow(ParseError);
+    expect(() => postgres.parse("REASSIGN OWNED BY a;")).toThrow(/Expected "to" but found ";"/);
+    expect(() => postgres.parse("REASSIGN OWNED BY a TO b, c;")).toThrow(ParseError);
   });
 });
 
@@ -5344,7 +5342,7 @@ describe("SQL-lite CREATE GROUP", () => {
       ],
     });
     expect(firstStmt("CREATE ROLE r;")).not.toHaveProperty("group");
-    expect(() => sqlLite.parse("CREATE GROUP;")).toThrow(/Expected a name but found ";"/);
+    expect(() => postgres.parse("CREATE GROUP;")).toThrow(/Expected a name but found ";"/);
   });
 });
 
@@ -5395,7 +5393,7 @@ describe("SQL-lite privilege words", () => {
 // --- Phase 9: transaction control ---
 
 describe("SQL-lite transaction control", () => {
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses BEGIN (with optional WORK) and its lack of modes", () => {
     expect(firstStmt("BEGIN WORK;")).toEqual({ kind: "begin", start: false, modes: [] });
@@ -5481,7 +5479,7 @@ describe("SQL-lite transaction control", () => {
     const [query, end] = parse("SELECT CASE WHEN a THEN 1 END FROM t; END;");
     expect(query).toMatchObject({ kind: "select", columns: [{ expr: { kind: "case" } }] });
     expect(end).toEqual({ kind: "commit", chain: false });
-    expect(() => sqlLite.parse("SELECT 1 END;")).toThrow(/Expected ";" but found "end"/);
+    expect(() => postgres.parse("SELECT 1 END;")).toThrow(/Expected ";" but found "end"/);
   });
 });
 
@@ -5546,9 +5544,9 @@ describe("SQL-lite SET values", () => {
     });
   });
 
-  it("admits the words sql-lite reserves but PostgreSQL does not", () => {
+  it("admits the words this grammar reserves but PostgreSQL does not", () => {
     expect(values("left, set, values")).toEqual([name("left"), name("set"), name("values")]);
-    expect(() => sqlLite.parse("SET x = system_user;")).toThrow(/Expected a parameter value but found "system_user"/);
+    expect(() => postgres.parse("SET x = system_user;")).toThrow(/Expected a parameter value but found "system_user"/);
   });
 
   it("parses lists of words, strings, quoted names and signed numbers", () => {
@@ -5581,18 +5579,18 @@ describe("SQL-lite SET values", () => {
       { kind: "set", parameter: "time zone", value: { kind: "list", values: [str("UTC")] } },
       { kind: "set", parameter: "z", value: { kind: "fromCurrent" } },
     ]);
-    expect(() => sqlLite.parse("CREATE FUNCTION f() RETURNS int SET x = 1 + 2 AS 'SELECT 1';")).toThrow(
+    expect(() => postgres.parse("CREATE FUNCTION f() RETURNS int SET x = 1 + 2 AS 'SELECT 1';")).toThrow(
       /Expected ";" but found "\+"/,
     );
   });
 
   it("rejects an expression where PostgreSQL takes a single value", () => {
-    expect(() => sqlLite.parse("SET x = 1 + 2;")).toThrow(/Expected ";" but found "\+" \(1:10\)/);
-    expect(() => sqlLite.parse("SET x = a.b;")).toThrow(/Expected ";" but found "\."/);
-    expect(() => sqlLite.parse("SET x = lower('A');")).toThrow(/Expected ";" but found "\("/);
-    expect(() => sqlLite.parse("SET x = null;")).toThrow(/Expected a parameter value but found "null"/);
-    expect(() => sqlLite.parse("SET x TO DEFAULT, 1;")).toThrow(/Expected ";" but found ","/);
-    expect(() => sqlLite.parse("SET x;")).toThrow(/Expected "to" or "=" but found ";"/);
+    expect(() => postgres.parse("SET x = 1 + 2;")).toThrow(/Expected ";" but found "\+" \(1:10\)/);
+    expect(() => postgres.parse("SET x = a.b;")).toThrow(/Expected ";" but found "\."/);
+    expect(() => postgres.parse("SET x = lower('A');")).toThrow(/Expected ";" but found "\("/);
+    expect(() => postgres.parse("SET x = null;")).toThrow(/Expected a parameter value but found "null"/);
+    expect(() => postgres.parse("SET x TO DEFAULT, 1;")).toThrow(/Expected ";" but found ","/);
+    expect(() => postgres.parse("SET x;")).toThrow(/Expected "to" or "=" but found ";"/);
   });
 });
 
@@ -5627,9 +5625,9 @@ describe("SQL-lite SET special forms", () => {
       name: "transaction snapshot",
       values: [str("00000003-1")],
     });
-    expect(() => sqlLite.parse("SET TRANSACTION;")).toThrow(/Expected "isolation", .* but found ";"/);
-    expect(() => sqlLite.parse("SET TRANSACTION READ ONLY,;")).toThrow(/Expected "isolation", .* but found ";"/);
-    expect(() => sqlLite.parse("BEGIN ISOLATION LEVEL SERIALIZABLE,;")).toThrow(
+    expect(() => postgres.parse("SET TRANSACTION;")).toThrow(/Expected "isolation", .* but found ";"/);
+    expect(() => postgres.parse("SET TRANSACTION READ ONLY,;")).toThrow(/Expected "isolation", .* but found ";"/);
+    expect(() => postgres.parse("BEGIN ISOLATION LEVEL SERIALIZABLE,;")).toThrow(
       /Expected "isolation", .* but found ";"/,
     );
   });
@@ -5645,8 +5643,8 @@ describe("SQL-lite SET special forms", () => {
       constraints: [["s", "fk_a"], ["fk_b"]],
       mode: "immediate",
     });
-    expect(() => sqlLite.parse("SET CONSTRAINTS ALL;")).toThrow(/Expected "deferred" or "immediate" but found ";"/);
-    expect(() => sqlLite.parse("SET LOCAL CONSTRAINTS ALL DEFERRED;")).toThrow(/Expected "to" or "=" but found "all"/);
+    expect(() => postgres.parse("SET CONSTRAINTS ALL;")).toThrow(/Expected "deferred" or "immediate" but found ";"/);
+    expect(() => postgres.parse("SET LOCAL CONSTRAINTS ALL DEFERRED;")).toThrow(/Expected "to" or "=" but found "all"/);
   });
 
   it("parses SET [SESSION | LOCAL] SESSION AUTHORIZATION and SET ROLE", () => {
@@ -5660,8 +5658,8 @@ describe("SQL-lite SET special forms", () => {
     expect(firstStmt("SET SESSION SESSION AUTHORIZATION DEFAULT;")).toEqual(auth("session", "default"));
     expect(firstStmt("SET LOCAL SESSION AUTHORIZATION bob;")).toEqual(auth("local", [name("bob")]));
     expect(firstStmt("SET ROLE 'admin';")).toEqual({ kind: "set", scope: null, name: "role", values: [str("admin")] });
-    expect(() => sqlLite.parse("SET SESSION AUTHORIZATION 1;")).toThrow(/Expected a name or a string but found "1"/);
-    expect(() => sqlLite.parse("SET ROLE DEFAULT;")).toThrow(/Expected a name or a string but found "default"/);
+    expect(() => postgres.parse("SET SESSION AUTHORIZATION 1;")).toThrow(/Expected a name or a string but found "1"/);
+    expect(() => postgres.parse("SET ROLE DEFAULT;")).toThrow(/Expected a name or a string but found "default"/);
   });
 
   it("reads TIME ZONE LOCAL as DEFAULT, and parses the other zone values", () => {
@@ -5674,9 +5672,9 @@ describe("SQL-lite SET special forms", () => {
     expect(zone("INTERVAL '+00:00' HOUR TO MINUTE")).toEqual([
       { kind: "interval", value: "+00:00", fields: "hour to minute" },
     ]);
-    expect(() => sqlLite.parse("SET TIME ZONE true;")).toThrow(/Expected a time zone but found "true"/);
-    expect(() => sqlLite.parse("SET TIME ZONE left;")).toThrow(/Expected a time zone but found "left"/);
-    expect(() => sqlLite.parse("SET TIME ZONE INTERVAL '1' DAY;")).toThrow(
+    expect(() => postgres.parse("SET TIME ZONE true;")).toThrow(/Expected a time zone but found "true"/);
+    expect(() => postgres.parse("SET TIME ZONE left;")).toThrow(/Expected a time zone but found "left"/);
+    expect(() => postgres.parse("SET TIME ZONE INTERVAL '1' DAY;")).toThrow(
       /A time zone interval must be HOUR or HOUR TO MINUTE, but found DAY \(1:14\)/,
     );
   });
@@ -5687,7 +5685,7 @@ describe("SQL-lite SET special forms", () => {
     expect(set("NAMES 'UTF8'")).toMatchObject({ name: "names", values: [str("UTF8")] });
     expect(set("NAMES")).toMatchObject({ name: "names", values: "default" });
     expect(set("XML OPTION CONTENT")).toMatchObject({ name: "xml option", values: [name("content")] });
-    expect(() => sqlLite.parse("SET SCHEMA app;")).toThrow(/Expected a string but found "app"/);
+    expect(() => postgres.parse("SET SCHEMA app;")).toThrow(/Expected a string but found "app"/);
   });
 
   it("reads a form word followed by = or TO as a parameter name", () => {
@@ -5723,7 +5721,7 @@ describe("SQL-lite SHOW / RESET targets", () => {
     expect(firstStmt("SHOW time;")).toEqual({ kind: "show", name: "time" });
     expect(firstStmt("SHOW transaction;")).toEqual({ kind: "show", name: "transaction" });
     expect(firstStmt("RESET session;")).toEqual({ kind: "reset", name: "session" });
-    expect(() => sqlLite.parse("SHOW TRANSACTION ISOLATION;")).toThrow(/Expected "level" but found ";"/);
+    expect(() => postgres.parse("SHOW TRANSACTION ISOLATION;")).toThrow(/Expected "level" but found ";"/);
   });
 
   it("keeps the form words unreserved as names and aliases", () => {
@@ -5767,7 +5765,7 @@ describe("SQL-lite DO / DEALLOCATE", () => {
 // --- LISTEN / NOTIFY / UNLISTEN, LOAD and DISCARD ---
 
 describe("SQL-lite LISTEN, NOTIFY, UNLISTEN, LOAD and DISCARD", () => {
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses LISTEN, NOTIFY with and without a payload, and UNLISTEN", () => {
     expect(firstStmt("LISTEN channel_a;")).toEqual({ kind: "listen", channel: "channel_a" });
@@ -5857,14 +5855,14 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
   });
 
   it("rejects a digit outside the literal's base", () => {
-    expect(() => sqlLite.parse("SELECT B'12' FROM t;")).toThrow(/Invalid binary digit "2"/);
-    expect(() => sqlLite.parse("SELECT X'gg' FROM t;")).toThrow(/Invalid hexadecimal digit "g"/);
+    expect(() => postgres.parse("SELECT B'12' FROM t;")).toThrow(/Invalid binary digit "2"/);
+    expect(() => postgres.parse("SELECT X'gg' FROM t;")).toThrow(/Invalid hexadecimal digit "g"/);
     // A literal that never closed is reported as unterminated, not blamed on
     // its first stray character.
-    expect(() => sqlLite.parse("SELECT B'101 FROM t;")).toThrow(/Unterminated bit string literal/);
-    expect(() => sqlLite.parse("SELECT 'abc FROM t;")).toThrow(/Unterminated quoted string/);
+    expect(() => postgres.parse("SELECT B'101 FROM t;")).toThrow(/Unterminated bit string literal/);
+    expect(() => postgres.parse("SELECT 'abc FROM t;")).toThrow(/Unterminated quoted string/);
     // Closed by a later quote, though, it is a terminated literal and is checked.
-    expect(() => sqlLite.parse("SELECT B'101 FROM t; SELECT 'x';")).toThrow(/Invalid binary digit " "/);
+    expect(() => postgres.parse("SELECT B'101 FROM t; SELECT 'x';")).toThrow(/Invalid binary digit " "/);
   });
 
   it("keeps b, x and u usable as names — a prefix only claims a quote right after it", () => {
@@ -5901,7 +5899,7 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
     expect(firstStmt("COMMENT ON TABLE t IS U&'\\0041';")).toMatchObject({ comment: "A" });
     // The asymmetry is PG's: a bit string is a `bit` constant, not text, so it
     // reaches expression positions only. Widening these would diverge.
-    expect(() => sqlLite.parse("CREATE TYPE m AS ENUM (B'1011');")).toThrow(/Expected a string/);
+    expect(() => postgres.parse("CREATE TYPE m AS ENUM (B'1011');")).toThrow(/Expected a string/);
   });
 
   it("carries bit strings through the rest of the expression grammar", () => {
@@ -5940,28 +5938,28 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
   });
 
   it("rejects a malformed escape and an invalid escape character", () => {
-    expect(() => sqlLite.parse("SELECT U&'\\00' FROM t;")).toThrow(/Invalid Unicode escape value/);
-    expect(() => sqlLite.parse("SELECT U&'\\xyzw' FROM t;")).toThrow(/Invalid Unicode escape value/);
+    expect(() => postgres.parse("SELECT U&'\\00' FROM t;")).toThrow(/Invalid Unicode escape value/);
+    expect(() => postgres.parse("SELECT U&'\\xyzw' FROM t;")).toThrow(/Invalid Unicode escape value/);
     // Past the last code point.
-    expect(() => sqlLite.parse("SELECT U&'\\+FFFFFF' FROM t;")).toThrow(/Invalid Unicode escape value/);
+    expect(() => postgres.parse("SELECT U&'\\+FFFFFF' FROM t;")).toThrow(/Invalid Unicode escape value/);
     // Zero is not a valid escape value in PG, and an unpaired surrogate would
     // reach the AST as a JS string that is not valid Unicode text.
-    expect(() => sqlLite.parse("SELECT U&'\\0000' FROM t;")).toThrow(/Invalid Unicode escape value/);
-    expect(() => sqlLite.parse("SELECT U&'\\D83D' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
-    expect(() => sqlLite.parse("SELECT U&'\\DE00' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(() => postgres.parse("SELECT U&'\\0000' FROM t;")).toThrow(/Invalid Unicode escape value/);
+    expect(() => postgres.parse("SELECT U&'\\D83D' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(() => postgres.parse("SELECT U&'\\DE00' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
     // Both sides of the pairing test, and both places a pending high surrogate
     // can be interrupted: by a literal character, and by a doubled escape.
-    expect(() => sqlLite.parse("SELECT U&'\\D83D\\D83D' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
-    expect(() => sqlLite.parse("SELECT U&'\\D83Dx' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
-    expect(() => sqlLite.parse("SELECT U&'\\D83D\\\\' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(() => postgres.parse("SELECT U&'\\D83D\\D83D' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(() => postgres.parse("SELECT U&'\\D83Dx' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
+    expect(() => postgres.parse("SELECT U&'\\D83D\\\\' FROM t;")).toThrow(/Invalid Unicode surrogate pair/);
     // A hex digit or a `+` would be ambiguous with the escape it introduces.
-    expect(() => sqlLite.parse("SELECT U&'x' UESCAPE '5' FROM t;")).toThrow(/Invalid Unicode escape character/);
-    expect(() => sqlLite.parse("SELECT U&'x' UESCAPE '+' FROM t;")).toThrow(/Invalid Unicode escape character/);
-    expect(() => sqlLite.parse("SELECT U&'x' UESCAPE 'ab' FROM t;")).toThrow(/Invalid Unicode escape character/);
+    expect(() => postgres.parse("SELECT U&'x' UESCAPE '5' FROM t;")).toThrow(/Invalid Unicode escape character/);
+    expect(() => postgres.parse("SELECT U&'x' UESCAPE '+' FROM t;")).toThrow(/Invalid Unicode escape character/);
+    expect(() => postgres.parse("SELECT U&'x' UESCAPE 'ab' FROM t;")).toThrow(/Invalid Unicode escape character/);
     // A truncated tail fails the same test: one legal character is not enough
     // without the quote that closes it, or it would silently re-point the
     // escape character of the literal in front of it.
-    expect(() => sqlLite.parse("SELECT U&'\\0041' UESCAPE '!")).toThrow(/Invalid Unicode escape character/);
+    expect(() => postgres.parse("SELECT U&'\\0041' UESCAPE '!")).toThrow(/Invalid Unicode escape character/);
   });
 });
 
@@ -5973,7 +5971,7 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
 describe("SQL-lite quoted literals", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const strTok = (value: string) => ({ type: "string", value });
-  const fails = (src: string) => () => sqlLite.parse(src);
+  const fails = (src: string) => () => postgres.parse(src);
 
   it("croaks on every quoted form the input ends inside", () => {
     expect(fails("SELECT 'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
@@ -6078,7 +6076,7 @@ describe("SQL-lite quoted literals", () => {
     expect(colExpr("U&'\\00'\n'41'")).toEqual(str("A"));
     expect(colExpr("'a' \f\n\v'b'")).toEqual(str("ab"));
     // The span runs from the first body to the end of the last.
-    const token = sqlLexer.tokenize(createInputStream("'ab'\n'cd'")).next()!;
+    const token = postgres.lexer.tokenize(createInputStream("'ab'\n'cd'")).next()!;
     expect(token.position).toEqual({ start: { row: 1, col: 1 }, end: { row: 2, col: 3 } });
   });
 
@@ -6145,7 +6143,7 @@ describe("SQL-lite quoted literals", () => {
 
   it("diagnose() resumes after a literal error, keeping later statements", () => {
     for (const bad of ["SELECT E'\\xC3';", 'SELECT "" FROM t;', "SELECT U&'x' UESCAPE '!!';", "SELECT B'12';"]) {
-      const { ast, errors } = sqlLite.diagnose(`${bad}\nSELECT 1;`);
+      const { ast, errors } = postgres.diagnose(`${bad}\nSELECT 1;`);
       expect(errors).toHaveLength(1);
       expect(stripSpans(ast).at(-1)).toMatchObject({ kind: "select", columns: [col(num(1))] });
     }
@@ -6241,11 +6239,11 @@ describe("SQL-lite numeric literals and parameters", () => {
       ["0o", /Invalid octal integer/],
       ["0b", /Invalid binary integer/],
     ];
-    for (const [src, error] of cases) expect(() => sqlLite.parse(`SELECT ${src};`), src).toThrow(error);
+    for (const [src, error] of cases) expect(() => postgres.parse(`SELECT ${src};`), src).toThrow(error);
     // The error spans the whole word.
     const error = (() => {
       try {
-        sqlLite.parse("SELECT 123abc FROM t;");
+        postgres.parse("SELECT 123abc FROM t;");
       } catch (caught) {
         return caught as ParseError;
       }
@@ -6264,10 +6262,10 @@ describe("SQL-lite numeric literals and parameters", () => {
       { type: "param", value: "12" },
       { type: "param", value: "foo" },
     ]);
-    expect(() => sqlLite.parse("SELECT $1abc;")).toThrow(/Trailing junk after parameter \(1:7\)/);
+    expect(() => postgres.parse("SELECT $1abc;")).toThrow(/Trailing junk after parameter \(1:7\)/);
     // A positional parameter takes no `_` separators.
-    expect(() => sqlLite.parse("SELECT $1_000;")).toThrow(/Trailing junk after parameter/);
-    expect(() => sqlLite.parse("SELECT $1é;")).toThrow(/Trailing junk after parameter/);
+    expect(() => postgres.parse("SELECT $1_000;")).toThrow(/Trailing junk after parameter/);
+    expect(() => postgres.parse("SELECT $1é;")).toThrow(/Trailing junk after parameter/);
   });
 
   it("reports junk inside a backtracking position as the lexer error", () => {
@@ -6280,7 +6278,7 @@ describe("SQL-lite numeric literals and parameters", () => {
       ["1e+", /Trailing junk after numeric literal \(1:18\)/],
     ];
     for (const [src, error] of cases) {
-      expect(() => sqlLite.parse(`INSERT INTO t (a, ${src}) VALUES (1);`), src).toThrow(error);
+      expect(() => postgres.parse(`INSERT INTO t (a, ${src}) VALUES (1);`), src).toThrow(error);
     }
   });
 
@@ -6302,7 +6300,7 @@ describe("SQL-lite numeric literals and parameters", () => {
       name: "f",
       args: [{ kind: "namedArg", name: "a", value: num(1) }],
     });
-    expect(() => sqlLite.parse("SELECT f(a : = 1);")).toThrow(/found ":"/);
+    expect(() => postgres.parse("SELECT f(a : = 1);")).toThrow(/found ":"/);
     // `:` and `::` lex as before.
     expect(colExpr("a[1:2]")).toMatchObject({ kind: "subscript" });
     expect(colExpr("a::int")).toMatchObject({ kind: "cast" });
@@ -6424,7 +6422,7 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
       { type: "string", value: "x" },
       { type: "string", value: "y" },
     ]);
-    expect(() => sqlLite.parse("SELECT $é$abc;")).toThrow(/Unterminated dollar-quoted string/);
+    expect(() => postgres.parse("SELECT $é$abc;")).toThrow(/Unterminated dollar-quoted string/);
     // A `$` with no tag-closing `$` is not a dollar quote.
     expect(lex("$1")).toEqual([{ type: "param", value: "1" }]);
     // A named parameter takes the same characters, so none is split off as an alias.
@@ -6458,12 +6456,12 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
   });
 
   it("spans N'…' from the N, with the N as its type", () => {
-    const [stmt] = sqlLite.parse("SELECT N'abc';") as any[];
+    const [stmt] = postgres.parse("SELECT N'abc';") as any[];
     const literal = stmt.columns[0].expr;
     expect(literal.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 12 } });
     expect(literal.type.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 8 } });
     // A continued literal ends where its last constant's body does.
-    const [continued] = sqlLite.parse("SELECT N'foo'\n  'bar';") as any[];
+    const [continued] = postgres.parse("SELECT N'foo'\n  'bar';") as any[];
     expect(continued.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 2, col: 6 } });
   });
 
@@ -6481,22 +6479,22 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
   });
 
   it("accepts N'…' only where an expression goes, as PG does", () => {
-    expect(() => sqlLite.parse("COMMENT ON TABLE t IS N'x';")).toThrow(/Expected a string or "null" but found "x"/);
-    expect(() => sqlLite.parse("SELECT * FROM f() AS N'x';")).toThrow(/Expected an alias but found "x"/);
+    expect(() => postgres.parse("COMMENT ON TABLE t IS N'x';")).toThrow(/Expected a string or "null" but found "x"/);
+    expect(() => postgres.parse("SELECT * FROM f() AS N'x';")).toThrow(/Expected an alias but found "x"/);
     // Nor does it follow a type word as a typed literal's string.
-    expect(() => sqlLite.parse("SELECT date N'2024-01-01';")).toThrow(/Expected ";" but found "2024-01-01"/);
+    expect(() => postgres.parse("SELECT date N'2024-01-01';")).toThrow(/Expected ";" but found "2024-01-01"/);
   });
 
   it("croaks on an unterminated N'…', also inside a backtracking position", () => {
-    expect(() => sqlLite.parse("SELECT N'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
-    expect(() => sqlLite.parse("INSERT INTO t (a, N'x) VALUES (1);")).toThrow(/Unterminated quoted string \(1:18\)/);
-    expect(() => sqlLite.parse("SELECT * FROM f() x (a N'abc);")).toThrow(/Unterminated quoted string \(1:23\)/);
+    expect(() => postgres.parse("SELECT N'abc")).toThrow(/Unterminated quoted string \(1:7\)/);
+    expect(() => postgres.parse("INSERT INTO t (a, N'x) VALUES (1);")).toThrow(/Unterminated quoted string \(1:18\)/);
+    expect(() => postgres.parse("SELECT * FROM f() x (a N'abc);")).toThrow(/Unterminated quoted string \(1:23\)/);
   });
 
   it("still rejects characters that start no token", () => {
-    expect(() => sqlLite.parse("SELECT \\ FROM t;")).toThrow(/Unexpected character "\\" \(1:7\)/);
-    expect(() => sqlLite.parse("SELECT { FROM t;")).toThrow(/Unexpected character "\{" \(1:7\)/);
-    expect(() => sqlLite.parse("SELECT café\\ FROM t;")).toThrow(/Unexpected character "\\" \(1:11\)/);
+    expect(() => postgres.parse("SELECT \\ FROM t;")).toThrow(/Unexpected character "\\" \(1:7\)/);
+    expect(() => postgres.parse("SELECT { FROM t;")).toThrow(/Unexpected character "\{" \(1:7\)/);
+    expect(() => postgres.parse("SELECT café\\ FROM t;")).toThrow(/Unexpected character "\\" \(1:11\)/);
   });
 });
 
@@ -6509,11 +6507,11 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
 // action or a replaceable target is still a one-line test edit.
 
 describe("SQL-lite keyword dispatch maps", () => {
-  const rawFirst = (text: string) => sqlLite.parse(text)[0] as Record<string, any>;
+  const rawFirst = (text: string) => postgres.parse(text)[0] as Record<string, any>;
   const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
 
   it("names the keyword-led CREATE targets in the join form", () => {
-    expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
+    expect(() => postgres.parse("CREATE frobnicate;")).toThrow(
       expectsKeys(
         [
           "table",
@@ -6531,27 +6529,27 @@ describe("SQL-lite keyword dispatch maps", () => {
         '"frobnicate"',
       ),
     );
-    expect(() => sqlLite.parse("CREATE frobnicate;")).toThrow(
+    expect(() => postgres.parse("CREATE frobnicate;")).toThrow(
       /Expected ("[a-z ]+" or )+"[a-z ]+" but found "frobnicate"/,
     );
   });
 
   it("names the table-item alternatives in the join form", () => {
-    expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (42 bad);")).toThrow(
       expectsKeys(["constraint", "primary key", "unique", "check", "foreign key", "like", "exclude"], '"42"'),
     );
-    expect(() => sqlLite.parse("CREATE TABLE t (42 bad);")).toThrow(/Expected ("[a-z ]+" or )+a name but found "42"/);
+    expect(() => postgres.parse("CREATE TABLE t (42 bad);")).toThrow(/Expected ("[a-z ]+" or )+a name but found "42"/);
   });
 
   // A record literal inherits `constructor` and `__proto__`, so a lead word
   // spelled like one must still miss the map rather than find a keyless entry.
   it("treats an Object.prototype key as an unknown lead word", () => {
-    expect(() => sqlLite.parse("ALTER TABLE t constructor;")).toThrow(ParseError);
-    expect(() => sqlLite.parse("ALTER TABLE t __proto__;")).toThrow(/Expected "add", "drop"/);
-    expect(() => sqlLite.parse("CREATE constructor;")).toThrow(/Expected "table" or "unique"/);
-    expect(() => sqlLite.parse("CREATE OR REPLACE __proto__;")).toThrow(/Expected "view", "materialized"/);
-    expect(() => sqlLite.parse("CREATE TABLE t (id int, constructor text);")).not.toThrow();
-    expect(() => sqlLite.parse("CREATE TABLE t (id int REFERENCES p ON DELETE constructor);")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE t constructor;")).toThrow(ParseError);
+    expect(() => postgres.parse("ALTER TABLE t __proto__;")).toThrow(/Expected "add", "drop"/);
+    expect(() => postgres.parse("CREATE constructor;")).toThrow(/Expected "table" or "unique"/);
+    expect(() => postgres.parse("CREATE OR REPLACE __proto__;")).toThrow(/Expected "view", "materialized"/);
+    expect(() => postgres.parse("CREATE TABLE t (id int, constructor text);")).not.toThrow();
+    expect(() => postgres.parse("CREATE TABLE t (id int REFERENCES p ON DELETE constructor);")).toThrow(
       /Expected "no action" or "restrict"/,
     );
     // The same holds for the special-call and GRANT … ALL … IN SCHEMA records:
@@ -6560,11 +6558,11 @@ describe("SQL-lite keyword dispatch maps", () => {
       col(call("constructor", [num(1)])),
       col(call("__proto__", [num(1)])),
     ]);
-    expect(sqlLite.diagnose("SELECT __proto__(1) FROM t;").errors).toEqual([]);
+    expect(postgres.diagnose("SELECT __proto__(1) FROM t;").errors).toEqual([]);
     // Like the dispatch maps, the plural must also be a bare word: quoted, or a
     // string, it is no keyword.
     for (const plural of ["constructor", '"tables"', "'tables'"]) {
-      expect(() => sqlLite.parse(`GRANT SELECT ON ALL ${plural} IN SCHEMA s TO u;`)).toThrow(
+      expect(() => postgres.parse(`GRANT SELECT ON ALL ${plural} IN SCHEMA s TO u;`)).toThrow(
         /Expected a name but found "all"/,
       );
     }
@@ -6667,17 +6665,17 @@ describe("SQL-lite multi-word type names", () => {
     // …and the type really stopped at `timestamp`, rather than the clause being
     // re-parsed from a half-consumed tail.
     expect(mv.query.columns[0].expr.type).toEqual(ct("timestamp"));
-    expect(() => sqlLite.parse("CREATE TABLE t (c timestamp with zone);")).toThrow(/Expected "," but found "with"/);
-    expect(() => sqlLite.parse("CREATE TABLE t (c interval to second);")).toThrow(/Expected "," but found "to"/);
+    expect(() => postgres.parse("CREATE TABLE t (c timestamp with zone);")).toThrow(/Expected "," but found "with"/);
+    expect(() => postgres.parse("CREATE TABLE t (c interval to second);")).toThrow(/Expected "," but found "to"/);
   });
 
   it("fixes which side of the name the precision sits on", () => {
     // Only the datetime types spell it before the tail, so a mid-name list is
     // the syntax error PG reports rather than a silently accepted spelling.
-    expect(() => sqlLite.parse("CREATE TABLE t (c character(10) varying);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (c character(10) varying);")).toThrow(
       /Expected "," but found "varying"/,
     );
-    expect(() => sqlLite.parse("CREATE TABLE t (c interval(3) day);")).toThrow(/Expected "," but found "day"/);
+    expect(() => postgres.parse("CREATE TABLE t (c interval(3) day);")).toThrow(/Expected "," but found "day"/);
     // A lead with no tail still takes its ordinary trailing list.
     expect(colType("timestamp(3)")).toEqual(ct("timestamp", { args: [3] }));
     expect(colType("interval(3)")).toEqual(ct("interval", { args: [3] }));
@@ -6696,7 +6694,7 @@ describe("SQL-lite multi-word type names", () => {
     expect(colType("__proto__")).toEqual(ct("__proto__"));
     expect(castType("x::constructor")).toEqual(ct("constructor"));
     // And `diagnose` must still collect rather than throw.
-    expect(sqlLite.diagnose("CREATE TABLE t (c constructor);").errors).toEqual([]);
+    expect(postgres.diagnose("CREATE TABLE t (c constructor);").errors).toEqual([]);
   });
 
   it("rethrows a lex error raised inside the tail lookahead", () => {
@@ -6704,8 +6702,8 @@ describe("SQL-lite multi-word type names", () => {
     // error cannot simply be discarded with the failed candidate: `interval day`
     // is a complete tail, and the rest of the statement parses, so nothing else
     // would ever report it. Under `parse` there is no collector to report to.
-    expect(() => sqlLite.parse("CREATE TABLE t (c interval day \\);")).toThrow(/Unexpected character "\\"/);
-    expect(sqlLite.diagnose("CREATE TABLE t (c interval day \\);").errors.map((e) => e.message)).toEqual([
+    expect(() => postgres.parse("CREATE TABLE t (c interval day \\);")).toThrow(/Unexpected character "\\"/);
+    expect(postgres.diagnose("CREATE TABLE t (c interval day \\);").errors.map((e) => e.message)).toEqual([
       'Unexpected character "\\" (1:31)',
     ]);
   });
@@ -6806,7 +6804,7 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
   });
 
   it("names them in the expected-an-expression message", () => {
-    expect(() => sqlLite.parse("SELECT 1 + ;")).toThrow(
+    expect(() => postgres.parse("SELECT 1 + ;")).toThrow(
       /or "array" or a keyword like "current_date" or "\(" or a name but found ";" \(1:11\)/,
     );
   });
@@ -6820,24 +6818,24 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     // Without a list the key is omitted, not null.
     expect(colExpr("current_timestamp")).not.toHaveProperty("precision");
     // PG takes no argument list at all on the others, not even an empty one.
-    expect(() => sqlLite.parse("SELECT current_date();")).toThrow(/Expected ";" but found "\(" \(1:19\)/);
-    expect(() => sqlLite.parse("SELECT current_user(1);")).toThrow(/Expected ";" but found "\("/);
+    expect(() => postgres.parse("SELECT current_date();")).toThrow(/Expected ";" but found "\(" \(1:19\)/);
+    expect(() => postgres.parse("SELECT current_user(1);")).toThrow(/Expected ";" but found "\("/);
     // …and nothing but an integer as the precision.
-    expect(() => sqlLite.parse("SELECT current_timestamp(1.5);")).toThrow(
+    expect(() => postgres.parse("SELECT current_timestamp(1.5);")).toThrow(
       /Expected an integer precision but found "1.5"/,
     );
     // PG's integer constants include hex, and the lexer has already dropped any
     // digit separators; a float spelling of a whole number is still a float.
     expect(colExpr("current_timestamp(0x3)")).toEqual(svf("current_timestamp", { precision: 3 }));
     expect(colExpr("current_time(1_0)")).toEqual(svf("current_time", { precision: 10 }));
-    expect(() => sqlLite.parse("SELECT current_timestamp(3e0);")).toThrow(
+    expect(() => postgres.parse("SELECT current_timestamp(3e0);")).toThrow(
       /Expected an integer precision but found "3e0"/,
     );
-    expect(() => sqlLite.parse("SELECT current_timestamp(2147483648);")).toThrow(
+    expect(() => postgres.parse("SELECT current_timestamp(2147483648);")).toThrow(
       /Expected an integer precision but found "2147483648"/,
     );
-    expect(() => sqlLite.parse("SELECT current_timestamp(x);")).toThrow(/Expected an integer precision but found "x"/);
-    expect(() => sqlLite.parse("SELECT current_timestamp(3;")).toThrow(/Expected "\)" but found ";"/);
+    expect(() => postgres.parse("SELECT current_timestamp(x);")).toThrow(/Expected an integer precision but found "x"/);
+    expect(() => postgres.parse("SELECT current_timestamp(3;")).toThrow(/Expected "\)" but found ";"/);
   });
 
   it("leaves the grantee spellings of the role words alone", () => {
@@ -6880,7 +6878,7 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
   });
 
   it("spans a typed literal from its type word to its string", () => {
-    const expr = (sqlLite.parse("SELECT timestamp(3) with time zone 'x';")[0] as any).columns[0].expr;
+    const expr = (postgres.parse("SELECT timestamp(3) with time zone 'x';")[0] as any).columns[0].expr;
     expect(expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 37 } });
     expect(expr.type.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 34 } });
   });
@@ -6890,23 +6888,23 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
     // general `type 'string'` form has it.
     expect(colExpr(`"date" 'x'`)).toEqual(typed(ct("date"), "x"));
     // A lead whose tail is not followed by a string is a name — no word is taken.
-    expect(() => sqlLite.parse("SELECT timestamp with time zone FROM t;")).toThrow(/Expected ";" but found "with"/);
+    expect(() => postgres.parse("SELECT timestamp with time zone FROM t;")).toThrow(/Expected ";" but found "with"/);
     // A lex error in the lookahead past the lead word must not cost the syntax
     // error the statement already had.
-    expect(sqlLite.diagnose("SELECT time with time zone \\;").errors.map((e) => e.message)).toEqual([
+    expect(postgres.diagnose("SELECT time with time zone \\;").errors.map((e) => e.message)).toEqual([
       'Unexpected character "\\" (1:27)',
       'Expected ";" but found "with" (1:12)',
     ]);
     // The token after a bare lead is read exactly as a name reads it, so a lex
     // error there costs the statement as it always did, for every lead.
-    expect(sqlLite.diagnose("SELECT date \\ FROM;").errors.map((e) => e.message)).toEqual([
+    expect(postgres.diagnose("SELECT date \\ FROM;").errors.map((e) => e.message)).toEqual([
       'Unexpected character "\\" (1:12)',
     ]);
-    expect(sqlLite.diagnose("SELECT a FROM t WHERE date \\;\nSELECT 1;").ast).toHaveLength(1);
+    expect(postgres.diagnose("SELECT a FROM t WHERE date \\;\nSELECT 1;").ast).toHaveLength(1);
     // PG writes the precision before the tail, never after it.
-    expect(() => sqlLite.parse("SELECT timestamp with time zone(3) 'x';")).toThrow(/Expected ";" but found "with"/);
+    expect(() => postgres.parse("SELECT timestamp with time zone(3) 'x';")).toThrow(/Expected ";" but found "with"/);
     // Nor does it take anything but an integer one.
-    expect(() => sqlLite.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(() => postgres.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
     // `date` is no keyword to PG, so `date(3) 'x'` is its generic
     // `name(typmod) 'string'` form, as `varchar(3) 'abc'` is.
     expect(colExpr("date(3) 'x'")).toEqual(typed(ct("date", { args: [3] }), "x"));
@@ -6966,22 +6964,24 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
   });
 
   it("rejects a malformed OVERLAY", () => {
-    expect(() => sqlLite.parse("SELECT overlay(s PLACING 'x');")).toThrow(/Expected "from" but found "\)"/);
-    expect(() => sqlLite.parse("SELECT overlay(s PLACING 'x' FROM 1 FOR);")).toThrow(/but found "\)" \(1:39\)/);
+    expect(() => postgres.parse("SELECT overlay(s PLACING 'x');")).toThrow(/Expected "from" but found "\)"/);
+    expect(() => postgres.parse("SELECT overlay(s PLACING 'x' FROM 1 FOR);")).toThrow(/but found "\)" \(1:39\)/);
     // PLACING may follow only the first argument of a bare OVERLAY, and only
     // a plain one.
-    expect(() => sqlLite.parse("SELECT overlay(a, b PLACING 'x' FROM 1);")).toThrow(
+    expect(() => postgres.parse("SELECT overlay(a, b PLACING 'x' FROM 1);")).toThrow(
       /Expected "\)" but found "placing"/,
     );
-    expect(() => sqlLite.parse("SELECT overlay(DISTINCT s PLACING 'x' FROM 1);")).toThrow(
+    expect(() => postgres.parse("SELECT overlay(DISTINCT s PLACING 'x' FROM 1);")).toThrow(
       /Expected "\)" but found "placing"/,
     );
-    expect(() => sqlLite.parse("SELECT overlay(* PLACING 'x' FROM 1);")).toThrow(/Expected "\)" but found "placing"/);
-    expect(() => sqlLite.parse("SELECT overlay(v => s PLACING 'x' FROM 1);")).toThrow(
+    expect(() => postgres.parse("SELECT overlay(* PLACING 'x' FROM 1);")).toThrow(/Expected "\)" but found "placing"/);
+    expect(() => postgres.parse("SELECT overlay(v => s PLACING 'x' FROM 1);")).toThrow(
       /Expected "\)" but found "placing"/,
     );
-    expect(() => sqlLite.parse(`SELECT "overlay"(s PLACING 'x' FROM 1);`)).toThrow(/Expected "\)" but found "placing"/);
-    expect(() => sqlLite.parse("SELECT pg_catalog.overlay(s PLACING 'x' FROM 1);")).toThrow(
+    expect(() => postgres.parse(`SELECT "overlay"(s PLACING 'x' FROM 1);`)).toThrow(
+      /Expected "\)" but found "placing"/,
+    );
+    expect(() => postgres.parse("SELECT pg_catalog.overlay(s PLACING 'x' FROM 1);")).toThrow(
       /Expected "\)" but found "placing"/,
     );
   });
@@ -7025,20 +7025,20 @@ describe("SQL-lite typed literals, ARRAY type spelling and interval precision", 
   });
 
   it("spans a qualified typed literal from its first name to its string", () => {
-    const expr = (sqlLite.parse("SELECT s.t(3) 'x';")[0] as any).columns[0].expr;
+    const expr = (postgres.parse("SELECT s.t(3) 'x';")[0] as any).columns[0].expr;
     expect(expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 16 } });
     expect(expr.type.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 13 } });
   });
 
   it("rejects the spellings PG's typed-literal forms do not take", () => {
     // No array type, either spelling, and no SETOF.
-    expect(() => sqlLite.parse("SELECT jsonb[] '{}';")).toThrow(/Expected an expression or ":" but found "\]"/);
-    expect(() => sqlLite.parse("SELECT int ARRAY '{}';")).toThrow(/Expected ";" but found "array"/);
-    expect(() => sqlLite.parse("SELECT setof int '1';")).toThrow(/Expected ";" but found "1"/);
+    expect(() => postgres.parse("SELECT jsonb[] '{}';")).toThrow(/Expected an expression or ":" but found "\]"/);
+    expect(() => postgres.parse("SELECT int ARRAY '{}';")).toThrow(/Expected ";" but found "array"/);
+    expect(() => postgres.parse("SELECT setof int '1';")).toThrow(/Expected ";" but found "1"/);
     // Nothing after a `.*`, and no call that is not a typmod.
-    expect(() => sqlLite.parse("SELECT t.* 'x';")).toThrow(/Expected ";" but found "x"/);
-    expect(() => sqlLite.parse("SELECT foo() 'x';")).toThrow(/Expected ";" but found "x"/);
-    expect(() => sqlLite.parse("SELECT foo(DISTINCT 1) 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(() => postgres.parse("SELECT t.* 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(() => postgres.parse("SELECT foo() 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(() => postgres.parse("SELECT foo(DISTINCT 1) 'x';")).toThrow(/Expected ";" but found "x"/);
     // A column-name keyword that is no type on its own is no `func_name`
     // either, though it may be part of a dotted one.
     for (const word of [
@@ -7051,30 +7051,30 @@ describe("SQL-lite typed literals, ARRAY type spelling and interval precision", 
       "system_user",
       "current_catalog",
     ]) {
-      expect(() => sqlLite.parse(`SELECT ${word} 'x';`)).toThrow(/Expected ";" but found "x"/);
+      expect(() => postgres.parse(`SELECT ${word} 'x';`)).toThrow(/Expected ";" but found "x"/);
     }
     expect(colExpr("trim.x 'y'")).toEqual(typed(ct("trim.x"), "y"));
-    expect(() => sqlLite.parse("SELECT system_user.x 'y';")).toThrow(/Expected ";" but found "y"/);
+    expect(() => postgres.parse("SELECT system_user.x 'y';")).toThrow(/Expected ";" but found "y"/);
     expect(colExpr("national character 'x'")).toEqual(typed(ct("national character"), "x"));
   });
 
   it("narrows the typmod to integer constants", () => {
     // PG's `func_name (args) 'string'` takes any expression list; this
     // grammar's type node holds integers only, so anything else stays a call.
-    expect(() => sqlLite.parse("SELECT varchar(x) 'abc';")).toThrow(/Expected ";" but found "abc"/);
-    expect(() => sqlLite.parse("SELECT varchar(1.5) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => postgres.parse("SELECT varchar(x) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => postgres.parse("SELECT varchar(1.5) 'abc';")).toThrow(/Expected ";" but found "abc"/);
     // An integer constant as PG lexes one: no float spelling of a whole number,
     // nothing past int4, and no expression that merely starts with one.
-    expect(() => sqlLite.parse("SELECT varchar(10.) 'abc';")).toThrow(/Expected ";" but found "abc"/);
-    expect(() => sqlLite.parse("SELECT varchar(4294967296) 'abc';")).toThrow(/Expected ";" but found "abc"/);
-    expect(() => sqlLite.parse("SELECT varchar(1 + 2) 'abc';")).toThrow(/Expected ";" but found "abc"/);
-    expect(() => sqlLite.parse("SELECT interval(3.0) '1';")).toThrow(/Expected ";" but found "1"/);
-    expect(() => sqlLite.parse("SELECT interval(1e0) '1';")).toThrow(/Expected ";" but found "1"/);
+    expect(() => postgres.parse("SELECT varchar(10.) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => postgres.parse("SELECT varchar(4294967296) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => postgres.parse("SELECT varchar(1 + 2) 'abc';")).toThrow(/Expected ";" but found "abc"/);
+    expect(() => postgres.parse("SELECT interval(3.0) '1';")).toThrow(/Expected ";" but found "1"/);
+    expect(() => postgres.parse("SELECT interval(1e0) '1';")).toThrow(/Expected ";" but found "1"/);
     // A call that is not followed by a string is still a call.
     expect(colExpr("foo(1, 2)")).toEqual({ kind: "call", name: "foo", args: [num(1), num(2)] });
     // The TIME / TIMESTAMP precision is read by the type spelling, which takes
     // an integer only; a dotted name is an ordinary one.
-    expect(() => sqlLite.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
+    expect(() => postgres.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
     expect(colExpr("timestamp.x(3) 'y'")).toEqual(typed(ct("timestamp.x", { args: [3] }), "y"));
     expect(colExpr("interval.x 'y'")).toEqual(typed(ct("interval.x"), "y"));
     // A quoted or qualified `interval` is an ordinary type name with a typmod,
@@ -7089,13 +7089,13 @@ describe("SQL-lite typed literals, ARRAY type spelling and interval precision", 
     // an `N'…'` is no typed literal.
     expect(colExpr("N'abc'")).toEqual(typed(ct("bpchar"), "abc"));
     expect(colExpr("n 'abc'")).toEqual(typed(ct("n"), "abc"));
-    expect(() => sqlLite.parse("SELECT jsonb N'{}';")).toThrow(/Expected ";" but found/);
+    expect(() => postgres.parse("SELECT jsonb N'{}';")).toThrow(/Expected ";" but found/);
   });
 
   it("decides a one-word typed literal without lookahead past the name or call", () => {
     // A lex error inside a call's arguments is reported from where the call
     // reads it, so recovery and the errors after it are unchanged.
-    const errors = (src: string) => sqlLite.diagnose(src).errors.map((e) => e.message);
+    const errors = (src: string) => postgres.diagnose(src).errors.map((e) => e.message);
     expect(errors("CREATE TABLE t (c int DEFAULT foo(1, \\), d int); SELECT 2;")).toEqual([
       'Unexpected character "\\" (1:37)',
       'Expected ";" but found "," (1:39)',
@@ -7109,7 +7109,7 @@ describe("SQL-lite typed literals, ARRAY type spelling and interval precision", 
     // complete tail, `double precision \`, is reported from the lookahead, and
     // the statement is kept without it — as for `c interval day \` in a type.)
     for (const src of ["SELECT double \\ FROM t; SELECT 2;", "SELECT char \\; SELECT 2;"]) {
-      expect(sqlLite.diagnose(src).ast).toHaveLength(1);
+      expect(postgres.diagnose(src).ast).toHaveLength(1);
     }
     // And a reserved word, which no type spelling starts, is croaked before
     // anything past it is read.
@@ -7136,21 +7136,21 @@ describe("SQL-lite typed literals, ARRAY type spelling and interval precision", 
   });
 
   it("rejects the INTERVAL field specs PG does not list", () => {
-    expect(() => sqlLite.parse("SELECT INTERVAL '1' DAY TO YEAR;")).toThrow(
+    expect(() => postgres.parse("SELECT INTERVAL '1' DAY TO YEAR;")).toThrow(
       /Expected an interval field spec like "day to second" but found "day to year" \(1:20\)/,
     );
-    expect(() => sqlLite.parse("SELECT INTERVAL '1' MONTH TO DAY;")).toThrow(/but found "month to day"/);
-    expect(() => sqlLite.parse("SELECT INTERVAL '1' TO SECOND;")).toThrow(/but found "to second"/);
+    expect(() => postgres.parse("SELECT INTERVAL '1' MONTH TO DAY;")).toThrow(/but found "month to day"/);
+    expect(() => postgres.parse("SELECT INTERVAL '1' TO SECOND;")).toThrow(/but found "to second"/);
     // Two fields in a row are no spec either (they used to give `"day hour"`).
-    expect(() => sqlLite.parse("SELECT INTERVAL '1' DAY HOUR;")).toThrow(/but found "day hour"/);
-    expect(() => sqlLite.parse("SELECT INTERVAL '1' SECOND SECOND;")).toThrow(/but found "second second"/);
+    expect(() => postgres.parse("SELECT INTERVAL '1' DAY HOUR;")).toThrow(/but found "day hour"/);
+    expect(() => postgres.parse("SELECT INTERVAL '1' SECOND SECOND;")).toThrow(/but found "second second"/);
     // Only SECOND takes a precision, and only an integer one.
-    expect(() => sqlLite.parse("SELECT INTERVAL '1' DAY(3);")).toThrow(/Expected ";" but found "\("/);
-    expect(() => sqlLite.parse("SELECT INTERVAL '1' SECOND(x);")).toThrow(
+    expect(() => postgres.parse("SELECT INTERVAL '1' DAY(3);")).toThrow(/Expected ";" but found "\("/);
+    expect(() => postgres.parse("SELECT INTERVAL '1' SECOND(x);")).toThrow(
       /Expected an integer precision but found "x"/,
     );
     // The type spelling was already limited to the same thirteen specs.
-    expect(() => sqlLite.parse("SELECT x::interval day to year;")).toThrow(/Expected ";" but found "to"/);
+    expect(() => postgres.parse("SELECT x::interval day to year;")).toThrow(/Expected ";" but found "to"/);
   });
 
   it("parses the SQL-standard ARRAY type spelling", () => {
@@ -7173,17 +7173,17 @@ describe("SQL-lite typed literals, ARRAY type spelling and interval precision", 
 
   it("rejects the ARRAY spellings PG does not take", () => {
     // ARRAY's bound is required when brackets follow, and there is one at most.
-    expect(() => sqlLite.parse("CREATE TABLE t (a int ARRAY[]);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (a int ARRAY[]);")).toThrow(
       /Expected an integer array bound but found "\]"/,
     );
-    expect(() => sqlLite.parse("CREATE TABLE t (a int ARRAY[3][4]);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (a int ARRAY[3][4]);")).toThrow(
       /Expected one array bound after ARRAY but found "\["/,
     );
-    expect(() => sqlLite.parse("SELECT x::int ARRAY[3][4];")).toThrow(/Expected one array bound after ARRAY/);
+    expect(() => postgres.parse("SELECT x::int ARRAY[3][4];")).toThrow(/Expected one array bound after ARRAY/);
     // The two spellings do not combine.
-    expect(() => sqlLite.parse("CREATE TABLE t (a int[] ARRAY);")).toThrow(/Expected "," but found "array"/);
+    expect(() => postgres.parse("CREATE TABLE t (a int[] ARRAY);")).toThrow(/Expected "," but found "array"/);
     // An ARRAY constructor is no bound.
-    expect(() => sqlLite.parse("SELECT x::int ARRAY[1, 2];")).toThrow(/Expected "\]" but found ","/);
+    expect(() => postgres.parse("SELECT x::int ARRAY[1, 2];")).toThrow(/Expected "\]" but found ","/);
   });
 
   it("records SETOF on the type instead of reading the type as an alias", () => {
@@ -7205,7 +7205,7 @@ describe("SQL-lite typed literals, ARRAY type spelling and interval precision", 
       col({ kind: "cast", expr: name("x"), type: ct("setof") }),
     ]);
     // RETURNS SETOF keeps its own flag, and PG's Typename takes one SETOF only.
-    expect(() => sqlLite.parse("CREATE FUNCTION f() RETURNS SETOF SETOF int LANGUAGE sql AS $$SELECT 1$$;")).toThrow(
+    expect(() => postgres.parse("CREATE FUNCTION f() RETURNS SETOF SETOF int LANGUAGE sql AS $$SELECT 1$$;")).toThrow(
       /Expected a type name but found "setof"/,
     );
     // A routine argument too: SETOF is no argument name to PG.
@@ -7264,7 +7264,7 @@ describe("SQL-lite CREATE TABLE storage options, LIKE and INHERITS", () => {
   const stmt = (src: string) => firstStmt(src) as any;
   const items = (body: string) => stmt(`CREATE TABLE t (${body});`).items;
   const options = (list: string) => stmt(`CREATE TABLE t (id int) WITH (${list});`).options;
-  const rawFirst = (text: string) => sqlLite.parse(text)[0] as Record<string, any>;
+  const rawFirst = (text: string) => postgres.parse(text)[0] as Record<string, any>;
   const idCol = { kind: "column", name: "id", dataType: ct("int"), constraints: [] };
 
   it("parses LIKE as a table item, with its INCLUDING / EXCLUDING options in source order", () => {
@@ -7288,17 +7288,17 @@ describe("SQL-lite CREATE TABLE storage options, LIKE and INHERITS", () => {
     // The one reservation this clause costs. PG makes the same call — `like` is
     // a type_func_name_keyword there — so these are not names in PG either:
     expect(items("like text")).toEqual([{ kind: "likeTable", table: ["text"], options: [] }]);
-    expect(() => sqlLite.parse("SELECT like FROM t;")).toThrow(/Expected a name but found "like"/);
-    expect(() => sqlLite.parse("SELECT * FROM t like;")).toThrow(/but found "like"/);
-    expect(() => sqlLite.parse("CREATE TABLE like (id int);")).toThrow(/Expected a name but found "like"/);
-    expect(() => sqlLite.parse("ALTER TABLE t ADD like text;")).toThrow(/Expected a name but found "like"/);
+    expect(() => postgres.parse("SELECT like FROM t;")).toThrow(/Expected a name but found "like"/);
+    expect(() => postgres.parse("SELECT * FROM t like;")).toThrow(/but found "like"/);
+    expect(() => postgres.parse("CREATE TABLE like (id int);")).toThrow(/Expected a name but found "like"/);
+    expect(() => postgres.parse("ALTER TABLE t ADD like text;")).toThrow(/Expected a name but found "like"/);
     // …but PG's tier still admits it as an alias after AS, a function name, a
     // type name and the tail of a qualified name. Reserved here, it loses all
     // four, exactly as any other reserved word (`left`, say) already does.
-    expect(() => sqlLite.parse("SELECT a AS like FROM t;")).toThrow(/Expected an alias but found "like"/);
-    expect(() => sqlLite.parse("SELECT like('abc', 'a%');")).toThrow(/Expected a name but found "like"/);
-    expect(() => sqlLite.parse("SELECT a::like FROM t;")).toThrow(/Expected a name but found "like"/);
-    expect(() => sqlLite.parse("SELECT t.like FROM t;")).toThrow(/Expected a name but found "like"/);
+    expect(() => postgres.parse("SELECT a AS like FROM t;")).toThrow(/Expected an alias but found "like"/);
+    expect(() => postgres.parse("SELECT like('abc', 'a%');")).toThrow(/Expected a name but found "like"/);
+    expect(() => postgres.parse("SELECT a::like FROM t;")).toThrow(/Expected a name but found "like"/);
+    expect(() => postgres.parse("SELECT t.like FROM t;")).toThrow(/Expected a name but found "like"/);
     // Quoted, it is a name as it always was.
     expect(items('"like" text')).toEqual([{ kind: "column", name: "like", dataType: ct("text"), constraints: [] }]);
     // The LIKE operator never read the word as a name, so it is untouched.
@@ -7446,12 +7446,12 @@ describe("SQL-lite CREATE TABLE storage options, LIKE and INHERITS", () => {
     for (const key of ["options", "onCommit", "tablespace"]) expect(plain).not.toHaveProperty(key);
     // INHERITS belongs to the element-list form only, as in PG; and once a
     // storage clause follows the name, AS is the only way on.
-    expect(() => sqlLite.parse("CREATE TABLE t INHERITS (p) AS SELECT 1;")).toThrow(/but found "inherits"/);
-    expect(() => sqlLite.parse("CREATE TABLE t WITH (x = 1) (id int);")).toThrow(/Expected "as" but found "\("/);
+    expect(() => postgres.parse("CREATE TABLE t INHERITS (p) AS SELECT 1;")).toThrow(/but found "inherits"/);
+    expect(() => postgres.parse("CREATE TABLE t WITH (x = 1) (id int);")).toThrow(/Expected "as" but found "\("/);
   });
 
   it("rejects malformed clauses, empty lists and out-of-order clauses", () => {
-    const bad = (tail: string) => () => sqlLite.parse(`CREATE TABLE t (id int) ${tail};`);
+    const bad = (tail: string) => () => postgres.parse(`CREATE TABLE t (id int) ${tail};`);
     expect(bad("WITH ()")).toThrow(/Expected an option name but found "\)"/);
     expect(bad("WITH (a =)")).toThrow(/Expected an option value but found "\)"/);
     expect(bad("WITH (a - b)")).toThrow(/Expected an option value but found "-"/);
@@ -7468,10 +7468,10 @@ describe("SQL-lite CREATE TABLE storage options, LIKE and INHERITS", () => {
     // PG fixes the order of the clauses, and so does this.
     expect(bad("TABLESPACE ts WITH (a = 1)")).toThrow(/Expected ";" but found "with"/);
     expect(bad("ON COMMIT DROP INHERITS (p)")).toThrow(/Expected ";" but found "inherits"/);
-    expect(() => sqlLite.parse("CREATE TABLE t (LIKE src INCLUDING everything);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (LIKE src INCLUDING everything);")).toThrow(
       /Expected "comments", "compression", "constraints", "defaults", "identity", "generated", "indexes", "statistics", "storage" or "all" but found "everything"/,
     );
-    expect(() => sqlLite.parse("CREATE TABLE t (LIKE);")).toThrow(/Expected a name but found "\)"/);
+    expect(() => postgres.parse("CREATE TABLE t (LIKE);")).toThrow(/Expected a name but found "\)"/);
   });
 });
 
@@ -7482,7 +7482,7 @@ describe("SQL-lite declarative partitioning", () => {
   const spec = (keys: string, strategy = "RANGE") =>
     stmt(`CREATE TABLE m (a int) PARTITION BY ${strategy} (${keys});`).partitionBy;
   const bound = (src: string) => stmt(`CREATE TABLE p PARTITION OF m ${src};`).partitionOf.bound;
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const aCol = { kind: "column", name: "a", dataType: ct("int"), constraints: [] };
 
   it("parses PARTITION BY after the element list, with each key's collation and operator class", () => {
@@ -7631,10 +7631,10 @@ describe("SQL-lite declarative partitioning", () => {
   });
 
   it("records spans for the partition spec, its keys and the bound", () => {
-    const node = sqlLite.parse("CREATE TABLE m (a int) PARTITION BY RANGE (a, (a + 1));")[0] as Record<string, any>;
+    const node = postgres.parse("CREATE TABLE m (a int) PARTITION BY RANGE (a, (a + 1));")[0] as Record<string, any>;
     expect(node.partitionBy.span).toEqual({ start: { row: 1, col: 23 }, end: { row: 1, col: 54 } });
     expect(node.partitionBy.keys[1].span).toEqual({ start: { row: 1, col: 46 }, end: { row: 1, col: 53 } });
-    const part = sqlLite.parse("CREATE TABLE p PARTITION OF m FOR VALUES FROM (MINVALUE) TO (1);")[0] as Record<
+    const part = postgres.parse("CREATE TABLE p PARTITION OF m FOR VALUES FROM (MINVALUE) TO (1);")[0] as Record<
       string,
       any
     >;
@@ -7799,7 +7799,7 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
       onUpdate: "no action",
     });
     // PG's order is fixed: MATCH comes before the ON clauses, never after.
-    expect(() => sqlLite.parse("CREATE TABLE t (c int REFERENCES p ON DELETE CASCADE MATCH FULL);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (c int REFERENCES p ON DELETE CASCADE MATCH FULL);")).toThrow(
       /Expected "," but found "match"/,
     );
   });
@@ -7949,8 +7949,8 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
   });
 
   it("judges a repeated attribute as PG does at each level", () => {
-    const column = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int ${src});`);
-    const table = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int, ${src});`);
+    const column = (src: string) => () => postgres.parse(`CREATE TABLE t (c int ${src});`);
+    const table = (src: string) => () => postgres.parse(`CREATE TABLE t (c int, ${src});`);
     // A column constraint's attributes are separate items, and any repeat is an
     // error — reported on the repeat, rather than misread as a NOT NULL.
     expect(column("UNIQUE DEFERRABLE NOT DEFERRABLE")).toThrow(
@@ -7977,7 +7977,7 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
     expect(table("PRIMARY KEY (c) INITIALLY IMMEDIATE INITIALLY DEFERRED")).toThrow(
       /conflicting constraint properties/,
     );
-    expect(() => sqlLite.parse("ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES p NOT DEFERRABLE DEFERRABLE;")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES p NOT DEFERRABLE DEFERRABLE;")).toThrow(
       /conflicting constraint properties/,
     );
     // …and there the never-deferred case is checked first.
@@ -7987,7 +7987,7 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
   });
 
   it("rejects a repeated, unknown or misplaced clause", () => {
-    const create = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int ${src});`);
+    const create = (src: string) => () => postgres.parse(`CREATE TABLE t (c int ${src});`);
     // A repeated verb names the one still open; PG takes each at most once.
     expect(create("REFERENCES p ON DELETE CASCADE ON DELETE SET NULL")).toThrow(/Expected "update" but found "delete"/);
     expect(create("REFERENCES p ON UPDATE CASCADE ON UPDATE CASCADE")).toThrow(/Expected "delete" but found "update"/);
@@ -8013,7 +8013,7 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
     expect(create("CHECK (c > 0) DEFERRABLE")).toThrow(/Expected "," but found "deferrable"/);
     // A table-level CHECK reads the attributes and refuses the deferring ones,
     // as PG's grammar does.
-    expect(() => sqlLite.parse("CREATE TABLE t (c int, CHECK (c > 0) INITIALLY DEFERRED);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (c int, CHECK (c > 0) INITIALLY DEFERRED);")).toThrow(
       /CHECK constraints cannot be marked DEFERRABLE \(1:37\)/,
     );
   });
@@ -8025,7 +8025,7 @@ describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () =>
 const constraintsOf = (src: string) =>
   (firstStmt(`CREATE TABLE t (c int ${src});`) as any).items[0].constraints as Record<string, unknown>[];
 const tableItemOf = (src: string) => (firstStmt(`CREATE TABLE t (c int, ${src});`) as any).items[1];
-const failsToParse = (sql: string) => () => sqlLite.parse(sql);
+const failsToParse = (sql: string) => () => postgres.parse(sql);
 const cGt0 = bin(">", name("c"), num(0));
 
 describe("SQL-lite named column constraints", () => {
@@ -8069,7 +8069,7 @@ describe("SQL-lite named column constraints", () => {
   });
 
   it("spans a named column constraint from CONSTRAINT", () => {
-    const [stmt] = sqlLite.parse("CREATE TABLE t (c int CONSTRAINT nn NOT NULL);") as any[];
+    const [stmt] = postgres.parse("CREATE TABLE t (c int CONSTRAINT nn NOT NULL);") as any[];
     expect(stmt.items[0].constraints[0].span).toEqual({ start: { row: 1, col: 22 }, end: { row: 1, col: 44 } });
   });
 
@@ -8173,7 +8173,7 @@ describe("SQL-lite NOT VALID and NO INHERIT constraint attributes", () => {
   });
 
   it("keeps a table whose CHECK tail is malformed in diagnose()", () => {
-    const { ast, errors } = sqlLite.diagnose("CREATE TABLE t (c int, CHECK (c > 0) NO $, e int);");
+    const { ast, errors } = postgres.diagnose("CREATE TABLE t (c int, CHECK (c > 0) NO $, e int);");
     expect(errors).toHaveLength(1);
     expect((stripSpans(ast) as any[])[0].items.map((i: any) => i.name)).toEqual(["c", "e"]);
   });
@@ -8509,11 +8509,11 @@ describe("SQL-lite index column options and storage parameters", () => {
   });
 
   it("rejects a malformed column option or storage parameter list", () => {
-    expect(() => sqlLite.parse("CREATE INDEX i ON t (a DESC NULLS);")).toThrow(
+    expect(() => postgres.parse("CREATE INDEX i ON t (a DESC NULLS);")).toThrow(
       /Expected "first" or "last" but found "\)"/,
     );
-    expect(() => sqlLite.parse("CREATE INDEX i ON t (a DESC ASC);")).toThrow(/Expected "," but found "asc"/);
-    expect(() => sqlLite.parse("CREATE INDEX i ON t (a) WITH fillfactor = 70;")).toThrow(
+    expect(() => postgres.parse("CREATE INDEX i ON t (a DESC ASC);")).toThrow(/Expected "," but found "asc"/);
+    expect(() => postgres.parse("CREATE INDEX i ON t (a) WITH fillfactor = 70;")).toThrow(
       /Expected "\(" but found "fillfactor"/,
     );
   });
@@ -8565,7 +8565,7 @@ describe("SQL-lite EXCLUDE table constraints", () => {
       initially: "deferred",
     });
     expect(items("EXCLUDE (a WITH =) NOT DEFERRABLE")[0]).toMatchObject({ deferrable: false });
-    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE (a WITH =) NOT DEFERRABLE INITIALLY DEFERRED);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (EXCLUDE (a WITH =) NOT DEFERRABLE INITIALLY DEFERRED);")).toThrow(
       /constraint declared INITIALLY DEFERRED must be DEFERRABLE/,
     );
   });
@@ -8619,7 +8619,7 @@ describe("SQL-lite EXCLUDE table constraints", () => {
       (firstStmt("ALTER TABLE t ADD EXCLUDE (a WITH =), ADD exclude text;") as any).actions.map((a: any) => a.kind),
     ).toEqual(["addConstraint", "addColumn"]);
     // A quoted "exclude" is a name, never the keyword.
-    expect(() => sqlLite.parse('CREATE TABLE t ("exclude" (a WITH =));')).toThrow(/Expected a name but found "\("/);
+    expect(() => postgres.parse('CREATE TABLE t ("exclude" (a WITH =));')).toThrow(/Expected a name but found "\("/);
   });
 
   it("keeps exclude and include unreserved as names and aliases", () => {
@@ -8635,33 +8635,33 @@ describe("SQL-lite EXCLUDE table constraints", () => {
   });
 
   it("reports a bad character after exclude as after any column name", () => {
-    const { ast, errors } = sqlLite.diagnose("CREATE TABLE t (id int, exclude \\, ok text);");
+    const { ast, errors } = postgres.diagnose("CREATE TABLE t (id int, exclude \\, ok text);");
     expect(errors.map((e) => e.message)).toEqual(['Unexpected character "\\" (1:32)']);
     expect((stripSpans(ast) as any)[0].items.map((i: any) => i.name)).toEqual(["id", "ok"]);
-    expect(sqlLite.diagnose("CREATE TABLE t (EXCLUDE (a WITH \\));").errors[0]!.message).toBe(
+    expect(postgres.diagnose("CREATE TABLE t (EXCLUDE (a WITH \\));").errors[0]!.message).toBe(
       'Unexpected character "\\" (1:32)',
     );
   });
 
   it("rejects a malformed EXCLUDE", () => {
     // In a table body the EXCLUDE reports its own error, not a column's.
-    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE (a));")).toThrow(/Expected "with" but found "\)" \(1:26\)/);
-    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE USING gist);")).toThrow(/Expected "\(" but found "\)"/);
-    expect(() => sqlLite.parse("CREATE TABLE t (EXCLUDE (a WITH =) INCLUDE ());")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (EXCLUDE (a));")).toThrow(/Expected "with" but found "\)" \(1:26\)/);
+    expect(() => postgres.parse("CREATE TABLE t (EXCLUDE USING gist);")).toThrow(/Expected "\(" but found "\)"/);
+    expect(() => postgres.parse("CREATE TABLE t (EXCLUDE (a WITH =) INCLUDE ());")).toThrow(
       /Expected a name but found "\)"/,
     );
-    expect(() => sqlLite.parse("CREATE TABLE t (CONSTRAINT c 42);")).toThrow(
+    expect(() => postgres.parse("CREATE TABLE t (CONSTRAINT c 42);")).toThrow(
       expectsKeys(["primary key", "unique", "check", "foreign key", "exclude"], '"42"'),
     );
-    expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE (a);")).toThrow(/Expected "with" but found "\)"/);
-    expect(() => sqlLite.parse("ALTER TABLE t ADD EXCLUDE USING gist (a WITH b);")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE t ADD EXCLUDE (a);")).toThrow(/Expected "with" but found "\)"/);
+    expect(() => postgres.parse("ALTER TABLE t ADD EXCLUDE USING gist (a WITH b);")).toThrow(
       /Expected an operator but found "b"/,
     );
-    expect(() => sqlLite.parse("ALTER TABLE t ADD CONSTRAINT c EXCLUDE (a WITH =) WHERE a;")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE t ADD CONSTRAINT c EXCLUDE (a WITH =) WHERE a;")).toThrow(
       /Expected "\(" but found "a"/,
     );
     // An EXCLUDE with no elements is a syntax error, as in PG.
-    expect(() => sqlLite.parse("ALTER TABLE t ADD CONSTRAINT c EXCLUDE ();")).toThrow(
+    expect(() => postgres.parse("ALTER TABLE t ADD CONSTRAINT c EXCLUDE ();")).toThrow(
       /Expected a number or .* or a name but found "\)" \(1:40\)/,
     );
   });
@@ -8816,7 +8816,7 @@ describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
   });
 
   it("spans each ROWS FROM call from its own name", () => {
-    const [stmt] = sqlLite.parse("SELECT * FROM LATERAL ROWS FROM (f(1), s.g()) WITH ORDINALITY;") as any[];
+    const [stmt] = postgres.parse("SELECT * FROM LATERAL ROWS FROM (f(1), s.g()) WITH ORDINALITY;") as any[];
     const spans = stmt.from[0].calls.map((c: any) => [c.span.start.col, c.span.end.col]);
     expect(spans).toEqual([
       [33, 37],
@@ -8826,20 +8826,20 @@ describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
 
   it("rejects malformed parenthesised joins and ROWS FROM", () => {
     // PG's parentheses hold a join, and one that is not itself aliased.
-    expect(() => sqlLite.parse("SELECT * FROM (a);")).toThrow(/Expected a join but found "\)"/);
-    expect(() => sqlLite.parse("SELECT * FROM ((a JOIN b ON true) x);")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM (a);")).toThrow(/Expected a join but found "\)"/);
+    expect(() => postgres.parse("SELECT * FROM ((a JOIN b ON true) x);")).toThrow(
       /Expected a join without an alias but found "\)"/,
     );
-    expect(() => sqlLite.parse("SELECT * FROM (a JOIN b ON true;")).toThrow(/Expected "\)" but found ";"/);
-    expect(() => sqlLite.parse("SELECT * FROM ((SELECT 1);")).toThrow(/Expected "\)" but found ";"/);
+    expect(() => postgres.parse("SELECT * FROM (a JOIN b ON true;")).toThrow(/Expected "\)" but found ";"/);
+    expect(() => postgres.parse("SELECT * FROM ((SELECT 1);")).toThrow(/Expected "\)" but found ";"/);
     // A `(` ahead of a token that opens neither keeps the query reading's error.
-    expect(() => sqlLite.parse("SELECT * FROM (1);")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM (1);")).toThrow(
       /Expected "select" or "values" or "table" or "\(" but found "1"/,
     );
-    expect(() => sqlLite.parse("SELECT * FROM (;")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM (;")).toThrow(
       /Expected "select" or "values" or "table" or "\(" but found ";"/,
     );
-    expect(() => sqlLite.parse("SELECT * FROM ((NULL)) x;")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM ((NULL)) x;")).toThrow(
       /Expected "select" or "values" or "table" or "\(" but found "null"/,
     );
     // A trailing query clause continues a query, so the run still takes the
@@ -8852,10 +8852,10 @@ describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
       },
     ]);
     // LATERAL takes no parenthesised join, as in PG: its `(` is a subquery.
-    expect(() => sqlLite.parse("SELECT * FROM LATERAL (a JOIN b ON true);")).toThrow(/Expected "select"/);
-    expect(() => sqlLite.parse("SELECT * FROM ROWS FROM ();")).toThrow(/Expected a name but found "\)"/);
-    expect(() => sqlLite.parse("SELECT * FROM ROWS FROM (f);")).toThrow(/Expected "\(" but found "\)"/);
-    expect(() => sqlLite.parse("SELECT * FROM t WITH ORDINALITY;")).toThrow(/Expected ";" but found "with"/);
+    expect(() => postgres.parse("SELECT * FROM LATERAL (a JOIN b ON true);")).toThrow(/Expected "select"/);
+    expect(() => postgres.parse("SELECT * FROM ROWS FROM ();")).toThrow(/Expected a name but found "\)"/);
+    expect(() => postgres.parse("SELECT * FROM ROWS FROM (f);")).toThrow(/Expected "\(" but found "\)"/);
+    expect(() => postgres.parse("SELECT * FROM t WITH ORDINALITY;")).toThrow(/Expected ";" but found "with"/);
   });
 });
 
@@ -9011,71 +9011,73 @@ describe("SQL-lite NATURAL joins, join qualifiers and FROM-item extras", () => {
     );
     expect(merge.source).toEqual(join(tableFrom(["s"]), join(tableFrom(["u"]), tableFrom(["v"])), { on: bool(false) }));
     // MERGE's own ON is not a join qualifier.
-    expect(() => sqlLite.parse("MERGE INTO t USING s JOIN u ON true WHEN MATCHED THEN DELETE;")).toThrow(
+    expect(() => postgres.parse("MERGE INTO t USING s JOIN u ON true WHEN MATCHED THEN DELETE;")).toThrow(
       /Expected "on" but found "when"/,
     );
-    expect(() => sqlLite.parse("SELECT * FROM (a JOIN b);")).toThrow(/Expected "on" or "using" but found "\)"/);
-    expect(() => sqlLite.parse("UPDATE t SET x = 1 FROM a JOIN b WHERE true;")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM (a JOIN b);")).toThrow(/Expected "on" or "using" but found "\)"/);
+    expect(() => postgres.parse("UPDATE t SET x = 1 FROM a JOIN b WHERE true;")).toThrow(
       /Expected "on" or "using" but found "where"/,
     );
-    expect(() => sqlLite.parse("DELETE FROM t USING a JOIN b;")).toThrow(/Expected "on" or "using" but found ";"/);
+    expect(() => postgres.parse("DELETE FROM t USING a JOIN b;")).toThrow(/Expected "on" or "using" but found ";"/);
   });
 
   it("rejects a join without a qualifier and NATURAL CROSS JOIN", () => {
-    expect(() => sqlLite.parse("SELECT * FROM a JOIN b;")).toThrow(/Expected "on" or "using" but found ";"/);
-    expect(() => sqlLite.parse("SELECT * FROM a LEFT JOIN b WHERE true;")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM a JOIN b;")).toThrow(/Expected "on" or "using" but found ";"/);
+    expect(() => postgres.parse("SELECT * FROM a LEFT JOIN b WHERE true;")).toThrow(
       /Expected "on" or "using" but found "where"/,
     );
-    expect(() => sqlLite.parse("SELECT * FROM a, b FULL JOIN c, d;")).toThrow(/Expected "on" or "using" but found ","/);
+    expect(() => postgres.parse("SELECT * FROM a, b FULL JOIN c, d;")).toThrow(
+      /Expected "on" or "using" but found ","/,
+    );
     // The only ON goes to the inner join, leaving the outer one without one.
-    expect(() => sqlLite.parse("SELECT * FROM a JOIN b JOIN c ON true;")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM a JOIN b JOIN c ON true;")).toThrow(
       /Expected "on" or "using" but found ";"/,
     );
-    expect(() => sqlLite.parse("SELECT * FROM a NATURAL CROSS JOIN b;")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM a NATURAL CROSS JOIN b;")).toThrow(
       /Expected "join", "inner", "left", "right" or "full" but found "cross"/,
     );
     // CROSS and NATURAL joins take no qualifier.
-    expect(() => sqlLite.parse("SELECT * FROM a CROSS JOIN b ON true;")).toThrow(/Expected ";" but found "on"/);
-    expect(() => sqlLite.parse("SELECT * FROM a NATURAL JOIN b USING (x);")).toThrow(/Expected ";" but found "using"/);
-    expect(() => sqlLite.parse("SELECT * FROM a JOIN b ON true ON false;")).toThrow(/Expected ";" but found "on"/);
+    expect(() => postgres.parse("SELECT * FROM a CROSS JOIN b ON true;")).toThrow(/Expected ";" but found "on"/);
+    expect(() => postgres.parse("SELECT * FROM a NATURAL JOIN b USING (x);")).toThrow(/Expected ";" but found "using"/);
+    expect(() => postgres.parse("SELECT * FROM a JOIN b ON true ON false;")).toThrow(/Expected ";" but found "on"/);
   });
 
   it("rejects malformed USING aliases, stars and column definition lists", () => {
     // PG's join_using_alias requires the AS.
-    expect(() => sqlLite.parse("SELECT * FROM a JOIN b USING (id) j;")).toThrow(/Expected ";" but found "j"/);
-    expect(() => sqlLite.parse("SELECT * FROM a JOIN b USING (id) AS;")).toThrow(/Expected an alias but found ";"/);
+    expect(() => postgres.parse("SELECT * FROM a JOIN b USING (id) j;")).toThrow(/Expected ";" but found "j"/);
+    expect(() => postgres.parse("SELECT * FROM a JOIN b USING (id) AS;")).toThrow(/Expected an alias but found ";"/);
     // The star follows a plain name only: not ONLY, and not twice.
-    expect(() => sqlLite.parse("SELECT * FROM ONLY t *;")).toThrow(/Expected ";" but found "\*"/);
-    expect(() => sqlLite.parse("SELECT * FROM t * *;")).toThrow(/Expected ";" but found "\*"/);
+    expect(() => postgres.parse("SELECT * FROM ONLY t *;")).toThrow(/Expected ";" but found "\*"/);
+    expect(() => postgres.parse("SELECT * FROM t * *;")).toThrow(/Expected ";" but found "\*"/);
     // A definition list names at least one column, each with a type, and
     // mixes with no bare names.
-    expect(() => sqlLite.parse("SELECT * FROM f() AS ();")).toThrow(/Expected a name but found "\)"/);
-    expect(() => sqlLite.parse("SELECT * FROM f() AS (a);")).toThrow(/Expected a name but found "\)"/);
-    expect(() => sqlLite.parse("SELECT * FROM f() AS x (a int, b);")).toThrow(/Expected a name but found "\)"/);
-    expect(() => sqlLite.parse("SELECT * FROM f() AS x (a, b int);")).toThrow(/Expected "\)" but found "int"/);
+    expect(() => postgres.parse("SELECT * FROM f() AS ();")).toThrow(/Expected a name but found "\)"/);
+    expect(() => postgres.parse("SELECT * FROM f() AS (a);")).toThrow(/Expected a name but found "\)"/);
+    expect(() => postgres.parse("SELECT * FROM f() AS x (a int, b);")).toThrow(/Expected a name but found "\)"/);
+    expect(() => postgres.parse("SELECT * FROM f() AS x (a, b int);")).toThrow(/Expected "\)" but found "int"/);
     // Inside ROWS FROM, a call takes only the alias-less `AS (…)` spelling.
-    expect(() => sqlLite.parse("SELECT * FROM ROWS FROM (f() AS x (a int));")).toThrow(/Expected "\(" but found "x"/);
+    expect(() => postgres.parse("SELECT * FROM ROWS FROM (f() AS x (a int));")).toThrow(/Expected "\(" but found "x"/);
     // Subqueries take no definition list, and functions no TABLESAMPLE.
-    expect(() => sqlLite.parse("SELECT * FROM (SELECT 1) AS x (a int);")).toThrow(/Expected "\)" but found "int"/);
-    expect(() => sqlLite.parse("SELECT * FROM f() x (a int) TABLESAMPLE system (1);")).toThrow(
+    expect(() => postgres.parse("SELECT * FROM (SELECT 1) AS x (a int);")).toThrow(/Expected "\)" but found "int"/);
+    expect(() => postgres.parse("SELECT * FROM f() x (a int) TABLESAMPLE system (1);")).toThrow(
       /Expected ";" but found "tablesample"/,
     );
   });
 
   it("reports a lex error met by the column definition lookahead", () => {
-    expect(() => sqlLite.parse("SELECT * FROM f() x (a \\);")).toThrow(/Unexpected character "\\"/);
-    const { ast, errors } = sqlLite.diagnose("SELECT * FROM f() x (a \\);\nSELECT 1;");
+    expect(() => postgres.parse("SELECT * FROM f() x (a \\);")).toThrow(/Unexpected character "\\"/);
+    const { ast, errors } = postgres.diagnose("SELECT * FROM f() x (a \\);\nSELECT 1;");
     expect(errors.map((e) => e.message)).toEqual(['Unexpected character "\\" (1:23)']);
     expect(ast).toHaveLength(2);
     // The other two lookahead points report it too: past a bare AS, where the
     // alias is then missing, and on the first name inside the parenthesis.
-    expect(() => sqlLite.parse("SELECT * FROM f() AS \\;")).toThrow(/Unexpected character "\\"/);
-    expect(sqlLite.diagnose("SELECT * FROM f() AS \\;").errors.map((e) => e.message)).toEqual([
+    expect(() => postgres.parse("SELECT * FROM f() AS \\;")).toThrow(/Unexpected character "\\"/);
+    expect(postgres.diagnose("SELECT * FROM f() AS \\;").errors.map((e) => e.message)).toEqual([
       'Unexpected character "\\" (1:21)',
       'Expected an alias but found ";" (1:22)',
     ]);
-    expect(() => sqlLite.parse("SELECT * FROM f() x (\\ int);")).toThrow(/Unexpected character "\\"/);
-    expect(sqlLite.diagnose("SELECT * FROM f() x (\\ int);").errors.map((e) => e.message)).toEqual([
+    expect(() => postgres.parse("SELECT * FROM f() x (\\ int);")).toThrow(/Unexpected character "\\"/);
+    expect(postgres.diagnose("SELECT * FROM f() x (\\ int);").errors.map((e) => e.message)).toEqual([
       'Unexpected character "\\" (1:21)',
     ]);
   });
@@ -9086,7 +9088,7 @@ describe("SQL-lite NATURAL joins, join qualifiers and FROM-item extras", () => {
 describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
   const alter = (text: string) => firstStmt(text) as any;
   const action = (text: string) => alter(text).action;
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
 
   it("parses ALTER SCHEMA RENAME TO and OWNER TO", () => {
     expect(alter("ALTER SCHEMA s RENAME TO n;")).toEqual({
@@ -9176,7 +9178,7 @@ describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
   });
 
   it("spans the whole statement, from ALTER through the action", () => {
-    const [stmt] = sqlLite.parse("ALTER DOMAIN d SET SCHEMA archive;") as Record<string, any>[];
+    const [stmt] = postgres.parse("ALTER DOMAIN d SET SCHEMA archive;") as Record<string, any>[];
     expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 33 } });
   });
 
@@ -9242,7 +9244,7 @@ describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
 describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
   const alter = (text: string) => firstStmt(text) as any;
   const action = (text: string) => alter(text).action;
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
   const arg = (type: string, argName: string | null = null) => ({
     mode: null,
     name: argName,
@@ -9360,7 +9362,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
   });
 
   it("spans the whole statement, from ALTER through the action", () => {
-    const [stmt] = sqlLite.parse("ALTER MATERIALIZED VIEW m OWNER TO r;") as Record<string, any>[];
+    const [stmt] = postgres.parse("ALTER MATERIALIZED VIEW m OWNER TO r;") as Record<string, any>[];
     expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 36 } });
   });
 
@@ -9469,7 +9471,7 @@ describe("SQL-lite object references", () => {
     defaultValue: null,
   });
   const comment = (sql: string) => firstStmt(`COMMENT ON ${sql} IS 'c';`);
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
 
   it("reads each reference shape after COMMENT ON", () => {
     const node = (ref: Record<string, unknown>) => ({ kind: "comment", ...ref, comment: "c" });
@@ -9658,7 +9660,7 @@ describe("SQL-lite object references", () => {
 // --- policies, publications and subscriptions ---
 
 describe("SQL-lite policies, publications and subscriptions", () => {
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const opt = (optionName: string, value: unknown) => ({ name: optionName, value });
 
   it("parses CREATE POLICY with every clause, and with none", () => {
@@ -10095,7 +10097,7 @@ describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDIN
     ]);
     expect(rows("t VALUES (default)")).toEqual([[DEFAULT]]);
     // The row item carries its own span.
-    const [item] = (sqlLite.parse("INSERT INTO t VALUES (DEFAULT);")[0] as any).source.rows[0];
+    const [item] = (postgres.parse("INSERT INTO t VALUES (DEFAULT);")[0] as any).source.rows[0];
     expect(item.span).toMatchObject({ start: { row: 1, col: 22 }, end: { row: 1, col: 29 } });
   });
 
@@ -10177,7 +10179,7 @@ describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDIN
   });
 
   it("rejects the misplaced and malformed forms", () => {
-    const parse = (src: string) => () => sqlLite.parse(`INSERT INTO ${src};`);
+    const parse = (src: string) => () => postgres.parse(`INSERT INTO ${src};`);
     // DEFAULT VALUES stands alone, as in PG's insert_rest; the message lists
     // every form still open where the source was expected.
     expect(parse("t (a) DEFAULT VALUES")).toThrow(
@@ -10196,8 +10198,8 @@ describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDIN
     // …and only in INSERT's own bare VALUES rows (and SET's right-hand side).
     // A VALUES query rejects it as PG does; a parenthesised VALUES source is a
     // limit of this grammar, which PG would accept.
-    expect(() => sqlLite.parse("SELECT * FROM (VALUES (DEFAULT)) v;")).toThrow(/Expected a name but found "default"/);
-    expect(() => sqlLite.parse("INSERT INTO t (VALUES (DEFAULT));")).toThrow(/Expected a name but found "default"/);
+    expect(() => postgres.parse("SELECT * FROM (VALUES (DEFAULT)) v;")).toThrow(/Expected a name but found "default"/);
+    expect(() => postgres.parse("INSERT INTO t (VALUES (DEFAULT));")).toThrow(/Expected a name but found "default"/);
     // The alias needs its AS, and AS needs a name.
     expect(parse("t x VALUES (1)")).toThrow(/found "x" \(1:14\)/);
     // An empty quoted alias is no name at all: PG's scanner rejects `""`.
@@ -10216,7 +10218,7 @@ describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDIN
 describe("SQL-lite PREPARE and EXECUTE", () => {
   const param = (n: string) => ({ kind: "param", name: n });
   const bodyOf = (src: string) => firstStmt(`PREPARE p AS ${src};`).query;
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses PREPARE with and without a type list, multi-word types included", () => {
     expect(firstStmt("PREPARE p AS SELECT 1;")).toEqual({
@@ -10308,7 +10310,7 @@ describe("SQL-lite column and domain DEFAULT as a b-expression", () => {
     (firstStmt(`CREATE TABLE t (c ${type} ${src});`) as any).items[0].constraints as Record<string, unknown>[];
   const domainConstraints = (src: string) =>
     (firstStmt(`CREATE DOMAIN d AS int ${src};`) as any).constraints as Record<string, unknown>[];
-  const bad = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int ${src});`);
+  const bad = (src: string) => () => postgres.parse(`CREATE TABLE t (c int ${src});`);
   const NOT_NULL = { kind: "notNull" };
   const typ = (n: string, over: Record<string, unknown> = {}) => ({ name: n, args: [], array: false, ...over });
 
@@ -10341,7 +10343,7 @@ describe("SQL-lite column and domain DEFAULT as a b-expression", () => {
       NOT_NULL,
     ]);
     // The span of the DEFAULT constraint stops at its operand.
-    const [stmt] = sqlLite.parse("CREATE TABLE t (c int DEFAULT 0 NOT NULL);") as any[];
+    const [stmt] = postgres.parse("CREATE TABLE t (c int DEFAULT 0 NOT NULL);") as any[];
     expect(stmt.items[0].constraints[0].span).toEqual({ start: { row: 1, col: 22 }, end: { row: 1, col: 31 } });
   });
 
@@ -10416,7 +10418,7 @@ describe("SQL-lite column and domain DEFAULT as a b-expression", () => {
 
   it("rejects what PG's DEFAULT b_expr rejects", () => {
     expect(bad("DEFAULT 5 IS NULL")).toThrow(/Expected "distinct from" but found "null" \(1:35\)/);
-    expect(() => sqlLite.parse("CREATE DOMAIN d AS int DEFAULT 5 IS NULL;")).toThrow(
+    expect(() => postgres.parse("CREATE DOMAIN d AS int DEFAULT 5 IS NULL;")).toThrow(
       /Expected "distinct from" but found "null"/,
     );
     expect(bad("DEFAULT now() AT TIME ZONE 'utc'")).toThrow(/but found "at" \(1:36\)/);
@@ -10435,7 +10437,7 @@ describe("SQL-lite column and domain DEFAULT as a b-expression", () => {
 describe("SQL-lite generated identity and stored columns and column collation", () => {
   const colConstraints = (src: string) =>
     (firstStmt(`CREATE TABLE t (c int ${src});`) as any).items[0].constraints as Record<string, unknown>[];
-  const bad = (src: string) => () => sqlLite.parse(`CREATE TABLE t (c int ${src});`);
+  const bad = (src: string) => () => postgres.parse(`CREATE TABLE t (c int ${src});`);
 
   it("parses GENERATED ALWAYS and BY DEFAULT AS IDENTITY, with and without options", () => {
     expect(colConstraints("GENERATED ALWAYS AS IDENTITY")).toEqual([{ kind: "identity", generated: "always" }]);
@@ -10475,7 +10477,7 @@ describe("SQL-lite generated identity and stored columns and column collation", 
       { kind: "notNull" },
     ]);
     // The span runs from GENERATED through STORED.
-    const [stmt] = sqlLite.parse("CREATE TABLE t (c int GENERATED ALWAYS AS (a) STORED);") as any[];
+    const [stmt] = postgres.parse("CREATE TABLE t (c int GENERATED ALWAYS AS (a) STORED);") as any[];
     expect(stmt.items[0].constraints[0].span).toEqual({ start: { row: 1, col: 22 }, end: { row: 1, col: 52 } });
   });
 
@@ -10555,7 +10557,7 @@ describe("SQL-lite generated identity and stored columns and column collation", 
 describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
   const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
   const bool = (value: boolean) => ({ kind: "bool", value });
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses CREATE DATABASE with its space-separated options, CONNECTION LIMIT included", () => {
     expect(firstStmt("CREATE DATABASE d;")).toEqual({ kind: "createDatabase", name: "d", options: [] });
@@ -10583,7 +10585,7 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
   });
 
   it("spans a folded CONNECTION LIMIT from CONNECTION through its value", () => {
-    const [stmt] = sqlLite.parse("CREATE DATABASE d CONNECTION LIMIT = -1;") as Record<string, any>[];
+    const [stmt] = postgres.parse("CREATE DATABASE d CONNECTION LIMIT = -1;") as Record<string, any>[];
     expect(stmt!.options[0].span).toEqual({ start: { row: 1, col: 18 }, end: { row: 1, col: 39 } });
   });
 
@@ -10610,10 +10612,10 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
       ),
     ).toEqual(["createView", "createIndex"]);
     // Each element spans from its own target keyword, as at the top level.
-    const [outer] = sqlLite.parse("CREATE SCHEMA s CREATE TABLE t (id int);") as Record<string, any>[];
+    const [outer] = postgres.parse("CREATE SCHEMA s CREATE TABLE t (id int);") as Record<string, any>[];
     expect(outer!.elements[0].span).toEqual({ start: { row: 1, col: 23 }, end: { row: 1, col: 39 } });
     // …and a VIEW or TRIGGER from its CREATE, again as at the top level.
-    const [withTrigger] = sqlLite.parse(
+    const [withTrigger] = postgres.parse(
       "CREATE SCHEMA s CREATE OR REPLACE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();",
     ) as Record<string, any>[];
     expect(withTrigger!.elements[0]).toMatchObject({ kind: "createTrigger", orReplace: true, name: "tr" });
@@ -10680,7 +10682,7 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
       "CREATE EXTENSION e;",
       "CREATE TABLESPACE ts LOCATION 'x' WITH (a = 1);",
     ]) {
-      const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+      const [stmt] = postgres.parse(src) as Record<string, any>[];
       expect(stmt!.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: src.length - 1 } });
     }
   });
@@ -10775,7 +10777,7 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
   const bool = (value: boolean) => ({ kind: "bool", value });
   const target = (tableName: string[], columns: string[] | null = null) => ({ name: tableName, columns });
   const explained = (src: string) => firstStmt(`EXPLAIN ${src};`).statement;
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses EXPLAIN with no options, the legacy flags and the option list", () => {
     expect(firstStmt("EXPLAIN SELECT 1;")).toEqual({
@@ -10802,7 +10804,7 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
       opt("format", word("json")),
     ]);
     // A legacy flag spans its own word.
-    const [stmt] = sqlLite.parse("EXPLAIN  VERBOSE SELECT 1;") as any[];
+    const [stmt] = postgres.parse("EXPLAIN  VERBOSE SELECT 1;") as any[];
     expect(stmt.options[0].span).toEqual({ start: { row: 1, col: 9 }, end: { row: 1, col: 16 } });
   });
 
@@ -10905,7 +10907,7 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
 
 describe("SQL-lite CHECKPOINT, CLUSTER and REINDEX", () => {
   const verbose = { name: "verbose", value: null };
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses CHECKPOINT", () => {
     expect(firstStmt("CHECKPOINT;")).toEqual({ kind: "checkpoint" });
@@ -11032,7 +11034,7 @@ describe("SQL-lite cursors", () => {
     ...over,
   });
   const directionOf = (src: string) => firstStmt(`FETCH ${src};`).direction;
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses a bare DECLARE … CURSOR FOR query", () => {
     expect(firstStmt("DECLARE c CURSOR FOR SELECT 1;")).toEqual(declare({}));
@@ -11183,9 +11185,9 @@ describe("SQL-lite cursors", () => {
 // --- TEMPORARY, UNLOGGED and scoped CREATE TABLE ---
 
 describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
-  const rawFirst = (text: string) => sqlLite.parse(text)[0] as Record<string, any>;
+  const rawFirst = (text: string) => postgres.parse(text)[0] as Record<string, any>;
   const modifiersOf = (src: string) => firstStmt(src).modifiers;
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("keeps the PG prefix words in source order, as written", () => {
     expect(modifiersOf("CREATE TEMP TABLE t (id int);")).toEqual(["temp"]);
@@ -11265,7 +11267,7 @@ describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
 
 describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
   const flag = (flagName: string, value = true) => ({ kind: "flag", name: flagName, value });
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses CREATE ROLE and CREATE USER with no options", () => {
     expect(firstStmt("CREATE ROLE r;")).toEqual({ kind: "createRole", user: false, name: "r", options: [] });
@@ -11348,11 +11350,11 @@ describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
 
   it("spans ROLE and USER from their keyword and PROCEDURE from CREATE", () => {
     for (const src of ["CREATE TABLE t (id int);", "CREATE ROLE r LOGIN;", "CREATE USER u IN ROLE a, b;"]) {
-      const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+      const [stmt] = postgres.parse(src) as Record<string, any>[];
       expect(stmt!.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: src.length - 1 } });
     }
     const src = "CREATE OR REPLACE PROCEDURE p() AS 'SELECT 1' LANGUAGE sql;";
-    const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+    const [stmt] = postgres.parse(src) as Record<string, any>[];
     expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: src.length - 1 } });
   });
 
@@ -11427,7 +11429,7 @@ describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
 
 describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
   const flag = (flagName: string, value = true) => ({ kind: "flag", name: flagName, value });
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const role = (over: Record<string, unknown>) => ({ kind: "alterRole", user: false, name: "r", ...over });
   const db = (action: unknown) => ({ kind: "alterDatabase", name: "d", action });
   const generic = (objectType: string, objectName: string, action: unknown) => ({
@@ -11637,7 +11639,7 @@ describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
       "ALTER TABLESPACE t RESET (x);",
       "DROP TABLESPACE t;",
     ]) {
-      const [stmt] = sqlLite.parse(src) as Record<string, any>[];
+      const [stmt] = postgres.parse(src) as Record<string, any>[];
       expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: src.length - 1 } });
     }
   });
@@ -11750,7 +11752,7 @@ describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
 describe("SQL-lite LOCK and CALL", () => {
   const target = (parts: string[], only = false) => ({ name: parts, only });
   const modeOf = (mode: string) => firstStmt(`LOCK t IN ${mode} MODE;`).mode;
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses LOCK with and without TABLE, ONLY, `*`, a mode and NOWAIT", () => {
     expect(firstStmt("LOCK t;")).toEqual({ kind: "lock", tables: [target(["t"])], mode: null, nowait: false });
@@ -11830,7 +11832,7 @@ describe("SQL-lite LOCK and CALL", () => {
 
 describe("SQL-lite view options and REFRESH MATERIALIZED VIEW", () => {
   const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses a view's WITH (option, …) list before AS", () => {
     expect(
@@ -11914,7 +11916,7 @@ describe("SQL-lite view options and REFRESH MATERIALIZED VIEW", () => {
       withData: true,
     });
     expect(firstStmt("REFRESH MATERIALIZED VIEW mv WITH NO DATA;")).toMatchObject({ withData: false });
-    expect(sqlLite.parse("REFRESH MATERIALIZED VIEW mv;")[0]!.span).toEqual({
+    expect(postgres.parse("REFRESH MATERIALIZED VIEW mv;")[0]!.span).toEqual({
       start: { row: 1, col: 0 },
       end: { row: 1, col: 28 },
     });
@@ -11973,7 +11975,7 @@ describe("SQL-lite COPY", () => {
     where: null,
     ...over,
   });
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses COPY FROM each location, with a column list and WHERE", () => {
     expect(firstStmt("COPY t FROM STDIN;")).toEqual(copy({ table: ["t"] }));
@@ -12086,7 +12088,7 @@ describe("SQL-lite COPY legacy options", () => {
   const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
   const word = (w: string) => ({ kind: "name", parts: [w] });
   const list = (...names: string[]) => ({ kind: "optionList", items: names.map(word) });
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const optionsOf = (src: string) => firstStmt(`COPY t FROM STDIN ${src};`).options;
 
   it("maps each bare-word option onto the parenthesised list's name", () => {
@@ -12257,7 +12259,7 @@ describe("SQL-lite COPY legacy options", () => {
     expect(bad("COPY binary select FROM STDIN;")).toThrow(/Expected "from" or "to" but found "select"/);
     expect(bad("COPY t FROM STDIN WITH 1;")).toThrow(/Expected "\(" or a COPY option but found "1"/);
     // The BINARY lookahead reports what does not lex rather than dropping it.
-    expect(sqlLite.diagnose("COPY binary 'x").errors[0]?.message).toMatch(/Unterminated/);
+    expect(postgres.diagnose("COPY binary 'x").errors[0]?.message).toMatch(/Unterminated/);
     expect(bad("COPY t TO STDOUT FORCE QUOTE (a);")).toThrow(/Expected "\*" or a name but found "\("/);
     expect(bad("COPY t FROM STDIN DELIMITER ,;")).toThrow(/Expected a string but found ","/);
     expect(bad("COPY t FROM STDIN ENCODING AS 'UTF8';")).toThrow(/Expected a string but found "as"/);
@@ -12278,7 +12280,7 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
     expect(actions).toHaveLength(1);
     return actions[0];
   };
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
   const opt = (name: string, value: unknown = null) => ({ name, value });
 
   it("parses SET SCHEMA, SET TABLESPACE and SET WITHOUT CLUSTER", () => {
@@ -12379,7 +12381,7 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
   });
 
   it("spans the whole statement", () => {
-    const [stmt] = sqlLite.parse("ALTER TABLE t ATTACH PARTITION p DEFAULT;") as Record<string, any>[];
+    const [stmt] = postgres.parse("ALTER TABLE t ATTACH PARTITION p DEFAULT;") as Record<string, any>[];
     expect(stmt!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 40 } });
   });
 
@@ -12474,7 +12476,7 @@ describe("SQL-lite ALTER TABLE column actions", () => {
     expect(actions).toHaveLength(1);
     return actions[0];
   };
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
 
   it("parses ADD GENERATED … AS IDENTITY, with pg_dump's SEQUENCE NAME", () => {
     expect(action("ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY")).toEqual({
@@ -12702,7 +12704,7 @@ describe("SQL-lite ALTER TABLE table-level actions", () => {
     expect(actions).toHaveLength(1);
     return actions[0];
   };
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
 
   it("parses the four row-level security switches", () => {
     expect(alter("ALTER TABLE app.orders ENABLE ROW LEVEL SECURITY;")).toEqual({
@@ -12829,7 +12831,7 @@ describe("SQL-lite ALTER TABLE table-level actions", () => {
 
 describe("SQL-lite ALTER INDEX ATTACH PARTITION, ALL IN TABLESPACE and matview SET TABLESPACE", () => {
   const stmt = (text: string) => firstStmt(text) as any;
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
 
   it("parses ALTER INDEX … ATTACH PARTITION and ALTER [COLUMN] n SET STATISTICS", () => {
     expect(stmt("ALTER INDEX app.events_idx ATTACH PARTITION app.events_2025_idx;")).toEqual({
@@ -12879,7 +12881,7 @@ describe("SQL-lite ALTER INDEX ATTACH PARTITION, ALL IN TABLESPACE and matview S
   });
 
   it("spans the whole statement", () => {
-    const [node] = sqlLite.parse("ALTER TABLE ALL IN TABLESPACE a SET TABLESPACE b;") as Record<string, any>[];
+    const [node] = postgres.parse("ALTER TABLE ALL IN TABLESPACE a SET TABLESPACE b;") as Record<string, any>[];
     expect(node!.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 48 } });
   });
 
@@ -12932,7 +12934,7 @@ describe("SQL-lite multi-column UPDATE assignments", () => {
     firstStmt(`INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET ${src};`).onConflict.action.set;
   const row = (items: unknown[], implicit = true) => ({ kind: "row", items, ...(implicit && { implicit }) });
   const DEFAULT = { kind: "default" };
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses a parenthesised row, ROW() and a subquery as the source", () => {
     expect(setOf("(a, b) = (1, 2)")).toEqual([{ columns: ["a", "b"], value: row([num(1), num(2)]) }]);
@@ -12970,7 +12972,7 @@ describe("SQL-lite multi-column UPDATE assignments", () => {
   });
 
   it("spans an implicit row from its paren and a ROW() from the keyword", () => {
-    const [explicit, implicit] = (sqlLite.parse("UPDATE t SET (a) = ROW(1), (b, c) = (2, 3);")[0] as any).set;
+    const [explicit, implicit] = (postgres.parse("UPDATE t SET (a) = ROW(1), (b, c) = (2, 3);")[0] as any).set;
     expect(explicit.value.span).toEqual({ start: { row: 1, col: 19 }, end: { row: 1, col: 25 } });
     expect(implicit.value.span).toEqual({ start: { row: 1, col: 36 }, end: { row: 1, col: 42 } });
   });
@@ -13041,7 +13043,7 @@ describe("SQL-lite ONLY targets, WHERE CURRENT OF and SET col = DEFAULT", () => 
     ...over,
   });
   const DEFAULT = { kind: "default" };
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("records ONLY on an UPDATE target and drops the * suffix", () => {
     expect(firstStmt("UPDATE ONLY t SET a = 1;")).toEqual(update({ only: true }));
@@ -13092,8 +13094,8 @@ describe("SQL-lite ONLY targets, WHERE CURRENT OF and SET col = DEFAULT", () => 
   });
 
   it("reports a bad character after WHERE current", () => {
-    expect(() => sqlLite.parse("DELETE FROM t WHERE current \\;")).toThrow(/Unexpected character "\\"/);
-    expect(sqlLite.diagnose("DELETE FROM t WHERE current \\;").errors.map((e) => e.message)).toEqual([
+    expect(() => postgres.parse("DELETE FROM t WHERE current \\;")).toThrow(/Unexpected character "\\"/);
+    expect(postgres.diagnose("DELETE FROM t WHERE current \\;").errors.map((e) => e.message)).toEqual([
       'Unexpected character "\\" (1:28)',
     ]);
   });
@@ -13183,7 +13185,7 @@ describe("SQL-lite assignment indirection and ON CONFLICT inference", () => {
   const conflict = (src: string) => firstStmt(`INSERT INTO t VALUES (1) ON CONFLICT ${src};`).onConflict;
   const key = (expr: unknown, over: Record<string, unknown> = {}) => ({ expr, ...over });
   const lower = { kind: "call", name: "lower", args: [name("email")] };
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("reads subscript and field steps on a single UPDATE target", () => {
     expect(firstStmt("UPDATE t SET a[1] = 1, c.f = 2, a[i + 1] = 3;").set).toEqual([
@@ -13377,7 +13379,7 @@ describe("SQL-lite MERGE", () => {
   const nothing = { kind: "nothing" };
   const head = "MERGE INTO t USING s ON t.id = s.id";
   const whenOf = (src: string) => firstStmt(`${head} ${src};`).when;
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
 
   it("parses each WHEN form with each of its actions", () => {
     expect(
@@ -13603,7 +13605,7 @@ describe("SQL-lite composite and array access, and call-argument forms", () => {
   const arr = (...elements: unknown[]) => ({ kind: "array", elements });
   const row = (...elements: unknown[]) => ({ kind: "array", elements, implicit: true });
   const named = (argName: string, value: unknown) => ({ kind: "namedArg", name: argName, value });
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const select1 = sel({ columns: [col(num(1))] });
 
   it("selects a field, or every field, of a parenthesised expression", () => {
@@ -13650,13 +13652,13 @@ describe("SQL-lite composite and array access, and call-argument forms", () => {
   });
 
   it("spans a field selection from its opening parenthesis", () => {
-    const [stmt] = sqlLite.parse("SELECT (r).f[1].g FROM t;") as any[];
+    const [stmt] = postgres.parse("SELECT (r).f[1].g FROM t;") as any[];
     const g = stmt.columns[0].expr;
     expect(g.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 17 } });
     // The subscript keeps the span the postfix gives it, from its base.
     expect(g.expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 15 } });
     expect(g.expr.base.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 12 } });
-    const [chained] = sqlLite.parse("SELECT a[1].f FROM t;") as any[];
+    const [chained] = postgres.parse("SELECT a[1].f FROM t;") as any[];
     expect(chained.columns[0].expr.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 13 } });
   });
 
@@ -13691,7 +13693,7 @@ describe("SQL-lite composite and array access, and call-argument forms", () => {
   });
 
   it("spans an inner row over its brackets", () => {
-    const [stmt] = sqlLite.parse("SELECT ARRAY[[1], [2, 3]];") as any[];
+    const [stmt] = postgres.parse("SELECT ARRAY[[1], [2, 3]];") as any[];
     const outer = stmt.columns[0].expr;
     expect(outer.span).toEqual({ start: { row: 1, col: 7 }, end: { row: 1, col: 25 } });
     expect(outer.elements[1].span).toEqual({ start: { row: 1, col: 18 }, end: { row: 1, col: 24 } });
@@ -13770,7 +13772,7 @@ describe("SQL-lite composite and array access, and call-argument forms", () => {
 
 describe("SQL-lite special predicates and calls", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const x = name("x");
 
   it("parses IS [NOT] [form] NORMALIZED", () => {
@@ -13946,7 +13948,7 @@ describe("SQL-lite special predicates and calls", () => {
 });
 
 describe("SQL-lite rejects empty parenthesised lists", () => {
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const emptyList = /but found "\)"/;
 
   it("rejects the empty forms PG rejects", () => {
@@ -14000,7 +14002,7 @@ describe("SQL-lite long-tail objects with definition lists", () => {
   const ty = (typeName: string, array = false) => ({ name: typeName, args: [], array });
   const arg = (typeName: string) => ({ mode: null, name: null, type: ty(typeName), defaultValue: null });
   const typeArg = (typeName: string) => ({ kind: "type", type: ty(typeName) });
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
 
   it("reads every kind of definition value", () => {
     expect(
@@ -14481,7 +14483,7 @@ const plainColumn = (colName: string, typeName: string, extra: Record<string, un
   constraints: [],
 });
 const selectOne = sel({ columns: [col(num(1))] });
-const parseFails = (src: string) => () => sqlLite.parse(src);
+const parseFails = (src: string) => () => postgres.parse(src);
 
 describe("SQL-lite typed tables (OF type)", () => {
   it("parses a typed table, its column options and its trailing clauses", () => {
@@ -14925,7 +14927,7 @@ describe("SQL-lite TEMP and RECURSIVE views", () => {
       view({ orReplace: true, columns: ["n"], recursive: true, options: [{ name: "security_barrier", value: null }] }),
     );
     // The span opens on CREATE, as an unprefixed view's does.
-    expect((sqlLite.parse("CREATE TEMP VIEW v AS SELECT 1;")[0] as Record<string, any>).span.start).toEqual({
+    expect((postgres.parse("CREATE TEMP VIEW v AS SELECT 1;")[0] as Record<string, any>).span.start).toEqual({
       row: 1,
       col: 0,
     });
@@ -15020,7 +15022,7 @@ describe("SQL-lite UNLOGGED materialized views and their storage clauses", () =>
 
   it("spans from CREATE, and is explainable", () => {
     expect(
-      (sqlLite.parse("CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;")[0] as Record<string, any>).span.start,
+      (postgres.parse("CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;")[0] as Record<string, any>).span.start,
     ).toEqual({ row: 1, col: 0 });
     expect(firstStmt("EXPLAIN CREATE UNLOGGED MATERIALIZED VIEW mv AS SELECT 1;").statement).toEqual({
       kind: "createView",
@@ -15050,11 +15052,11 @@ describe("SQL-lite UNLOGGED materialized views and their storage clauses", () =>
   });
 });
 
-// --- psql scripts: sqlLiteScript ---
+// --- psql scripts: postgres.parseScript ---
 
 describe("SQL-lite psql scripts", () => {
-  const script = (text: string) => stripSpans(sqlLiteScript.parse(text)) as Record<string, any>[];
-  const bad = (src: string) => () => sqlLiteScript.parse(src);
+  const script = (text: string) => stripSpans(postgres.parseScript(text)) as Record<string, any>[];
+  const bad = (src: string) => () => postgres.parseScript(src);
   const meta = (command: string, args = "") => ({ kind: "psqlMeta", command, args });
   const copyIn = (table: string, data?: string) => ({
     kind: "copy",
@@ -15132,15 +15134,15 @@ describe("SQL-lite psql scripts", () => {
         end: { row: 3, col: 2 },
       });
     }
-    expect(sqlLiteScript.diagnose("COPY t FROM stdin; ab cd   \n1\n\\.").errors[0]!.end).toEqual({ row: 1, col: 24 });
-    expect(() => sqlLiteScript.parse("COPY t FROM stdin; x \r\n1\n\\.")).toThrow(
+    expect(postgres.diagnoseScript("COPY t FROM stdin; ab cd   \n1\n\\.").errors[0]!.end).toEqual({ row: 1, col: 24 });
+    expect(() => postgres.parseScript("COPY t FROM stdin; x \r\n1\n\\.")).toThrow(
       expect.objectContaining({ end: { row: 1, col: 20 } }),
     );
-    expect((sqlLiteScript.parse("\\x\r\nSELECT 1;")[0] as any).span).toEqual({
+    expect((postgres.parseScript("\\x\r\nSELECT 1;")[0] as any).span).toEqual({
       start: { row: 1, col: 0 },
       end: { row: 1, col: 2 },
     });
-    const [copy, select] = sqlLiteScript.parse("COPY t FROM stdin;\n1\n2\n\\.\nSELECT 1;") as any[];
+    const [copy, select] = postgres.parseScript("COPY t FROM stdin;\n1\n2\n\\.\nSELECT 1;") as any[];
     expect(copy.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 17 } });
     expect(select.span).toEqual({ start: { row: 5, col: 0 }, end: { row: 5, col: 8 } });
     expect(bad("COPY t FROM stdin;\n1\n\\.\nSELECT 1 +;")).toThrow(/\(4:10\)/);
@@ -15157,7 +15159,7 @@ describe("SQL-lite psql scripts", () => {
     expect(script("COPY (SELECT 'from stdin') TO STDOUT;\nSELECT 1;")).toHaveLength(2);
     expect(script("COPY t FROM 'f' WHERE a IS DISTINCT FROM stdin;\nSELECT 1;")).toHaveLength(2);
     // Rows are read for a statement the grammar rejects, a qualified name included.
-    expect(sqlLiteScript.diagnose("COPY s.from FROM stdin;\n1\n\\.\nSELECT 1;").ast).toHaveLength(1);
+    expect(postgres.diagnoseScript("COPY s.from FROM stdin;\n1\n\\.\nSELECT 1;").ast).toHaveLength(1);
     // A COPY with no `;` ends the input, so it has no rows to read. Without
     // rows, `data` is absent, not undefined.
     expect(script("COPY t FROM stdin")).toStrictEqual([copyIn("t")]);
@@ -15169,7 +15171,7 @@ describe("SQL-lite psql scripts", () => {
     // Rows are taken even when a table named `from` is rejected, after an
     // earlier COPY that ended on a qualified name's dot too.
     for (const sql of ["COPY from FROM stdin;", "COPY from.t FROM stdin;", "COPY s.;\nCOPY from FROM stdin;"]) {
-      expect(stripSpans(sqlLiteScript.diagnose(`${sql}\n\\connect x\n\\.\nSELECT 1;`).ast)).toEqual([one]);
+      expect(stripSpans(postgres.diagnoseScript(`${sql}\n\\connect x\n\\.\nSELECT 1;`).ast)).toEqual([one]);
     }
     expect(script("SELECT copy, stdin FROM copy;\nSELECT 1;")).toEqual([
       firstStmt("SELECT copy, stdin FROM copy;"),
@@ -15211,9 +15213,9 @@ describe("SQL-lite psql scripts", () => {
     expect(bad("SELECT 1;\n\\ x")).toThrow(/Invalid psql meta-command "\\" \(2:0\)/);
   });
 
-  it("parses statements as sqlLite does, spans included", () => {
+  it("parses statements as postgres.parse does, spans included", () => {
     const text = "CREATE TABLE t (a int);\n-- c\nINSERT INTO t VALUES (1) /* c */ ;\nSELECT 1";
-    expect(sqlLiteScript.parse(text)).toEqual(sqlLite.parse(text));
+    expect(postgres.parseScript(text)).toEqual(postgres.parse(text));
   });
 
   it("still rejects a backslash inside a statement", () => {
@@ -15224,15 +15226,15 @@ describe("SQL-lite psql scripts", () => {
     expect(bad("SELECT 1\n\\connect db")).toThrow(/Expected ";" but found "\\connect db" \(2:0\)/);
   });
 
-  it("leaves sqlLite and sqlLexer strict", () => {
-    expect(() => sqlLite.parse("\\connect db")).toThrow(/Unexpected character "\\"/);
-    expect(() => sqlLite.parse("COPY t FROM stdin;\n1\n\\.")).toThrow(/Expected a statement but found "1" \(2:0\)/);
+  it("leaves postgres.parse and postgres.lexer strict", () => {
+    expect(() => postgres.parse("\\connect db")).toThrow(/Unexpected character "\\"/);
+    expect(() => postgres.parse("COPY t FROM stdin;\n1\n\\.")).toThrow(/Expected a statement but found "1" \(2:0\)/);
     expect(() => lex("\\x")).toThrow(/Unexpected character "\\"/);
-    expect(lex("\\x", sqlScriptLexer)).toEqual([{ type: "psqlmeta", value: "\\x" }]);
+    expect(lex("\\x", postgres.scriptLexer)).toEqual([{ type: "psqlmeta", value: "\\x" }]);
   });
 
   it("recovers at the next statement, at a meta-command line and past COPY rows", () => {
-    const { ast, errors } = sqlLiteScript.diagnose(
+    const { ast, errors } = postgres.diagnoseScript(
       [
         "SELECT FROM WHERE;",
         "\\connect db",
@@ -15257,7 +15259,7 @@ describe("SQL-lite psql scripts", () => {
 
   it("reports a backslash with no command name without losing the statement before it", () => {
     // `f(a)`'s parse looks one token past its `;`, at the bad line.
-    const { ast, errors } = sqlLiteScript.diagnose("SELECT f(a);\n\\ x\n\\connect db\nSELECT 2;");
+    const { ast, errors } = postgres.diagnoseScript("SELECT f(a);\n\\ x\n\\connect db\nSELECT 2;");
     expect(stripSpans(ast)).toEqual([firstStmt("SELECT f(a);"), meta("connect", "db"), two]);
     expect(errors.map((error) => error.message)).toEqual(['Invalid psql meta-command "\\" (2:0)']);
   });
@@ -15270,20 +15272,20 @@ describe("SQL-lite psql scripts", () => {
       ["COPY t FROM stdin WITH junk; x\n1\n\\.", 2],
     ];
     for (const [lead, count] of leads) {
-      const { ast, errors } = sqlLiteScript.diagnose(`${lead}\n\\connect db\nSELECT 2;`);
+      const { ast, errors } = postgres.diagnoseScript(`${lead}\n\\connect db\nSELECT 2;`);
       expect(stripSpans(ast).slice(-2)).toEqual([meta("connect", "db"), two]);
       expect(errors).toHaveLength(count);
     }
   });
 
   it("keeps a COPY whose parse looked ahead into a bad data block", () => {
-    const { ast, errors } = sqlLiteScript.diagnose("COPY t FROM stdin WHERE f(a); x\n1\n\\.\nSELECT 1;");
+    const { ast, errors } = postgres.diagnoseScript("COPY t FROM stdin WHERE f(a); x\n1\n\\.\nSELECT 1;");
     expect(stripSpans(ast)).toEqual([{ ...firstStmt("COPY t FROM stdin WHERE f(a);"), data: "1\n" }, one]);
     expect(errors.map((error) => error.message)).toEqual(["Unexpected text after COPY … FROM STDIN (1:30)"]);
   });
 
   it("reports an error in the data block and keeps the COPY and its rows", () => {
-    const { ast, errors } = sqlLiteScript.diagnose("COPY t FROM stdin; x\n1\n\\.\nSELECT 1;");
+    const { ast, errors } = postgres.diagnoseScript("COPY t FROM stdin; x\n1\n\\.\nSELECT 1;");
     expect(stripSpans(ast)).toEqual([copyIn("t", "1\n"), one]);
     expect(errors.map((error) => error.message)).toEqual(["Unexpected text after COPY … FROM STDIN (1:19)"]);
   });
@@ -15292,7 +15294,7 @@ describe("SQL-lite psql scripts", () => {
 // --- foreign data: wrappers, servers, user mappings, foreign tables ---
 
 describe("SQL-lite foreign data", () => {
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
   const ty = (typeName: string, args: number[] = []) => ({
     name: typeName,
     args,
@@ -15791,7 +15793,7 @@ describe("SQL-lite foreign data", () => {
 describe("SQL-lite XML functions", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const fromItem = (src: string) => (firstStmt(`SELECT * FROM ${src};`) as any).from[0];
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const ty = (typeName: string, args: number[] = []) => ({ name: typeName, args, array: false });
   const x = name("x");
 
@@ -16166,7 +16168,7 @@ describe("SQL-lite XML functions", () => {
 
 describe("SQL-lite SQL/JSON functions", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
-  const bad = (src: string) => () => sqlLite.parse(src);
+  const bad = (src: string) => () => postgres.parse(src);
   const x = name("x");
   const v = (expr: unknown, over: Record<string, unknown> = {}) => ({ expr, ...over });
   const call = (fnName: string, args: unknown[], over: Record<string, unknown> = {}) => ({
@@ -16537,14 +16539,14 @@ describe("SQL-lite SQL/JSON functions", () => {
       start: { row: 1, col: startCol },
       end: { row: 1, col: endCol },
     });
-    const [stmt] = sqlLite.parse(
+    const [stmt] = postgres.parse(
       "SELECT JSON_OBJECT('a' VALUE 1) + 1, JSON_ARRAYAGG(x RETURNING jsonb) OVER () FROM t;",
     );
     const columns = (stmt as any).columns;
     expect(columns[0].expr.left.span).toEqual(span(7, 31));
     expect(columns[1].expr.span).toEqual(span(37, 77));
     expect(columns[1].expr.fn.span).toEqual(span(37, 69));
-    const [fromStmt] = sqlLite.parse("SELECT * FROM LATERAL JSON_TABLE(d, '$' COLUMNS (a int)) j;");
+    const [fromStmt] = postgres.parse("SELECT * FROM LATERAL JSON_TABLE(d, '$' COLUMNS (a int)) j;");
     expect((fromStmt as any).from[0].table.span).toEqual(span(22, 56));
   });
 
