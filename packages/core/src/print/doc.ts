@@ -1,7 +1,9 @@
 // The document IR: a Wadler/Leijen-style description of output text that
 // `render` lays out for a given line width. A Doc is a string, an array of
 // Docs (concatenation), or one of the commands below. Docs are plain immutable
-// values: build them once, render them at any width.
+// values: build them once, render them at any width. Build groups with
+// `group()` and don't mutate an array after wrapping it, because `group()`
+// decides once whether its contents must break.
 
 /** A document: text, a concatenation (array), or a layout command. */
 export type Doc = string | readonly Doc[] | DocCommand;
@@ -20,7 +22,7 @@ export interface Group {
   /**
    * True when the group can never be flat: it was built with `shouldBreak`,
    * or its flat layout contains a `hardline` or a group that must break.
-   * Computed once by `group()`.
+   * Computed once by `group()`; don't build a Group literal by hand.
    */
   readonly break: boolean;
 }
@@ -103,7 +105,8 @@ const mustBreak = (contents: Doc): boolean => {
         todo.push(c.contents);
         break;
       case "ifBreak":
-        // Only the flat branch is printed when this group is flat.
+        // Only the flat branch is printed when this group is flat, so a hard
+        // line in the broken branch doesn't force a break (prettier's does).
         todo.push(c.flatContents);
         break;
     }

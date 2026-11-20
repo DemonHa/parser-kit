@@ -6,7 +6,10 @@ export interface RenderOptions {
    * out flat (only hard lines break) and skips all width measurement.
    */
   width?: number;
-  /** One indentation level: a number of spaces, or a string such as `"\t"`. Default 2. */
+  /**
+   * One indentation level: a number of spaces, or a string such as `"\t"`.
+   * Default 2. A string is measured by its length, so a tab counts as one column.
+   */
   indent?: number | string;
 }
 
@@ -73,15 +76,29 @@ const fits = (doc: Doc, rest: Stack, width: number): boolean => {
   return false;
 };
 
+// Drops spaces and tabs at the end of the output, so no line ends in whitespace.
+const trimTrailing = (out: string[]): void => {
+  while (out.length > 0) {
+    const last = out[out.length - 1]!;
+    let end = last.length;
+    while (end > 0 && (last[end - 1] === " " || last[end - 1] === "\t")) end--;
+    if (end > 0) {
+      if (end < last.length) out[out.length - 1] = last.slice(0, end);
+      return;
+    }
+    out.pop();
+  }
+};
+
 /**
  * Lays `doc` out as text. A group prints flat when it fits in what is left of
  * the current line, and broken otherwise; lines outside every group always
  * break. Text is measured by `.length`, an indentation string by its length,
  * and a `"\n"` inside text is written as is (no indentation added after it).
  *
- * The walk is iterative, so document depth is limited by memory, not the call
- * stack. Indentation is written lazily, so blank lines carry no trailing
- * whitespace.
+ * Spaces and tabs at the end of a line are dropped, as prettier does, so a
+ * group ending in `line` before a hard line leaves no trailing space. The walk
+ * is iterative, so document depth is limited by memory, not the call stack.
  */
 export const render = (doc: Doc, options?: RenderOptions): string => {
   const width = options?.width ?? 80;
@@ -93,7 +110,9 @@ export const render = (doc: Doc, options?: RenderOptions): string => {
   const deeper = (level: IndentLevel): IndentLevel =>
     (level.next ??= { text: level.text + unitText, width: level.width + unitText.length });
 
-  let out = "";
+  // Output chunks, joined once at the end. Keeping them separate lets a newline
+  // trim the trailing whitespace before it without rescanning the whole output.
+  const out: string[] = [];
   let pos = 0;
   // Indentation owed by the last newline, written before the next text.
   let pending: IndentLevel | null = null;
@@ -107,10 +126,10 @@ export const render = (doc: Doc, options?: RenderOptions): string => {
     if (typeof d === "string") {
       if (d === "") continue;
       if (pending !== null) {
-        out += pending.text;
+        out.push(pending.text);
         pending = null;
       }
-      out += d;
+      out.push(d);
       if (measure) {
         const nl = d.lastIndexOf("\n");
         pos = nl >= 0 ? d.length - nl - 1 : pos + d.length;
@@ -138,14 +157,15 @@ export const render = (doc: Doc, options?: RenderOptions): string => {
           if (mode === FLAT && !c.hard) {
             if (!c.soft) {
               if (pending !== null) {
-                out += pending.text;
+                out.push(pending.text);
                 pending = null;
               }
-              out += " ";
+              out.push(" ");
               pos += 1;
             }
           } else {
-            out += "\n";
+            trimTrailing(out);
+            out.push("\n");
             pending = level;
             pos = level.width;
           }
@@ -153,5 +173,5 @@ export const render = (doc: Doc, options?: RenderOptions): string => {
       }
     }
   }
-  return out;
+  return out.join("");
 };

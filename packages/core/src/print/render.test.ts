@@ -106,6 +106,15 @@ describe("render", () => {
     expect(render(d)).toBe("x {\n  a\n\n  b\n}");
   });
 
+  it("trims spaces and tabs at the end of each line", () => {
+    expect(render(["a", group(["b", line]), hardline, "c"])).toBe("ab\nc");
+    expect(render(["a", nbsp, "\t", hardline, "b"], { width: INF })).toBe("a\nb");
+    expect(render(group([indent([hardline, group([line]), hardline]), "x"]))).toBe("\n\n  x");
+    // Text before the trailing whitespace is kept, across chunks.
+    expect(render(["x ", "", " ", hardline, "y"])).toBe("x\ny");
+    expect(render(["a", hardline, "  ", hardline, "b"])).toBe("a\n\nb");
+  });
+
   it("chooses the ifBreak branch from the enclosing group's mode", () => {
     const trailingComma = (items: Doc[]) =>
       group(["[", indent([softline, join([",", line], items), ifBreak(",")]), softline, "]"]);
