@@ -48,7 +48,7 @@ grammar.parse("answer 42");         // → ParseError: Expected ":" but found "4
 - [Combinators](#combinators) — `seq`, `oneOf`, `optional`, `delimited`, …
 - [Expressions: `pratt`](#expressions-pratt) — precedence climbing
 - [Grammars: `defineExpression` / `defineGrammar`](#grammars-defineexpression--definegrammar)
-- [Printing: `@parser-kit/core/print`](#printing-parser-kitcoreprint) — a document IR and width-aware renderer
+- [Printing: `@parser-kit/core/print`](#printing-parser-kitcoreprint) — a document IR and renderer, typed printers, parentheses from the Pratt table, quoting
 - [The example grammars](#the-example-grammars) — how to learn the kit by reading
 - [Design notes & current limits](#design-notes--current-limits)
 
@@ -197,6 +197,8 @@ The `match` infix form dispatches on a rule's first set instead of literal op va
 
 Any infix or postfix group can take an opt-in `when: (ctx, left) => boolean` guard, checked after the group's operator matched. Returning `false` declines: the next matching group of the same kind is tried, and a token no postfix group accepts goes on to infix lookup as usual. If no infix group accepts either, the expression ends there as if no operator matched, leaving the token to the enclosing rule. Infix guards run before the bp check, so a later group with a different bp can take a declined token; postfix guards run only once the group's bp qualifies. The cursor is still on the operator, so peek with `ctx.peek()`/`ctx.peekAhead(n)` and don't consume. The guard may be called again for the same token (at each enclosing precedence level, with that level's `left`, and for the non-associativity chain check), so keep it pure. That lets a catch-all operator group skip one token (`when: (ctx) => ctx.peek()?.value !== "=>"`), or a keyword postfix like `AT` bow out unless `TIME ZONE` or `LOCAL` follows, so the word stays usable as an alias. Guards don't change the rule's first set, and groups without one behave and cost exactly as before.
 
+Groups also accept two printer-only fields, `nodes` and `rhs`, which the parser ignores. They let `precedence()` in [`@parser-kit/core/print`](#parentheses-from-the-pratt-table-precedence) derive a printer's parentheses from the same table.
+
 ## Grammars: `defineExpression` / `defineGrammar`
 
 Two forms. **Root-rule** for languages whose statements need no leading keyword:
@@ -232,7 +234,7 @@ Every grammar exposes:
 
 ## Printing: `@parser-kit/core/print`
 
-An opt-in entry point for the other direction, AST → text. It holds a Wadler/Leijen-style document IR (the model prettier uses) and a renderer that lays a document out for a line width. You write the printer by hand, one function per node, and build docs instead of strings. The entry is about 1.3 KB minified and gzipped, and nothing in the parsing API imports it, so parse-only bundles don't grow.
+An opt-in entry point for the other direction, AST → text. It holds a Wadler/Leijen-style document IR (the model prettier uses), a renderer that lays a document out for a line width, typed exhaustive printers (`definePrinter`), parentheses derived from your Pratt table (`precedence`) and a quoting policy for names and strings (`quoting`). You write the printer by hand, one handler per node, and build docs instead of strings. The entry is about 2.5 KB minified and gzipped, and nothing in the parsing API imports it, so parse-only bundles don't grow.
 
 ```ts
 import { doc, render } from "@parser-kit/core/print";
@@ -268,6 +270,99 @@ A `Doc` is a string, an array of docs (concatenation), or a command:
 
 `list` is a group, so it breaks when it doesn't fit. For a language where newlines carry meaning (DBML settings lists, for instance), render at `width: Infinity`, or concatenate the parts yourself, so only the hard lines you placed break.
 
+### Typed printers: `definePrinter`
+
+`definePrinter<T>()(key, handlers)` builds a printer for one discriminated union `T`, dispatching on the discriminant `key` (`"kind"`, `"type"`, …). The handlers object needs one entry per variant, so leaving one out is a compile error, and each handler gets its node narrowed to that variant. Take `T` from the grammar (`Infer<typeof rule>`, or the AST type you declared for a recursive rule).
+
+```ts
+import { definePrinter, extendPrinter, type NodePrinter, type Printable } from "@parser-kit/core/print";
+
+const printExpr: NodePrinter<Printable<Expr>, "kind"> = definePrinter<Printable<Expr>>()("kind", {
+  number: (n) => String(n.value),
+  binary: (n, print) => [print(n.left), " ", n.op, " ", print(n.right)],
+  subquery: (n) => ["(", printQuery(n.query), ")"],
+  // omit a kind and tsc fails: Property 'call' is missing
+});
+const printFrom = definePrinter<Printable<FromItem>>()("kind", {
+  table: (n) => n.name,
+  subquery: (n) => ["(", printQuery(n.query), ") AS ", n.alias], // same tag, another union
+});
+```
+
+- **One printer per union.** Discriminant values repeat across unions (an expression and a FROM item can both be `kind: "subquery"`), so each union gets its own printer and the printers call each other. Records with no discriminant are plain functions. Like recursive rules, printers that call each other need one type annotation (`NodePrinter<T, K>`) to break the inference cycle.
+- **Recursion goes through `print`.** Each handler gets the printer it runs in as its second argument. Recurse through it rather than the printer's name, so a printer built by `extendPrinter` applies its overrides all the way down.
+- **`extendPrinter(base, overrides)`** reuses every handler of `base` and replaces some, e.g. a dialect that prints a few nodes differently. To print a wider union, spread `base.handlers` into a new `definePrinter` call and add the new variants.
+- **`Printable<T>`** is `T` with every `span` optional, all the way down, so the printer accepts hand-built trees as well as parsed ones. Printers should never read spans.
+- A node whose discriminant has no handler at run time (a hand-built tree with a typo) throws a `TypeError`.
+
+### Parentheses from the Pratt table: `precedence`
+
+`precedence(table, { key, print })` reads binding powers and associativity from the same table `pratt()` parses with, so the printer adds parentheses only where the parser needs them and the two can't drift apart. `key` names a node's entry in the table, `print` prints a child, and `prec.child(parent, child, side)` returns the child's doc, wrapped if needed. Pull the operator groups out of the `pratt()` call so both sides share them:
+
+```ts
+export const expressionTable: Omit<PrattDef<Expr, TT>, "atom"> = {
+  prefix: [{ ops: ["-", "!"], bp: 14, nodes: ["unary"] }],
+  infix: [
+    { ops: ["="], bp: 2, assoc: "right", nodes: ["assign"], map: … },
+    { ops: ["?"], bp: 3, nodes: ["cond"], rhs: 0, parse: … }, // alternate parsed with parseRhs(0)
+    { ops: ["+", "-"], bp: 11, map: … },                       // binary nodes, keyed by op
+  ],
+  postfix: [{ match: punc("("), bp: 17, nodes: ["call"], rhs: "none", parse: … }],
+};
+const expression = pratt({ atom, ...expressionTable });
+
+const prec = precedence<Expr>(expressionTable, {
+  key: (n) => (n.kind === "binary" ? n.op : n.kind),
+  print: (n): Doc => printExpr(n),
+  atoms: { arrow: 0 }, // an atom whose body runs on: `x => x + 1`
+});
+// in printExpr:
+binary: (n) => group([prec.child(n, n.left, "left"), " ", n.op, indent([line, prec.child(n, n.right, "right")])]),
+call: (n, print) => [prec.child(n, n.callee, "left"), list("(", n.args.map(print), ")")],
+```
+
+- **Keys.** An `ops` group without a custom `parse` is keyed by its ops: return the operator from `key` for the nodes it builds, or `{ prefix: op }` for a prefix op (the same op can be both, like `-`). Any group can name its nodes in `nodes` instead. A key the table doesn't name is an atom, never wrapped.
+- **Two optional fields on Pratt groups**, `nodes` and `rhs`, are printer metadata; the parser ignores them. `rhs` says where a custom `parse` reads its trailing operand (the bp it passes to `parseRhs`), or `"none"` when the node ends in a token of its own (`)`, `]`, a name). It is derived for `ops` groups without `parse`; a `parse` group without it is treated as open to every operator, which is safe but adds parentheses.
+- **Sides.** `"left"` and `"right"` are the operands before and after the operator; `"inner"` is an operand between tokens of the node (a ternary's middle, call arguments) and is never wrapped. A prefix operator's operand is its `"right"`.
+- **Conservative where unsure.** A custom-`parse` group without an explicit `assoc` is treated as non-associative, so a chain of it is parenthesised (`(a BETWEEN b AND c) BETWEEN …`). A parent the table doesn't know wraps every operator child. A key two groups build with different binding powers throws when the table is read.
+- **Context.** `prec.operand(node, minBp?, context?)` handles operands the grammar parses outside the table, at a given bp (0, the default, is a whole expression). `contexts: { b: restrictedTable }` names cut-down tables for positions the grammar parses with fewer operators; pass the name as the last argument of `child` or `operand`, and nodes that table can't build are wrapped there. `prec.parens(…)` answers the question without printing, and `wrap` replaces the default `["(", doc, ")"]`.
+
+### Quoting: `quoting`
+
+`quoting(rules)` builds a function that prints a name or string bare or quoted. The grammar supplies its lexical rules; the policy decides from the value, so a hand-built tree prints valid text even when its tags are missing or wrong.
+
+```ts
+import { quoting } from "@parser-kit/core/print";
+
+const ident = quoting({ quote: '"', start: /[a-z_]/, part: /[a-z0-9_$]/, reserved: RESERVED, fold: "lower" });
+ident("users");                             // users
+ident("MyCol");                             // "MyCol"   (folding would change it)
+ident("select");                            // "select"  (reserved)
+ident('say "hi"');                          // "say ""hi"""
+ident("users", "always");                   // "users"
+ident("users", "preserve-if-valid", true);  // "users"   (the source quoted it)
+
+const str = quoting({ quote: "'", escape: "backslash" }); // no `start`: always quoted
+str("it's");                                // 'it\'s'
+```
+
+Rules: `quote` and `close` (default: the same), `escape` (`"double"`, the default, doubles the closing quote; `"backslash"` escapes it and backslashes; or a function), `start` / `part` (regexes for one character; without `start` nothing is bare), `reserved` (words, or a predicate, as the lexer reads them after folding) and `fold` (`"lower"` / `"upper"`: a word folding would change must be quoted). Modes: `"minimal"` (default) quotes only when needed, `"always"` quotes everything, `"preserve-if-valid"` keeps a "was quoted" hint and leaves a word bare only when that is valid.
+
+### Finding dropped fields: `@parser-kit/core/print/testing`
+
+Exhaustive handlers prove every variant is printed, not that every field is. `fieldCoverage({ key })` wraps trees so a test can see what the printer read, and reports the variants it never printed and the fields it never read. It is a separate entry point, so it never reaches a printer's bundle.
+
+```ts
+import { fieldCoverage } from "@parser-kit/core/print/testing";
+
+const coverage = fieldCoverage({ key: "kind", kinds: ALL_KINDS }); // `kinds` is optional
+for (const source of corpus) render(printStmt(coverage.track(parse(source))));
+expect(coverage.report()).toEqual({ kinds: [], fields: [] });
+// e.g. { kinds: ["window"], fields: ["table.note"] }
+```
+
+Fields are reported as `variant.field`; a record without a discriminant is named by where it sits (`select.items.alias`). Only fields present on some tracked node count, and `span` is ignored by default (`ignore` replaces that list). A variant is printed once its discriminant is read; list every variant in `kinds` to also catch ones the corpus never reached.
+
 ## The example grammars
 
 Two real grammars double as the kit's genericity/integration tests and as the fastest way to learn it — read their `grammar.ts` top to bottom.
@@ -277,7 +372,7 @@ Two real grammars double as the kit's genericity/integration tests and as the fa
 
 ## Design notes & current limits
 
-- **Stringify/printing**: printers are written by hand, not derived from the grammar. The separate, opt-in [`@parser-kit/core/print`](#printing-parser-kitcoreprint) entry provides the building blocks. The `Rule.print` / `Rule.inverse` hooks, `custom(…, { print })`, the second argument to `map(fn, inverse)` and the `Printer` type are deprecated: nothing ever called them, and they will be removed before 1.0.
+- **Stringify/printing**: printers are written by hand, not derived from the grammar. The separate, opt-in [`@parser-kit/core/print`](#printing-parser-kitcoreprint) entry provides the building blocks: typed exhaustive dispatch, parentheses from the same Pratt table the parser uses, and quoting from the grammar's lexical rules. The `Rule.print` / `Rule.inverse` hooks, `custom(…, { print })`, the second argument to `map(fn, inverse)` and the `Printer` type are deprecated: nothing ever called them, and they will be removed before 1.0.
 - **Tokenization is context-sensitive when you opt in**: readers dispatch on the current character, but [modes, transitions, and `LexContext`](#context-sensitive-lexing-modes--transitions) give the lexer/parser interplay that JS regex-vs-division and template literals need. A mode-free lexer stays a plain context-free tokenizer.
 - **`InputStream` ships a string implementation only** — the interface is the contract, but there's no streaming/incremental reader yet.
 - **`oneOf` validation** runs at definition time when possible; branches behind `lazy()` forward references are validated on first parse instead.

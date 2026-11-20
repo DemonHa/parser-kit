@@ -10,6 +10,10 @@ export default defineConfig({
   resolve: {
     // The subpath comes first: aliases match by prefix, first entry wins.
     alias: [
+      {
+        find: "@parser-kit/core/print/testing",
+        replacement: resolve(import.meta.dirname, "packages/core/src/print/testing.ts"),
+      },
       { find: "@parser-kit/core/print", replacement: resolve(import.meta.dirname, "packages/core/src/print/index.ts") },
       { find: "@parser-kit/core", replacement: resolve(import.meta.dirname, "packages/core/src/index.ts") },
     ],

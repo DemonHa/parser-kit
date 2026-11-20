@@ -63,9 +63,11 @@ verify() {
   fi
 }
 
-# core's opt-in ./print entry ships in both formats, with declarations.
+# core's opt-in ./print entry and its ./print/testing helpers ship in both
+# formats, with declarations.
 verify packages/core parser-kit-core "" build/esm/print/index.js build/cjs/print/index.js \
-  build/esm/print/index.d.ts build/cjs/print/index.d.ts
+  build/esm/print/index.d.ts build/cjs/print/index.d.ts build/esm/print/testing.js build/cjs/print/testing.js \
+  build/esm/print/testing.d.ts build/cjs/print/testing.d.ts
 # Each SQL dialect is also a subpath export (`@parser-kit/sql/postgres`).
 verify packages/sql parser-kit-sql "" build/esm/postgres/index.js build/cjs/postgres/index.js \
   build/esm/postgres/index.d.ts build/cjs/postgres/index.d.ts
@@ -84,11 +86,15 @@ npm install --no-audit --no-fund "$PACK"/*.tgz >/dev/null
 
 cat > esm.mjs <<'JS'
 import * as core from "@parser-kit/core";
-import { doc, render } from "@parser-kit/core/print";
+import { definePrinter, doc, precedence, quoting, render } from "@parser-kit/core/print";
+import { fieldCoverage } from "@parser-kit/core/print/testing";
 import * as sql from "@parser-kit/sql";
 import { postgres } from "@parser-kit/sql/postgres";
 if (!core.defineGrammar) throw new Error("core: ESM export missing");
 if (render(doc.group(["a", doc.line, "b"]), { width: 1 }) !== "a\nb") throw new Error("core/print: ESM render failed");
+if (typeof definePrinter !== "function" || typeof precedence !== "function") throw new Error("core/print: ESM export missing");
+if (quoting({ quote: '"' })("a") !== '"a"') throw new Error("core/print: ESM quoting failed");
+if (fieldCoverage({ key: "kind" }).report().fields.length !== 0) throw new Error("core/print/testing: ESM failed");
 if (Object.keys(sql).join() !== "postgres") throw new Error(`sql: unexpected ESM exports ${Object.keys(sql)}`);
 if (sql.postgres !== postgres) throw new Error("sql: the root and /postgres entries load separate copies");
 const [stmt] = postgres.parse("SELECT 1 AS one");
@@ -100,11 +106,15 @@ JS
 
 cat > cjs.cjs <<'JS'
 const core = require("@parser-kit/core");
-const { doc, render } = require("@parser-kit/core/print");
+const { definePrinter, doc, precedence, quoting, render } = require("@parser-kit/core/print");
+const { fieldCoverage } = require("@parser-kit/core/print/testing");
 const sql = require("@parser-kit/sql");
 const { postgres } = require("@parser-kit/sql/postgres");
 if (!core.defineGrammar) throw new Error("core: CJS export missing");
 if (render(doc.group(["a", doc.line, "b"]), { width: 1 }) !== "a\nb") throw new Error("core/print: CJS render failed");
+if (typeof definePrinter !== "function" || typeof precedence !== "function") throw new Error("core/print: CJS export missing");
+if (quoting({ quote: '"' })("a") !== '"a"') throw new Error("core/print: CJS quoting failed");
+if (fieldCoverage({ key: "kind" }).report().fields.length !== 0) throw new Error("core/print/testing: CJS failed");
 if (Object.keys(sql).join() !== "postgres") throw new Error(`sql: unexpected CJS exports ${Object.keys(sql)}`);
 if (sql.postgres !== postgres) throw new Error("sql: the root and /postgres entries load separate copies");
 const [stmt] = postgres.parse("SELECT 1 AS one");
@@ -184,12 +194,18 @@ echo "TypeScript ok: @parser-kit/dbml types resolve from ESM and CJS (nodenext)"
 # core's ./print subpath: types from ESM and CJS (nodenext), and under the
 # legacy node10 resolution through core's typesVersions map.
 cat > print-consumer.mts <<'TS'
-import { type Doc, group, line, render } from "@parser-kit/core/print";
+import { type Doc, definePrinter, group, line, render } from "@parser-kit/core/print";
+import { type FieldCoverage, fieldCoverage } from "@parser-kit/core/print/testing";
 const d: Doc = group(["a", line, "b"]);
 export const text: string = render(d, { width: 80, indent: "\t" });
+type N = { kind: "a" } | { kind: "b"; x: string };
+export const p: (n: N) => Doc = definePrinter<N>()("kind", { a: () => "a", b: (n) => n.x });
+export const cov: FieldCoverage = fieldCoverage({ key: "kind" });
 TS
 cat > print-consumer.cts <<'TS'
 import print = require("@parser-kit/core/print");
+import testing = require("@parser-kit/core/print/testing");
+export const cov: testing.FieldCoverage = testing.fieldCoverage({ key: "type" });
 const d: print.Doc = print.doc.group(["a", print.doc.line, "b"]);
 export const text: string = print.render(d, { width: Number.POSITIVE_INFINITY });
 TS
@@ -198,13 +214,15 @@ TS
 cat > print-legacy.ts <<'TS'
 import { defineGrammar } from "@parser-kit/core";
 import { type Doc, render } from "@parser-kit/core/print";
+import { fieldCoverage } from "@parser-kit/core/print/testing";
+export const cov: unknown = fieldCoverage;
 const d: Doc = ["a", "b"];
 export const text: string = render(d);
 export const g: unknown = defineGrammar;
 TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --target es2022 --module commonjs --moduleResolution node --ignoreDeprecations 5.0 \
   print-legacy.ts
-echo "TypeScript ok: @parser-kit/core/print types resolve from ESM and CJS (nodenext) and under moduleResolution node"
+echo "TypeScript ok: @parser-kit/core/print and /print/testing types resolve from ESM and CJS (nodenext) and under moduleResolution node"
 
 # Size budget for the print entry, measured the way a consumer's bundler sees
 # it: bundled from the installed tarball, minified, gzipped. esbuild comes from

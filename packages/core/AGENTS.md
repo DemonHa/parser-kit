@@ -15,7 +15,7 @@ grammars are the fastest way to learn the kit and are its genericity/integration
 
 ## Public API
 
-`src/index.ts` re-exports the parsing API (no default export); `src/print/index.ts` is the separate `@parser-kit/core/print` entry (see below). The parsing pieces:
+`src/index.ts` re-exports the parsing API (no default export); `src/print/index.ts` and `src/print/testing.ts` are the separate `@parser-kit/core/print` and `@parser-kit/core/print/testing` entries (see below). The parsing pieces:
 
 - **Lexing** — `defineLexer`, the `readers.*` library (`number`, `string`,
   `dollarString`, `lineComment`, `blockComment`, `operator`, `regex`,
@@ -53,12 +53,19 @@ mid-migration onto the rest.
   together and add recovery/trivia/error-reporting policy.
 - `strip-spans.ts` — `stripSpans` for structural test comparisons.
 - `print/` — the `@parser-kit/core/print` entry: `doc.ts` (the document IR and
-  its builders) and `render.ts` (the iterative, width-aware renderer). It
-  imports nothing from the rest of `src/`, and nothing in the parse path may
-  import it, so parse-only bundles stay the same size; a test in
-  `print/render.test.ts` enforces the second rule. `scripts/verify-packages.sh`
-  checks the subpath from ESM, CJS and TypeScript and holds it to a 3 KB
-  min+gz budget. Its bench is `bench/render.bench.ts`.
+  its builders), `render.ts` (the iterative, width-aware renderer),
+  `printer.ts` (`definePrinter` / `extendPrinter`, typed exhaustive dispatch
+  per union), `precedence.ts` (parenthesisation from a Pratt table, reading
+  each group's bp/assoc plus the printer-only `nodes` / `rhs` fields that
+  `pratt.ts` declares and ignores) and `quoting.ts`. `print/testing.ts` is the
+  separate `@parser-kit/core/print/testing` entry (`fieldCoverage`), kept out
+  of `./print` so test helpers never count against a printer's bundle. None of
+  them imports anything from the rest of `src/` at run time, and nothing in
+  the parse path may import them, so parse-only bundles stay the same size; a
+  test in `print/render.test.ts` enforces the second rule.
+  `scripts/verify-packages.sh` checks both subpaths from ESM, CJS and
+  TypeScript and holds `./print` to a 3 KB min+gz budget. Its bench is
+  `bench/render.bench.ts`.
 
 ## Authoring a grammar — gotchas that will bite you
 

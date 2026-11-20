@@ -7,6 +7,7 @@ import {
   lazy,
   oneOf,
   optional,
+  type PrattDef,
   pratt,
   type Rule,
   repeat,
@@ -100,13 +101,16 @@ const binary = (ops: string[], bp: number) => ({
   map: (op: string, left: Expr, right: Expr, span: Span): Expr => ({ kind: "binary", op, left, right, span }),
 });
 
-const expressionRule = pratt<Expr, JsTokenType>({
-  atom,
+// The operator table, exported so a printer can derive its parentheses from
+// the same binding powers (`precedence` in `@parser-kit/core/print`). The
+// `nodes` / `rhs` fields are printer metadata; the parser ignores them.
+export const expressionTable: Omit<PrattDef<Expr, JsTokenType>, "atom"> = {
   prefix: [
     {
       ops: ["!", "-"],
       bp: 14,
       type: "punc",
+      nodes: ["unary"],
       map: (op, operand, span): Expr => ({ kind: "unary", op, operand, span }),
     },
   ],
@@ -116,12 +120,16 @@ const expressionRule = pratt<Expr, JsTokenType>({
       bp: 2,
       assoc: "right",
       type: "punc",
+      nodes: ["assign"],
       map: (_op, target, value, span): Expr => ({ kind: "assign", target, value, span }),
     },
     {
       ops: ["?"],
       bp: 3,
       type: "punc",
+      nodes: ["cond"],
+      // The alternate is parsed at bp 0, so it runs to the end of the expression.
+      rhs: 0,
       parse: (ctx, left, h): Expr => {
         ctx.next(); // "?"
         const consequent = h.parseRhs(0);
@@ -147,6 +155,8 @@ const expressionRule = pratt<Expr, JsTokenType>({
     {
       match: punc("("),
       bp: 17,
+      nodes: ["call"],
+      rhs: "none",
       parse: (ctx, left): Expr => {
         const args = ctx.parse(argsList);
         return { kind: "call", callee: left, args, span: { start: left.span.start, end: ctx.lastEnd() } };
@@ -155,6 +165,8 @@ const expressionRule = pratt<Expr, JsTokenType>({
     {
       match: punc("."),
       bp: 17,
+      nodes: ["member"],
+      rhs: "none",
       parse: (ctx, left): Expr => {
         ctx.next(); // "."
         const property = ctx.parse(identName);
@@ -164,6 +176,8 @@ const expressionRule = pratt<Expr, JsTokenType>({
     {
       match: punc("["),
       bp: 17,
+      nodes: ["index"],
+      rhs: "none",
       parse: (ctx, left): Expr => {
         ctx.next(); // "["
         const index = ctx.parse(expression);
@@ -172,7 +186,9 @@ const expressionRule = pratt<Expr, JsTokenType>({
       },
     },
   ],
-});
+};
+
+const expressionRule = pratt<Expr, JsTokenType>({ atom, ...expressionTable });
 
 // --- statements ---
 

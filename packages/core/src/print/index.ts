@@ -24,5 +24,16 @@ export {
   nbsp,
   softline,
 } from "./doc";
+export {
+  type Precedence,
+  type PrecedenceGroup,
+  type PrecedenceKey,
+  type PrecedenceOptions,
+  type PrecedenceTable,
+  precedence,
+  type Side,
+} from "./precedence";
+export { definePrinter, extendPrinter, type Handlers, type NodePrinter, type Printable } from "./printer";
+export { type Quote, type QuoteMode, type QuotingRules, quoting } from "./quoting";
 export { type RenderOptions, render } from "./render";
 export { doc };

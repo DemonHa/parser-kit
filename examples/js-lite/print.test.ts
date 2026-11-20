@@ -1,99 +1,67 @@
 import { stripSpans } from "@parser-kit/core";
-import { block, type Doc, group, hardline, indent, join, line, list, render } from "@parser-kit/core/print";
+import {
+  block,
+  type Doc,
+  definePrinter,
+  group,
+  hardline,
+  indent,
+  join,
+  line,
+  list,
+  type NodePrinter,
+  precedence,
+  render,
+} from "@parser-kit/core/print";
 import { describe, expect, it } from "vitest";
-import { type Expr, jsLite, type Stmt } from "./grammar";
+import { type Expr, expressionTable, jsLite, type Stmt } from "./grammar";
 
 // A genericity guard for `@parser-kit/core/print`: a small js-lite printer
-// written against the public IR only. Parsing what it prints must give back
+// written against the public API only. Parsing what it prints must give back
 // the same tree, at every width.
 
-// Binding power of each node as an operand, mirroring the grammar's Pratt table.
-const BINARY_BP: Record<string, number> = {
-  "||": 4,
-  "&&": 5,
-  "==": 8,
-  "!=": 8,
-  "===": 8,
-  "!==": 8,
-  "<": 9,
-  ">": 9,
-  "<=": 9,
-  ">=": 9,
-  "+": 11,
-  "-": 11,
-  "*": 12,
-  "/": 12,
-  "%": 12,
-};
-const POSTFIX = 17;
-const ATOM = 20;
-
-const bp = (e: Expr): number => {
-  switch (e.kind) {
-    case "arrow":
-      return 1;
-    case "assign":
-      return 2;
-    case "cond":
-      return 3;
-    case "binary":
-      return BINARY_BP[e.op]!;
-    case "unary":
-      return 14;
-    case "call":
-    case "member":
-    case "index":
-      return POSTFIX;
-    default:
-      return ATOM;
-  }
-};
-
-/** Prints `e`, parenthesised if it binds looser than `min`. */
-const operand = (e: Expr, min: number): Doc => (bp(e) < min ? ["(", expr(e), ")"] : expr(e));
+// Parentheses come from the grammar's own Pratt table. Binary nodes are keyed
+// by their operator; every other operator node by the kind its group names in
+// `nodes`. An arrow function is an atom whose body runs to the end of the
+// expression, so it is declared with the bp that body is parsed at.
+const prec = precedence<Expr>(expressionTable, {
+  key: (e) => (e.kind === "binary" ? e.op : e.kind),
+  print: (e): Doc => expr(e),
+  atoms: { arrow: 0 },
+});
 
 // Enough for the corpus below, which has no string holding both quote kinds or a backslash.
 const str = (s: string): string => (s.includes("'") ? `"${s}"` : `'${s}'`);
 
 const params = (ps: string[]): Doc => (ps.length === 1 ? ps[0]! : list("(", ps, ")"));
 
-const expr = (e: Expr): Doc => {
-  switch (e.kind) {
-    case "number":
-      return String(e.value);
-    case "string":
-      return str(e.value);
-    case "boolean":
-      return String(e.value);
-    case "null":
-      return "null";
-    case "ident":
-      return e.name;
-    case "array":
-      return list("[", e.elements.map(expr), "]");
-    case "arrow":
-      return isExpr(e.body)
-        ? group([params(e.params), " =>", indent([line, expr(e.body)])])
-        : [params(e.params), " => ", stmt(e.body)];
-    case "unary":
-      // `- -x` must not print as `--x`.
-      return [e.op, e.operand.kind === "unary" ? " " : "", operand(e.operand, 14)];
-    case "binary": {
-      const p = bp(e);
-      return group([operand(e.left, p), " ", e.op, indent([line, operand(e.right, p + 1)])]);
-    }
-    case "assign":
-      return [operand(e.target, 3), " = ", operand(e.value, 2)];
-    case "cond":
-      return group([operand(e.test, 4), indent([line, "? ", expr(e.consequent), line, ": ", expr(e.alternate)])]);
-    case "call":
-      return [operand(e.callee, POSTFIX), list("(", e.args.map(expr), ")")];
-    case "member":
-      return [operand(e.object, POSTFIX), ".", e.property];
-    case "index":
-      return [operand(e.object, POSTFIX), "[", expr(e.index), "]"];
-  }
-};
+// Expressions and statements are separate unions, so each gets its own printer;
+// they call each other for arrow bodies and expression statements. Mutually
+// recursive printers need one type annotation, like recursive rules.
+const expr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind", {
+  number: (e) => String(e.value),
+  string: (e) => str(e.value),
+  boolean: (e) => String(e.value),
+  null: () => "null",
+  ident: (e) => e.name,
+  array: (e, print) => list("[", e.elements.map(print), "]"),
+  arrow: (e, print) =>
+    isExpr(e.body)
+      ? group([params(e.params), " =>", indent([line, print(e.body)])])
+      : [params(e.params), " => ", stmt(e.body)],
+  // `- -x` must not print as `--x`.
+  unary: (e) => [e.op, e.operand.kind === "unary" ? " " : "", prec.child(e, e.operand, "right")],
+  binary: (e) => group([prec.child(e, e.left, "left"), " ", e.op, indent([line, prec.child(e, e.right, "right")])]),
+  assign: (e) => [prec.child(e, e.target, "left"), " = ", prec.child(e, e.value, "right")],
+  cond: (e, print) =>
+    group([
+      prec.child(e, e.test, "left"),
+      indent([line, "? ", print(e.consequent), line, ": ", prec.child(e, e.alternate, "right")]),
+    ]),
+  call: (e, print) => [prec.child(e, e.callee, "left"), list("(", e.args.map(print), ")")],
+  member: (e) => [prec.child(e, e.object, "left"), ".", e.property],
+  index: (e, print) => [prec.child(e, e.object, "left"), "[", print(e.index), "]"],
+});
 
 const STMT_KINDS = new Set(["var", "function", "if", "while", "return", "block", "expr"]);
 const isExpr = (n: Expr | Stmt): n is Expr => !STMT_KINDS.has(n.kind);
@@ -101,30 +69,21 @@ const isExpr = (n: Expr | Stmt): n is Expr => !STMT_KINDS.has(n.kind);
 /** A statement body after `if (…)` / `while (…)`: blocks stay on the line, others indent. */
 const body = (s: Stmt): Doc => (s.kind === "block" ? [" ", stmt(s)] : group(indent([line, stmt(s)])));
 
-const stmt = (s: Stmt): Doc => {
-  switch (s.kind) {
-    case "var":
-      return group([s.declKind, " ", s.name, " =", indent([line, expr(s.init)]), ";"]);
-    case "function":
-      return ["function ", s.name, list("(", s.params, ")"), " ", stmt(s.body)];
-    case "if":
-      return [
-        "if (",
-        expr(s.test),
-        ")",
-        body(s.consequent),
-        s.alternate ? [s.consequent.kind === "block" ? " " : line, "else", body(s.alternate)] : "",
-      ];
-    case "while":
-      return ["while (", expr(s.test), ")", body(s.body)];
-    case "return":
-      return ["return", s.argument ? [" ", expr(s.argument)] : "", ";"];
-    case "block":
-      return block("", s.body.map(stmt));
-    case "expr":
-      return [expr(s.expression), ";"];
-  }
-};
+const stmt: NodePrinter<Stmt, "kind"> = definePrinter<Stmt>()("kind", {
+  var: (s) => group([s.declKind, " ", s.name, " =", indent([line, expr(s.init)]), ";"]),
+  function: (s, print) => ["function ", s.name, list("(", s.params, ")"), " ", print(s.body)],
+  if: (s) => [
+    "if (",
+    expr(s.test),
+    ")",
+    body(s.consequent),
+    s.alternate ? [s.consequent.kind === "block" ? " " : line, "else", body(s.alternate)] : "",
+  ],
+  while: (s) => ["while (", expr(s.test), ")", body(s.body)],
+  return: (s) => ["return", s.argument ? [" ", expr(s.argument)] : "", ";"],
+  block: (s, print) => block("", s.body.map(print)),
+  expr: (s) => [expr(s.expression), ";"],
+});
 
 const program = (stmts: Stmt[]): Doc => join(hardline, stmts.map(stmt));
 
@@ -150,6 +109,13 @@ const SOURCES = [
   "if (veryLongConditionName && anotherQuiteLongCondition) doSomethingWith(argumentOne, argumentTwo);",
   "{ const nested = []; }",
   "const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0) / items.length;",
+  "x = a - (b - c) - d * (e + f) % g;",
+  "x = !(!a) || -(-b) || !-c;",
+  "r = (a = b) ? c = d : e = f;",
+  "r = a ? b : x => x ? y : z;",
+  "r = (a ? b : c).d + (x => x)(1) + (y => y);",
+  "f(a = b, (c, d) => c || d)[e ? f : g];",
+  "x = (a ? b : c) || (d = e);",
 ];
 
 describe("a js-lite printer on the doc IR", () => {
@@ -173,6 +139,11 @@ describe("a js-lite printer on the doc IR", () => {
     expect(print(ast, Number.POSITIVE_INFINITY)).toBe(
       "const add = (a, b) => a + b;\nif (x) {\n  y(1);\n} else z = [1, 2];",
     );
+  });
+
+  it("prints only the parentheses the grammar's binding powers need", () => {
+    const ast = jsLite.parse("x = ((a + b)) * (c) - (d * e) - (f - g); y = (h = i); z = (a ? b : c);");
+    expect(print(ast, Number.POSITIVE_INFINITY)).toBe("x = (a + b) * c - d * e - (f - g);\ny = h = i;\nz = a ? b : c;");
   });
 
   it("breaks groups from the outside in at a narrow width", () => {

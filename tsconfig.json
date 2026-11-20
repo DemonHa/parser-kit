@@ -32,7 +32,8 @@
     // Resolved relative to this file, so every extending config inherits it.
     "paths": {
       "@parser-kit/core": ["./packages/core/src/index.ts"],
-      "@parser-kit/core/print": ["./packages/core/src/print/index.ts"]
+      "@parser-kit/core/print": ["./packages/core/src/print/index.ts"],
+      "@parser-kit/core/print/testing": ["./packages/core/src/print/testing.ts"]
     }
   },
   "exclude": ["build", "**/build", "node_modules", "**/node_modules"],
