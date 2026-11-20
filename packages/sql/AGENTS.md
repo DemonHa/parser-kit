@@ -51,7 +51,12 @@ internals and grammar-authoring gotchas.
   `stringify-cases/` through the printer (`stringify.<family>.golden.sql` pin
   its width-80 output per statement family; `STRINGIFY_REPORT=1` prints what
   isn't printable yet), and `parity-corpus.ts` holds the parity lists both
-  harnesses read.
+  harnesses read. `libpg-query.differential.test.ts` holds the parser and the
+  printer to PostgreSQL 17's own parser (the `libpg-query` dev dependency,
+  WASM): the same inputs accepted, and printed SQL that PostgreSQL parses to
+  the same tree as its source (`LIBPG_QUERY_REPORT=1` prints the counts). A
+  new disagreement is a bug to fix or an entry, with its reason, in that
+  file's `PARSER_DIFFERENCES` / `PRINTER_DIFFERENCES`.
 - `bench/` — the node-sql-parser comparisons. `bench-baseline.json` at the repo
   root keys on their file paths and group names.
 

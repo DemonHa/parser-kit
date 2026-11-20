@@ -115,6 +115,7 @@ The package lives at [`packages/sql`](https://github.com/DemonHa/parser-kit/tree
 | `test/corpus.ts` | The statements the benchmark measures and the parity golden pins |
 | `test/parity.test.ts` + `test/parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus the lists in `test/parity-corpus.ts` |
 | `test/stringify.test.ts` + `test/stringify-cases/` + `test/stringify.*.golden.sql` | The printer's round trips over the corpus, the parity lists, the accepted coverage-battery rows, the pg_dump statements that parse and each statement family's own cases, and its width-80 output per family (`STRINGIFY_REPORT=1` prints the statements not yet printable) |
+| `test/libpg-query.differential.test.ts` | The differential test against PostgreSQL 17's own parser (libpg_query): over the corpus, `postgres.parse` accepts what PostgreSQL accepts, and PostgreSQL parses every printable statement's output to the same tree as its source. Deliberate differences are listed in the file with their reasons (`LIBPG_QUERY_REPORT=1` prints the counts) |
 | `test/pg-coverage.ts` + `test/pg-coverage.test.ts` | The PostgreSQL coverage battery: 609 statements with the bucket each one lands in |
 | `test/pg-dump-corpus.ts` + `test/pg-dump-corpus.test.ts` | The pg_dump corpus: whether each statement of the dumps in `test/fixtures/pg-dump/` parses, and whether each file parses whole through `postgres.parseScript` |
 | `bench/postgres.bench.ts` | Throughput over the corpus, per category |
@@ -347,7 +348,7 @@ Every item here was checked against the current grammar and fails to parse.
 
 ### Known wrong ASTs
 
-One kind of input is known to parse into the wrong tree. Report any other as a bug.
+These inputs are known to parse into the wrong tree. Report any other as a bug.
 
 - **A configuration parameter that spells a special form's name.** Wherever `SET` / `SHOW` / `RESET` syntax is read (the statements, a routine's `SET`, and `ALTER ROLE` / `ALTER DATABASE … SET | RESET`), a parameter written quoted, or as a plain `name = value` / `name TO value`, gets the tree of the special form it spells:
   - `SET "time zone" = 'UTC'` and `SET TIME ZONE 'UTC'` both give `name: ["time zone"]`. The same holds for `"session authorization"`, `"transaction isolation level"`, `"transaction snapshot"` and `"xml option"`;
@@ -355,6 +356,8 @@ One kind of input is known to parse into the wrong tree. Report any other as a b
   - `SET schema = 'x'` and `SET "schema" = 'x'` give the same tree as `SET SCHEMA 'x'` (which sets `search_path`), and `SET names = 'u'` the same as `SET NAMES 'u'` (which sets `client_encoding`).
 
   PostgreSQL reads each such spelling as a parameter of that literal name, which doesn't exist, so the statement fails there when run. (`SHOW "all"` is no exception: PostgreSQL reads it as `SHOW ALL` too.)
+- **A parenthesised arm that holds its own `WITH`.** `(WITH a AS (…) SELECT …) UNION SELECT …` gives the same tree as `WITH a AS (…) (SELECT …) UNION SELECT …`, though in the second the CTE is in scope for every arm.
+- **A quoted column named like an SQL value function.** A lone `"system_user"`, `"current_catalog"` or `"current_schema"` gives the same tree as the bare `system_user` / `current_catalog` / `current_schema`, which PostgreSQL reads as the function.
 
 A number's `value` alone is a double; where that loses digits, type or scale, the literal's text is kept in `raw` (see [AST conventions](#ast-conventions)).
 
@@ -370,6 +373,8 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
   - `operator(x)` as an ordinary call in a select list.
 - **The `at` and `similar` guards look only at the next token**, so `SELECT a + b at FROM t` reads `at` as an alias, and `substring(a = b SIMILAR 'x' ESCAPE '#')` parses. PostgreSQL rejects both.
 - **Aliases:** AS_LABEL keywords other than `isnull` / `notnull` / `overlaps` (`day`, `over`, …) are accepted as bare aliases. `isnull`, `notnull` and `overlaps` are refused as bare aliases, but accepted as table aliases after `AS`.
+- **`IGNORE NULLS` / `RESPECT NULLS`** after a window function call (`lag(x) IGNORE NULLS OVER w`), which PostgreSQL 17's grammar doesn't have.
+- **A `COLLATE` in `BETWEEN`'s lower bound** (`a BETWEEN b COLLATE "C" AND c`), which PostgreSQL reads as a b_expr, where `COLLATE` can't appear. Parenthesise it there.
 - **Window frames PostgreSQL rejects:** `ROWS BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING`, `ROWS 1 FOLLOWING`.
 - **The empty `USING ()` join list.**
 - **Impossible type modifiers:** `x::int(4)`.
@@ -384,6 +389,8 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **`CREATE INDEX IF NOT EXISTS ON t (…)`** with no index name.
 - **`CREATE OR REPLACE MATERIALIZED VIEW`.**
 - **Publication and subscription `WITH (…)` lists** take the general option shape, so `ns.name` keys and parenthesised values parse. PostgreSQL's `definition` has neither.
+- **Storage parameter lists** (`CREATE TABLE … WITH (…)`) take the general option shape too, so `x -1`, `force_quote *` and `force_null (a, 'b')` parse. PostgreSQL's reloptions take only `name [= value]`.
+- **`COPY` and utility statement option lists** (`COPY … (…)`, `CLUSTER (…)`) take a qualified option name (`toast.x 1`) and numbers in a parenthesised value list (`list ('a', 2)`). PostgreSQL's take neither.
 - **PostgreSQL 18's `GENERATED ALWAYS AS (…) VIRTUAL`** columns parse (pagila's schema dump has one), though PostgreSQL 17 requires `STORED`. The PostgreSQL 18 spelling with neither keyword is rejected.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted:
@@ -535,5 +542,5 @@ Run everything from the repository root (`pnpm test`, `pnpm types:check`, `pnpm 
 - **Follow the [AST conventions](#ast-conventions).** A new field is optional and left out when absent, so trees for input that doesn't use the construct stay byte-identical.
 - **Prove new keywords stay unreserved.** PostgreSQL leaves most keywords usable as names, and so does this grammar: only the words in `RESERVED` are refused as bare names. Every feature that matches a new word by value comes with a "keeps … unreserved as names and aliases" test showing the word still works as a column, table and alias (for example `SELECT rows, ordinality FROM t AS rows;`). Don't add to `RESERVED` to make a parse work.
 - **Pin observable output in the parity golden.** `parity.test.ts` serialises the full AST, spans included, for every `corpus.ts` row and the `SUPPLEMENTAL` / `MULTI_LINE` / `LEXER_EDGE_CASES` lists in `parity-corpus.ts`, plus `diagnose()` output for `MALFORMED`. New node shapes go in `SUPPLEMENTAL`, not `corpus.ts`. `stringify.test.ts` reads the same rows (and the accepted `pg-coverage.ts` ones), so a new row is round-tripped through the printer too, and a new `corpus.ts` or `SUPPLEMENTAL` row of a printed statement family moves its `stringify.<family>.golden.sql`. The benchmark's group names count the corpus's shared rows, and `bench-baseline.json` keys on those names, so a new `pg: true` corpus row renames them and silently disconnects `pnpm bench:compare`. When output is *meant* to move, regenerate with `pnpm test -- -u` (the `--` matters) and call the diff out in review. Never regenerate to make a refactor pass.
-- **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README. Update the "Not yet supported", "Known wrong ASTs" and "Accepted, but PostgreSQL rejects" lists too, and add any input that stops parsing to "Behaviour changes". No test pins those lists.
+- **Update the coverage battery.** If a change makes a `pg-coverage.ts` statement parse (or stop parsing), `pg-coverage.test.ts` fails with an `expected -> actual` line per moved row. Update the row's bucket, re-print the table with `PG_COVERAGE_REPORT=1`, and update the numbers in this README. Update the "Not yet supported", "Known wrong ASTs" and "Accepted, but PostgreSQL rejects" lists too, and add any input that stops parsing to "Behaviour changes". No test pins those lists, but `libpg-query.differential.test.ts` fails on any corpus input whose acceptance differs from PostgreSQL's and isn't in its `PARSER_DIFFERENCES`, so a statement that starts or stops parsing adds or removes an entry there.
 - **Update the pg_dump corpus.** If a change makes a dump statement parse (or stop parsing), `pg-dump-corpus.test.ts` fails the same way. Regenerate `pg-dump-corpus.ts` with `PG_DUMP_CORPUS_WRITE=1`, check that no row moved to `fail`, and update the [pg_dump corpus](#pg_dump-corpus) table from `PG_DUMP_CORPUS_REPORT=1`.

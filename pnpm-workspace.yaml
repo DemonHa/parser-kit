@@ -23,3 +23,7 @@ catalog:
   # Benchmark comparison baseline
   node-sql-parser: "5.1.0"
   "@dbml/core": "12.1.0"
+
+  # Differential-test oracle: PostgreSQL 17's own parser as WASM. 17.7.4 bundles
+  # libpg_query 17-6.1.0 (the upstream release, not the 17.8 line's fork).
+  libpg-query: "17.7.4"

@@ -17,7 +17,6 @@ import type {
   IndexColumn,
   IndexParams,
   PartitionBound,
-  PartitionKey,
   PartitionRangeDatum,
   PartitionSpec,
   RefAction,
@@ -26,17 +25,23 @@ import type {
   TableConstraintAttrs,
   TableItem,
 } from "../ast";
-import { clause, commaList, ident, kw, lastText, parenList, parens, qualified, quoted } from "./context";
+import { clause, commaList, ident, kw, lastText, parenList, parens, qualified } from "./context";
 import { bExpr, expr } from "./expr";
 import { printQuery } from "./query";
 import { defineFamily, statementPrinter } from "./registry";
 import {
   alterGenericOptions,
+  collationName,
   genericOptions,
+  keyElement,
+  leadName,
+  opclassName,
   ownerTo,
+  partitionKey,
   relationOptions,
   renameTo,
   roleSpec,
+  STORAGE_PARAMETERS,
   sequenceOption,
   sequenceOptions,
   setSchema,
@@ -68,27 +73,6 @@ const names = (list: readonly string[]): Doc => parenList(list.map(ident));
 
 // --- expressions in restricted positions ---
 
-// What PG's index_elem, part_elem and exclusion element take unparenthesised: a
-// column (one name part) or a function call. Anything else is parenthesised,
-// which never changes what PG reads, and which this grammar requires of a
-// partition key and drops again on parsing.
-const isBareElement = (e: Expr): boolean => (e.kind === "name" && e.parts.length === 1) || e.kind === "call";
-const element = (e: Expr): Doc =>
-  e.kind === "name" && e.parts.length === 1 && LOOKAHEAD_WORDS.has(e.parts[0]!)
-    ? quoted(e.parts[0]!)
-    : isBareElement(e)
-      ? expr(e)
-      : parens(expr(e));
-
-// PG's lexer reads FORMAT before JSON, WITHOUT before TIME and NULLS before
-// FIRST / LAST as one token, which no name can be. So a name written where
-// one of those words may follow it (a column before its type, an element
-// before its operator class) is quoted when it is one of the three.
-const LOOKAHEAD_WORDS = new Set(["format", "without", "nulls"]);
-const leadName = (name: string): string => (LOOKAHEAD_WORDS.has(name) ? quoted(name) : ident(name));
-const collation = (parts: readonly string[]): string =>
-  parts.map((p, i) => (i === parts.length - 1 && LOOKAHEAD_WORDS.has(p) ? quoted(p) : ident(p))).join(".");
-
 // An index or exclusion element: as `element`, but a COLLATE around it is
 // written outside the parentheses, where PG reads it as the element's own
 // collation (`a COLLATE "C"`). Inside them, it would make the element an
@@ -96,16 +80,7 @@ const collation = (parts: readonly string[]): string =>
 // reads both spellings as the same tree. (A partition key keeps its own
 // collation apart, so its COLLATE nodes are the parenthesised kind.)
 const indexElement = (e: Expr): Doc =>
-  e.kind === "collate" ? [element(e.expr), " ", kw("COLLATE"), " ", collation(e.collation)] : element(e);
-
-// An operator class follows its element's expression, so a word that would
-// continue that expression is quoted (`a "between"`, `f(a) "over" (…)`). The
-// others are quoted by `ident` already (reserved words, IS, ISNULL, LIKE, …).
-const opclass = (parts: readonly string[]): string =>
-  parts.map((p, i) => (i === 0 && CONTINUING_WORDS.has(p) ? quoted(p) : ident(p))).join(".");
-// BETWEEN continues any expression; OVER and FILTER a call, when a `(`
-// (the operator class's options) follows.
-const CONTINUING_WORDS = new Set(["between", "over", "filter"]);
+  e.kind === "collate" ? [keyElement(e.expr), " ", kw("COLLATE"), " ", collationName(e.collation)] : keyElement(e);
 
 // --- constraints ---
 
@@ -122,7 +97,7 @@ const tableAttrs = (a: TableConstraintAttrs): Doc[] => [
 
 const indexParams = (p: IndexParams): Doc[] => [
   p.include !== undefined ? [kw("INCLUDE"), " ", names(p.include)] : "",
-  p.options !== undefined ? [kw("WITH"), " ", relationOptions(p.options)] : "",
+  p.options !== undefined ? [kw("WITH"), " ", relationOptions(p.options, STORAGE_PARAMETERS)] : "",
   p.indexTablespace !== undefined ? `${kw("USING INDEX TABLESPACE")} ${ident(p.indexTablespace)}` : "",
 ];
 
@@ -302,13 +277,6 @@ export const partitionBound = (b: PartitionBound): Doc => {
   }
 };
 
-const partitionKey = (k: PartitionKey): Doc =>
-  words(
-    element(k.expr),
-    k.collate !== undefined ? `${kw("COLLATE")} ${collation(k.collate)}` : "",
-    k.opclass !== undefined ? opclass(k.opclass) : "",
-  );
-
 const partitionBy = (p: PartitionSpec): Doc => [
   kw(`PARTITION BY ${p.strategy.toUpperCase()}`),
   " ",
@@ -333,7 +301,7 @@ const ON_COMMIT = { preserveRows: "PRESERVE ROWS", deleteRows: "DELETE ROWS", dr
 /** `[USING m] [WITH (…) | WITHOUT OIDS] [ON COMMIT …] [TABLESPACE t]`, in PG's fixed order. */
 const storageClauses = (s: StorageClauses): Doc[] => [
   ...(s.accessMethod !== undefined ? [`${kw("USING")} ${ident(s.accessMethod)}`] : []),
-  ...(s.options !== undefined ? [[kw("WITH"), " ", relationOptions(s.options)]] : []),
+  ...(s.options !== undefined ? [[kw("WITH"), " ", relationOptions(s.options, STORAGE_PARAMETERS)]] : []),
   ...(s.withoutOids ? [kw("WITHOUT OIDS")] : []),
   ...(s.onCommit !== undefined ? [kw(`ON COMMIT ${ON_COMMIT[s.onCommit]}`)] : []),
   ...(s.tablespace !== undefined ? [`${kw("TABLESPACE")} ${ident(s.tablespace)}`] : []),
@@ -379,7 +347,10 @@ const indexColumn = (c: IndexColumn): Doc =>
   words(
     indexElement(c.expr),
     c.opclass !== undefined
-      ? [opclass(c.opclass), c.opclassOptions !== undefined ? [" ", relationOptions(c.opclassOptions)] : ""]
+      ? [
+          opclassName(c.opclass),
+          c.opclassOptions !== undefined ? [" ", relationOptions(c.opclassOptions, STORAGE_PARAMETERS)] : "",
+        ]
       : "",
     c.dir !== undefined ? kw(c.dir.toUpperCase()) : "",
     c.nulls !== undefined ? kw(`NULLS ${c.nulls.toUpperCase()}`) : "",
@@ -402,7 +373,7 @@ const createIndex = (i: CreateIndex): Doc => {
   const clauses: Doc[] = [];
   if (i.include !== null) clauses.push([kw("INCLUDE"), " ", names(i.include)]);
   if (i.nulls !== undefined) clauses.push(nullsTreatment(i.nulls));
-  if (i.options !== undefined) clauses.push([kw("WITH"), " ", relationOptions(i.options)]);
+  if (i.options !== undefined) clauses.push([kw("WITH"), " ", relationOptions(i.options, STORAGE_PARAMETERS)]);
   if (i.tablespace !== undefined) clauses.push(`${kw("TABLESPACE")} ${ident(i.tablespace)}`);
   if (i.where !== null) clauses.push(clause(kw("WHERE"), expr(i.where)));
   return withClauses(head, clauses);
@@ -486,9 +457,9 @@ const alterAction = (a: AlterAction): Doc => {
     case "setCompression":
       return alterColumn(a.column, `${kw("SET COMPRESSION")} ${a.method === null ? kw("DEFAULT") : ident(a.method)}`);
     case "setColumnOptions":
-      return alterColumn(a.column, [kw("SET"), " ", relationOptions(a.options)]);
+      return alterColumn(a.column, [kw("SET"), " ", relationOptions(a.options, STORAGE_PARAMETERS)]);
     case "resetColumnOptions":
-      return alterColumn(a.column, [kw("RESET"), " ", relationOptions(a.options)]);
+      return alterColumn(a.column, [kw("RESET"), " ", relationOptions(a.options, STORAGE_PARAMETERS)]);
     case "columnGenericOptions":
       return alterColumn(a.column, alterGenericOptions(a.options));
     case "genericOptions":
@@ -521,9 +492,9 @@ const alterAction = (a: AlterAction): Doc => {
     case "setTablespace":
       return `${kw("SET TABLESPACE")} ${ident(a.tablespace)}`;
     case "setOptions":
-      return [kw("SET"), " ", relationOptions(a.options)];
+      return [kw("SET"), " ", relationOptions(a.options, STORAGE_PARAMETERS)];
     case "resetOptions":
-      return [kw("RESET"), " ", relationOptions(a.options)];
+      return [kw("RESET"), " ", relationOptions(a.options, STORAGE_PARAMETERS)];
     case "enableTrigger":
       return words(
         kw("ENABLE"),
