@@ -79,7 +79,7 @@ export const cases: string[] = [
   "CREATE OR REPLACE FUNCTION s.f(IN a int, OUT b text, INOUT c int DEFAULT 1, VARIADIC d int[] = ARRAY[1]) RETURNS SETOF record LANGUAGE plpgsql IMMUTABLE LEAKPROOF STRICT SECURITY DEFINER PARALLEL SAFE COST 100 ROWS 10 AS $$ BEGIN RETURN; END $$",
   "CREATE FUNCTION f(int, text) RETURNS TABLE (a int, b text) STABLE NOT LEAKPROOF CALLED ON NULL INPUT EXTERNAL SECURITY INVOKER PARALLEL RESTRICTED AS $body$SELECT $1, $2$body$ LANGUAGE sql",
   "CREATE FUNCTION f(x double precision, double precision, timestamp with time zone, y character varying(3)) RETURNS void VOLATILE RETURNS NULL ON NULL INPUT PARALLEL UNSAFE WINDOW LANGUAGE c AS 'obj', 'sym'",
-  `CREATE FUNCTION f("in" int, "out" int, "setof" int, "double" precision, "Mixed" int) RETURNS int AS $$it's $1 \\ $$ LANGUAGE sql`,
+  `CREATE FUNCTION f("in" int, "out" int, "setof" int, "double" int, "Mixed" int) RETURNS int AS $$it's $1 \\ $$ LANGUAGE sql`,
   "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $x$ $$ $x$",
   "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $_$ends in $$_$",
   "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $q$ $$ $x$ $x1$ $q$",

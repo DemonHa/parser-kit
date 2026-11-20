@@ -323,14 +323,8 @@ CREATE FUNCTION f(
   LANGUAGE c
   AS 'obj', 'sym';
 
--- CREATE FUNCTION f("in" int, "out" int, "setof" int, "double" precision, "Mixed" int) RETURNS int AS $$it's $1 \ $$ LANGUAGE sql
-CREATE FUNCTION f(
-  "in" int,
-  "out" int,
-  "setof" int,
-  "double" "precision",
-  "Mixed" int
-)
+-- CREATE FUNCTION f("in" int, "out" int, "setof" int, "double" int, "Mixed" int) RETURNS int AS $$it's $1 \ $$ LANGUAGE sql
+CREATE FUNCTION f("in" int, "out" int, "setof" int, "double" int, "Mixed" int)
   RETURNS int
   AS $$it's $1 \ $$
   LANGUAGE sql;
