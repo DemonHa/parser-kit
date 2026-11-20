@@ -1,6 +1,6 @@
 // A test helper that splits a plain-format pg_dump / pg_dumpall file into
 // statements the way psql does when it runs one (psqlscan.l), so each
-// statement can be handed to `sqlLite.parse` on its own.
+// statement can be handed to `postgres.parse` on its own.
 //
 // It follows psql's lexer only as far as framing goes:
 //

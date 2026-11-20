@@ -11,7 +11,7 @@ import {
   type TokenStream,
 } from "@parser-kit/core";
 
-// SQL-lite is the PostgreSQL-flavoured counterpart to js-lite: it exercises the
+// The PostgreSQL lexer, the counterpart to js-lite's: it exercises the
 // reader and keyword machinery DBML doesn't touch. Identifiers fold their ASCII
 // letters to lowercase, as PG's do (so grammar-side keyword matching is
 // exact-value matching and unreserved words stay usable as names), quoted
@@ -37,7 +37,7 @@ export type SqlTokenType =
 
 // --- Quoted literals ---
 // PG reads every quoted form in its scanner (scan.l), and so does this file:
-// sql-lite owns its `'…'`, `E'…'`, `"…"`, `B'…'`, `X'…'` and `U&` readers rather
+// it owns its `'…'`, `E'…'`, `"…"`, `B'…'`, `X'…'` and `U&` readers rather
 // than borrowing core's `readers.string`, which is lenient where PG is not —
 // it lets an unterminated literal run to the end of input, and knows only the
 // `{n,t,r,b,f}` backslash escapes. Running off the end croaks here, as it does
@@ -622,7 +622,7 @@ const rejectJunk = (stream: InputStream, tokenStart: Position, message: string):
 
 // Integers (decimal, `0x`/`0o`/`0b`), `1.5`, `5.`, `.5`, `1e3`, `1.e3`. The
 // core number reader leaves `5.` as `5` `.` and `123abc` as two tokens, both
-// unlike PG, so sql-lite reads its own. It declines (null, stream restored)
+// unlike PG, so this lexer reads its own. It declines (null, stream restored)
 // only for a `.` with no digit after it; past that it produces a number or
 // croaks. Its lookaheads each take and release the single snapshot slot in
 // turn, never nested.
@@ -663,7 +663,7 @@ const numberReader: Reader<SqlTokenType> = readers.custom("number", {
 
     if (stream.peek() === ".") {
       // `1..5` is PG's `{numericfail}`: the integer, with the dots left for the
-      // next token. sql-lite has no `..` token, so they then lex as `.` `.5`.
+      // next token. This lexer has no `..` token, so they then lex as `.` `.5`.
       stream.snapshot();
       stream.next();
       const dotDot = stream.peek() === ".";

@@ -12,7 +12,7 @@ npm install @parser-kit/core   # or: pnpm add / yarn add / bun add
 
 Ships ESM and CommonJS builds with bundled type declarations. Node >= 18, zero runtime dependencies.
 
-The kit knows nothing about any particular language. Two grammars in the repo parse real languages with the same engine: [`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite) (a JavaScript subset) and [`@parser-kit/sql`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql) (PostgreSQL 17, published as its own package).
+The kit knows nothing about any particular language. Two grammars in the repo parse real languages with the same engine: [`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite) (a JavaScript subset) and [`@parser-kit/sql`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql) (PostgreSQL 17, published as its own package, with the grammar in `src/postgres/`).
 
 ```ts
 import { bindTokens, defineGrammar, defineLexer, field, type Infer, readers, seq, skip } from "@parser-kit/core";
@@ -273,7 +273,7 @@ A `Doc` is a string, an array of docs (concatenation), or a command:
 Two real grammars double as the kit's genericity/integration tests and as the fastest way to learn it — read their `grammar.ts` top to bottom.
 
 - **[`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite)** — a JavaScript subset (`const`/`let`, `function`, `if`/`else`, `while`, `return`, blocks, expression statements, full expression precedence, arrays, arrow functions). Exercises what DBML doesn't: root-rule dispatch, newlines as whitespace, the whole `pratt()` table, load-bearing `attempt()` backtracking, and the template-literal *mode*.
-- **[`packages/sql/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql)** — the PostgreSQL 17 grammar published as `@parser-kit/sql`: DDL, DML, queries and psql scripts, with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, a full Pratt operator table with keyword operators, hand-written `custom()` rules and `diagnose()` recovery. The best reference for a folding lexer, keyword tiers and `word()`/`phrase()` keyword matching.
+- **[`packages/sql/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql)** — the PostgreSQL 17 grammar published as `@parser-kit/sql` (`postgres.parse`, grammar in [`src/postgres/grammar.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/sql/src/postgres/grammar.ts)): DDL, DML, queries and psql scripts, with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, a full Pratt operator table with keyword operators, hand-written `custom()` rules and `diagnose()` recovery. The best reference for a folding lexer, keyword tiers and `word()`/`phrase()` keyword matching.
 
 ## Design notes & current limits
 
@@ -299,7 +299,7 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the change workflow.
 
 ### Benchmarks
 
-The parser benchmarks live with the SQL grammar, in [`packages/sql/bench/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql/bench). [`sql-lite.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/sql/bench/sql-lite.bench.ts) pits `@parser-kit/sql` against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from its tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles. [`packages/core/bench/render.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/core/bench/render.bench.ts) measures `render` on a 1,000-statement doc, at `width: Infinity` and at two finite widths.
+The parser benchmarks live with the SQL grammar, in [`packages/sql/bench/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql/bench). [`postgres.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/sql/bench/postgres.bench.ts) pits `@parser-kit/sql` against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from its tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles. [`packages/core/bench/render.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/core/bench/render.bench.ts) measures `render` on a 1,000-statement doc, at `width: Infinity` and at two finite widths.
 
 ```sh
 pnpm bench          # run once, print the table

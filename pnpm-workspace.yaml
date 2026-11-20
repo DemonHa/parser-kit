@@ -22,3 +22,4 @@ catalog:
 
   # Benchmark comparison baseline
   node-sql-parser: "5.1.0"
+  "@dbml/core": "12.1.0"
