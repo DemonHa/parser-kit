@@ -122,8 +122,6 @@ export const quoted = (name: string): string => quoteName(name, "always");
  * encoding): quoted only when it must be, whatever `identifierQuote` says.
  */
 export const minimalIdent = minimal;
-/** A dotted type name, each part through `minimalIdent`. */
-export const minimalQualified = (parts: readonly string[]): string => parts.map(minimal).join(".");
 
 /**
  * A dotted function name, PG's `ColId indirection`: the first part is a column

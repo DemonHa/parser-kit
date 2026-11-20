@@ -265,7 +265,7 @@ SELECT
     (k || 'x') VALUE v FORMAT JSON
     NULL ON NULL
     WITH UNIQUE KEYS
-    RETURNING "json"
+    RETURNING json
   );
 
 -- SELECT JSON_OBJECT(k : v ABSENT ON NULL), JSON_ARRAY(), JSON_ARRAY(1, 'a' FORMAT JSON ENCODING utf8 ABSENT ON NULL RETURNING jsonb FORMAT JSON);
@@ -935,6 +935,3 @@ SELECT
   b::timestamp(3) with time zone,
   c::interval day to second
 FROM t;
-
--- SELECT t.* FROM t;
-SELECT t.* FROM t;

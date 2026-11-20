@@ -59,6 +59,8 @@ import { typeName } from "./types";
 // --- names and aliases ---
 
 /** ` AS alias (a, b)`, or nothing. AS is always written: a keyword alias needs it. */
+// Exported for the DML family (UPDATE / DELETE / MERGE aliases), as are
+// `selectItems` (RETURNING), `withClause`, `isQuery` and `columnDefinition`.
 export const aliasClause = (alias: string | null | undefined, columns?: string[]): Doc =>
   alias === null || alias === undefined
     ? ""
@@ -313,7 +315,8 @@ const tail = (q: Query, parts: Doc[]): void => {
 
 // --- FROM items ---
 
-const columnDefinition = (d: ColumnDefinition): Doc => [
+/** `name type [COLLATE c]`: a column definition list's entry, a composite type's attribute. */
+export const columnDefinition = (d: ColumnDefinition): Doc => [
   ident(d.name),
   " ",
   typeName(d.type),

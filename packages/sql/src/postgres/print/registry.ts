@@ -3,9 +3,6 @@
 import type { Doc, Handlers } from "@parser-kit/core/print";
 import type { Stmt } from "../ast";
 
-/** Handlers for some of the statement kinds: what a family prints. */
-export type StatementHandlers = Partial<Handlers<Stmt, "kind">>;
-
 /** One statement family: the kinds it prints, and the kinds it will print but doesn't yet. */
 export interface Family<K extends Stmt["kind"], P extends readonly Stmt["kind"][]> {
   readonly name: string;

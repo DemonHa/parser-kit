@@ -16,10 +16,10 @@
 // is a missing handler here, a kind two families name is an error here, and
 // one a family both prints and lists as pending is an error in that family.
 //
-// The printers recurse through module-level functions (`expr`, `printQuery`,
-// `printStatement`), not through each handler's `print` argument, so a printer
-// built from them with `extendPrinter` would apply its overrides at the top
-// level only.
+// The printers recurse mostly through module-level functions (`expr`,
+// `printQuery`, `printStatement`) rather than each handler's `print` argument,
+// so a printer built from them with `extendPrinter` would apply its overrides
+// at the top level only.
 import {
   type Doc,
   definePrinter,
@@ -53,7 +53,7 @@ const handlersOf = <K extends Stmt["kind"], P extends readonly Stmt["kind"][]>(
   ...family.statements,
 });
 
-/** Every statement family, for the tests. */
+/** Every statement family, for the tests. A new family goes here and in `printStatement` below. */
 export const FAMILIES = [queryFamily, dmlFamily, tablesFamily, objectsFamily, rolesFamily] as const;
 
 // Every kind belongs to exactly one family. Named by two (printed or pending

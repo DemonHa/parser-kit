@@ -1,3 +1,4 @@
+import { readdirSync, readFileSync } from "node:fs";
 import { stripSpans } from "@parser-kit/core";
 import { type Printable, render } from "@parser-kit/core/print";
 import { fieldCoverage } from "@parser-kit/core/print/testing";
@@ -17,15 +18,16 @@ import { printFrom } from "../src/postgres/print/query";
 import { CORPUS } from "./corpus";
 import { LEXER_EDGE_CASES, MULTI_LINE, SUPPLEMENTAL } from "./parity-corpus";
 import { PG_BATTERY } from "./pg-coverage";
+import { splitPsqlScript } from "./psql-split";
 import * as dml from "./stringify-cases/dml";
 import * as objects from "./stringify-cases/objects";
 import * as query from "./stringify-cases/query";
 import * as roles from "./stringify-cases/roles";
 import * as tables from "./stringify-cases/tables";
 
-// The printer's round-trip harness, over every valid statement the other
-// suites hold: the benchmark corpus, the parity lists and the accepted
-// PostgreSQL coverage battery rows, plus PRINTER_CASES below.
+// The printer's round-trip harness, over the benchmark corpus, the parity
+// lists, the accepted PostgreSQL coverage battery rows, the statements of the
+// pg_dump fixtures that parse, and each family's own cases.
 //
 //   P1  parse(stringify(ast)) is the same tree, at widths ∞, 80, 40 and 1
 //       (width 1 breaks every line the layout allows, which is where a break
@@ -33,29 +35,50 @@ import * as tables from "./stringify-cases/tables";
 //       option;
 //   P2  printing is idempotent: stringify(parse(stringify(ast))) is the same text;
 //   P3  `stringify.<family>.golden.sql` pins each statement family's width-80
-//       output of the corpus and the parity SUPPLEMENTAL list, so a layout
-//       change shows in review (one file per family, so families landing in
-//       parallel touch different files);
+//       output of the corpus, the parity SUPPLEMENTAL list and the family's
+//       own cases, so a layout change shows in review (one file per family, so
+//       a family's printer moves its own golden, and the query golden only
+//       where a query holds one of its statements, as a CTE body);
 //   P4  every variant and every field the printed trees hold was read by the
 //       printer, so a field it forgets fails here rather than vanishing.
 //
 // Statements of a kind its family doesn't print yet throw NotPrintableError
 // and are skipped; the test checks that every skip is such a kind
 // (STRINGIFY_REPORT=1 prints how many of each remain). Each family keeps its
-// own cases in `stringify-cases/<family>.ts`. Regenerate the goldens with `pnpm test -- -u` only
-// when the change in them is intended.
+// own cases in `stringify-cases/<family>.ts`. Regenerate the goldens with
+// `pnpm test -- -u` only when the change in them is intended.
 
 // Each family's own cases and the nested variants its printer reads.
 const FAMILY_CASES: Record<string, { cases: string[]; kinds: string[] }> = { query, dml, tables, objects, roles };
 const PRINTER_CASES = Object.values(FAMILY_CASES).flatMap((family) => family.cases);
 
+// The pg_dump fixtures' statements, split as psql would, that parse alone.
+const DUMP_STATEMENTS = readdirSync(new URL("./fixtures/pg-dump/", import.meta.url))
+  .filter((file) => file.endsWith(".sql"))
+  .flatMap(
+    (file) => splitPsqlScript(readFileSync(new URL(`./fixtures/pg-dump/${file}`, import.meta.url), "utf8")).statements,
+  )
+  .map((statement) => statement.sql)
+  .filter((sql) => {
+    try {
+      postgres.parse(sql);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+// Each source once, though some sit in more than one list.
 const SOURCES = [
-  ...PRINTER_CASES,
-  ...CORPUS.map((sample) => sample.sql),
-  ...SUPPLEMENTAL,
-  ...MULTI_LINE,
-  ...LEXER_EDGE_CASES,
-  ...PG_BATTERY.filter((row) => row.expect === "both" || row.expect === "sql-lite").map((row) => row.sql),
+  ...new Set([
+    ...PRINTER_CASES,
+    ...CORPUS.map((sample) => sample.sql),
+    ...SUPPLEMENTAL,
+    ...MULTI_LINE,
+    ...LEXER_EDGE_CASES,
+    ...PG_BATTERY.filter((row) => row.expect === "both" || row.expect === "sql-lite").map((row) => row.sql),
+    ...DUMP_STATEMENTS,
+  ]),
 ];
 
 const WIDTHS = [Number.POSITIVE_INFINITY, 80, 40, 1];

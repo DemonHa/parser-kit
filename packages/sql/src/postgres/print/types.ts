@@ -32,6 +32,7 @@ const KEYWORD_TYPES = new Set([
   "int",
   "integer",
   "interval",
+  "json",
   "nchar",
   "numeric",
   "real",

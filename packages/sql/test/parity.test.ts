@@ -14,8 +14,8 @@ import { LEXER_EDGE_CASES, MULTI_LINE, SUPPLEMENTAL } from "./parity-corpus";
 // them before comparing, and so does the `lex` helper.
 //
 // This harness closes that gap. It serialises the full AST — spans included,
-// nothing stripped — for every statement below, plus the errors `diagnose()`
-// collects for a fixed list of malformed inputs, and compares the result
+// nothing stripped — for every corpus row and every statement in
+// `parity-corpus.ts`, plus the errors `diagnose()` collects for a fixed list of malformed inputs, and compares the result
 // byte-for-byte against a committed golden. A refactor that is supposed to
 // preserve behaviour must leave those files untouched.
 //

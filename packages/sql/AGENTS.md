@@ -36,15 +36,21 @@ internals and grammar-authoring gotchas.
   Parentheses come from the grammar's Pratt tables through `precedence`, so a
   group that builds a new node kind needs its printer-only `nodes` / `rhs`
   annotation too. `expr.ts` and `query.ts` import each other: neither may use
-  the other's exports at module load, only inside functions.
+  the other's exports at module load, only inside functions. Some AST pieces
+  serve several families (`RelationOption`, `GenericOption`, `ObjectRef`,
+  `FunctionArg`, the rename / owner / schema actions, `AlterConfigAction`);
+  the first family that prints one puts its printer in a shared module
+  (`print/shared.ts`) for the others to import, rather than in its own.
 - `test/` — unit tests (`postgres.test.ts`), the entry-surface pin
   (`entry.test.ts`), the parity harness and its goldens, the PostgreSQL coverage
   battery (`pg-coverage.ts`) and the pg_dump corpus (`pg-dump-corpus.ts`,
   `fixtures/pg-dump/`, pagila vendored under the PostgreSQL License) and
   `psql-split.ts`, the psql-style statement splitter the corpus test uses.
-  `stringify.test.ts` round-trips every valid statement of those suites through
-  the printer (`stringify.<family>.golden.sql` pin its width-80 output per
-  statement family), and `parity-corpus.ts` holds the parity lists both
+  `stringify.test.ts` round-trips the corpus, the parity lists, the accepted
+  battery rows, the pg_dump statements that parse and each family's cases in
+  `stringify-cases/` through the printer (`stringify.<family>.golden.sql` pin
+  its width-80 output per statement family; `STRINGIFY_REPORT=1` prints what
+  isn't printable yet), and `parity-corpus.ts` holds the parity lists both
   harnesses read.
 - `bench/` — the node-sql-parser comparisons. `bench-baseline.json` at the repo
   root keys on their file paths and group names.
