@@ -116,6 +116,7 @@ const PARSER_DIFFERENCES: ParserDifference[] = [
     acceptedBy: "ours",
     reason: RELOPTIONS,
   },
+  { sql: "CREATE TABLE t (a int) WITH (y = (a, 'b', -0))", acceptedBy: "ours", reason: RELOPTIONS },
   {
     sql: 'SELECT a BETWEEN b COLLATE "C" AND c, a BETWEEN SYMMETRIC 1 AND 2, a NOT BETWEEN ASYMMETRIC b + 1 AND c;',
     acceptedBy: "ours",
@@ -245,12 +246,41 @@ const PRINTER_DIFFERENCES: PrinterDifference[] = [
     reason: DO_ORDER,
   },
   {
+    sql: "CREATE TABLE t (a varchar(10), b numeric(10, 2), c int[], d text[][]);",
+    paths: ["$.0.CreateStmt.tableElts.3.ColumnDef.typeName.arrayBounds"],
+    reason: "A type's dimension count isn't in our tree, as in the row above.",
+  },
+  {
+    sql: "CREATE TABLE arr (tags text[], matrix int[][], scores integer ARRAY[3], b bit varying(8), iv interval day to second(3));",
+    paths: [
+      "$.0.CreateStmt.tableElts.1.ColumnDef.typeName.arrayBounds",
+      "$.0.CreateStmt.tableElts.2.ColumnDef.typeName.arrayBounds.0.Integer.ival",
+    ],
+    reason: "A type's array sizes and dimension count aren't in our tree, as in the row above.",
+  },
+  {
+    sql: 'CREATE INDEX i ON t (nulls NULLS FIRST, a nulls, (x) "asc")',
+    paths: ["$.0.IndexStmt.indexParams.2.IndexElem.expr", "$.0.IndexStmt.indexParams.2.IndexElem.name"],
+    reason:
+      "An index element `(x)` gives the same tree as the column `x`, which the printer writes. PostgreSQL's tree has an expression for the source, but it indexes an expression that is a plain column as that column.",
+  },
+  {
     sql: "CREATE STATISTICS (mcv) ON (a::int), (b) FROM t",
     paths: ["$.0.CreateStatsStmt.exprs.1.StatsElem.expr", "$.0.CreateStatsStmt.exprs.1.StatsElem.name"],
     reason:
       "A parenthesised column `(b)` gives the same tree as the column `b`, which the printer writes. PostgreSQL's tree has an expression element for the source and a column element for the print; CREATE STATISTICS stores both as the column (same `stxkeys`, no `stxexprs`, checked on PostgreSQL 16).",
   },
   // Printer known limits: real meaning changes our tree can't express.
+  {
+    sql: 'CREATE INDEX i ON t USING gist (a gist_trgm_ops (siglen = 32), (a + b), (c COLLATE "C"), (d::text) DESC, (e IS NULL))',
+    paths: [
+      "$.0.IndexStmt.indexParams.2.IndexElem.expr",
+      "$.0.IndexStmt.indexParams.2.IndexElem.name",
+      "$.0.IndexStmt.indexParams.2.IndexElem.collation",
+    ],
+    reason:
+      'An index element `(c COLLATE "C")` gives the same tree as `c COLLATE "C"`, and the printer writes the second: the column with its own collation, where PostgreSQL indexes the first as an expression.',
+  },
   {
     sql: "ALTER FUNCTION f(int) SET schema = 'x'",
     paths: ["$.0.AlterFunctionStmt.actions.0.DefElem.arg.VariableSetStmt.name"],

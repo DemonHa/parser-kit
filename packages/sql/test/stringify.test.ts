@@ -391,11 +391,18 @@ describe("stringify on hand-built trees", () => {
   });
 
   it("throws NotPrintableError for a statement family not printed yet", () => {
-    const [stmt] = postgres.parse("CREATE TABLE t (a int)");
-    expect(() => stringify(stmt!)).toThrow(NotPrintableError);
-    expect(() => stringify(stmt!)).toThrow('A "createTable" statement is not yet printable');
+    // Any kind a family doesn't print yet; the handler throws before it reads the node.
+    const pending = new Set<string>(FAMILIES.flatMap((family) => [...family.pending]));
+    const [kind] = pending;
+    if (kind !== undefined) {
+      const stmt = { kind } as Stmt;
+      expect(() => stringify(stmt)).toThrow(NotPrintableError);
+      expect(() => stringify(stmt)).toThrow(`A "${kind}" statement is not yet printable`);
+    }
     // Nested in a printable statement (EXPLAIN's body), it throws all the same.
-    const [explain] = postgres.parse("EXPLAIN CREATE TABLE t AS SELECT 1");
-    expect(() => stringify(explain!)).toThrow('A "createTableAs" statement is not yet printable');
+    if (pending.has("createView")) {
+      const [explain] = postgres.parse("EXPLAIN CREATE MATERIALIZED VIEW v AS SELECT 1");
+      expect(() => stringify(explain!)).toThrow('A "createView" statement is not yet printable');
+    }
   });
 });
