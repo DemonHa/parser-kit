@@ -15,7 +15,7 @@ grammars are the fastest way to learn the kit and are its genericity/integration
 
 ## Public API
 
-`src/index.ts` re-exports everything supported (no default export). The pieces:
+`src/index.ts` re-exports the parsing API (no default export); `src/print/index.ts` is the separate `@parser-kit/core/print` entry (see below). The parsing pieces:
 
 - **Lexing** — `defineLexer`, the `readers.*` library (`number`, `string`,
   `dollarString`, `lineComment`, `blockComment`, `operator`, `regex`,
@@ -52,6 +52,13 @@ mid-migration onto the rest.
 - `grammar.ts` — `defineExpression` / `defineGrammar` tie a lexer + root rule
   together and add recovery/trivia/error-reporting policy.
 - `strip-spans.ts` — `stripSpans` for structural test comparisons.
+- `print/` — the `@parser-kit/core/print` entry: `doc.ts` (the document IR and
+  its builders) and `render.ts` (the iterative, width-aware renderer). It
+  imports nothing from the rest of `src/`, and nothing in the parse path may
+  import it, so parse-only bundles stay the same size; a test in
+  `print/render.test.ts` enforces the second rule. `scripts/verify-packages.sh`
+  checks the subpath from ESM, CJS and TypeScript and holds it to a 3 KB
+  min+gz budget. Its bench is `bench/render.bench.ts`.
 
 ## Authoring a grammar — gotchas that will bite you
 

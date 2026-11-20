@@ -76,7 +76,9 @@ const fits = (doc: Doc, rest: Stack, width: number): boolean => {
   return false;
 };
 
-// Drops spaces and tabs at the end of the output, so no line ends in whitespace.
+// Drops spaces and tabs at the end of the output. Called at every line break the
+// doc makes and at the end, so no rendered line ends in whitespace. (Text that
+// contains its own "\n" is written as is.)
 const trimTrailing = (out: string[]): void => {
   while (out.length > 0) {
     const last = out[out.length - 1]!;
@@ -96,8 +98,10 @@ const trimTrailing = (out: string[]): void => {
  * break. Text is measured by `.length`, an indentation string by its length,
  * and a `"\n"` inside text is written as is (no indentation added after it).
  *
- * Spaces and tabs at the end of a line are dropped, as prettier does, so a
- * group ending in `line` before a hard line leaves no trailing space. The walk
+ * Spaces and tabs before each line break the doc makes, and at the very end,
+ * are dropped (prettier does the same), so a group ending in `line` before a
+ * hard line leaves no trailing space. Lines outside every group always break,
+ * and an `ifBreak` outside every group prints its broken branch. The walk
  * is iterative, so document depth is limited by memory, not the call stack.
  */
 export const render = (doc: Doc, options?: RenderOptions): string => {
@@ -173,5 +177,6 @@ export const render = (doc: Doc, options?: RenderOptions): string => {
       }
     }
   }
+  trimTrailing(out);
   return out.join("");
 };

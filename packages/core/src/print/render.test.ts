@@ -81,8 +81,9 @@ describe("render", () => {
     expect(render(d, { width: 10 })).toBe("outer(\n  inner(\n    x,\n    y\n  ),\n  zzzzzzzzzz\n)");
   });
 
-  it("treats lines outside every group as broken", () => {
+  it("treats lines and ifBreak outside every group as broken", () => {
     expect(render(["a", line, "b", softline, "c"], { width: 80 })).toBe("a\nb\nc");
+    expect(render(["a", ifBreak("B", "F")], { width: INF })).toBe("aB");
     expect(render(["a", line, "b"], { width: INF })).toBe("a\nb");
   });
 
@@ -113,6 +114,9 @@ describe("render", () => {
     // Text before the trailing whitespace is kept, across chunks.
     expect(render(["x ", "", " ", hardline, "y"])).toBe("x\ny");
     expect(render(["a", hardline, "  ", hardline, "b"])).toBe("a\n\nb");
+    // ...and at the end of the output, but not before a newline inside text.
+    expect(render(group(["a", line]))).toBe("a");
+    expect(render(["a ", "\nb"])).toBe("a \nb");
   });
 
   it("chooses the ifBreak branch from the enclosing group's mode", () => {

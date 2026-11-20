@@ -121,12 +121,26 @@ TS
   consumer.mts consumer.cts
 echo "TypeScript ok: @parser-kit/sql and @parser-kit/core/print types resolve from ESM and CJS (nodenext)"
 
+# Older CommonJS setups (moduleResolution node10) ignore "exports"; core's
+# typesVersions map keeps the ./print subpath resolvable there.
+cat > consumer-node10.ts <<'TS'
+import { defineGrammar } from "@parser-kit/core";
+import { type Doc, render } from "@parser-kit/core/print";
+const d: Doc = ["a", "b"];
+export const text: string = render(d);
+export const g: unknown = defineGrammar;
+TS
+"$ROOT/node_modules/.bin/tsc" --noEmit --strict --target es2022 --module commonjs --moduleResolution node10 \
+  consumer-node10.ts
+echo "TypeScript ok: @parser-kit/core and @parser-kit/core/print types resolve under moduleResolution node10"
+
 # Size budget for the print entry, measured the way a consumer's bundler sees
 # it: bundled from the installed tarball, minified, gzipped.
 PRINT_BUDGET=3072
-npm install --no-audit --no-fund --no-save esbuild@0.28.2 >/dev/null
+# esbuild comes from the workspace (pinned by the lockfile); it resolves the
+# import from this directory, so the installed tarball is what gets measured.
 echo 'export * from "@parser-kit/core/print";' > print-entry.mjs
-PRINT_SIZE=$(npx --no-install esbuild print-entry.mjs --bundle --minify --format=esm --log-level=error | gzip -9 | wc -c)
+PRINT_SIZE=$("$ROOT/node_modules/.bin/esbuild" print-entry.mjs --bundle --minify --format=esm --log-level=error | gzip -9 | wc -c)
 if [ "$PRINT_SIZE" -gt "$PRINT_BUDGET" ]; then
   echo "::error::@parser-kit/core/print is $PRINT_SIZE bytes min+gz, over the $PRINT_BUDGET byte budget"
   exit 1

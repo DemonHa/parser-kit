@@ -232,7 +232,7 @@ Every grammar exposes:
 
 ## Printing: `@parser-kit/core/print`
 
-An opt-in entry point for the other direction, AST → text. It holds a Wadler/Leijen-style document IR (the model prettier uses) and a renderer that lays a document out for a line width. You write the printer by hand, one function per node, and build docs instead of strings. The entry is about 1.2 KB minified and gzipped, and nothing in the parsing API imports it, so parse-only bundles don't grow.
+An opt-in entry point for the other direction, AST → text. It holds a Wadler/Leijen-style document IR (the model prettier uses) and a renderer that lays a document out for a line width. You write the printer by hand, one function per node, and build docs instead of strings. The entry is about 1.3 KB minified and gzipped, and nothing in the parsing API imports it, so parse-only bundles don't grow.
 
 ```ts
 import { doc, render } from "@parser-kit/core/print";
@@ -246,25 +246,27 @@ render(call("f", ["alpha", "beta"]), { width: 10 });   // "f(\n  alpha,\n  beta\
 
 // Fixed shapes: an indented body, and a settings list that vanishes when empty.
 const column = ["id int", list(" [", ["pk", "increment"], "]", { empty: "omit" })];
-render(block("Table users", [column]), { indent: "\t" });
+render(block("Table users", [column]), { width: Infinity, indent: "\t" });
 // "Table users {\n\tid int [pk, increment]\n}"
 ```
 
 A `Doc` is a string, an array of docs (concatenation), or a command:
 
 | Builder | Meaning |
-| --- | --- |
+|---|---|
 | `group(doc, { shouldBreak? })` | Lay `doc` out flat if it fits in the rest of the line, else break every line directly inside it. Nested groups decide for themselves, outermost first. |
 | `indent(doc)` | One more indentation level for the line breaks inside `doc`. |
 | `line` / `softline` | A space / nothing when the enclosing group is flat, a newline when it is broken. |
-| `hardline` | Always a newline. Every group around it breaks. |
+| `hardline` | Always a newline. Every group around it breaks (except from inside the broken branch of an `ifBreak`, which a flat group never prints). |
 | `nbsp` | A space that never breaks, for places where a newline would change meaning. |
 | `ifBreak(broken, flat?)` | Pick a doc by the enclosing group's mode (trailing commas, optional parentheses). |
 | `join(sep, docs)` | `docs` with `sep` between them. |
 | `block(header, items, { open?, close? })` | `header {`, one indented item per line, `}`. Prints `header {}` when empty. |
 | `list(open, items, close, { separator?, empty? })` | `[a, b]` flat, one item per line broken. `empty: "omit"` prints nothing for an empty list. |
 
-`render(doc, { width = 80, indent = 2 })` returns the text. `indent` is a number of spaces or a string such as `"\t"`. **`width: Infinity`** lays every group out flat and skips width measurement altogether, which is the fast path for one-line output. Only hard lines, groups built with `shouldBreak`, and lines outside every group still break. As in prettier, a `line` that is not inside any group always breaks, so wrap a doc in `group()` to get it on one line. Text width is its `.length`, and a `"\n"` inside a string is written as is, with no indentation after it. Rendering is iterative, so a deeply nested doc can't overflow the stack.
+`render(doc, { width = 80, indent = 2 })` returns the text. `indent` is a number of spaces or a string such as `"\t"`. **`width: Infinity`** lays every group out flat and skips width measurement altogether, which is the fast path for one-line output. Only hard lines, groups built with `shouldBreak`, and lines outside every group still break. As in prettier, a `line` that is not inside any group always breaks, so wrap a doc in `group()` to get it on one line. Text width is its `.length` (an indent string's too, so a tab counts as one column), and a `"\n"` inside a string is written as is, with no indentation after it. Spaces and tabs before each line break the doc makes, and at the end of the output, are dropped. Rendering is iterative, so a deeply nested doc can't overflow the stack.
+
+`list` is a group, so it breaks when it doesn't fit. For a language where newlines carry meaning (DBML settings lists, for instance), render at `width: Infinity`, or concatenate the parts yourself, so only the hard lines you placed break.
 
 ## The example grammars
 
@@ -297,7 +299,7 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the change workflow.
 
 ### Benchmarks
 
-The benchmarks live with the SQL grammar, in [`packages/sql/bench/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql/bench). [`sql-lite.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/sql/bench/sql-lite.bench.ts) pits `@parser-kit/sql` against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from its tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles.
+The parser benchmarks live with the SQL grammar, in [`packages/sql/bench/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql/bench). [`sql-lite.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/sql/bench/sql-lite.bench.ts) pits `@parser-kit/sql` against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from its tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles. [`packages/core/bench/render.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/core/bench/render.bench.ts) measures `render` on a 1,000-statement doc, at `width: Infinity` and at two finite widths.
 
 ```sh
 pnpm bench          # run once, print the table

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { block, type Doc, join, list, render } from "./index";
+import { block, type Doc, hardline, join, list, render } from "./index";
 
 // A genericity guard: a tiny printer for a DBML-shaped schema language, written
 // against the public IR only. Its layout is fixed (tabs, one column per line,
-// settings lists in brackets), so it never depends on the width.
+// settings lists in brackets). DBML reads newlines as meaningful and `list()`
+// is a group that can break, so the printer always renders at width Infinity:
+// only the hard lines inside blocks break.
 
 type ColumnSetting =
   | { kind: "pk" }
@@ -77,9 +79,9 @@ const table = (t: Table): Doc => {
   return block(header, body);
 };
 
-const schema = (tables: Table[]): Doc => join(["\n", "\n"], tables.map(table));
+const schema = (tables: Table[]): Doc => join([hardline, hardline], tables.map(table));
 
-const print = (tables: Table[], width = Number.POSITIVE_INFINITY) => render(schema(tables), { width, indent: "\t" });
+const print = (tables: Table[]) => render(schema(tables), { width: Number.POSITIVE_INFINITY, indent: "\t" });
 
 const users: Table = {
   name: "users",
@@ -153,9 +155,20 @@ describe("a DBML-shaped printer on the doc IR", () => {
     expect(out).toBe('Table "say \\"hi\\"" {\n\t"a b" int\n\n\tNote: \'\\\\\\\'\'\n}');
   });
 
-  it("is a fixed layout: the same output at any reasonable width", () => {
-    const expected = print([users, tags]);
-    expect(print([users, tags], 80)).toBe(expected);
-    expect(print([users, tags], 60)).toBe(expected);
+  it("keeps settings lists on one line however long they get", () => {
+    const longNote = "x".repeat(200);
+    const out = print([
+      {
+        name: "t",
+        columns: [{ name: "c", type: "int", settings: [{ kind: "pk" }, { kind: "note", text: longNote }] }],
+        indexes: [],
+      },
+    ]);
+    expect(out).toBe(`Table t {\n\tc int [pk, note: '${longNote}']\n}`);
+  });
+
+  it("would break a settings list at a finite width, which is why it renders at Infinity", () => {
+    const d = column({ name: "c", type: "int", settings: [{ kind: "pk" }, { kind: "unique" }] });
+    expect(render(d, { width: 10 })).toBe("c int [\n  pk,\n  unique\n]");
   });
 });

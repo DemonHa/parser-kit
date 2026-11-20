@@ -56,6 +56,13 @@
     },
     "./package.json": "./package.json"
   },
+  "typesVersions": {
+    "*": {
+      "print": [
+        "./build/cjs/print/index.d.ts"
+      ]
+    }
+  },
   "files": [
     "build",
     "src",

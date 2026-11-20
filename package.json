@@ -24,6 +24,7 @@
     "@changesets/cli": "catalog:",
     "@commitlint/cli": "catalog:",
     "@commitlint/config-conventional": "catalog:",
+    "esbuild": "catalog:",
     "husky": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
