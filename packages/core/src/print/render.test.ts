@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join as joinPath } from "node:path";
+import { join as joinPath, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import * as entry from "./index";
 import { block, type Doc, group, hardline, ifBreak, indent, join, line, list, nbsp, softline } from "./index";
@@ -211,6 +211,8 @@ describe("block", () => {
     );
     expect(render(block("", ["x;"]))).toBe("{\n  x;\n}");
     expect(render(block([], []))).toBe("{}");
+    expect(render(block([""], ["x;"]))).toBe("{\n  x;\n}");
+    expect(render(block([[], ""], []))).toBe("{}");
   });
 
   it("nests", () => {
@@ -277,9 +279,9 @@ describe("deep documents", () => {
 describe("packaging", () => {
   it("is not imported by the parse path", () => {
     const src = joinPath(import.meta.dirname, "..");
-    const offenders = readdirSync(src)
-      .filter((f) => f.endsWith(".ts"))
-      .filter((f) => /from\s+["']\.\/print/.test(readFileSync(joinPath(src, f), "utf8")));
+    const offenders = (readdirSync(src, { recursive: true }) as string[])
+      .filter((f) => f.endsWith(".ts") && !f.startsWith(`print${sep}`))
+      .filter((f) => /["'][./]*\/print(\/|["'])/.test(readFileSync(joinPath(src, f), "utf8")));
     expect(offenders).toEqual([]);
   });
 });

@@ -141,7 +141,8 @@ export const join = (separator: Doc, docs: readonly Doc[]): Doc[] => {
   return out;
 };
 
-const isEmpty = (d: Doc): boolean => d === "" || (Array.isArray(d) && d.length === 0);
+/** True for a doc that prints nothing: `""`, or arrays holding only such docs. */
+const isEmpty = (d: Doc): boolean => d === "" || (Array.isArray(d) && d.every(isEmpty));
 
 /**
  * A header followed by a delimited body with one item per line, indented:
@@ -154,7 +155,7 @@ const isEmpty = (d: Doc): boolean => d === "" || (Array.isArray(d) && d.length =
  * ```
  *
  * The body always breaks. With no items it prints `header {}`. An empty header
- * (`""` or `[]`) prints the body alone, with no leading space.
+ * (`""`, `[]`, or arrays of those) prints the body alone, with no leading space.
  */
 export const block = (header: Doc, items: readonly Doc[], options?: BlockOptions): Doc[] => {
   const open = options?.open ?? "{";

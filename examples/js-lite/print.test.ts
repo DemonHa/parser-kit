@@ -52,6 +52,7 @@ const bp = (e: Expr): number => {
 /** Prints `e`, parenthesised if it binds looser than `min`. */
 const operand = (e: Expr, min: number): Doc => (bp(e) < min ? ["(", expr(e), ")"] : expr(e));
 
+// Enough for the corpus below, which has no string holding both quote kinds or a backslash.
 const str = (s: string): string => (s.includes("'") ? `"${s}"` : `'${s}'`);
 
 const params = (ps: string[]): Doc => (ps.length === 1 ? ps[0]! : list("(", ps, ")"));

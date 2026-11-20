@@ -3,7 +3,8 @@ import type { Doc, DocCommand } from "./doc";
 export interface RenderOptions {
   /**
    * Target line width, in characters. Default 80. `Infinity` lays every group
-   * out flat (only hard lines break) and skips all width measurement.
+   * flat unless it must break (`shouldBreak`, or it contains a hard line) and
+   * skips all width measurement.
    */
   width?: number;
   /**
@@ -100,8 +101,8 @@ const trimTrailing = (out: string[]): void => {
  *
  * Spaces and tabs before each line break the doc makes, and at the very end,
  * are dropped (prettier does the same), so a group ending in `line` before a
- * hard line leaves no trailing space. Lines outside every group always break,
- * and an `ifBreak` outside every group prints its broken branch. The walk
+ * hard line leaves no trailing space. An `ifBreak` outside every group prints
+ * its broken branch. The walk
  * is iterative, so document depth is limited by memory, not the call stack.
  */
 export const render = (doc: Doc, options?: RenderOptions): string => {
