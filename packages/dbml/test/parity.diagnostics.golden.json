@@ -1,0 +1,2329 @@
+[
+  {
+    "name": "empty script",
+    "errors": []
+  },
+  {
+    "name": "newlines only",
+    "errors": []
+  },
+  {
+    "name": "whitespace and comments only",
+    "errors": []
+  },
+  {
+    "name": "project with database_type and note",
+    "errors": []
+  },
+  {
+    "name": "project with block note and custom properties",
+    "errors": []
+  },
+  {
+    "name": "project without a name",
+    "errors": []
+  },
+  {
+    "name": "table basic",
+    "errors": []
+  },
+  {
+    "name": "table with schema name",
+    "errors": []
+  },
+  {
+    "name": "table with alias",
+    "errors": []
+  },
+  {
+    "name": "table with quoted name",
+    "errors": []
+  },
+  {
+    "name": "table with quoted schema and alias",
+    "errors": []
+  },
+  {
+    "name": "table with quoted schema name",
+    "errors": []
+  },
+  {
+    "name": "table with quoted column name and type",
+    "errors": []
+  },
+  {
+    "name": "table keyword in any case",
+    "errors": []
+  },
+  {
+    "name": "single-line table body",
+    "errors": []
+  },
+  {
+    "name": "single-line blocks",
+    "errors": []
+  },
+  {
+    "name": "all column type forms",
+    "errors": []
+  },
+  {
+    "name": "type length single",
+    "errors": []
+  },
+  {
+    "name": "type length multiple",
+    "errors": []
+  },
+  {
+    "name": "empty type args",
+    "errors": []
+  },
+  {
+    "name": "type args with strings and names",
+    "errors": []
+  },
+  {
+    "name": "pk and not null",
+    "errors": []
+  },
+  {
+    "name": "all column settings",
+    "errors": []
+  },
+  {
+    "name": "empty settings list",
+    "errors": []
+  },
+  {
+    "name": "bare pk and unique after the type",
+    "errors": []
+  },
+  {
+    "name": "settings list spanning lines",
+    "errors": []
+  },
+  {
+    "name": "column settings in any case",
+    "errors": []
+  },
+  {
+    "name": "default values of every kind",
+    "errors": []
+  },
+  {
+    "name": "default string",
+    "errors": []
+  },
+  {
+    "name": "default number",
+    "errors": []
+  },
+  {
+    "name": "default float",
+    "errors": []
+  },
+  {
+    "name": "default negative number",
+    "errors": []
+  },
+  {
+    "name": "default negative float",
+    "errors": []
+  },
+  {
+    "name": "default true",
+    "errors": []
+  },
+  {
+    "name": "default false",
+    "errors": []
+  },
+  {
+    "name": "default null",
+    "errors": []
+  },
+  {
+    "name": "default null with not null",
+    "errors": []
+  },
+  {
+    "name": "default expression",
+    "errors": []
+  },
+  {
+    "name": "ref setting valid",
+    "errors": []
+  },
+  {
+    "name": "ref setting every relation",
+    "errors": []
+  },
+  {
+    "name": "note setting valid",
+    "errors": []
+  },
+  {
+    "name": "check setting expression",
+    "errors": []
+  },
+  {
+    "name": "table note double-quoted string",
+    "errors": []
+  },
+  {
+    "name": "table note string",
+    "errors": []
+  },
+  {
+    "name": "table note multiline string",
+    "errors": []
+  },
+  {
+    "name": "table note block form",
+    "errors": []
+  },
+  {
+    "name": "string escapes",
+    "errors": []
+  },
+  {
+    "name": "headercolor short hex",
+    "errors": []
+  },
+  {
+    "name": "headercolor long hex",
+    "errors": []
+  },
+  {
+    "name": "every table setting",
+    "errors": []
+  },
+  {
+    "name": "ref short form",
+    "errors": []
+  },
+  {
+    "name": "ref short form named",
+    "errors": []
+  },
+  {
+    "name": "ref long form",
+    "errors": []
+  },
+  {
+    "name": "ref long form unnamed",
+    "errors": []
+  },
+  {
+    "name": "ref every relation",
+    "errors": []
+  },
+  {
+    "name": "ref optional sides",
+    "errors": []
+  },
+  {
+    "name": "ref composite",
+    "errors": []
+  },
+  {
+    "name": "ref with schema names",
+    "errors": []
+  },
+  {
+    "name": "ref with quoted schema names",
+    "errors": []
+  },
+  {
+    "name": "ref every setting",
+    "errors": []
+  },
+  {
+    "name": "ref without spaces around the relation",
+    "errors": []
+  },
+  {
+    "name": "enum basic",
+    "errors": []
+  },
+  {
+    "name": "enum with schema and alias",
+    "errors": []
+  },
+  {
+    "name": "enum with quoted names",
+    "errors": []
+  },
+  {
+    "name": "enum with value settings",
+    "errors": []
+  },
+  {
+    "name": "enum used as a column type",
+    "errors": []
+  },
+  {
+    "name": "indexes plain and composite",
+    "errors": []
+  },
+  {
+    "name": "indexes with settings",
+    "errors": []
+  },
+  {
+    "name": "indexes with name and type settings",
+    "errors": []
+  },
+  {
+    "name": "indexes with expressions",
+    "errors": []
+  },
+  {
+    "name": "indexes with sort order",
+    "errors": []
+  },
+  {
+    "name": "checks block",
+    "errors": []
+  },
+  {
+    "name": "table group with settings and note",
+    "errors": []
+  },
+  {
+    "name": "table group basic",
+    "errors": []
+  },
+  {
+    "name": "sticky note",
+    "errors": []
+  },
+  {
+    "name": "sticky note with settings and multiline text",
+    "errors": []
+  },
+  {
+    "name": "sticky note with a schema-qualified name",
+    "errors": []
+  },
+  {
+    "name": "sticky note with color none",
+    "errors": []
+  },
+  {
+    "name": "table partial with injection",
+    "errors": []
+  },
+  {
+    "name": "records with mixed value types",
+    "errors": []
+  },
+  {
+    "name": "records inside a table",
+    "errors": []
+  },
+  {
+    "name": "records with example setting and no column list",
+    "errors": []
+  },
+  {
+    "name": "records row continued on the next line",
+    "errors": []
+  },
+  {
+    "name": "records with an empty column list and in-table settings",
+    "errors": []
+  },
+  {
+    "name": "comments everywhere",
+    "errors": []
+  },
+  {
+    "name": "comments in every block",
+    "errors": []
+  },
+  {
+    "name": "headers and refs across lines",
+    "errors": []
+  },
+  {
+    "name": "blank lines between table rows",
+    "errors": []
+  },
+  {
+    "name": "blank line before indexes block",
+    "errors": []
+  },
+  {
+    "name": "crlf line endings",
+    "errors": []
+  },
+  {
+    "name": "crlf with comments, enums, records and block notes",
+    "errors": []
+  },
+  {
+    "name": "unicode names and strings",
+    "errors": []
+  },
+  {
+    "name": "digit-led names and number forms",
+    "errors": []
+  },
+  {
+    "name": "multi-line strings",
+    "errors": []
+  },
+  {
+    "name": "no trailing newline",
+    "errors": []
+  },
+  {
+    "name": "tabs for indentation",
+    "errors": []
+  },
+  {
+    "name": "keywords and settings in any case",
+    "errors": []
+  },
+  {
+    "name": "keywords as column names",
+    "errors": []
+  },
+  {
+    "name": "keywords as table, enum and value names",
+    "errors": []
+  },
+  {
+    "name": "keywords as element names",
+    "errors": []
+  },
+  {
+    "name": "keywords as index columns",
+    "errors": []
+  },
+  {
+    "name": "full example with top-level comments",
+    "errors": []
+  },
+  {
+    "name": "e-commerce schema",
+    "errors": []
+  },
+  {
+    "name": "blog schema",
+    "errors": []
+  },
+  {
+    "name": "saas multi-tenant schema",
+    "errors": []
+  },
+  {
+    "name": "hr and payroll schema",
+    "errors": []
+  },
+  {
+    "name": "iot telemetry schema",
+    "errors": []
+  },
+  {
+    "name": "invalid top-level word",
+    "source": "Tabel users {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"Project\", \"Table\", \"Ref\", \"Enum\", \"TableGroup\", \"Note\", \"TablePartial\" or \"records\" but found \"Tabel\" (1:0)",
+        "end": {
+          "row": 1,
+          "col": 5
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "stray closing brace",
+    "source": "}\nTable t {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"Project\", \"Table\", \"Ref\", \"Enum\", \"TableGroup\", \"Note\", \"TablePartial\" or \"records\" but found \"}\" (1:0)",
+        "end": {
+          "row": 1,
+          "col": 1
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "garbage between elements",
+    "source": "Table a {\n  id int\n}\n42\nTable b {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"Project\", \"Table\", \"Ref\", \"Enum\", \"TableGroup\", \"Note\", \"TablePartial\" or \"records\" but found \"42\" (4:0)",
+        "end": {
+          "row": 4,
+          "col": 2
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [
+        {
+          "type": "table",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "a",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 6
+                },
+                "end": {
+                  "row": 1,
+                  "col": 7
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 6
+              },
+              "end": {
+                "row": 1,
+                "col": 7
+              }
+            }
+          },
+          "alias": null,
+          "settings": [],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "id",
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 4
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 2,
+                        "col": 5
+                      },
+                      "end": {
+                        "row": 2,
+                        "col": 8
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 2,
+                      "col": 5
+                    },
+                    "end": {
+                      "row": 2,
+                      "col": 8
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 5
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 8
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 2
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 3,
+              "col": 1
+            }
+          }
+        }
+      ],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 3,
+          "col": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "table without a name",
+    "source": "Table {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected a table name but found \"{\" (1:6)",
+        "end": {
+          "row": 1,
+          "col": 7
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "table missing open brace",
+    "source": "Table users\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"as\" or \"{\" but found \"id\" (2:2)",
+        "end": {
+          "row": 2,
+          "col": 4
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "table name with three parts",
+    "source": "Table a.b.c {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"as\", \"[\" or \"{\" but found \".\" (1:9)",
+        "end": {
+          "row": 1,
+          "col": 10
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "alias without a name",
+    "source": "Table users as {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected an alias but found \"{\" (1:15)",
+        "end": {
+          "row": 1,
+          "col": 16
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "unclosed table body",
+    "source": "Table users {\n  id int\n",
+    "errors": [
+      {
+        "message": "Expected \"}\" but found end of input (3:0)",
+        "end": {
+          "row": 3,
+          "col": 0
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "column without a type",
+    "source": "Table t {\n  id\n}\nTable ok {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected a column type but found a new line (2:4)",
+        "end": {
+          "row": 3,
+          "col": 0
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "comma between columns",
+    "source": "Table t {\n  id int,\n  name text\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"pk\", \"unique\", \"[\", a new line or \"}\" but found \",\" (2:8)",
+        "end": {
+          "row": 2,
+          "col": 9
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "bad column mid-table",
+    "source": "Table t {\n  id int\n  42 bad\n  name text\n}\nTable ok {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected a column, a note, a partial injection, records, \"indexes\" or \"checks\" but found \"42\" (3:2)",
+        "end": {
+          "row": 3,
+          "col": 4
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "invalid column setting",
+    "source": "Table t {\n  id int [primary]\n}\n",
+    "errors": [
+      {
+        "message": "Expected \":\" but found \"]\" (2:17)",
+        "end": {
+          "row": 2,
+          "col": 18
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "column settings end of file",
+    "source": "Table t {\n  id int [pk, not null",
+    "errors": [
+      {
+        "message": "Expected \",\" or \"]\" but found end of input (2:22)",
+        "end": {
+          "row": 2,
+          "col": 22
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "missing comma between settings",
+    "source": "Table t {\n  id int [default: 1 2]\n}\n",
+    "errors": [
+      {
+        "message": "Expected \",\" or \"]\" but found \"2\" (2:21)",
+        "end": {
+          "row": 2,
+          "col": 22
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "trailing comma in settings",
+    "source": "Table t {\n  id int [pk,]\n}\n",
+    "errors": [
+      {
+        "message": "Expected a column setting but found \"]\" (2:13)",
+        "end": {
+          "row": 2,
+          "col": 14
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "default invalid type",
+    "source": "Table t {\n  c int [default: [1]]\n}\n",
+    "errors": [
+      {
+        "message": "Expected a string, a number, an expression, \"true\", \"false\", \"null\" or an enum value but found \"[\" (2:18)",
+        "end": {
+          "row": 2,
+          "col": 19
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "default end of file",
+    "source": "Table t {\n  c int [default:",
+    "errors": [
+      {
+        "message": "Expected a string, a number, an expression, \"true\", \"false\", \"null\" or an enum value but found end of input (2:17)",
+        "end": {
+          "row": 2,
+          "col": 17
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "ref setting without a relation",
+    "source": "Table t {\n  c int [ref: u.id]\n}\n",
+    "errors": [
+      {
+        "message": "Expected a relation (<, >, -, <>) but found \"u\" (2:14)",
+        "end": {
+          "row": 2,
+          "col": 15
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "ref setting invalid type",
+    "source": "Table t {\n  c int [ref: > 'users.id']\n}\n",
+    "errors": [
+      {
+        "message": "Expected a column reference but found a string (2:16)",
+        "end": {
+          "row": 2,
+          "col": 26
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "ref setting single-part target",
+    "source": "Table t {\n  c int [ref: > id]\n}\n",
+    "errors": [
+      {
+        "message": "Expected \".\" but found \"]\" (2:18)",
+        "end": {
+          "row": 2,
+          "col": 19
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "note setting invalid type",
+    "source": "Table t {\n  c int [note: 42]\n}\n",
+    "errors": [
+      {
+        "message": "Expected a string but found \"42\" (2:15)",
+        "end": {
+          "row": 2,
+          "col": 17
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "note setting invalid syntax",
+    "source": "Table t {\n  c int [note 'x']\n}\n",
+    "errors": [
+      {
+        "message": "Expected \":\" but found a string (2:14)",
+        "end": {
+          "row": 2,
+          "col": 17
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "check setting not an expression",
+    "source": "Table t {\n  c int [check: 'c > 0']\n}\n",
+    "errors": [
+      {
+        "message": "Expected an expression but found a string (2:16)",
+        "end": {
+          "row": 2,
+          "col": 23
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "unclosed type args",
+    "source": "Table t {\n  c varchar(255\n}\n",
+    "errors": [
+      {
+        "message": "Expected \",\" or \")\" but found \"}\" (3:0)",
+        "end": {
+          "row": 3,
+          "col": 1
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "headercolor string value",
+    "source": "Table t [headercolor: 'red'] {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected a color but found a string (1:22)",
+        "end": {
+          "row": 1,
+          "col": 27
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "table note setting invalid type",
+    "source": "Table t [note: 42] {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected a string but found \"42\" (1:15)",
+        "end": {
+          "row": 1,
+          "col": 17
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "table settings on a later line",
+    "source": "Table t\n  [headercolor: #000, note: 'x'] {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"as\" or \"{\" but found \"[\" (2:2)",
+        "end": {
+          "row": 2,
+          "col": 3
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "table setting not null",
+    "source": "Table t [not null] {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Expected \":\" but found \"]\" (1:17)",
+        "end": {
+          "row": 1,
+          "col": 18
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "table note without a value",
+    "source": "Table t {\n  id int\n  Note:\n}\n",
+    "errors": [
+      {
+        "message": "Expected a string but found \"}\" (4:0)",
+        "end": {
+          "row": 4,
+          "col": 1
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "unterminated string",
+    "source": "Table t {\n  id int [note: 'oops]\n}\nTable ok {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Unterminated string (2:16)",
+        "end": {
+          "row": 2,
+          "col": 22
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "unterminated multiline string",
+    "source": "Table t {\n  id int\n  Note: '''never closed\n}\n",
+    "errors": [
+      {
+        "message": "Unterminated multi-line string (3:8)",
+        "end": {
+          "row": 5,
+          "col": 0
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "ref missing endpoint",
+    "source": "Ref: users.id >\n",
+    "errors": [
+      {
+        "message": "Expected a column reference but found end of input (2:0)",
+        "end": {
+          "row": 2,
+          "col": 0
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "ref missing relation",
+    "source": "Ref: users.id posts.user_id\n",
+    "errors": [
+      {
+        "message": "Expected a relation (<, >, -, <>) but found \"posts\" (1:14)",
+        "end": {
+          "row": 1,
+          "col": 19
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "ref endpoint without a column",
+    "source": "Ref: users > posts.user_id\n",
+    "errors": [
+      {
+        "message": "Expected \".\" but found \">\" (1:11)",
+        "end": {
+          "row": 1,
+          "col": 12
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "ref invalid action",
+    "source": "Ref: a.x > b.y [delete: explode]\n",
+    "errors": [
+      {
+        "message": "Expected \"cascade\", \"restrict\", \"set null\", \"set default\" or \"no action\" but found \"explode\" (1:24)",
+        "end": {
+          "row": 1,
+          "col": 31
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "ref long form with two relationships",
+    "source": "Ref {\n  a.x > b.y\n  c.x > d.y\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"}\" but found \"c\" (3:2)",
+        "end": {
+          "row": 3,
+          "col": 3
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "ref endpoint with four parts",
+    "source": "Ref: a.b.c.d > e.f\n",
+    "errors": [
+      {
+        "message": "Expected a relation (<, >, -, <>) but found \".\" (1:10)",
+        "end": {
+          "row": 1,
+          "col": 11
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "enum invalid comma",
+    "source": "enum status {\n  active,\n  inactive\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"[\", a new line or \"}\" but found \",\" (2:8)",
+        "end": {
+          "row": 2,
+          "col": 9
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "enum invalid pk prop",
+    "source": "enum status {\n  active [pk]\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"note\" but found \"pk\" (2:10)",
+        "end": {
+          "row": 2,
+          "col": 12
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "index unknown setting",
+    "source": "Table t {\n  a int\n  indexes {\n    a [clustered]\n  }\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"pk\", \"unique\", \"name\", \"type\" or \"note\" but found \"clustered\" (4:7)",
+        "end": {
+          "row": 4,
+          "col": 16
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "index unclosed composite",
+    "source": "Table t {\n  a int\n  indexes {\n    (a, b\n  }\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"[\", \",\" or \")\" but found \"}\" (5:2)",
+        "end": {
+          "row": 5,
+          "col": 3
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "check entry not an expression",
+    "source": "Table t {\n  a int\n  checks {\n    a > 0\n  }\n}\n",
+    "errors": [
+      {
+        "message": "Expected an expression but found \"a\" (4:4)",
+        "end": {
+          "row": 4,
+          "col": 5
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "table group without a name",
+    "source": "TableGroup {\n  a\n}\n",
+    "errors": [
+      {
+        "message": "Expected a table group name but found \"{\" (1:11)",
+        "end": {
+          "row": 1,
+          "col": 12
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "named note inside a table group",
+    "source": "TableGroup g {\n  a\n  Note n { 'x' }\n}\n",
+    "errors": [
+      {
+        "message": "Expected a new line or \"}\" but found \"n\" (3:7)",
+        "end": {
+          "row": 3,
+          "col": 8
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "sticky note without text",
+    "source": "Note n {\n}\n",
+    "errors": [
+      {
+        "message": "Expected a string but found \"}\" (2:0)",
+        "end": {
+          "row": 2,
+          "col": 1
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "injection without a name",
+    "source": "Table t {\n  ~\n}\n",
+    "errors": [
+      {
+        "message": "Expected a table partial name but found \"}\" (3:0)",
+        "end": {
+          "row": 3,
+          "col": 1
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "records inside a table partial",
+    "source": "TablePartial p {\n  records { 1 }\n}\n",
+    "errors": [
+      {
+        "message": "Expected a column, a note, \"indexes\" or \"checks\" but found \"records\" (2:2)",
+        "end": {
+          "row": 2,
+          "col": 9
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "table partial custom setting",
+    "source": "TablePartial p [owner: 'x'] {\n  a int\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"note\" or \"headercolor\" but found \"owner\" (1:16)",
+        "end": {
+          "row": 1,
+          "col": 21
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "sticky note color string",
+    "source": "Note n [color: 'red'] {\n  'x'\n}\n",
+    "errors": [
+      {
+        "message": "Expected a color or \"none\" but found a string (1:15)",
+        "end": {
+          "row": 1,
+          "col": 20
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "records unclosed column list",
+    "source": "records t(a, b {\n  1, 2\n}\n",
+    "errors": [
+      {
+        "message": "Expected \",\" or \")\" but found \"{\" (1:15)",
+        "end": {
+          "row": 1,
+          "col": 16
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "records invalid value",
+    "source": "records t(a) {\n  [1]\n}\n",
+    "errors": [
+      {
+        "message": "Expected a string, a number, an expression, \"true\", \"false\", \"null\" or an enum value but found \"[\" (2:2)",
+        "end": {
+          "row": 2,
+          "col": 3
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "project property with a number",
+    "source": "Project p {\n  version: 2\n}\n",
+    "errors": [
+      {
+        "message": "Expected a string but found \"2\" (2:11)",
+        "end": {
+          "row": 2,
+          "col": 12
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "project with settings",
+    "source": "Project p [note: 'x'] {\n  a: 'b'\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"{\" but found \"[\" (1:10)",
+        "end": {
+          "row": 1,
+          "col": 11
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "unknown character",
+    "source": "Table t {\n  id int $\n}\n",
+    "errors": [
+      {
+        "message": "Unexpected character \"$\" (2:9)",
+        "end": {
+          "row": 2,
+          "col": 10
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "unterminated block comment",
+    "source": "Table t {\n  id int\n}\n/* never closed\n",
+    "errors": [
+      {
+        "message": "Unterminated comment (4:0)",
+        "end": {
+          "row": 5,
+          "col": 0
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [
+        {
+          "type": "table",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "t",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 6
+                },
+                "end": {
+                  "row": 1,
+                  "col": 7
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 6
+              },
+              "end": {
+                "row": 1,
+                "col": 7
+              }
+            }
+          },
+          "alias": null,
+          "settings": [],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "id",
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 4
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 2,
+                        "col": 5
+                      },
+                      "end": {
+                        "row": 2,
+                        "col": 8
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 2,
+                      "col": 5
+                    },
+                    "end": {
+                      "row": 2,
+                      "col": 8
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 5
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 8
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 2
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 3,
+              "col": 1
+            }
+          }
+        }
+      ],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 3,
+          "col": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "unterminated quoted name",
+    "source": "Table \"users {\n  id int\n}\n",
+    "errors": [
+      {
+        "message": "Unterminated quoted identifier (1:6)",
+        "end": {
+          "row": 1,
+          "col": 14
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "unterminated expression",
+    "source": "Table t {\n  id int [default: `now()]\n}\n",
+    "errors": [
+      {
+        "message": "Unterminated expression (2:19)",
+        "end": {
+          "row": 4,
+          "col": 0
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "trailing semicolon",
+    "source": "Table t {\n  id int\n};\n",
+    "errors": [
+      {
+        "message": "Unexpected character \";\" (3:1)",
+        "end": {
+          "row": 3,
+          "col": 2
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [
+        {
+          "type": "table",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "t",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 6
+                },
+                "end": {
+                  "row": 1,
+                  "col": 7
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 6
+              },
+              "end": {
+                "row": 1,
+                "col": 7
+              }
+            }
+          },
+          "alias": null,
+          "settings": [],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "id",
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 4
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 2,
+                        "col": 5
+                      },
+                      "end": {
+                        "row": 2,
+                        "col": 8
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 2,
+                      "col": 5
+                    },
+                    "end": {
+                      "row": 2,
+                      "col": 8
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 5
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 8
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 2
+                },
+                "end": {
+                  "row": 2,
+                  "col": 8
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 3,
+              "col": 1
+            }
+          }
+        }
+      ],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 3,
+          "col": 1
+        }
+      }
+    }
+  }
+]
