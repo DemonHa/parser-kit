@@ -28,7 +28,11 @@ const lex = (text: string, lexer = postgres.lexer) => {
 };
 
 const name = (...parts: string[]) => ({ kind: "name", parts });
+// A call's or a type's name parts, a dotted string standing for its parts
+// (`"pg_catalog.int4"`); a quoted part holding a dot is written as an array.
+const qn = (n: string | string[]) => (typeof n === "string" ? n.split(".") : n);
 const num = (value: number) => ({ kind: "number", value });
+const numRaw = (value: number, raw: string) => ({ kind: "number", value, raw });
 const str = (value: string) => ({ kind: "string", value });
 const bin = (op: string, left: unknown, right: unknown) => ({ kind: "binary", op, left, right });
 const star = (table: string[] | null = null) => ({ kind: "star", table });
@@ -373,7 +377,7 @@ describe("PostgreSQL statements", () => {
 
     const items = stmt.items as any[];
     expect(items.map((i) => i.kind)).toEqual(["column", "column", "column", "column", "unique"]);
-    expect(items[0]).toMatchObject({ name: "id", dataType: { name: "int", args: [], array: false } });
+    expect(items[0]).toMatchObject({ name: "id", dataType: { name: ["int"], args: [], array: false } });
     expect(items[0].constraints).toEqual([{ kind: "primaryKey" }]);
     expect(items[1].constraints).toEqual([{ kind: "notNull" }]);
     expect(items[2].constraints).toEqual([
@@ -390,10 +394,10 @@ describe("PostgreSQL statements", () => {
     const stmt = firstStmt("CREATE TABLE t (a varchar(10), b numeric(10, 2), c int[], d text[][]);");
     const types = (stmt.items as any[]).map((i) => i.dataType);
     expect(types).toEqual([
-      { name: "varchar", args: [10], array: false },
-      { name: "numeric", args: [10, 2], array: false },
-      { name: "int", args: [], array: true },
-      { name: "text", args: [], array: true },
+      { name: ["varchar"], args: [10], array: false },
+      { name: ["numeric"], args: [10, 2], array: false },
+      { name: ["int"], args: [], array: true },
+      { name: ["text"], args: [], array: true },
     ]);
   });
 
@@ -421,7 +425,7 @@ describe("PostgreSQL statements", () => {
 
     const partial = firstStmt("CREATE UNIQUE INDEX ON users (lower(email)) WHERE active;");
     expect(partial).toMatchObject({ kind: "createIndex", unique: true, name: null });
-    expect((partial as any).columns).toEqual([{ expr: { kind: "call", name: "lower", args: [name("email")] } }]);
+    expect((partial as any).columns).toEqual([{ expr: { kind: "call", name: ["lower"], args: [name("email")] } }]);
     expect((partial as any).where).toEqual(name("active"));
     // The Phase 6 extras default off / absent on a plain index.
     expect(plain).toMatchObject({ concurrently: false, ifNotExists: false, include: null });
@@ -483,7 +487,7 @@ describe("PostgreSQL ALTER TABLE", () => {
   it("adds a column, with or without the COLUMN keyword", () => {
     expect(action("ALTER TABLE t ADD COLUMN age int;")).toMatchObject({
       kind: "addColumn",
-      column: { name: "age", dataType: { name: "int" } },
+      column: { name: "age", dataType: { name: ["int"] } },
     });
     expect(action("ALTER TABLE t ADD email text NOT NULL;")).toMatchObject({
       kind: "addColumn",
@@ -540,12 +544,12 @@ describe("PostgreSQL ALTER TABLE (Phase 6 actions)", () => {
     expect(action("ALTER TABLE t ALTER COLUMN n SET DATA TYPE bigint;")).toMatchObject({
       kind: "setDataType",
       column: "n",
-      dataType: { name: "bigint" },
+      dataType: { name: ["bigint"] },
     });
     expect(action("ALTER TABLE t ALTER n TYPE numeric(10, 2);")).toMatchObject({
       kind: "setDataType",
       column: "n",
-      dataType: { name: "numeric", args: [10, 2] },
+      dataType: { name: ["numeric"], args: [10, 2] },
     });
   });
 
@@ -614,7 +618,7 @@ describe("PostgreSQL ALTER TABLE action lists and IF [NOT] EXISTS", () => {
   const addColumn = (name: string, ifNotExists = false) => ({
     kind: "addColumn",
     ifNotExists,
-    column: { kind: "column", name, dataType: { name: "int", args: [], array: false }, constraints: [] },
+    column: { kind: "column", name, dataType: { name: ["int"], args: [], array: false }, constraints: [] },
   });
 
   it("parses comma-separated actions in source order", () => {
@@ -637,7 +641,7 @@ describe("PostgreSQL ALTER TABLE action lists and IF [NOT] EXISTS", () => {
     ).toMatchObject([
       { kind: "addConstraint", name: "k", constraint: { kind: "check" } },
       { kind: "addConstraint", name: null, constraint: { kind: "unique", columns: ["a", "b"] } },
-      { kind: "setDataType", column: "a", dataType: { name: "numeric", args: [10, 2] } },
+      { kind: "setDataType", column: "a", dataType: { name: ["numeric"], args: [10, 2] } },
     ]);
     // A comma straight after an expression or a column constraint's tail.
     expect(alter("ALTER TABLE t ALTER a SET DEFAULT f(1, 2) + 3, DROP b;").actions).toMatchObject([
@@ -676,7 +680,7 @@ describe("PostgreSQL ALTER TABLE action lists and IF [NOT] EXISTS", () => {
     expect(alter("ALTER TABLE t ADD COLUMN IF NOT EXISTS if int;").actions).toEqual([addColumn("if", true)]);
     // A quoted "not" is an ordinary type name, so it does not start IF NOT EXISTS.
     expect(alter('ALTER TABLE t ADD if "not";').actions).toMatchObject([
-      { kind: "addColumn", ifNotExists: false, column: { name: "if", dataType: { name: "not" } } },
+      { kind: "addColumn", ifNotExists: false, column: { name: "if", dataType: { name: ["not"] } } },
     ]);
   });
 
@@ -730,7 +734,7 @@ describe("PostgreSQL ONLY on ALTER TABLE and CREATE INDEX", () => {
   const addA = {
     kind: "addColumn",
     ifNotExists: false,
-    column: { kind: "column", name: "a", dataType: { name: "int", args: [], array: false }, constraints: [] },
+    column: { kind: "column", name: "a", dataType: { name: ["int"], args: [], array: false }, constraints: [] },
   };
   const index = (over: Record<string, unknown>) => ({
     kind: "createIndex",
@@ -925,7 +929,7 @@ describe("PostgreSQL DROP object types", () => {
   const arg = (type: string, extra: Record<string, unknown> = {}) => ({
     mode: null,
     name: null,
-    type: { name: type, args: [], array: false },
+    type: { name: qn(type), args: [], array: false },
     defaultValue: null,
     ...extra,
   });
@@ -1209,8 +1213,8 @@ describe("PostgreSQL CREATE TYPE composite / range", () => {
       form: "composite",
       name: ["point"],
       attributes: [
-        { name: "x", type: { name: "float8", args: [], array: false } },
-        { name: "y", type: { name: "float8", args: [], array: false } },
+        { name: "x", type: { name: ["float8"], args: [], array: false } },
+        { name: "y", type: { name: ["float8"], args: [], array: false } },
       ],
     });
   });
@@ -1222,9 +1226,9 @@ describe("PostgreSQL CREATE TYPE composite / range", () => {
       form: "composite",
       name: ["c"],
       attributes: [
-        { name: "a", type: { name: "text", args: [], array: false }, collate: ["C"] },
-        { name: "b", type: { name: "int", args: [], array: false } },
-        { name: "d", type: { name: "text", args: [], array: false }, collate: ["pg_catalog", "default"] },
+        { name: "a", type: { name: ["text"], args: [], array: false }, collate: ["C"] },
+        { name: "b", type: { name: ["int"], args: [], array: false } },
+        { name: "d", type: { name: ["text"], args: [], array: false }, collate: ["pg_catalog", "default"] },
       ],
     });
     expect(firstStmt("CREATE TYPE c AS ();")).toEqual({
@@ -1243,7 +1247,7 @@ describe("PostgreSQL CREATE TYPE composite / range", () => {
 
   it("keeps a composite attribute called collate usable when quoted", () => {
     expect(firstStmt('CREATE TYPE c AS ("collate" text COLLATE "C");').attributes).toEqual([
-      { name: "collate", type: { name: "text", args: [], array: false }, collate: ["C"] },
+      { name: "collate", type: { name: ["text"], args: [], array: false }, collate: ["C"] },
     ]);
   });
 
@@ -1253,8 +1257,8 @@ describe("PostgreSQL CREATE TYPE composite / range", () => {
       form: "range",
       name: ["floatrange"],
       options: [
-        { name: "subtype", value: "float8" },
-        { name: "subtype_opclass", value: "float8_ops" },
+        { name: "subtype", value: ["float8"] },
+        { name: "subtype_opclass", value: ["float8_ops"] },
       ],
     });
   });
@@ -1267,7 +1271,7 @@ describe("PostgreSQL CREATE SEQUENCE", () => {
     );
     expect(stmt).toMatchObject({ kind: "createSequence", ifNotExists: true, name: ["s"] });
     expect((stmt as any).options).toEqual([
-      { kind: "as", type: { name: "bigint", args: [], array: false } },
+      { kind: "as", type: { name: ["bigint"], args: [], array: false } },
       { kind: "increment", value: num(2) },
       { kind: "minValue", value: num(1) },
       { kind: "maxValue", value: null },
@@ -1293,7 +1297,7 @@ describe("PostgreSQL CREATE DOMAIN", () => {
     const stmt = firstStmt(
       "CREATE DOMAIN us_postal AS text NOT NULL DEFAULT '00000' CONSTRAINT fmt CHECK (VALUE ~ '^[0-9]{5}$');",
     );
-    expect(stmt).toMatchObject({ kind: "createDomain", name: ["us_postal"], dataType: { name: "text" } });
+    expect(stmt).toMatchObject({ kind: "createDomain", name: ["us_postal"], dataType: { name: ["text"] } });
     expect((stmt as any).constraints).toEqual([
       { kind: "notNull", name: null },
       { kind: "default", expr: str("00000") },
@@ -1305,7 +1309,7 @@ describe("PostgreSQL CREATE DOMAIN", () => {
     expect(firstStmt("CREATE DOMAIN positive int CHECK (VALUE > 0);")).toMatchObject({
       kind: "createDomain",
       name: ["positive"],
-      dataType: { name: "int" },
+      dataType: { name: ["int"] },
     });
   });
 });
@@ -1313,7 +1317,7 @@ describe("PostgreSQL CREATE DOMAIN", () => {
 // --- Phase 8: functions / aggregates / triggers ---
 
 // A ColType literal (the shape typeRef yields once spans are stripped).
-const ct = (name: string, over: Record<string, unknown> = {}) => ({ name, args: [], array: false, ...over });
+const ct = (name: string[], over: Record<string, unknown> = {}) => ({ name, args: [], array: false, ...over });
 
 describe("PostgreSQL CREATE FUNCTION", () => {
   it("parses OR REPLACE, arg defaults, RETURNS and an opaque dollar body", () => {
@@ -1325,10 +1329,10 @@ describe("PostgreSQL CREATE FUNCTION", () => {
       orReplace: true,
       name: ["add"],
       args: [
-        { mode: null, name: "a", type: ct("integer"), defaultValue: null },
-        { mode: null, name: "b", type: ct("integer"), defaultValue: num(0) },
+        { mode: null, name: "a", type: ct(["integer"]), defaultValue: null },
+        { mode: null, name: "b", type: ct(["integer"]), defaultValue: num(0) },
       ],
-      returns: { kind: "type", setof: false, type: ct("integer") },
+      returns: { kind: "type", setof: false, type: ct(["integer"]) },
       options: [
         { kind: "language", name: "sql" },
         { kind: "volatility", value: "immutable" },
@@ -1344,9 +1348,9 @@ describe("PostgreSQL CREATE FUNCTION", () => {
       "CREATE FUNCTION f(IN x integer, OUT y text, VARIADIC vals integer[]) RETURNS void LANGUAGE plpgsql AS $body$BEGIN END$body$;",
     );
     expect((stmt as any).args).toEqual([
-      { mode: "in", name: "x", type: ct("integer"), defaultValue: null },
-      { mode: "out", name: "y", type: ct("text"), defaultValue: null },
-      { mode: "variadic", name: "vals", type: ct("integer", { array: true }), defaultValue: null },
+      { mode: "in", name: "x", type: ct(["integer"]), defaultValue: null },
+      { mode: "out", name: "y", type: ct(["text"]), defaultValue: null },
+      { mode: "variadic", name: "vals", type: ct(["integer"], { array: true }), defaultValue: null },
     ]);
     expect((stmt as any).options).toEqual([
       { kind: "language", name: "plpgsql" },
@@ -1359,13 +1363,13 @@ describe("PostgreSQL CREATE FUNCTION", () => {
       "CREATE FUNCTION top_users(numeric(10, 2)) RETURNS TABLE(id integer, label text) LANGUAGE sql AS $$SELECT 1$$;",
     );
     expect((stmt as any).args).toEqual([
-      { mode: null, name: null, type: ct("numeric", { args: [10, 2] }), defaultValue: null },
+      { mode: null, name: null, type: ct(["numeric"], { args: [10, 2] }), defaultValue: null },
     ]);
     expect((stmt as any).returns).toEqual({
       kind: "table",
       columns: [
-        { name: "id", type: ct("integer") },
-        { name: "label", type: ct("text") },
+        { name: "id", type: ct(["integer"]) },
+        { name: "label", type: ct(["text"]) },
       ],
     });
   });
@@ -1377,7 +1381,11 @@ describe("PostgreSQL CREATE FUNCTION", () => {
     expect((stmt as any).options).toEqual([
       { kind: "language", name: "sql" },
       { kind: "security", external: false, definer: true },
-      { kind: "set", parameter: "search_path", value: { kind: "list", values: [name("pg_catalog"), name("public")] } },
+      {
+        kind: "set",
+        parameter: ["search_path"],
+        value: { kind: "list", values: [name("pg_catalog"), name("public")] },
+      },
       { kind: "cost", value: num(100) },
       { kind: "parallel", value: "safe" },
       { kind: "as", parts: ["SELECT 1"] },
@@ -1404,10 +1412,10 @@ describe("PostgreSQL CREATE AGGREGATE", () => {
       orReplace: false,
       name: ["sum_agg"],
       star: false,
-      args: [{ mode: null, name: null, type: ct("numeric"), defaultValue: null }],
+      args: [{ mode: null, name: null, type: ct(["numeric"]), defaultValue: null }],
       options: [
-        { name: "sfunc", value: { kind: "type", type: ct("numeric_add") } },
-        { name: "stype", value: { kind: "type", type: ct("numeric") } },
+        { name: "sfunc", value: { kind: "type", type: ct(["numeric_add"]) } },
+        { name: "stype", value: { kind: "type", type: ct(["numeric"]) } },
         { name: "initcond", value: { kind: "literal", expr: str("0") } },
       ],
     });
@@ -1417,9 +1425,9 @@ describe("PostgreSQL CREATE AGGREGATE", () => {
     const stmt = firstStmt("CREATE AGGREGATE avg_legacy (BASETYPE = numeric, SFUNC = avg_acc, STYPE = internal);");
     expect(stmt).toMatchObject({ kind: "createAggregate", star: false, args: [] });
     expect((stmt as any).options).toEqual([
-      { name: "basetype", value: { kind: "type", type: ct("numeric") } },
-      { name: "sfunc", value: { kind: "type", type: ct("avg_acc") } },
-      { name: "stype", value: { kind: "type", type: ct("internal") } },
+      { name: "basetype", value: { kind: "type", type: ct(["numeric"]) } },
+      { name: "sfunc", value: { kind: "type", type: ct(["avg_acc"]) } },
+      { name: "stype", value: { kind: "type", type: ct(["internal"]) } },
     ]);
   });
 
@@ -1485,8 +1493,16 @@ describe("PostgreSQL expressions", () => {
 
   it("parses the containment operator and casts", () => {
     expect(exprOf("tags @> other")).toEqual(bin("@>", name("tags"), name("other")));
-    expect(exprOf("x::int")).toEqual({ kind: "cast", expr: name("x"), type: { name: "int", args: [], array: false } });
-    expect(exprOf("'123'::int::text")).toMatchObject({ kind: "cast", type: { name: "text" }, expr: { kind: "cast" } });
+    expect(exprOf("x::int")).toEqual({
+      kind: "cast",
+      expr: name("x"),
+      type: { name: ["int"], args: [], array: false },
+    });
+    expect(exprOf("'123'::int::text")).toMatchObject({
+      kind: "cast",
+      type: { name: ["text"] },
+      expr: { kind: "cast" },
+    });
   });
 
   it("binds unary minus and NOT", () => {
@@ -1542,8 +1558,64 @@ describe("PostgreSQL expressions", () => {
 
   it("parses qualified names and function calls", () => {
     expect(exprOf("schema.tbl.col")).toEqual(name("schema", "tbl", "col"));
-    expect(exprOf("coalesce(a, 0)")).toEqual({ kind: "call", name: "coalesce", args: [name("a"), num(0)] });
-    expect(exprOf("now()")).toEqual({ kind: "call", name: "now", args: [] });
+    expect(exprOf("coalesce(a, 0)")).toEqual({ kind: "call", name: ["coalesce"], args: [name("a"), num(0)] });
+    expect(exprOf("now()")).toEqual({ kind: "call", name: ["now"], args: [] });
+  });
+
+  // A dotted name keeps one element per part, so a quoted part holding a dot
+  // stays apart from a qualified name: PG resolves `"a.b"(1)` as one function
+  // named `a.b`, and `a.b(1)` as function `b` in schema `a`.
+  it("keeps the parts of a qualified call, type and typed-literal name apart", () => {
+    expect(exprOf('"a.b"(1)')).toEqual({ kind: "call", name: ["a.b"], args: [num(1)] });
+    expect(exprOf("a.b(1)")).toEqual({ kind: "call", name: ["a", "b"], args: [num(1)] });
+    expect(exprOf('"S".F(1)')).toEqual({ kind: "call", name: ["S", "f"], args: [num(1)] });
+    expect(exprOf('x::"a.b"').type).toEqual(ct(["a.b"]));
+    expect(exprOf("x::a.b").type).toEqual(ct(["a", "b"]));
+    expect(exprOf("x::pg_catalog.varchar(3)[]").type).toEqual(
+      ct(["pg_catalog", "varchar"], { args: [3], array: true }),
+    );
+    // A multi-word keyword spelling is one part.
+    expect(exprOf("x::timestamp(3) with time zone").type).toEqual(ct(["timestamp with time zone"], { args: [3] }));
+    expect(exprOf("x::double precision").type).toEqual(ct(["double precision"]));
+    // Quoted, the same words are one name looked up as written.
+    expect(exprOf('x::"double precision"').type).toEqual(ct(["double precision"], { quoted: true }));
+    expect(exprOf(`"timestamp with time zone" 'x'`).type).toEqual(ct(["timestamp with time zone"], { quoted: true }));
+    expect(exprOf('x::"my type"').type).toEqual(ct(["my type"]));
+    expect(exprOf(`"a.b" 'x'`)).toEqual({ kind: "typedLiteral", type: ct(["a.b"]), value: "x" });
+    expect(exprOf("a.b 'x'")).toEqual({ kind: "typedLiteral", type: ct(["a", "b"]), value: "x" });
+    const fromCall = (src: string) => (firstStmt(`SELECT * FROM ${src};`) as any).from[0].call;
+    expect(fromCall('"a.b"()')).toEqual({ kind: "call", name: ["a.b"], args: [] });
+    expect(fromCall("a.b()")).toEqual({ kind: "call", name: ["a", "b"], args: [] });
+  });
+
+  it("keeps the parts of a range option value and a configuration parameter apart", () => {
+    expect(firstStmt('CREATE TYPE r AS RANGE (SUBTYPE = "a.b", SUBTYPE_DIFF = a.b);').options).toEqual([
+      { name: "subtype", value: ["a.b"] },
+      { name: "subtype_diff", value: ["a", "b"] },
+    ]);
+    expect(firstStmt('SET "my.guc" = 1;').name).toEqual(["my.guc"]);
+    expect(firstStmt("SET my.guc = 1;").name).toEqual(["my", "guc"]);
+    expect(firstStmt("SHOW my.guc;")).toEqual({ kind: "show", name: ["my", "guc"] });
+    expect(firstStmt("RESET my.guc;")).toEqual({ kind: "reset", name: ["my", "guc"] });
+    const fnSet = (src: string) => (firstStmt(`CREATE FUNCTION f() RETURNS int SET ${src} AS 'x';`) as any).options;
+    expect(fnSet('"a.b" = 1')).toContainEqual({
+      kind: "set",
+      parameter: ["a.b"],
+      value: { kind: "list", values: [num(1)] },
+    });
+    expect(fnSet("a.b = 1")).toContainEqual({
+      kind: "set",
+      parameter: ["a", "b"],
+      value: { kind: "list", values: [num(1)] },
+    });
+    expect(firstStmt("ALTER ROLE r SET a.b = 1;").action).toEqual({ kind: "set", name: ["a", "b"], values: [num(1)] });
+    expect(firstStmt('ALTER ROLE r RESET "a.b";').action).toEqual({ kind: "reset", name: ["a.b"] });
+    expect(firstStmt('ALTER DATABASE d SET "a.b" TO 1;').action).toEqual({
+      kind: "set",
+      name: ["a.b"],
+      values: [num(1)],
+    });
+    expect(firstStmt("ALTER DATABASE d RESET a.b;").action).toEqual({ kind: "reset", name: ["a", "b"] });
   });
 });
 
@@ -1652,7 +1724,7 @@ describe("PostgreSQL expression operators", () => {
 
 describe("PostgreSQL arithmetic, bitwise and jsonpath operators", () => {
   const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
-  const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(type) });
+  const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(qn(type)) });
 
   it("lexes the arithmetic, bitwise and jsonpath operators as single op tokens", () => {
     const toks = lex("% ^ & | # << >> @?");
@@ -1795,7 +1867,7 @@ describe("PostgreSQL SQL-standard routine bodies", () => {
     orReplace: false,
     name: ["f"],
     args: [],
-    returns: { kind: "type", setof: false, type: ct("int") },
+    returns: { kind: "type", setof: false, type: ct(["int"]) },
     options: [{ kind: "language", name: "sql" }],
     body,
     ...over,
@@ -1810,7 +1882,7 @@ describe("PostgreSQL SQL-standard routine bodies", () => {
       fn(ret(bin("*", name("x"), name("x"))), {
         orReplace: true,
         name: ["s", "f"],
-        args: [{ mode: null, name: "x", type: ct("int"), defaultValue: null }],
+        args: [{ mode: null, name: "x", type: ct(["int"]), defaultValue: null }],
         returns: null,
         options: [{ kind: "volatility", value: "immutable" }],
       }),
@@ -1839,7 +1911,7 @@ describe("PostgreSQL SQL-standard routine bodies", () => {
       kind: "createProcedure",
       orReplace: false,
       name: ["p"],
-      args: [{ mode: null, name: "a", type: ct("int"), defaultValue: null }],
+      args: [{ mode: null, name: "a", type: ct(["int"]), defaultValue: null }],
       options: [{ kind: "language", name: "sql" }],
       body: atomic(firstStmt("DELETE FROM t WHERE x = a;")),
     });
@@ -2060,7 +2132,7 @@ describe("PostgreSQL SQL-standard routine bodies", () => {
 // sign < `[ ]` < `::`, all left-associative except the right-associative sign.
 describe("PostgreSQL precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts and casts", () => {
   const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
-  const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(type) });
+  const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(qn(type)) });
   const at = (expr: unknown, zone: unknown) => ({ kind: "atTimeZone", expr, zone });
   const coll = (expr: unknown, ...collation: string[]) => ({ kind: "collate", expr, collation });
   const sub = (base: unknown, index: unknown) => ({ kind: "subscript", base, index });
@@ -2131,7 +2203,7 @@ describe("PostgreSQL generic operators", () => {
     }
     // The `~~` pg_dump writes for LIKE in CHECK constraints and views.
     expect(exprOf("(email ~~ '%@gmail.com'::text)")).toEqual(
-      bin("~~", name("email"), { kind: "cast", expr: str("%@gmail.com"), type: ct("text") }),
+      bin("~~", name("email"), { kind: "cast", expr: str("%@gmail.com"), type: ct(["text"]) }),
     );
   });
 
@@ -2184,7 +2256,7 @@ describe("PostgreSQL generic operators", () => {
   it("leaves `=>` to named arguments", () => {
     expect(colExpr("f(a => 1)")).toEqual({
       kind: "call",
-      name: "f",
+      name: ["f"],
       args: [{ kind: "namedArg", name: "a", value: num(1) }],
     });
     expect(() => postgres.parse("SELECT a => 1 FROM t;")).toThrow(/Expected ";" but found "=>" \(1:9\)/);
@@ -2200,7 +2272,7 @@ describe("PostgreSQL generic operators", () => {
     // stops at another bp-12 operator, which then takes the prefix as its left.
     expect(exprOf("@ a + b")).toEqual(un("@", bin("+", name("a"), name("b"))));
     expect(exprOf("@ a <-> b")).toEqual(bin("<->", un("@", name("a")), name("b")));
-    expect(exprOf("~ a::int")).toEqual(un("~", { kind: "cast", expr: name("a"), type: ct("int") }));
+    expect(exprOf("~ a::int")).toEqual(un("~", { kind: "cast", expr: name("a"), type: ct(["int"]) }));
     expect(exprOf("a = ~ b")).toEqual(bin("=", name("a"), un("~", name("b"))));
   });
 
@@ -2290,16 +2362,16 @@ describe("PostgreSQL generic operators", () => {
         { kind: "table", name: ["t"], alias: "operator" },
       ]);
       expect((firstStmt("CREATE TABLE operator (operator int);") as any).items).toEqual([
-        { kind: "column", name: "operator", dataType: ct("int"), constraints: [] },
+        { kind: "column", name: "operator", dataType: ct(["int"]), constraints: [] },
       ]);
       // A call named `operator` stays a call unless its argument is exactly an
       // operator reference — leniently in a select list, where PG rejects it,
       // and as PG reads it in an index, exclusion or partition element.
-      const call = (args: unknown[]) => ({ kind: "call", name: "operator", args });
+      const call = (args: unknown[]) => ({ kind: "call", name: ["operator"], args });
       expect(colExpr("operator(1)")).toEqual(call([num(1)]));
       expect(colExpr("operator(-1)")).toEqual(call([un("-", num(1))]));
       expect(colExpr("operator(a.b)")).toEqual(call([name("a", "b")]));
-      expect(colExpr("s.operator(1)")).toEqual({ kind: "call", name: "s.operator", args: [num(1)] });
+      expect(colExpr("s.operator(1)")).toEqual({ kind: "call", name: ["s", "operator"], args: [num(1)] });
       expect((firstStmt("CREATE INDEX ON t (operator(a));") as any).columns[0].expr).toEqual(call([name("a")]));
       expect((firstStmt("CREATE TABLE t (a int) PARTITION BY RANGE (operator(a));") as any).partitionBy).toMatchObject({
         keys: [{ expr: call([name("a")]) }],
@@ -2412,7 +2484,7 @@ describe("PostgreSQL ISNULL and NOTNULL", () => {
     expect(exprOf("a = b NOTNULL")).toEqual(isNull(bin("=", name("a"), name("b")), true));
     expect(exprOf("NOT a ISNULL")).toEqual({ kind: "unary", op: "not", operand: isNull(name("a")) });
     expect(exprOf("a ISNULL AND b")).toEqual(bin("and", isNull(name("a")), name("b")));
-    expect(exprOf("a ISNULL::int")).toEqual({ kind: "cast", expr: isNull(name("a")), type: ct("int") });
+    expect(exprOf("a ISNULL::int")).toEqual({ kind: "cast", expr: isNull(name("a")), type: ct(["int"]) });
   });
 
   it("rejects them where PG's grammar does", () => {
@@ -2428,13 +2500,13 @@ describe("PostgreSQL ISNULL and NOTNULL", () => {
 
   it("keeps isnull and notnull unreserved as names, and as aliases after AS", () => {
     expect((firstStmt("CREATE TABLE isnull (isnull int, notnull int);") as any).items).toEqual([
-      { kind: "column", name: "isnull", dataType: ct("int"), constraints: [] },
-      { kind: "column", name: "notnull", dataType: ct("int"), constraints: [] },
+      { kind: "column", name: "isnull", dataType: ct(["int"]), constraints: [] },
+      { kind: "column", name: "notnull", dataType: ct(["int"]), constraints: [] },
     ]);
     const stmt = firstStmt("SELECT t.isnull, isnull(a), b AS isnull, c AS notnull FROM t AS notnull;") as any;
     expect(stmt.columns).toEqual([
       col(name("t", "isnull")),
-      col({ kind: "call", name: "isnull", args: [name("a")] }),
+      col({ kind: "call", name: ["isnull"], args: [name("a")] }),
       col(name("b"), "isnull"),
       col(name("c"), "notnull"),
     ]);
@@ -2538,7 +2610,7 @@ describe("PostgreSQL row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON",
     });
     // A trailing cast binds to the predicate, not to the right-hand row — PG's
     // reading too, since its operands are rows rather than expressions.
-    expect(exprOf("(a, b) OVERLAPS (c, d)::text")).toEqual({ kind: "cast", expr: ab_cd, type: ct("text") });
+    expect(exprOf("(a, b) OVERLAPS (c, d)::text")).toEqual({ kind: "cast", expr: ab_cd, type: ct(["text"]) });
   });
 
   it("parses BETWEEN SYMMETRIC and ASYMMETRIC, recording only what was written", () => {
@@ -2596,8 +2668,8 @@ describe("PostgreSQL row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON",
     expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(name(w))));
     // …as column names,
     expect((firstStmt("CREATE TABLE t (overlaps int, json jsonb);") as any).items).toEqual([
-      { kind: "column", name: "overlaps", dataType: ct("int"), constraints: [] },
-      { kind: "column", name: "json", dataType: ct("jsonb"), constraints: [] },
+      { kind: "column", name: "overlaps", dataType: ct(["int"]), constraints: [] },
+      { kind: "column", name: "json", dataType: ct(["jsonb"]), constraints: [] },
     ]);
     // …and as aliases. `overlaps` is an AS_LABEL keyword in PG, so it is an
     // alias only after AS — including straight after a row, where it is
@@ -2686,11 +2758,11 @@ describe("PostgreSQL expression special forms", () => {
     expect(colExpr("CAST(x AS int)")).toEqual({
       kind: "cast",
       expr: name("x"),
-      type: { name: "int", args: [], array: false },
+      type: { name: ["int"], args: [], array: false },
     });
     expect(colExpr("CAST(n AS numeric(10, 2))")).toMatchObject({
       kind: "cast",
-      type: { name: "numeric", args: [10, 2] },
+      type: { name: ["numeric"], args: [10, 2] },
     });
   });
 
@@ -2719,7 +2791,7 @@ describe("PostgreSQL expression special forms", () => {
     expect(colExpr("a[1]::int")).toEqual({
       kind: "cast",
       expr: { kind: "subscript", base: name("a"), index: num(1) },
-      type: { name: "int", args: [], array: false },
+      type: { name: ["int"], args: [], array: false },
     });
   });
 
@@ -2761,7 +2833,7 @@ describe("PostgreSQL expression special forms", () => {
     // The ordinary comma form falls through to a plain call node.
     expect(colExpr("SUBSTRING(s, 1, 3)")).toEqual({
       kind: "call",
-      name: "substring",
+      name: ["substring"],
       args: [name("s"), num(1), num(3)],
     });
   });
@@ -2776,7 +2848,7 @@ describe("PostgreSQL expression special forms", () => {
     // still parses tight operators like `::` and `||`.
     expect(colExpr("POSITION('a'::text IN str)")).toEqual({
       kind: "position",
-      substring: { kind: "cast", expr: str("a"), type: { name: "text", args: [], array: false } },
+      substring: { kind: "cast", expr: str("a"), type: { name: ["text"], args: [], array: false } },
       string: name("str"),
     });
   });
@@ -2828,7 +2900,7 @@ describe("PostgreSQL expression special forms", () => {
 
 describe("PostgreSQL window functions", () => {
   const winExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
-  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: qn(fnName), args });
   const order = (expr: unknown, dir: string | null = null, nulls: string | null = null) => ({ expr, dir, nulls });
 
   it("parses an empty OVER () and a partition/order spec", () => {
@@ -2900,7 +2972,7 @@ describe("PostgreSQL window functions", () => {
     });
     expect(winExpr("percentile_cont(0.5) WITHIN GROUP (ORDER BY x)")).toEqual({
       kind: "withinGroup",
-      fn: call("percentile_cont", [num(0.5)]),
+      fn: call("percentile_cont", [numRaw(0.5, "0.5")]),
       orderBy: [order(name("x"))],
     });
   });
@@ -2923,7 +2995,7 @@ describe("PostgreSQL window functions", () => {
           col(
             {
               kind: "window",
-              fn: { kind: "call", name: "rank", args: [] },
+              fn: { kind: "call", name: ["rank"], args: [] },
               name: "w",
               partitionBy: null,
               orderBy: null,
@@ -2967,7 +3039,7 @@ describe("PostgreSQL aggregate call modifiers", () => {
   const aggExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const call = (fnName: string, args: unknown[] = [], mods: Record<string, unknown> = {}) => ({
     kind: "call",
-    name: fnName,
+    name: qn(fnName),
     args,
     ...mods,
   });
@@ -3078,7 +3150,7 @@ describe("PostgreSQL aggregate call modifiers", () => {
 
 describe("PostgreSQL FROM items: LATERAL, table functions, TABLESAMPLE", () => {
   const from = (src: string) => (firstStmt(src) as any).from;
-  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: qn(fnName), args });
 
   it("parses a table function in FROM and a schema-qualified one", () => {
     expect(from("SELECT * FROM generate_series(1, 10) g;")).toEqual([
@@ -3133,7 +3205,7 @@ describe("PostgreSQL FROM items: LATERAL, table functions, TABLESAMPLE", () => {
 
 describe("PostgreSQL FROM-item column-alias lists and ONLY", () => {
   const from = (src: string) => (firstStmt(src) as any).from;
-  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: qn(fnName), args });
 
   it("reads a column-alias list after a table alias, with or without AS", () => {
     expect(from("SELECT * FROM t AS x (a, b);")).toEqual([
@@ -3703,7 +3775,7 @@ describe("PostgreSQL GROUP BY ROLLUP / CUBE / GROUPING SETS", () => {
   it("keeps rollup/cube/grouping unreserved as names and functions", () => {
     // `cube` with no following `(` is an ordinary column; `grouping(a)` is a call.
     expect(groupBy("cube")).toEqual([name("cube")]);
-    expect(groupBy("grouping(a)")).toEqual([{ kind: "call", name: "grouping", args: [name("a")] }]);
+    expect(groupBy("grouping(a)")).toEqual([{ kind: "call", name: ["grouping"], args: [name("a")] }]);
   });
 });
 
@@ -4064,7 +4136,7 @@ describe("PostgreSQL SELECT", () => {
         from: [tableFrom(["users"])],
         where: bin(">=", name("age"), num(18)),
         groupBy: [name("id")],
-        having: bin(">", { kind: "call", name: "count", args: [star()] }, num(1)),
+        having: bin(">", { kind: "call", name: ["count"], args: [star()] }, num(1)),
         orderBy: [
           { expr: name("id"), dir: "desc", nulls: "last" },
           { expr: name("name"), dir: "asc", nulls: null },
@@ -4088,11 +4160,11 @@ describe("PostgreSQL SELECT", () => {
   it("parses * / t.* / count(*) / count(distinct x)", () => {
     const cols = (src: string) => (firstStmt(src) as any).columns;
     expect(cols("SELECT t.* FROM t;")).toEqual([col(star(["t"]))]);
-    expect(cols("SELECT count(*) FROM t;")).toEqual([col({ kind: "call", name: "count", args: [star()] })]);
+    expect(cols("SELECT count(*) FROM t;")).toEqual([col({ kind: "call", name: ["count"], args: [star()] })]);
     // DISTINCT inside an aggregate is recorded on the call node itself; the
     // modifiers have their own suite below.
     expect(cols("SELECT count(distinct x) FROM t;")).toEqual([
-      col({ kind: "call", name: "count", args: [name("x")], distinct: true }),
+      col({ kind: "call", name: ["count"], args: [name("x")], distinct: true }),
     ]);
   });
 });
@@ -4497,7 +4569,7 @@ describe("PostgreSQL joins & subqueries", () => {
       col(
         {
           kind: "subquery",
-          query: sel({ columns: [col({ kind: "call", name: "max", args: [name("x")] })], from: [tableFrom(["u"])] }),
+          query: sel({ columns: [col({ kind: "call", name: ["max"], args: [name("x")] })], from: [tableFrom(["u"])] }),
         },
         "m",
       ),
@@ -4987,7 +5059,7 @@ describe("PostgreSQL GRANT / REVOKE", () => {
 // --- GRANT / REVOKE: object kinds, role grant options, GRANTED BY ---
 
 describe("PostgreSQL GRANT / REVOKE object kinds and options", () => {
-  const type = (n: string) => ({ name: n, args: [], array: false });
+  const type = (n: string) => ({ name: qn(n), args: [], array: false });
   const arg = (typeName: string, argName: string | null = null, mode: string | null = null) => ({
     mode,
     name: argName,
@@ -5560,7 +5632,7 @@ describe("PostgreSQL transaction control", () => {
     expect(firstStmt("PREPARE transaction (int) AS SELECT $1;")).toMatchObject({
       kind: "prepare",
       name: "transaction",
-      types: [{ name: "int" }],
+      types: [{ name: ["int"] }],
     });
   });
 
@@ -5599,7 +5671,7 @@ describe("PostgreSQL SET / SHOW / RESET", () => {
     expect(firstStmt("SET search_path TO my_schema, public;")).toEqual({
       kind: "set",
       scope: null,
-      name: "search_path",
+      name: ["search_path"],
       values: [name("my_schema"), name("public")],
     });
   });
@@ -5608,27 +5680,27 @@ describe("PostgreSQL SET / SHOW / RESET", () => {
     expect(firstStmt("SET my.guc = DEFAULT;")).toEqual({
       kind: "set",
       scope: null,
-      name: "my.guc",
+      name: ["my", "guc"],
       values: "default",
     });
     expect(firstStmt("SET LOCAL TIME ZONE 'PST8PDT';")).toEqual({
       kind: "set",
       scope: "local",
-      name: "time zone",
+      name: ["time zone"],
       values: [str("PST8PDT")],
     });
     expect(firstStmt("SET SESSION ROLE none;")).toEqual({
       kind: "set",
       scope: "session",
-      name: "role",
+      name: ["role"],
       values: [name("none")],
     });
   });
 
   it("parses SHOW / RESET including their ALL forms", () => {
-    expect(firstStmt("SHOW search_path;")).toEqual({ kind: "show", name: "search_path" });
-    expect(firstStmt("SHOW ALL;")).toEqual({ kind: "show", name: "all" });
-    expect(firstStmt("RESET ALL;")).toEqual({ kind: "reset", name: "all" });
+    expect(firstStmt("SHOW search_path;")).toEqual({ kind: "show", name: ["search_path"] });
+    expect(firstStmt("SHOW ALL;")).toEqual({ kind: "show", name: ["all"] });
+    expect(firstStmt("RESET ALL;")).toEqual({ kind: "reset", name: ["all"] });
   });
 });
 
@@ -5641,14 +5713,14 @@ describe("PostgreSQL SET values", () => {
     expect(firstStmt("SET standard_conforming_strings = on;")).toEqual({
       kind: "set",
       scope: null,
-      name: "standard_conforming_strings",
+      name: ["standard_conforming_strings"],
       values: [name("on")],
     });
     expect(values("off")).toEqual([name("off")]);
     expect(values("false")).toEqual([{ kind: "bool", value: false }]);
     expect(firstStmt("SELECT pg_catalog.set_config('search_path', '', false);").columns[0].expr).toEqual({
       kind: "call",
-      name: "pg_catalog.set_config",
+      name: ["pg_catalog", "set_config"],
       args: [str("search_path"), str(""), { kind: "bool", value: false }],
     });
   });
@@ -5664,7 +5736,7 @@ describe("PostgreSQL SET values", () => {
       name("$user"),
       name("public"),
       str("a b"),
-      num(1.5),
+      numRaw(1.5, "1.5"),
       { kind: "unary", op: "-", operand: num(1) },
       { kind: "unary", op: "+", operand: num(2) },
     ]);
@@ -5674,7 +5746,7 @@ describe("PostgreSQL SET values", () => {
     expect(firstStmt("SET LOCAL search_path FROM CURRENT;")).toEqual({
       kind: "set",
       scope: "local",
-      name: "search_path",
+      name: ["search_path"],
       values: "fromCurrent",
     });
   });
@@ -5683,10 +5755,10 @@ describe("PostgreSQL SET values", () => {
     const options = (src: string) =>
       (firstStmt(`CREATE FUNCTION f() RETURNS int LANGUAGE sql ${src} AS 'SELECT 1';`) as any).options.slice(1, -1);
     expect(options("SET x = on SET y TO DEFAULT SET TIME ZONE 'UTC' SET z FROM CURRENT")).toEqual([
-      { kind: "set", parameter: "x", value: { kind: "list", values: [name("on")] } },
-      { kind: "set", parameter: "y", value: { kind: "default" } },
-      { kind: "set", parameter: "time zone", value: { kind: "list", values: [str("UTC")] } },
-      { kind: "set", parameter: "z", value: { kind: "fromCurrent" } },
+      { kind: "set", parameter: ["x"], value: { kind: "list", values: [name("on")] } },
+      { kind: "set", parameter: ["y"], value: { kind: "default" } },
+      { kind: "set", parameter: ["time zone"], value: { kind: "list", values: [str("UTC")] } },
+      { kind: "set", parameter: ["z"], value: { kind: "fromCurrent" } },
     ]);
     expect(() => postgres.parse("CREATE FUNCTION f() RETURNS int SET x = 1 + 2 AS 'SELECT 1';")).toThrow(
       /Expected ";" but found "\+"/,
@@ -5731,7 +5803,7 @@ describe("PostgreSQL SET special forms", () => {
     expect(firstStmt("SET TRANSACTION SNAPSHOT '00000003-1';")).toEqual({
       kind: "set",
       scope: null,
-      name: "transaction snapshot",
+      name: ["transaction snapshot"],
       values: [str("00000003-1")],
     });
     expect(() => postgres.parse("SET TRANSACTION;")).toThrow(/Expected "isolation", .* but found ";"/);
@@ -5760,13 +5832,18 @@ describe("PostgreSQL SET special forms", () => {
     const auth = (scope: string | null, values: unknown) => ({
       kind: "set",
       scope,
-      name: "session authorization",
+      name: ["session authorization"],
       values,
     });
     expect(firstStmt("SET SESSION AUTHORIZATION 'bob';")).toEqual(auth(null, [str("bob")]));
     expect(firstStmt("SET SESSION SESSION AUTHORIZATION DEFAULT;")).toEqual(auth("session", "default"));
     expect(firstStmt("SET LOCAL SESSION AUTHORIZATION bob;")).toEqual(auth("local", [name("bob")]));
-    expect(firstStmt("SET ROLE 'admin';")).toEqual({ kind: "set", scope: null, name: "role", values: [str("admin")] });
+    expect(firstStmt("SET ROLE 'admin';")).toEqual({
+      kind: "set",
+      scope: null,
+      name: ["role"],
+      values: [str("admin")],
+    });
     expect(() => postgres.parse("SET SESSION AUTHORIZATION 1;")).toThrow(/Expected a name or a string but found "1"/);
     expect(() => postgres.parse("SET ROLE DEFAULT;")).toThrow(/Expected a name or a string but found "default"/);
   });
@@ -5790,21 +5867,21 @@ describe("PostgreSQL SET special forms", () => {
 
   it("parses SCHEMA, NAMES and XML OPTION, whose values PostgreSQL restricts", () => {
     const set = (src: string) => firstStmt(`SET ${src};`) as any;
-    expect(set("SCHEMA 'app'")).toMatchObject({ name: "schema", values: [str("app")] });
-    expect(set("NAMES 'UTF8'")).toMatchObject({ name: "names", values: [str("UTF8")] });
-    expect(set("NAMES")).toMatchObject({ name: "names", values: "default" });
-    expect(set("XML OPTION CONTENT")).toMatchObject({ name: "xml option", values: [name("content")] });
+    expect(set("SCHEMA 'app'")).toMatchObject({ name: ["schema"], values: [str("app")] });
+    expect(set("NAMES 'UTF8'")).toMatchObject({ name: ["names"], values: [str("UTF8")] });
+    expect(set("NAMES")).toMatchObject({ name: ["names"], values: "default" });
+    expect(set("XML OPTION CONTENT")).toMatchObject({ name: ["xml option"], values: [name("content")] });
     expect(() => postgres.parse("SET SCHEMA app;")).toThrow(/Expected a string but found "app"/);
   });
 
   it("reads a form word followed by = or TO as a parameter name", () => {
     const words = ["role", "schema", "names", "constraints", "transaction", "session", "local", "time"];
     for (const word of words) {
-      expect(firstStmt(`SET ${word} TO 1;`)).toEqual({ kind: "set", scope: null, name: word, values: [num(1)] });
-      expect(firstStmt(`SET ${word}.x = 1;`)).toMatchObject({ scope: null, name: `${word}.x` });
+      expect(firstStmt(`SET ${word} TO 1;`)).toEqual({ kind: "set", scope: null, name: [word], values: [num(1)] });
+      expect(firstStmt(`SET ${word}.x = 1;`)).toMatchObject({ scope: null, name: [word, "x"] });
     }
-    expect(firstStmt("SET session FROM CURRENT;")).toMatchObject({ scope: null, name: "session" });
-    expect(firstStmt("SET SESSION session = 1;")).toMatchObject({ scope: "session", name: "session" });
+    expect(firstStmt("SET session FROM CURRENT;")).toMatchObject({ scope: null, name: ["session"] });
+    expect(firstStmt("SET SESSION session = 1;")).toMatchObject({ scope: "session", name: ["session"] });
   });
 });
 
@@ -5814,22 +5891,22 @@ describe("PostgreSQL SHOW / RESET targets", () => {
   it("parses TIME ZONE, TRANSACTION ISOLATION LEVEL and SESSION AUTHORIZATION", () => {
     expect(firstStmt("SHOW TRANSACTION ISOLATION LEVEL;")).toEqual({
       kind: "show",
-      name: "transaction isolation level",
+      name: ["transaction isolation level"],
     });
-    expect(firstStmt("SHOW TIME ZONE;")).toEqual({ kind: "show", name: "time zone" });
-    expect(firstStmt("SHOW SESSION AUTHORIZATION;")).toEqual({ kind: "show", name: "session authorization" });
-    expect(firstStmt("RESET SESSION AUTHORIZATION;")).toEqual({ kind: "reset", name: "session authorization" });
-    expect(firstStmt("RESET TIME ZONE;")).toEqual({ kind: "reset", name: "time zone" });
+    expect(firstStmt("SHOW TIME ZONE;")).toEqual({ kind: "show", name: ["time zone"] });
+    expect(firstStmt("SHOW SESSION AUTHORIZATION;")).toEqual({ kind: "show", name: ["session authorization"] });
+    expect(firstStmt("RESET SESSION AUTHORIZATION;")).toEqual({ kind: "reset", name: ["session authorization"] });
+    expect(firstStmt("RESET TIME ZONE;")).toEqual({ kind: "reset", name: ["time zone"] });
     expect(firstStmt("RESET TRANSACTION ISOLATION LEVEL;")).toEqual({
       kind: "reset",
-      name: "transaction isolation level",
+      name: ["transaction isolation level"],
     });
   });
 
   it("reads a lone lead word as a parameter name", () => {
-    expect(firstStmt("SHOW time;")).toEqual({ kind: "show", name: "time" });
-    expect(firstStmt("SHOW transaction;")).toEqual({ kind: "show", name: "transaction" });
-    expect(firstStmt("RESET session;")).toEqual({ kind: "reset", name: "session" });
+    expect(firstStmt("SHOW time;")).toEqual({ kind: "show", name: ["time"] });
+    expect(firstStmt("SHOW transaction;")).toEqual({ kind: "show", name: ["transaction"] });
+    expect(firstStmt("RESET session;")).toEqual({ kind: "reset", name: ["session"] });
     expect(() => postgres.parse("SHOW TRANSACTION ISOLATION;")).toThrow(/Expected "level" but found ";"/);
   });
 
@@ -5844,7 +5921,7 @@ describe("PostgreSQL SHOW / RESET targets", () => {
         from: [tableFrom([word])],
       });
       expect(firstStmt(`SELECT a ${word} FROM t;`).columns[0]).toEqual({ expr: name("a"), alias: word });
-      expect(firstStmt(`SET ${word} = 1;`)).toMatchObject({ name: word });
+      expect(firstStmt(`SET ${word} = 1;`)).toMatchObject({ name: [word] });
     }
   });
 });
@@ -6019,13 +6096,13 @@ describe("PostgreSQL bit-string, hex-string and unicode-escape literals", () => 
     expect(colExpr("B'1011'::bit")).toEqual({
       kind: "cast",
       expr: bits("1011"),
-      type: { name: "bit", args: [], array: false },
+      type: { name: ["bit"], args: [], array: false },
     });
     expect(colExpr("a IN (B'1', X'f')")).toMatchObject({
       kind: "in",
       list: [bits("1"), bits("f", true)],
     });
-    expect(colExpr("count(B'1')")).toMatchObject({ kind: "call", name: "count", args: [bits("1")] });
+    expect(colExpr("count(B'1')")).toMatchObject({ kind: "call", name: ["count"], args: [bits("1")] });
     // And through a statement that never touches the select list.
     expect((firstStmt("INSERT INTO t (a, b, c) VALUES (B'1011', X'ff', U&'\\0041');") as any).source).toMatchObject({
       rows: [[bits("1011"), bits("ff", true), str("A")]],
@@ -6286,7 +6363,7 @@ describe("PostgreSQL numeric literals and parameters", () => {
       { type: "number", value: "1.E-3" },
       { type: "number", value: ".5e1" },
     ]);
-    expect(firstStmt("SELECT 5., 1.e3;").columns).toEqual([col(num(5)), col(num(1000))]);
+    expect(firstStmt("SELECT 5., 1.e3;").columns).toEqual([col(numRaw(5, "5.")), col(numRaw(1000, "1.e3"))]);
     // `1..` is PG's `{numericfail}`: the integer, with both dots left behind.
     expect(lex("1..")).toEqual([
       { type: "number", value: "1" },
@@ -6303,9 +6380,11 @@ describe("PostgreSQL numeric literals and parameters", () => {
   });
 
   it("reads hex, octal and binary integers, with `_` between digits", () => {
-    expect(firstStmt("SELECT 0o17, 0O17, 0b101, 0B1, 0x_ff, 0X1F, 1_000.000_1, 1_0e1_0;").columns).toEqual(
-      [15, 15, 5, 1, 255, 31, 1000.0001, 1e11].map((value) => col(num(value))),
-    );
+    expect(firstStmt("SELECT 0o17, 0O17, 0b101, 0B1, 0x_ff, 0X1F, 1_000.000_1, 1_0e1_0;").columns).toEqual([
+      ...[15, 15, 5, 1, 255, 31].map((value) => col(num(value))),
+      col(numRaw(1000.0001, "1000.0001")),
+      col(numRaw(1e11, "10e10")),
+    ]);
     // A radix integer runs into a following `.5`, as in PG: two numbers.
     expect(lex("0x1.5")).toEqual([
       { type: "number", value: "0x1" },
@@ -6406,7 +6485,7 @@ describe("PostgreSQL numeric literals and parameters", () => {
     // `:=` names an argument, and the spaced spelling is no named argument.
     expect(colExpr("f(a := 1)")).toEqual({
       kind: "call",
-      name: "f",
+      name: ["f"],
       args: [{ kind: "namedArg", name: "a", value: num(1) }],
     });
     expect(() => postgres.parse("SELECT f(a : = 1);")).toThrow(/found ":"/);
@@ -6440,20 +6519,49 @@ describe("PostgreSQL numeric literals and parameters", () => {
     });
   });
 
-  it("leaves `raw` off every number its value holds exactly", () => {
-    for (const src of ["0", "42", "9007199254740991", "3.14", ".5", "5.", "1e10", "0.1", "0x1F", "1_000"]) {
+  it("leaves `raw` off an integer its value spells exactly", () => {
+    for (const src of ["0", "42", "9007199254740991", "0x1F", "0o17", "0b101", "1_000"]) {
       expect(colExpr(src), src).not.toHaveProperty("raw");
     }
   });
 
+  // PG types `1` int4 but `1.0` numeric (`1/2` is 0, `1.0/2` is 0.5), and a
+  // numeric keeps its scale (`1.50`), so every other spelling keeps its text.
+  it("keeps `raw` on a fraction, an exponent or a spelling the value doesn't give back", () => {
+    for (const [src, value] of [
+      ["1.0", 1],
+      ["1.50", 1.5],
+      ["3.14", 3.14],
+      [".5", 0.5],
+      ["5.", 5],
+      ["0.1", 0.1],
+      ["1e2", 100],
+      ["1E10", 1e10],
+      ["1.5e-3", 0.0015],
+      ["007", 7],
+      ["1_000.000_1", 1000.0001],
+      ["00", 0],
+      ["1e-400", 0],
+    ] as const) {
+      expect(colExpr(src), src).toEqual(numRaw(value, src.replaceAll("_", "")));
+    }
+    expect(colExpr("-1.0")).toEqual({ kind: "unary", op: "-", operand: numRaw(1, "1.0") });
+  });
+
   it("folds an option value's sign into `raw` and the value alike", () => {
-    expect(options("a = -99999999999999999999, b = +99999999999999999999, c = -1e400, d = -0x10, e = -5")).toEqual([
+    expect(
+      options(
+        "a = -99999999999999999999, b = +99999999999999999999, c = -1e400, d = -0x10, e = -5, f = -1.50, g = +2.0",
+      ),
+    ).toEqual([
       { name: "a", value: { kind: "number", value: -100000000000000000000, raw: "-99999999999999999999" } },
       { name: "b", value: { kind: "number", value: 100000000000000000000, raw: "+99999999999999999999" } },
       { name: "c", value: { kind: "number", value: Number.NEGATIVE_INFINITY, raw: "-1e400" } },
       // The sign applies after decoding: `Number("-0x10")` alone is NaN.
       { name: "d", value: num(-16) },
       { name: "e", value: num(-5) },
+      { name: "f", value: numRaw(-1.5, "-1.50") },
+      { name: "g", value: numRaw(2, "+2.0") },
     ]);
   });
 });
@@ -6466,7 +6574,7 @@ describe("PostgreSQL non-ASCII identifiers and national strings", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const bpchar = (value: string) => ({
     kind: "typedLiteral",
-    type: { name: "bpchar", args: [], array: false },
+    type: { name: ["bpchar"], args: [], array: false },
     value,
   });
 
@@ -6476,7 +6584,7 @@ describe("PostgreSQL non-ASCII identifiers and national strings", () => {
         columns: [
           col(name("café")),
           col(name("ñ", "größe"), "über"),
-          col({ kind: "call", name: "naïve", args: [name("ß")] }, "résumé"),
+          col({ kind: "call", name: ["na\u00efve"], args: [name("ß")] }, "résumé"),
         ],
         from: [tableFrom(["schéma", "tàble"], "ŧ")],
       }),
@@ -6557,7 +6665,7 @@ describe("PostgreSQL non-ASCII identifiers and national strings", () => {
     expect(colExpr("N'a'::text")).toEqual({
       kind: "cast",
       expr: bpchar("a"),
-      type: { name: "text", args: [], array: false },
+      type: { name: ["text"], args: [], array: false },
     });
     expect(firstStmt("CREATE TABLE t (c char(3) DEFAULT N'x');")).toMatchObject({
       items: [{ constraints: [{ kind: "default", expr: bpchar("x") }] }],
@@ -6582,7 +6690,7 @@ describe("PostgreSQL non-ASCII identifiers and national strings", () => {
     // a typed literal of a type named `n`, as PG reads it too.
     expect((firstStmt("SELECT N 'abc';") as any).columns[0].expr).toEqual({
       kind: "typedLiteral",
-      type: ct("n"),
+      type: ct(["n"]),
       value: "abc",
     });
   });
@@ -6617,7 +6725,7 @@ describe("PostgreSQL non-ASCII identifiers and national strings", () => {
 
 describe("PostgreSQL keyword dispatch maps", () => {
   const rawFirst = (text: string) => postgres.parse(text)[0] as Record<string, any>;
-  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: qn(fnName), args });
 
   it("names the keyword-led CREATE targets in the join form", () => {
     expect(() => postgres.parse("CREATE frobnicate;")).toThrow(
@@ -6706,61 +6814,61 @@ describe("PostgreSQL multi-word type names", () => {
     (firstStmt(`CREATE FUNCTION f(${signature}) RETURNS int LANGUAGE sql AS $$SELECT 1$$;`) as any).args;
 
   it("parses the PG types spelled with more than one word", () => {
-    expect(colType("double precision")).toEqual(ct("double precision"));
-    expect(colType("character varying(10)")).toEqual(ct("character varying", { args: [10] }));
-    expect(colType("char varying(10)")).toEqual(ct("char varying", { args: [10] }));
-    expect(colType("national character varying(8)")).toEqual(ct("national character varying", { args: [8] }));
-    expect(colType("national character(8)")).toEqual(ct("national character", { args: [8] }));
-    expect(colType("national char(8)")).toEqual(ct("national char", { args: [8] }));
+    expect(colType("double precision")).toEqual(ct(["double precision"]));
+    expect(colType("character varying(10)")).toEqual(ct(["character varying"], { args: [10] }));
+    expect(colType("char varying(10)")).toEqual(ct(["char varying"], { args: [10] }));
+    expect(colType("national character varying(8)")).toEqual(ct(["national character varying"], { args: [8] }));
+    expect(colType("national character(8)")).toEqual(ct(["national character"], { args: [8] }));
+    expect(colType("national char(8)")).toEqual(ct(["national char"], { args: [8] }));
     // Listed before the bare `national char`, so the greedy match takes the
     // longer spelling rather than choking on the leftover `varying`.
-    expect(colType("national char varying(3)")).toEqual(ct("national char varying", { args: [3] }));
-    expect(colType("bit varying(4)")).toEqual(ct("bit varying", { args: [4] }));
-    expect(colType("timestamp with time zone")).toEqual(ct("timestamp with time zone"));
-    expect(colType("timestamp without time zone")).toEqual(ct("timestamp without time zone"));
-    expect(colType("time with time zone")).toEqual(ct("time with time zone"));
-    expect(colType("interval day to second")).toEqual(ct("interval day to second"));
-    expect(colType("interval year to month")).toEqual(ct("interval year to month"));
-    expect(colType("interval hour")).toEqual(ct("interval hour"));
+    expect(colType("national char varying(3)")).toEqual(ct(["national char varying"], { args: [3] }));
+    expect(colType("bit varying(4)")).toEqual(ct(["bit varying"], { args: [4] }));
+    expect(colType("timestamp with time zone")).toEqual(ct(["timestamp with time zone"]));
+    expect(colType("timestamp without time zone")).toEqual(ct(["timestamp without time zone"]));
+    expect(colType("time with time zone")).toEqual(ct(["time with time zone"]));
+    expect(colType("interval day to second")).toEqual(ct(["interval day to second"]));
+    expect(colType("interval year to month")).toEqual(ct(["interval year to month"]));
+    expect(colType("interval hour")).toEqual(ct(["interval hour"]));
   });
 
   it("hoists a mid-name precision out into args", () => {
     // PG puts the precision inside the name; the node keeps the words together
     // and the args separate, never `{ name: "timestamp(3) with time zone" }`.
-    expect(colType("timestamp(3) with time zone")).toEqual(ct("timestamp with time zone", { args: [3] }));
-    expect(colType("time(6) without time zone")).toEqual(ct("time without time zone", { args: [6] }));
-    expect(colType("interval day to second(3)")).toEqual(ct("interval day to second", { args: [3] }));
+    expect(colType("timestamp(3) with time zone")).toEqual(ct(["timestamp with time zone"], { args: [3] }));
+    expect(colType("time(6) without time zone")).toEqual(ct(["time without time zone"], { args: [6] }));
+    expect(colType("interval day to second(3)")).toEqual(ct(["interval day to second"], { args: [3] }));
   });
 
   it("leaves the single-word, arg and array spellings alone", () => {
-    expect(colType("int")).toEqual(ct("int"));
-    expect(colType("numeric(10,2)[]")).toEqual(ct("numeric", { args: [10, 2], array: true }));
-    expect(colType("double precision[]")).toEqual(ct("double precision", { array: true }));
-    expect(colType("pg_catalog.numeric")).toEqual(ct("pg_catalog.numeric"));
+    expect(colType("int")).toEqual(ct(["int"]));
+    expect(colType("numeric(10,2)[]")).toEqual(ct(["numeric"], { args: [10, 2], array: true }));
+    expect(colType("double precision[]")).toEqual(ct(["double precision"], { array: true }));
+    expect(colType("pg_catalog.numeric")).toEqual(ct(["pg_catalog", "numeric"]));
   });
 
   it("casts to a multi-word type instead of aliasing the second word", () => {
     // `SELECT a::double precision FROM t` used to cast to `double` and read
     // `precision` as the column's alias.
-    expect(castType("a::double precision")).toEqual(ct("double precision"));
+    expect(castType("a::double precision")).toEqual(ct(["double precision"]));
     expect((firstStmt("SELECT a::double precision FROM t;") as any).columns[0].alias).toBeNull();
-    expect(castType("a::timestamp(3) with time zone")).toEqual(ct("timestamp with time zone", { args: [3] }));
+    expect(castType("a::timestamp(3) with time zone")).toEqual(ct(["timestamp with time zone"], { args: [3] }));
     // A trailing INTERVAL field now belongs to the type name, as it does in PG.
-    expect(castType("x::interval day")).toEqual(ct("interval day"));
+    expect(castType("x::interval day")).toEqual(ct(["interval day"]));
   });
 
   it("only extends a bare, unqualified lead word", () => {
     // A quoted lead is an ordinary name, so `precision` stays an alias.
     expect(firstStmt('SELECT a::"double" precision FROM t;')).toEqual(
       sel({
-        columns: [{ expr: { kind: "cast", expr: name("a"), type: ct("double") }, alias: "precision" }],
+        columns: [{ expr: { kind: "cast", expr: name("a"), type: ct(["double"]) }, alias: "precision" }],
         from: [tableFrom(["t"])],
       }),
     );
     // So is a dotted one.
     expect(firstStmt("SELECT x::public.interval day FROM t;")).toEqual(
       sel({
-        columns: [{ expr: { kind: "cast", expr: name("x"), type: ct("public.interval") }, alias: "day" }],
+        columns: [{ expr: { kind: "cast", expr: name("x"), type: ct(["public", "interval"]) }, alias: "day" }],
         from: [tableFrom(["t"])],
       }),
     );
@@ -6773,7 +6881,7 @@ describe("PostgreSQL multi-word type names", () => {
     expect(mv).toMatchObject({ kind: "createView", materialized: true, withData: false });
     // …and the type really stopped at `timestamp`, rather than the clause being
     // re-parsed from a half-consumed tail.
-    expect(mv.query.columns[0].expr.type).toEqual(ct("timestamp"));
+    expect(mv.query.columns[0].expr.type).toEqual(ct(["timestamp"]));
     expect(() => postgres.parse("CREATE TABLE t (c timestamp with zone);")).toThrow(/Expected "," but found "with"/);
     expect(() => postgres.parse("CREATE TABLE t (c interval to second);")).toThrow(/Expected "," but found "to"/);
   });
@@ -6786,22 +6894,22 @@ describe("PostgreSQL multi-word type names", () => {
     );
     expect(() => postgres.parse("CREATE TABLE t (c interval(3) day);")).toThrow(/Expected "," but found "day"/);
     // A lead with no tail still takes its ordinary trailing list.
-    expect(colType("timestamp(3)")).toEqual(ct("timestamp", { args: [3] }));
-    expect(colType("interval(3)")).toEqual(ct("interval", { args: [3] }));
+    expect(colType("timestamp(3)")).toEqual(ct(["timestamp"], { args: [3] }));
+    expect(colType("interval(3)")).toEqual(ct(["interval"], { args: [3] }));
     // What is *not* checked is whether the type takes a precision at all — PG
     // rejects all three of these, and so does no type in this grammar: the
     // single-word `text(5)` is equally lenient, on main and here.
-    expect(colType("double precision(10)")).toEqual(ct("double precision", { args: [10] }));
-    expect(colType("timestamp with time zone(3)")).toEqual(ct("timestamp with time zone", { args: [3] }));
-    expect(colType("text(5)")).toEqual(ct("text", { args: [5] }));
+    expect(colType("double precision(10)")).toEqual(ct(["double precision"], { args: [10] }));
+    expect(colType("timestamp with time zone(3)")).toEqual(ct(["timestamp with time zone"], { args: [3] }));
+    expect(colType("text(5)")).toEqual(ct(["text"], { args: [5] }));
   });
 
   it("treats a type name that collides with Object.prototype as an ordinary name", () => {
     // Identifiers fold to lowercase, so these reach the tail lookup verbatim. An
     // object literal keyed by lead word would hand back an inherited value here.
-    expect(colType("constructor")).toEqual(ct("constructor"));
-    expect(colType("__proto__")).toEqual(ct("__proto__"));
-    expect(castType("x::constructor")).toEqual(ct("constructor"));
+    expect(colType("constructor")).toEqual(ct(["constructor"]));
+    expect(colType("__proto__")).toEqual(ct(["__proto__"]));
+    expect(castType("x::constructor")).toEqual(ct(["constructor"]));
     // And `diagnose` must still collect rather than throw.
     expect(postgres.diagnose("CREATE TABLE t (c constructor);").errors).toEqual([]);
   });
@@ -6821,20 +6929,20 @@ describe("PostgreSQL multi-word type names", () => {
     const arg = (over: Record<string, unknown>) => ({ mode: null, name: null, defaultValue: null, ...over });
     // Both words are the type: one unnamed argument, not a `double` of type
     // `precision`.
-    expect(fnArgs("double precision")).toEqual([arg({ type: ct("double precision") })]);
-    expect(fnArgs("timestamp with time zone")).toEqual([arg({ type: ct("timestamp with time zone") })]);
+    expect(fnArgs("double precision")).toEqual([arg({ type: ct(["double precision"]) })]);
+    expect(fnArgs("timestamp with time zone")).toEqual([arg({ type: ct(["timestamp with time zone"]) })]);
     // A name in front of one still works, and used to fail outright.
-    expect(fnArgs("a double precision")).toEqual([arg({ name: "a", type: ct("double precision") })]);
-    expect(fnArgs("a timestamp with time zone")).toEqual([arg({ name: "a", type: ct("timestamp with time zone") })]);
+    expect(fnArgs("a double precision")).toEqual([arg({ name: "a", type: ct(["double precision"]) })]);
+    expect(fnArgs("a timestamp with time zone")).toEqual([arg({ name: "a", type: ct(["timestamp with time zone"]) })]);
     // The ordinary `name type` pair is untouched.
-    expect(fnArgs("a integer")).toEqual([arg({ name: "a", type: ct("integer") })]);
-    expect(fnArgs("integer")).toEqual([arg({ type: ct("integer") })]);
+    expect(fnArgs("a integer")).toEqual([arg({ name: "a", type: ct(["integer"]) })]);
+    expect(fnArgs("integer")).toEqual([arg({ type: ct(["integer"]) })]);
     // A lead word followed by something that cannot continue it is a name again —
     // including a word that starts a tail but cannot finish one, since the test
     // is the whole tail rather than just the pair.
-    expect(fnArgs("interval integer")).toEqual([arg({ name: "interval", type: ct("integer") })]);
-    expect(fnArgs("timestamp without")).toEqual([arg({ name: "timestamp", type: ct("without") })]);
-    expect(fnArgs("in double precision")).toEqual([arg({ mode: "in", type: ct("double precision") })]);
+    expect(fnArgs("interval integer")).toEqual([arg({ name: "interval", type: ct(["integer"]) })]);
+    expect(fnArgs("timestamp without")).toEqual([arg({ name: "timestamp", type: ct(["without"]) })]);
+    expect(fnArgs("in double precision")).toEqual([arg({ mode: "in", type: ct(["double precision"]) })]);
   });
 
   it("keeps the type words unreserved as names and aliases", () => {
@@ -6864,9 +6972,9 @@ describe("PostgreSQL multi-word type names", () => {
     expect((firstStmt(`SELECT ${words.join(", ")} FROM t;`) as any).columns).toEqual(words.map((w) => col(name(w))));
     // …as column names, with an ordinary type after them,
     expect((firstStmt("CREATE TABLE t (double int, interval text, zone int);") as any).items).toEqual([
-      { kind: "column", name: "double", dataType: ct("int"), constraints: [] },
-      { kind: "column", name: "interval", dataType: ct("text"), constraints: [] },
-      { kind: "column", name: "zone", dataType: ct("int"), constraints: [] },
+      { kind: "column", name: "double", dataType: ct(["int"]), constraints: [] },
+      { kind: "column", name: "interval", dataType: ct(["text"]), constraints: [] },
+      { kind: "column", name: "zone", dataType: ct(["int"]), constraints: [] },
     ]);
     // `date` is the neighbouring unreserved type word this rule does *not* match
     // by value; it stays an ordinary column reference.
@@ -6961,28 +7069,28 @@ describe("PostgreSQL niladic keyword functions, typed datetime literals and OVER
   });
 
   it("parses DATE, TIME and TIMESTAMP string literals", () => {
-    expect(colExpr("date '2024-01-01'")).toEqual(typed(ct("date"), "2024-01-01"));
-    expect(colExpr("time '10:00'")).toEqual(typed(ct("time"), "10:00"));
-    expect(colExpr("TIMESTAMP '2024-01-01 00:00'")).toEqual(typed(ct("timestamp"), "2024-01-01 00:00"));
+    expect(colExpr("date '2024-01-01'")).toEqual(typed(ct(["date"]), "2024-01-01"));
+    expect(colExpr("time '10:00'")).toEqual(typed(ct(["time"]), "10:00"));
+    expect(colExpr("TIMESTAMP '2024-01-01 00:00'")).toEqual(typed(ct(["timestamp"]), "2024-01-01 00:00"));
     // The type is a full typeRef: multi-word spellings and the pre-tail
     // precision come out exactly as they do in a cast.
     expect(colExpr("timestamp with time zone '2024-01-01'")).toEqual(
-      typed(ct("timestamp with time zone"), "2024-01-01"),
+      typed(ct(["timestamp with time zone"]), "2024-01-01"),
     );
     expect(colExpr("time(3) without time zone '10:00'")).toEqual(
-      typed(ct("time without time zone", { args: [3] }), "10:00"),
+      typed(ct(["time without time zone"], { args: [3] }), "10:00"),
     );
-    expect(colExpr("timestamp(2) 'x'")).toEqual(typed(ct("timestamp", { args: [2] }), "x"));
+    expect(colExpr("timestamp(2) 'x'")).toEqual(typed(ct(["timestamp"], { args: [2] }), "x"));
     // A typed literal is an atom, so the postfixes and operators bind around it.
     expect(colExpr("date '2024-01-01'::text")).toEqual({
       kind: "cast",
-      expr: typed(ct("date"), "2024-01-01"),
-      type: ct("text"),
+      expr: typed(ct(["date"]), "2024-01-01"),
+      type: ct(["text"]),
     });
     expect(colExpr("extract(epoch FROM timestamp 'x')")).toEqual({
       kind: "extract",
       field: "epoch",
-      source: typed(ct("timestamp"), "x"),
+      source: typed(ct(["timestamp"]), "x"),
     });
   });
 
@@ -6995,7 +7103,7 @@ describe("PostgreSQL niladic keyword functions, typed datetime literals and OVER
   it("reads a typed literal only when the whole spelling is followed by a string", () => {
     // A quoted lead is a type name like any other, and leads a literal as PG's
     // general `type 'string'` form has it.
-    expect(colExpr(`"date" 'x'`)).toEqual(typed(ct("date"), "x"));
+    expect(colExpr(`"date" 'x'`)).toEqual(typed(ct(["date"]), "x"));
     // A lead whose tail is not followed by a string is a name — no word is taken.
     expect(() => postgres.parse("SELECT timestamp with time zone FROM t;")).toThrow(/Expected ";" but found "with"/);
     // A lex error in the lookahead past the lead word must not cost the syntax
@@ -7016,7 +7124,7 @@ describe("PostgreSQL niladic keyword functions, typed datetime literals and OVER
     expect(() => postgres.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
     // `date` is no keyword to PG, so `date(3) 'x'` is its generic
     // `name(typmod) 'string'` form, as `varchar(3) 'abc'` is.
-    expect(colExpr("date(3) 'x'")).toEqual(typed(ct("date", { args: [3] }), "x"));
+    expect(colExpr("date(3) 'x'")).toEqual(typed(ct(["date"], { args: [3] }), "x"));
   });
 
   it("keeps date / time / timestamp unreserved as names, calls and aliases", () => {
@@ -7026,8 +7134,8 @@ describe("PostgreSQL niladic keyword functions, typed datetime literals and OVER
       col(name("timestamp")),
     ]);
     expect((firstStmt("SELECT date(x), timestamp(3), time.x FROM t;") as any).columns).toEqual([
-      col({ kind: "call", name: "date", args: [name("x")] }),
-      col({ kind: "call", name: "timestamp", args: [num(3)] }),
+      col({ kind: "call", name: ["date"], args: [name("x")] }),
+      col({ kind: "call", name: ["timestamp"], args: [num(3)] }),
       col(name("time", "x")),
     ]);
     expect((firstStmt("SELECT a date, b AS time, c timestamp FROM t;") as any).columns).toEqual([
@@ -7036,9 +7144,9 @@ describe("PostgreSQL niladic keyword functions, typed datetime literals and OVER
       col(name("c"), "timestamp"),
     ]);
     expect((firstStmt("CREATE TABLE t (date date, time time, overlay text);") as any).items).toEqual([
-      { kind: "column", name: "date", dataType: ct("date"), constraints: [] },
-      { kind: "column", name: "time", dataType: ct("time"), constraints: [] },
-      { kind: "column", name: "overlay", dataType: ct("text"), constraints: [] },
+      { kind: "column", name: "date", dataType: ct(["date"]), constraints: [] },
+      { kind: "column", name: "time", dataType: ct(["time"]), constraints: [] },
+      { kind: "column", name: "overlay", dataType: ct(["text"]), constraints: [] },
     ]);
   });
 
@@ -7062,12 +7170,16 @@ describe("PostgreSQL niladic keyword functions, typed datetime literals and OVER
     // reject on OVERLAY but which this grammar accepts on any call.
     expect(colExpr("overlay(s, 'x', 1)")).toEqual({
       kind: "call",
-      name: "overlay",
+      name: ["overlay"],
       args: [name("s"), str("x"), num(1)],
     });
-    expect(colExpr("overlay(DISTINCT s ORDER BY s)")).toMatchObject({ kind: "call", name: "overlay", distinct: true });
-    expect(colExpr("overlay(s, 'x', 1) OVER ()")).toMatchObject({ kind: "window", fn: { name: "overlay" } });
-    expect(colExpr("overlay()")).toEqual({ kind: "call", name: "overlay", args: [] });
+    expect(colExpr("overlay(DISTINCT s ORDER BY s)")).toMatchObject({
+      kind: "call",
+      name: ["overlay"],
+      distinct: true,
+    });
+    expect(colExpr("overlay(s, 'x', 1) OVER ()")).toMatchObject({ kind: "window", fn: { name: ["overlay"] } });
+    expect(colExpr("overlay()")).toEqual({ kind: "call", name: ["overlay"], args: [] });
     // A qualified star is an ordinary operand; only a bare `*` is refused.
     expect(colExpr("overlay(t.* PLACING 'x' FROM 1)")).toMatchObject({ kind: "overlay", value: star(["t"]) });
   });
@@ -7113,23 +7225,23 @@ describe("PostgreSQL typed literals, ARRAY type spelling and interval precision"
   const interval = (value: string, over: Record<string, unknown> = {}) => ({ kind: "interval", value, ...over });
 
   it("reads a string after any type name as a typed literal", () => {
-    expect(colExpr("jsonb '{}'")).toEqual(typed(ct("jsonb"), "{}"));
-    expect(colExpr("timestamptz '2024-01-01'")).toEqual(typed(ct("timestamptz"), "2024-01-01"));
-    expect(colExpr("int4 '42'")).toEqual(typed(ct("int4"), "42"));
+    expect(colExpr("jsonb '{}'")).toEqual(typed(ct(["jsonb"]), "{}"));
+    expect(colExpr("timestamptz '2024-01-01'")).toEqual(typed(ct(["timestamptz"]), "2024-01-01"));
+    expect(colExpr("int4 '42'")).toEqual(typed(ct(["int4"]), "42"));
     // Qualified and quoted names, as PG's `func_name 'string'` takes them.
-    expect(colExpr("s.t 'x'")).toEqual(typed(ct("s.t"), "x"));
-    expect(colExpr("pg_catalog.int4 '1'")).toEqual(typed(ct("pg_catalog.int4"), "1"));
-    expect(colExpr(`"MyType" 'x'`)).toEqual(typed(ct("MyType"), "x"));
-    expect(colExpr(`"char" 'a'`)).toEqual(typed(ct("char", { quoted: true }), "a"));
+    expect(colExpr("s.t 'x'")).toEqual(typed(ct(["s", "t"]), "x"));
+    expect(colExpr("pg_catalog.int4 '1'")).toEqual(typed(ct(["pg_catalog", "int4"]), "1"));
+    expect(colExpr(`"MyType" 'x'`)).toEqual(typed(ct(["MyType"]), "x"));
+    expect(colExpr(`"char" 'a'`)).toEqual(typed(ct(["char"], { quoted: true }), "a"));
     // A typmod of integer constants, on a generic or a multi-word name.
-    expect(colExpr("varchar(3) 'abc'")).toEqual(typed(ct("varchar", { args: [3] }), "abc"));
-    expect(colExpr("numeric(10, 2) '1.5'")).toEqual(typed(ct("numeric", { args: [10, 2] }), "1.5"));
-    expect(colExpr("character varying(3) 'abc'")).toEqual(typed(ct("character varying", { args: [3] }), "abc"));
-    expect(colExpr("double precision '1'")).toEqual(typed(ct("double precision"), "1"));
+    expect(colExpr("varchar(3) 'abc'")).toEqual(typed(ct(["varchar"], { args: [3] }), "abc"));
+    expect(colExpr("numeric(10, 2) '1.5'")).toEqual(typed(ct(["numeric"], { args: [10, 2] }), "1.5"));
+    expect(colExpr("character varying(3) 'abc'")).toEqual(typed(ct(["character varying"], { args: [3] }), "abc"));
+    expect(colExpr("double precision '1'")).toEqual(typed(ct(["double precision"]), "1"));
     // It is an atom, so operators bind around it.
-    expect(colExpr("jsonb '{}' || x")).toEqual(bin("||", typed(ct("jsonb"), "{}"), name("x")));
+    expect(colExpr("jsonb '{}' || x")).toEqual(bin("||", typed(ct(["jsonb"]), "{}"), name("x")));
     expect((firstStmt("SELECT a FROM t WHERE ts > timestamptz '2024-01-01';") as any).where).toEqual(
-      bin(">", name("ts"), typed(ct("timestamptz"), "2024-01-01")),
+      bin(">", name("ts"), typed(ct(["timestamptz"]), "2024-01-01")),
     );
   });
 
@@ -7162,9 +7274,9 @@ describe("PostgreSQL typed literals, ARRAY type spelling and interval precision"
     ]) {
       expect(() => postgres.parse(`SELECT ${word} 'x';`)).toThrow(/Expected ";" but found "x"/);
     }
-    expect(colExpr("trim.x 'y'")).toEqual(typed(ct("trim.x"), "y"));
+    expect(colExpr("trim.x 'y'")).toEqual(typed(ct(["trim", "x"]), "y"));
     expect(() => postgres.parse("SELECT system_user.x 'y';")).toThrow(/Expected ";" but found "y"/);
-    expect(colExpr("national character 'x'")).toEqual(typed(ct("national character"), "x"));
+    expect(colExpr("national character 'x'")).toEqual(typed(ct(["national character"]), "x"));
   });
 
   it("narrows the typmod to integer constants", () => {
@@ -7180,24 +7292,24 @@ describe("PostgreSQL typed literals, ARRAY type spelling and interval precision"
     expect(() => postgres.parse("SELECT interval(3.0) '1';")).toThrow(/Expected ";" but found "1"/);
     expect(() => postgres.parse("SELECT interval(1e0) '1';")).toThrow(/Expected ";" but found "1"/);
     // A call that is not followed by a string is still a call.
-    expect(colExpr("foo(1, 2)")).toEqual({ kind: "call", name: "foo", args: [num(1), num(2)] });
+    expect(colExpr("foo(1, 2)")).toEqual({ kind: "call", name: ["foo"], args: [num(1), num(2)] });
     // The TIME / TIMESTAMP precision is read by the type spelling, which takes
     // an integer only; a dotted name is an ordinary one.
     expect(() => postgres.parse("SELECT timestamp(1.5) 'x';")).toThrow(/Expected ";" but found "x"/);
-    expect(colExpr("timestamp.x(3) 'y'")).toEqual(typed(ct("timestamp.x", { args: [3] }), "y"));
-    expect(colExpr("interval.x 'y'")).toEqual(typed(ct("interval.x"), "y"));
+    expect(colExpr("timestamp.x(3) 'y'")).toEqual(typed(ct(["timestamp", "x"], { args: [3] }), "y"));
+    expect(colExpr("interval.x 'y'")).toEqual(typed(ct(["interval", "x"]), "y"));
     // A quoted or qualified `interval` is an ordinary type name with a typmod,
     // not the INTERVAL precision form.
-    expect(colExpr(`"interval"(3) '1'`)).toEqual(typed(ct("interval", { args: [3] }), "1"));
-    expect(colExpr("pg_catalog.interval(3) '1'")).toEqual(typed(ct("pg_catalog.interval", { args: [3] }), "1"));
+    expect(colExpr(`"interval"(3) '1'`)).toEqual(typed(ct(["interval"], { args: [3] }), "1"));
+    expect(colExpr("pg_catalog.interval(3) '1'")).toEqual(typed(ct(["pg_catalog", "interval"], { args: [3] }), "1"));
   });
 
   it("keeps N'…' the national-character literal, not a type named n", () => {
     // `N'abc'` is its own token and stays PG's bpchar literal; a spaced
     // `n 'x'` is an ordinary typed literal, to PG as well. A type name before
     // an `N'…'` is no typed literal.
-    expect(colExpr("N'abc'")).toEqual(typed(ct("bpchar"), "abc"));
-    expect(colExpr("n 'abc'")).toEqual(typed(ct("n"), "abc"));
+    expect(colExpr("N'abc'")).toEqual(typed(ct(["bpchar"]), "abc"));
+    expect(colExpr("n 'abc'")).toEqual(typed(ct(["n"]), "abc"));
     expect(() => postgres.parse("SELECT jsonb N'{}';")).toThrow(/Expected ";" but found/);
   });
 
@@ -7241,7 +7353,7 @@ describe("PostgreSQL typed literals, ARRAY type spelling and interval precision"
       col(interval("1", { precision: 3 }), "day"),
     ]);
     // Without a string, `interval(3)` is still an ordinary call.
-    expect(colExpr("interval(3)")).toEqual({ kind: "call", name: "interval", args: [num(3)] });
+    expect(colExpr("interval(3)")).toEqual({ kind: "call", name: ["interval"], args: [num(3)] });
   });
 
   it("rejects the INTERVAL field specs PG does not list", () => {
@@ -7263,18 +7375,18 @@ describe("PostgreSQL typed literals, ARRAY type spelling and interval precision"
   });
 
   it("parses the SQL-standard ARRAY type spelling", () => {
-    expect(colType("int ARRAY")).toEqual(ct("int", { array: true }));
-    expect(colType("integer ARRAY[3]")).toEqual(ct("integer", { array: true }));
-    expect(colType("varchar(10) ARRAY")).toEqual(ct("varchar", { args: [10], array: true }));
-    expect(castType("'{}'::int ARRAY")).toEqual(ct("int", { array: true }));
-    expect(castType("CAST(x AS text ARRAY)")).toEqual(ct("text", { array: true }));
+    expect(colType("int ARRAY")).toEqual(ct(["int"], { array: true }));
+    expect(colType("integer ARRAY[3]")).toEqual(ct(["integer"], { array: true }));
+    expect(colType("varchar(10) ARRAY")).toEqual(ct(["varchar"], { args: [10], array: true }));
+    expect(castType("'{}'::int ARRAY")).toEqual(ct(["int"], { array: true }));
+    expect(castType("CAST(x AS text ARRAY)")).toEqual(ct(["text"], { array: true }));
     // Column constraints follow it as they follow any type.
     expect((firstStmt("CREATE TABLE t (a int ARRAY NOT NULL, b text ARRAY[2] DEFAULT '{}');") as any).items).toEqual([
-      { kind: "column", name: "a", dataType: ct("int", { array: true }), constraints: [{ kind: "notNull" }] },
+      { kind: "column", name: "a", dataType: ct(["int"], { array: true }), constraints: [{ kind: "notNull" }] },
       {
         kind: "column",
         name: "b",
-        dataType: ct("text", { array: true }),
+        dataType: ct(["text"], { array: true }),
         constraints: [{ kind: "default", expr: str("{}") }],
       },
     ]);
@@ -7299,19 +7411,19 @@ describe("PostgreSQL typed literals, ARRAY type spelling and interval precision"
     // `x::setof int` used to cast to a type named `setof`, aliased `int`.
     expect(firstStmt("SELECT x::setof int FROM t;")).toEqual(
       sel({
-        columns: [col({ kind: "cast", expr: name("x"), type: ct("int", { setof: true }) })],
+        columns: [col({ kind: "cast", expr: name("x"), type: ct(["int"], { setof: true }) })],
         from: [tableFrom(["t"])],
       }),
     );
-    expect(castType("x::setof int[]")).toEqual(ct("int", { array: true, setof: true }));
+    expect(castType("x::setof int[]")).toEqual(ct(["int"], { array: true, setof: true }));
     // PG's Typename takes SETOF wherever a type is written; whether it means
     // anything there is decided after parsing.
-    expect(colType("setof int")).toEqual(ct("int", { setof: true }));
+    expect(colType("setof int")).toEqual(ct(["int"], { setof: true }));
     // Without a type name after it, `setof` is read as the type name, as it
     // was before SETOF was recognised — PG rejects that.
-    expect(castType("x::setof")).toEqual(ct("setof"));
+    expect(castType("x::setof")).toEqual(ct(["setof"]));
     expect((firstStmt("SELECT x::setof FROM t;") as any).columns).toEqual([
-      col({ kind: "cast", expr: name("x"), type: ct("setof") }),
+      col({ kind: "cast", expr: name("x"), type: ct(["setof"]) }),
     ]);
     // RETURNS SETOF keeps its own flag, and PG's Typename takes one SETOF only.
     expect(() => postgres.parse("CREATE FUNCTION f() RETURNS SETOF SETOF int LANGUAGE sql AS $$SELECT 1$$;")).toThrow(
@@ -7319,22 +7431,22 @@ describe("PostgreSQL typed literals, ARRAY type spelling and interval precision"
     );
     // A routine argument too: SETOF is no argument name to PG.
     expect((firstStmt("CREATE FUNCTION f(setof int) RETURNS int LANGUAGE sql AS $$SELECT 1$$;") as any).args).toEqual([
-      { mode: null, name: null, type: ct("int", { setof: true }), defaultValue: null },
+      { mode: null, name: null, type: ct(["int"], { setof: true }), defaultValue: null },
     ]);
   });
 
   it("keeps a quoted keyword type name apart from the keyword", () => {
     // `"char"` is PG's one-byte internal type; a bare `char` is bpchar.
-    expect(castType(`1::"char"`)).toEqual(ct("char", { quoted: true }));
-    expect(castType("1::char")).toEqual(ct("char"));
-    expect(castType(`1::"int"`)).toEqual(ct("int", { quoted: true }));
+    expect(castType(`1::"char"`)).toEqual(ct(["char"], { quoted: true }));
+    expect(castType("1::char")).toEqual(ct(["char"]));
+    expect(castType(`1::"int"`)).toEqual(ct(["int"], { quoted: true }));
     // Quoting that changes nothing carries no flag: an ordinary name, or a
     // qualified one, which PG never reads as a keyword spelling.
-    expect(castType(`1::"MyType"`)).toEqual(ct("MyType"));
-    expect(castType(`1::"double"`)).toEqual(ct("double"));
-    expect(castType(`1::"numeric"`)).toEqual(ct("numeric"));
-    expect(castType(`1::"timestamp"`)).toEqual(ct("timestamp"));
-    expect(castType(`1::pg_catalog."char"`)).toEqual(ct("pg_catalog.char"));
+    expect(castType(`1::"MyType"`)).toEqual(ct(["MyType"]));
+    expect(castType(`1::"double"`)).toEqual(ct(["double"]));
+    expect(castType(`1::"numeric"`)).toEqual(ct(["numeric"]));
+    expect(castType(`1::"timestamp"`)).toEqual(ct(["timestamp"]));
+    expect(castType(`1::pg_catalog."char"`)).toEqual(ct(["pg_catalog", "char"]));
   });
 
   it("keeps type names and setof unreserved as names, calls and aliases", () => {
@@ -7346,14 +7458,14 @@ describe("PostgreSQL typed literals, ARRAY type spelling and interval precision"
       col(name("s", "t")),
     ]);
     expect((firstStmt("SELECT int4(x), jsonb(y), a jsonb, b AS setof FROM t;") as any).columns).toEqual([
-      col({ kind: "call", name: "int4", args: [name("x")] }),
-      col({ kind: "call", name: "jsonb", args: [name("y")] }),
+      col({ kind: "call", name: ["int4"], args: [name("x")] }),
+      col({ kind: "call", name: ["jsonb"], args: [name("y")] }),
       col(name("a"), "jsonb"),
       col(name("b"), "setof"),
     ]);
     expect((firstStmt("CREATE TABLE jsonb (int4 int, setof setof);") as any).items).toEqual([
-      { kind: "column", name: "int4", dataType: ct("int"), constraints: [] },
-      { kind: "column", name: "setof", dataType: ct("setof"), constraints: [] },
+      { kind: "column", name: "int4", dataType: ct(["int"]), constraints: [] },
+      { kind: "column", name: "setof", dataType: ct(["setof"]), constraints: [] },
     ]);
     // A string after a name that does not start an operand is not a literal's.
     expect((firstStmt("SELECT a FROM t WHERE a LIKE b ESCAPE '!';") as any).where).toEqual({
@@ -7374,7 +7486,7 @@ describe("PostgreSQL CREATE TABLE storage options, LIKE and INHERITS", () => {
   const items = (body: string) => stmt(`CREATE TABLE t (${body});`).items;
   const options = (list: string) => stmt(`CREATE TABLE t (id int) WITH (${list});`).options;
   const rawFirst = (text: string) => postgres.parse(text)[0] as Record<string, any>;
-  const idCol = { kind: "column", name: "id", dataType: ct("int"), constraints: [] };
+  const idCol = { kind: "column", name: "id", dataType: ct(["int"]), constraints: [] };
 
   it("parses LIKE as a table item, with its INCLUDING / EXCLUDING options in source order", () => {
     expect(items("LIKE src INCLUDING DEFAULTS EXCLUDING INDEXES, id int")).toEqual([
@@ -7409,7 +7521,7 @@ describe("PostgreSQL CREATE TABLE storage options, LIKE and INHERITS", () => {
     expect(() => postgres.parse("SELECT a::like FROM t;")).toThrow(/Expected a name but found "like"/);
     expect(() => postgres.parse("SELECT t.like FROM t;")).toThrow(/Expected a name but found "like"/);
     // Quoted, it is a name as it always was.
-    expect(items('"like" text')).toEqual([{ kind: "column", name: "like", dataType: ct("text"), constraints: [] }]);
+    expect(items('"like" text')).toEqual([{ kind: "column", name: "like", dataType: ct(["text"]), constraints: [] }]);
     // The LIKE operator never read the word as a name, so it is untouched.
     expect(exprOf("name LIKE 'a%'")).toMatchObject({ kind: "like", negated: false, ci: false });
   });
@@ -7455,7 +7567,7 @@ describe("PostgreSQL CREATE TABLE storage options, LIKE and INHERITS", () => {
     // A sign belongs to the number it precedes.
     expect(options("x = -1, y +2.5")).toEqual([
       { name: "x", value: num(-1) },
-      { name: "y", value: num(2.5) },
+      { name: "y", value: numRaw(2.5, "+2.5") },
     ]);
     // Names (PG's ColLabel) and word values may be reserved words, or quoted.
     expect(options('analyze, null = on, "Mixed" = "Word"')).toEqual([
@@ -7592,7 +7704,7 @@ describe("PostgreSQL declarative partitioning", () => {
     stmt(`CREATE TABLE m (a int) PARTITION BY ${strategy} (${keys});`).partitionBy;
   const bound = (src: string) => stmt(`CREATE TABLE p PARTITION OF m ${src};`).partitionOf.bound;
   const bad = (src: string) => () => postgres.parse(src);
-  const aCol = { kind: "column", name: "a", dataType: ct("int"), constraints: [] };
+  const aCol = { kind: "column", name: "a", dataType: ct(["int"]), constraints: [] };
 
   it("parses PARTITION BY after the element list, with each key's collation and operator class", () => {
     expect(stmt("CREATE TABLE m (a int) PARTITION BY LIST (a);")).toEqual({
@@ -7609,7 +7721,7 @@ describe("PostgreSQL declarative partitioning", () => {
       keys: [
         { expr: name("a"), opclass: ["text_ops"] },
         {
-          expr: { kind: "call", name: "lower", args: [name("b")] },
+          expr: { kind: "call", name: ["lower"], args: [name("b")] },
           collate: ["C"],
           opclass: ["app", "text_pattern_ops"],
         },
@@ -8265,8 +8377,8 @@ describe("PostgreSQL NOT VALID and NO INHERIT constraint attributes", () => {
     expect(
       firstStmt("CREATE TABLE t (valid int, inherit valid);").items.map((i: any) => [i.name, i.dataType.name]),
     ).toEqual([
-      ["valid", "int"],
-      ["inherit", "valid"],
+      ["valid", ["int"]],
+      ["inherit", ["valid"]],
     ]);
     expect(firstStmt("SELECT valid, inherit AS valid FROM inherit;")).toEqual(
       sel({
@@ -8412,7 +8524,7 @@ describe("PostgreSQL constraint index parameters and NULLS [NOT] DISTINCT", () =
       firstStmt(`CREATE TABLE t (${words.map((w, i) => `c${i} ${w}`).join(", ")});`).items.map(
         (i: any) => i.dataType.name,
       ),
-    ).toEqual(words);
+    ).toEqual(words.map((w) => [w]));
     expect(firstStmt("SELECT include, nulls AS tablespace FROM index;")).toEqual(
       sel({
         columns: [col(name("include")), col(name("nulls"), "tablespace")],
@@ -8538,7 +8650,7 @@ describe("PostgreSQL GENERATED ALWAYS AS (expr) VIRTUAL", () => {
   it("keeps virtual unreserved", () => {
     expect(firstStmt("CREATE TABLE t (virtual virtual);").items[0]).toMatchObject({
       name: "virtual",
-      dataType: { name: "virtual" },
+      dataType: { name: ["virtual"] },
     });
     expect(firstStmt("SELECT virtual AS virtual FROM virtual;")).toEqual(
       sel({ columns: [col(name("virtual"), "virtual")], from: [{ kind: "table", name: ["virtual"], alias: null }] }),
@@ -8560,7 +8672,7 @@ describe("PostgreSQL GENERATED ALWAYS AS (expr) VIRTUAL", () => {
 describe("PostgreSQL index column options and storage parameters", () => {
   const index = (tail: string) => firstStmt(`CREATE INDEX i ON t ${tail};`) as any;
   const columns = (list: string) => index(`(${list})`).columns;
-  const lower = (arg: unknown) => ({ kind: "call", name: "lower", args: [arg] });
+  const lower = (arg: unknown) => ({ kind: "call", name: ["lower"], args: [arg] });
 
   it("parses an operator class, ASC / DESC and NULLS FIRST / LAST per column", () => {
     expect(columns("a text_pattern_ops DESC NULLS LAST, b ASC, c NULLS FIRST, d")).toEqual([
@@ -8710,7 +8822,7 @@ describe("PostgreSQL EXCLUDE table constraints", () => {
     const column = (dataType: string, array = false) => ({
       kind: "column",
       name: "exclude",
-      dataType: { name: dataType, args: [], array },
+      dataType: { name: qn(dataType), args: [], array },
       constraints: [],
     });
     expect(items("exclude text")).toEqual([column("text")]);
@@ -8780,7 +8892,7 @@ describe("PostgreSQL EXCLUDE table constraints", () => {
 
 describe("PostgreSQL parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
   const from = (src: string) => (firstStmt(src) as any).from;
-  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: qn(fnName), args });
   const bool = (value: boolean) => ({ kind: "bool", value });
   const join = (left: unknown, right: unknown, extra: Record<string, unknown> = {}) => ({
     kind: "join",
@@ -8972,7 +9084,7 @@ describe("PostgreSQL parenthesised joins, ROWS FROM and WITH ORDINALITY", () => 
 
 describe("PostgreSQL NATURAL joins, join qualifiers and FROM-item extras", () => {
   const from = (src: string) => (firstStmt(src) as any).from;
-  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
+  const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: qn(fnName), args });
   const bool = (value: boolean) => ({ kind: "bool", value });
   const join = (left: unknown, right: unknown, extra: Record<string, unknown> = {}) => ({
     kind: "join",
@@ -8986,7 +9098,7 @@ describe("PostgreSQL NATURAL joins, join qualifiers and FROM-item extras", () =>
   const [a, b, c, d] = ["a", "b", "c", "d"].map((t) => tableFrom([t]));
   const def = (colName: string, type: string, over: Record<string, unknown> = {}) => ({
     name: colName,
-    type: ct(type),
+    type: ct(qn(type)),
     ...over,
   });
 
@@ -9064,7 +9176,7 @@ describe("PostgreSQL NATURAL joins, join qualifiers and FROM-item extras", () =>
         call: call("f"),
         alias: "x",
         columnDefinitions: [
-          def("a", "numeric", { type: ct("numeric", { args: [10, 2], array: true }) }),
+          def("a", "numeric", { type: ct(["numeric"], { args: [10, 2], array: true }) }),
           def("B", "double precision", { collate: ["C"] }),
           def("c", "s.t"),
         ],
@@ -9357,7 +9469,7 @@ describe("PostgreSQL ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
   const arg = (type: string, argName: string | null = null) => ({
     mode: null,
     name: argName,
-    type: { name: type, args: [], array: false },
+    type: { name: qn(type), args: [], array: false },
     defaultValue: null,
   });
 
@@ -9391,11 +9503,11 @@ describe("PostgreSQL ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
     });
     // SET is SET SCHEMA only when a name follows `schema`; otherwise it sets a parameter.
     expect(action("ALTER FUNCTION f SET search_path = public;").options).toEqual([
-      { kind: "set", parameter: "search_path", value: { kind: "list", values: [name("public")] } },
+      { kind: "set", parameter: ["search_path"], value: { kind: "list", values: [name("public")] } },
     ]);
     for (const src of ["= 'x'", "TO 'x'", "FROM CURRENT"]) {
       expect(action(`ALTER FUNCTION f SET schema ${src};`).options).toMatchObject([
-        { kind: "set", parameter: "schema" },
+        { kind: "set", parameter: ["schema"] },
       ]);
     }
   });
@@ -9573,7 +9685,7 @@ describe("PostgreSQL ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
 // --- object references: COMMENT ON, SECURITY LABEL, ALTER EXTENSION, generic ALTER ---
 
 describe("PostgreSQL object references", () => {
-  const ty = (typeName: string) => ({ name: typeName, args: [], array: false });
+  const ty = (typeName: string) => ({ name: qn(typeName), args: [], array: false });
   const arg = (typeName: string, mode: string | null = null) => ({
     mode,
     name: null,
@@ -10341,10 +10453,10 @@ describe("PostgreSQL PREPARE and EXECUTE", () => {
       kind: "prepare",
       name: "q",
       types: [
-        ct("int"),
-        ct("double precision"),
-        ct("timestamp with time zone", { args: [3] }),
-        ct("text", { array: true }),
+        ct(["int"]),
+        ct(["double precision"]),
+        ct(["timestamp with time zone"], { args: [3] }),
+        ct(["text"], { array: true }),
       ],
       query: sel({ columns: [col(param("1"))] }),
     });
@@ -10422,7 +10534,7 @@ describe("PostgreSQL column and domain DEFAULT as a b-expression", () => {
     (firstStmt(`CREATE DOMAIN d AS int ${src};`) as any).constraints as Record<string, unknown>[];
   const bad = (src: string) => () => postgres.parse(`CREATE TABLE t (c int ${src});`);
   const NOT_NULL = { kind: "notNull" };
-  const typ = (n: string, over: Record<string, unknown> = {}) => ({ name: n, args: [], array: false, ...over });
+  const typ = (n: string, over: Record<string, unknown> = {}) => ({ name: qn(n), args: [], array: false, ...over });
 
   it("ends the default before NOT NULL, as pg_dump writes it", () => {
     expect(colConstraints("integer", "DEFAULT nextval('public.t_id_seq'::regclass) NOT NULL")).toEqual([
@@ -10430,7 +10542,7 @@ describe("PostgreSQL column and domain DEFAULT as a b-expression", () => {
         kind: "default",
         expr: {
           kind: "call",
-          name: "nextval",
+          name: ["nextval"],
           args: [{ kind: "cast", expr: str("public.t_id_seq"), type: typ("regclass") }],
         },
       },
@@ -10485,7 +10597,7 @@ describe("PostgreSQL column and domain DEFAULT as a b-expression", () => {
     expect(colConstraints("timestamp", "DEFAULT (now() AT TIME ZONE 'utc') NOT NULL")).toEqual([
       {
         kind: "default",
-        expr: { kind: "atTimeZone", expr: { kind: "call", name: "now", args: [] }, zone: str("utc") },
+        expr: { kind: "atTimeZone", expr: { kind: "call", name: ["now"], args: [] }, zone: str("utc") },
       },
       NOT_NULL,
     ]);
@@ -10574,7 +10686,7 @@ describe("PostgreSQL generated identity and stored columns and column collation"
         kind: "identity",
         generated: "by default",
         options: [
-          { kind: "as", type: ct("bigint") },
+          { kind: "as", type: ct(["bigint"]) },
           { kind: "minValue", value: num(1) },
         ],
       },
@@ -10626,9 +10738,9 @@ describe("PostgreSQL generated identity and stored columns and column collation"
     // …as type names, ahead of a constraint of the same word…
     expect(
       firstStmt("CREATE TABLE t (a stored, b always, c identity);").items.map((i: any) => i.dataType.name),
-    ).toEqual(["stored", "always", "identity"]);
+    ).toEqual([["stored"], ["always"], ["identity"]]);
     expect(firstStmt("CREATE TABLE t (a generated GENERATED ALWAYS AS IDENTITY);").items[0]).toMatchObject({
-      dataType: { name: "generated" },
+      dataType: { name: ["generated"] },
       constraints: [{ kind: "identity" }],
     });
     // …and as names everywhere else.
@@ -10780,7 +10892,7 @@ describe("PostgreSQL CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
       name: "ts",
       owner: "bob",
       location: "",
-      options: [opt("seq_page_cost", num(1.5)), opt("random_page_cost", num(2))],
+      options: [opt("seq_page_cost", numRaw(1.5, "1.5")), opt("random_page_cost", num(2))],
     });
   });
 
@@ -11434,14 +11546,14 @@ describe("PostgreSQL CREATE ROLE, USER and PROCEDURE", () => {
       orReplace: true,
       name: ["app", "p"],
       args: [
-        { mode: "in", name: "a", type: ct("integer"), defaultValue: null },
-        { mode: "inout", name: "b", type: ct("double precision"), defaultValue: num(1) },
-        { mode: null, name: null, type: ct("text"), defaultValue: null },
+        { mode: "in", name: "a", type: ct(["integer"]), defaultValue: null },
+        { mode: "inout", name: "b", type: ct(["double precision"]), defaultValue: num(1) },
+        { mode: null, name: null, type: ct(["text"]), defaultValue: null },
       ],
       options: [
         { kind: "language", name: "plpgsql" },
         { kind: "security", external: false, definer: true },
-        { kind: "set", parameter: "search_path", value: { kind: "list", values: [name("app")] } },
+        { kind: "set", parameter: ["search_path"], value: { kind: "list", values: [name("app")] } },
         { kind: "as", parts: ["BEGIN NULL; END"] },
       ],
     });
@@ -11600,35 +11712,37 @@ describe("PostgreSQL ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
 
   it("parses ALTER ROLE [IN DATABASE] SET and RESET, for a role or ALL", () => {
     expect(firstStmt("ALTER ROLE r SET search_path TO 'app', 'public';")).toEqual(
-      role({ action: { kind: "set", name: "search_path", values: [str("app"), str("public")] } }),
+      role({ action: { kind: "set", name: ["search_path"], values: [str("app"), str("public")] } }),
     );
     expect(firstStmt("ALTER ROLE r SET statement_timeout = '5s';")).toEqual(
-      role({ action: { kind: "set", name: "statement_timeout", values: [str("5s")] } }),
+      role({ action: { kind: "set", name: ["statement_timeout"], values: [str("5s")] } }),
     );
     expect(firstStmt("ALTER USER CURRENT_ROLE IN DATABASE appdb SET work_mem FROM CURRENT;")).toEqual(
       role({
         user: true,
         name: "current_role",
         database: "appdb",
-        action: { kind: "set", name: "work_mem", values: "fromCurrent" },
+        action: { kind: "set", name: ["work_mem"], values: "fromCurrent" },
       }),
     );
     expect(firstStmt("ALTER ROLE ALL SET jit = off;")).toEqual(
-      role({ name: null, action: { kind: "set", name: "jit", values: [name("off")] } }),
+      role({ name: null, action: { kind: "set", name: ["jit"], values: [name("off")] } }),
     );
     expect(firstStmt("ALTER ROLE r SET TIME ZONE 'UTC';")).toEqual(
-      role({ action: { kind: "set", name: "time zone", values: [str("UTC")] } }),
+      role({ action: { kind: "set", name: ["time zone"], values: [str("UTC")] } }),
     );
     expect(firstStmt("ALTER ROLE r SET x.y TO DEFAULT;")).toEqual(
-      role({ action: { kind: "set", name: "x.y", values: "default" } }),
+      role({ action: { kind: "set", name: ["x", "y"], values: "default" } }),
     );
     expect(firstStmt("ALTER ROLE r IN DATABASE appdb RESET ALL;")).toEqual(
-      role({ database: "appdb", action: { kind: "reset", name: "all" } }),
+      role({ database: "appdb", action: { kind: "reset", name: ["all"] } }),
     );
     expect(firstStmt("ALTER USER ALL IN DATABASE appdb RESET search_path;")).toEqual(
-      role({ user: true, name: null, database: "appdb", action: { kind: "reset", name: "search_path" } }),
+      role({ user: true, name: null, database: "appdb", action: { kind: "reset", name: ["search_path"] } }),
     );
-    expect(firstStmt("ALTER ROLE r RESET TIME ZONE;")).toEqual(role({ action: { kind: "reset", name: "time zone" } }));
+    expect(firstStmt("ALTER ROLE r RESET TIME ZONE;")).toEqual(
+      role({ action: { kind: "reset", name: ["time zone"] } }),
+    );
     expect(firstStmt("ALTER ROLE r SET x = 1;")).not.toHaveProperty("database");
   });
 
@@ -11652,20 +11766,20 @@ describe("PostgreSQL ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
     );
     expect(firstStmt("ALTER DATABASE d REFRESH COLLATION VERSION;")).toEqual(db({ kind: "refreshCollationVersion" }));
     expect(firstStmt("ALTER DATABASE d SET search_path TO app, public;")).toEqual(
-      db({ kind: "set", name: "search_path", values: [name("app"), name("public")] }),
+      db({ kind: "set", name: ["search_path"], values: [name("app"), name("public")] }),
     );
     expect(firstStmt("ALTER DATABASE d SET search_path FROM CURRENT;")).toEqual(
-      db({ kind: "set", name: "search_path", values: "fromCurrent" }),
+      db({ kind: "set", name: ["search_path"], values: "fromCurrent" }),
     );
-    expect(firstStmt("ALTER DATABASE d RESET ALL;")).toEqual(db({ kind: "reset", name: "all" }));
-    expect(firstStmt("ALTER DATABASE d RESET search_path;")).toEqual(db({ kind: "reset", name: "search_path" }));
+    expect(firstStmt("ALTER DATABASE d RESET ALL;")).toEqual(db({ kind: "reset", name: ["all"] }));
+    expect(firstStmt("ALTER DATABASE d RESET search_path;")).toEqual(db({ kind: "reset", name: ["search_path"] }));
     // A parameter called `tablespace` is set as any other is.
     expect(firstStmt("ALTER DATABASE d SET tablespace TO x;")).toEqual(
-      db({ kind: "set", name: "tablespace", values: [name("x")] }),
+      db({ kind: "set", name: ["tablespace"], values: [name("x")] }),
     );
     // …as is one called `tablespace` written with `=`, and so is a quoted SET.
     expect(firstStmt("ALTER DATABASE d SET TABLESPACE = x;")).toEqual(
-      db({ kind: "set", name: "tablespace", values: [name("x")] }),
+      db({ kind: "set", name: ["tablespace"], values: [name("x")] }),
     );
     expect(firstStmt("ALTER DATABASE d WITH TABLESPACE x;")).toEqual(
       db({ kind: "options", options: [{ name: "tablespace", value: name("x") }] }),
@@ -11697,7 +11811,7 @@ describe("PostgreSQL ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
       action: {
         kind: "setOptions",
         options: [
-          { name: "random_page_cost", value: num(1.1) },
+          { name: "random_page_cost", value: numRaw(1.1, "1.1") },
           { name: "seq_page_cost", value: num(2) },
         ],
       },
@@ -11789,7 +11903,7 @@ describe("PostgreSQL ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
       role({ name: "rename", action: { kind: "rename", to: "password" } }),
     );
     expect(firstStmt("ALTER ROLE role IN DATABASE database SET reset = 1;")).toEqual(
-      role({ name: "role", database: "database", action: { kind: "set", name: "reset", values: [num(1)] } }),
+      role({ name: "role", database: "database", action: { kind: "set", name: ["reset"], values: [num(1)] } }),
     );
     expect(firstStmt("ALTER DATABASE refresh SET TABLESPACE version;")).toEqual({
       kind: "alterDatabase",
@@ -11978,10 +12092,10 @@ describe("PostgreSQL view options and REFRESH MATERIALIZED VIEW", () => {
     ]) {
       const v = firstStmt(`CREATE VIEW v AS SELECT now()::timestamp ${clause};`);
       expect(v.checkOption).toBe(level);
-      expect(v.query.columns[0].expr.type).toMatchObject({ name: "timestamp" });
+      expect(v.query.columns[0].expr.type).toMatchObject({ name: ["timestamp"] });
     }
     expect(firstStmt("CREATE VIEW v AS SELECT now()::timestamp WITH TIME ZONE WITH CHECK OPTION;")).toMatchObject({
-      query: { columns: [{ expr: { type: { name: "timestamp with time zone" } } }] },
+      query: { columns: [{ expr: { type: { name: ["timestamp with time zone"] } } }] },
       checkOption: "cascaded",
     });
     expect(firstStmt("CREATE MATERIALIZED VIEW mv AS SELECT now()::timestamp WITH NO DATA;")).toMatchObject({
@@ -12616,7 +12730,7 @@ describe("PostgreSQL ALTER TABLE column actions", () => {
     expect(firstStmt("CREATE TABLE t (id int GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME q));").items[0]).toEqual({
       kind: "column",
       name: "id",
-      dataType: ct("int"),
+      dataType: ct(["int"]),
       constraints: [{ kind: "identity", generated: "always", options: [{ kind: "sequenceName", name: ["q"] }] }],
     });
   });
@@ -12658,13 +12772,13 @@ describe("PostgreSQL ALTER TABLE column actions", () => {
     expect(action("ALTER COLUMN email TYPE varchar(320) USING lower(email)")).toEqual({
       kind: "setDataType",
       column: "email",
-      dataType: ct("varchar", { args: [320] }),
-      using: { kind: "call", name: "lower", args: [name("email")] },
+      dataType: ct(["varchar"], { args: [320] }),
+      using: { kind: "call", name: ["lower"], args: [name("email")] },
     });
     expect(action('ALTER c SET DATA TYPE text COLLATE "C"')).toEqual({
       kind: "setDataType",
       column: "c",
-      dataType: ct("text"),
+      dataType: ct(["text"]),
       collate: ["C"],
     });
     expect(action("ALTER c SET EXPRESSION AS (a + 1)")).toEqual({
@@ -13422,7 +13536,7 @@ describe("PostgreSQL assignment indirection and ON CONFLICT inference", () => {
   const values = (...items: unknown[]) => ({ kind: "values", rows: [items] });
   const conflict = (src: string) => firstStmt(`INSERT INTO t VALUES (1) ON CONFLICT ${src};`).onConflict;
   const key = (expr: unknown, over: Record<string, unknown> = {}) => ({ expr, ...over });
-  const lower = { kind: "call", name: "lower", args: [name("email")] };
+  const lower = { kind: "call", name: ["lower"], args: [name("email")] };
   const bad = (src: string) => () => postgres.parse(src);
 
   it("reads subscript and field steps on a single UPDATE target", () => {
@@ -13836,7 +13950,7 @@ describe("PostgreSQL composite and array access, and call-argument forms", () =>
   const sub = (base: unknown, index: unknown) => ({ kind: "subscript", base, index });
   const call = (fnName: string, args: unknown[] = [], mods: Record<string, unknown> = {}) => ({
     kind: "call",
-    name: fnName,
+    name: qn(fnName),
     args,
     ...mods,
   });
@@ -13883,7 +13997,7 @@ describe("PostgreSQL composite and array access, and call-argument forms", () =>
 
   it("binds the chain tighter than any operator", () => {
     expect(colExpr("-(r).f")).toEqual({ kind: "unary", op: "-", operand: fieldOf(name("r"), "f") });
-    expect(colExpr("(r).f::int")).toEqual({ kind: "cast", expr: fieldOf(name("r"), "f"), type: ct("int") });
+    expect(colExpr("(r).f::int")).toEqual({ kind: "cast", expr: fieldOf(name("r"), "f"), type: ct(["int"]) });
     expect(colExpr("(r).f + (s).g")).toEqual(bin("+", fieldOf(name("r"), "f"), fieldOf(name("s"), "g")));
     expect(exprOf("(r).f > 0")).toEqual(bin(">", fieldOf(name("r"), "f"), num(0)));
     expect(firstStmt("SELECT (r).f AS x FROM t;").columns).toEqual([col(fieldOf(name("r"), "f"), "x")]);
@@ -14056,7 +14170,7 @@ describe("PostgreSQL special predicates and calls", () => {
       value: bin("||", x, str("a")),
       form: "nfkd",
     });
-    expect(colExpr("normalize(x)")).toEqual({ kind: "call", name: "normalize", args: [x] });
+    expect(colExpr("normalize(x)")).toEqual({ kind: "call", name: ["normalize"], args: [x] });
     // The form is a keyword: no string, column or expression takes its place.
     expect(bad("SELECT normalize(x, 'NFC') FROM t;")).toThrow(
       /Expected "nfc", "nfd", "nfkc" or "nfkd" but found "NFC"/,
@@ -14068,10 +14182,10 @@ describe("PostgreSQL special predicates and calls", () => {
     expect(bad("SELECT normalize(x) OVER () FROM t;")).toThrow(/Expected ";" but found "\("/);
     expect(bad("SELECT normalize(VARIADIC x) FROM t;")).toThrow(/but found "variadic"/);
     // Quoted or qualified, it is an ordinary function.
-    expect(colExpr("\"normalize\"(x, 'NFC')")).toEqual({ kind: "call", name: "normalize", args: [x, str("NFC")] });
+    expect(colExpr("\"normalize\"(x, 'NFC')")).toEqual({ kind: "call", name: ["normalize"], args: [x, str("NFC")] });
     expect(colExpr("pg_catalog.normalize(x, 'NFC')")).toEqual({
       kind: "call",
-      name: "pg_catalog.normalize",
+      name: ["pg_catalog", "normalize"],
       args: [x, str("NFC")],
     });
   });
@@ -14220,7 +14334,7 @@ describe("PostgreSQL rejects empty parenthesised lists", () => {
 
   it("keeps the empty lists PG allows", () => {
     // A call, a ROW constructor and a trigger's function arguments may be empty.
-    expect(firstStmt("SELECT now() FROM t;").columns[0].expr).toEqual({ kind: "call", name: "now", args: [] });
+    expect(firstStmt("SELECT now() FROM t;").columns[0].expr).toEqual({ kind: "call", name: ["now"], args: [] });
     expect(firstStmt("SELECT ROW() FROM t;").columns[0].expr).toEqual({ kind: "row", items: [] });
     expect(firstStmt("EXECUTE p;")).toMatchObject({ args: null });
     const trigger = (args: string) =>
@@ -14237,7 +14351,7 @@ describe("PostgreSQL rejects empty parenthesised lists", () => {
 // --- long-tail objects: definition lists, casts, collations, operators, … ---
 
 describe("PostgreSQL long-tail objects with definition lists", () => {
-  const ty = (typeName: string, array = false) => ({ name: typeName, args: [], array });
+  const ty = (typeName: string, array = false) => ({ name: qn(typeName), args: [], array });
   const arg = (typeName: string) => ({ mode: null, name: null, type: ty(typeName), defaultValue: null });
   const typeArg = (typeName: string) => ({ kind: "type", type: ty(typeName) });
   const fails = (text: string) => () => postgres.parse(text);
@@ -14257,7 +14371,7 @@ describe("PostgreSQL long-tail objects with definition lists", () => {
         { name: "input", value: typeArg("c_in") },
         { name: "like", value: typeArg("pg_catalog.int4") },
         { name: "element", value: { kind: "type", type: ty("float4", true) } },
-        { name: "default", value: { kind: "number", value: -1.5 } },
+        { name: "default", value: { kind: "number", value: -1.5, raw: "-1.5" } },
         {
           name: "internallength",
           value: { kind: "number", value: 1e20, raw: "99999999999999999999" },
@@ -14407,7 +14521,7 @@ describe("PostgreSQL long-tail objects with definition lists", () => {
     expect(firstStmt("CREATE STATISTICS ON (a + b), lower(c) FROM s.t;")).toEqual({
       kind: "createStatistics",
       ifNotExists: false,
-      on: [bin("+", name("a"), name("b")), { kind: "call", name: "lower", args: [name("c")] }],
+      on: [bin("+", name("a"), name("b")), { kind: "call", name: ["lower"], args: [name("c")] }],
       from: [["s", "t"]],
     });
     // The special-syntax calls are function calls too; `::` is not.
@@ -14712,8 +14826,8 @@ describe("PostgreSQL long-tail objects with definition lists", () => {
 // --- typed tables, storage clauses, CTAS forms, column storage, constraint
 // triggers, transition tables and temp / recursive views ---
 
-const plainType = (typeName: string) => ({ name: typeName, args: [], array: false });
-const plainColumn = (colName: string, typeName: string, extra: Record<string, unknown> = {}) => ({
+const plainType = (typeName: string[]) => ({ name: qn(typeName), args: [], array: false });
+const plainColumn = (colName: string, typeName: string[], extra: Record<string, unknown> = {}) => ({
   kind: "column",
   name: colName,
   dataType: plainType(typeName),
@@ -14777,7 +14891,7 @@ describe("PostgreSQL typed tables (OF type)", () => {
       items: [],
       ofType: ["of"],
     });
-    expect(firstStmt("CREATE TABLE of (of int);").items).toEqual([plainColumn("of", "int")]);
+    expect(firstStmt("CREATE TABLE of (of int);").items).toEqual([plainColumn("of", ["int"])]);
   });
 });
 
@@ -14789,7 +14903,7 @@ describe("PostgreSQL USING method and WITHOUT OIDS table clauses", () => {
       kind: "createTable",
       ifNotExists: false,
       name: ["t"],
-      items: [plainColumn("a", "int")],
+      items: [plainColumn("a", ["int"])],
       inherits: [["p"]],
       accessMethod: "heap",
       withoutOids: true,
@@ -14817,7 +14931,7 @@ describe("PostgreSQL USING method and WITHOUT OIDS table clauses", () => {
       kind: "createTable",
       ifNotExists: false,
       name: ["heap"],
-      items: [plainColumn("without", "int"), plainColumn("oids", "int")],
+      items: [plainColumn("without", ["int"]), plainColumn("oids", ["int"])],
       accessMethod: "heap",
     });
     expect(firstStmt("SELECT without, oids, heap AS oids FROM heap AS without;")).toEqual(
@@ -14899,15 +15013,18 @@ describe("PostgreSQL column STORAGE and COMPRESSION", () => {
         'CREATE TABLE t (a text STORAGE external COMPRESSION lz4 NOT NULL, b text STORAGE DEFAULT, c text COMPRESSION default, d text STORAGE "MAIN", e text COMPRESSION "DEFAULT");',
       ).items,
     ).toEqual([
-      { ...plainColumn("a", "text", { storage: "external", compression: "lz4" }), constraints: [{ kind: "notNull" }] },
-      plainColumn("b", "text", { storage: "default" }),
-      plainColumn("c", "text", { compression: "default" }),
-      plainColumn("d", "text", { storage: "main" }),
-      plainColumn("e", "text", { compression: "DEFAULT" }),
+      {
+        ...plainColumn("a", ["text"], { storage: "external", compression: "lz4" }),
+        constraints: [{ kind: "notNull" }],
+      },
+      plainColumn("b", ["text"], { storage: "default" }),
+      plainColumn("c", ["text"], { compression: "default" }),
+      plainColumn("d", ["text"], { storage: "main" }),
+      plainColumn("e", ["text"], { compression: "DEFAULT" }),
     ]);
     expect(firstStmt("ALTER TABLE t ADD COLUMN a text STORAGE plain, ADD b int COMPRESSION lz4;").actions).toEqual([
-      { kind: "addColumn", ifNotExists: false, column: plainColumn("a", "text", { storage: "plain" }) },
-      { kind: "addColumn", ifNotExists: false, column: plainColumn("b", "int", { compression: "lz4" }) },
+      { kind: "addColumn", ifNotExists: false, column: plainColumn("a", ["text"], { storage: "plain" }) },
+      { kind: "addColumn", ifNotExists: false, column: plainColumn("b", ["int"], { compression: "lz4" }) },
     ]);
     // SET STORAGE and SET COMPRESSION share the readers, and keep their nulls.
     expect(firstStmt('ALTER TABLE t ALTER a SET STORAGE "DEFAULT", ALTER b SET COMPRESSION default;').actions).toEqual([
@@ -14922,7 +15039,7 @@ describe("PostgreSQL column STORAGE and COMPRESSION", () => {
         .items,
     ).toEqual([
       {
-        ...plainColumn("a", "int", { storage: "plain", compression: "lz4", options: [{ name: "x", value: "y" }] }),
+        ...plainColumn("a", ["int"], { storage: "plain", compression: "lz4", options: [{ name: "x", value: "y" }] }),
         constraints: [{ kind: "notNull" }],
       },
     ]);
@@ -14947,8 +15064,8 @@ describe("PostgreSQL column STORAGE and COMPRESSION", () => {
       ifNotExists: false,
       name: ["storage"],
       items: [
-        plainColumn("storage", "text", { storage: "main", compression: "compression" }),
-        plainColumn("compression", "int"),
+        plainColumn("storage", ["text"], { storage: "main", compression: "compression" }),
+        plainColumn("compression", ["int"]),
       ],
     });
     expect(firstStmt("SELECT storage, compression AS storage FROM compression storage;")).toEqual(
@@ -15071,10 +15188,10 @@ describe("PostgreSQL lead words of the prefixed, recursive and constraint CREATE
         kind: "createTable",
         ifNotExists: false,
         name: ["t"],
-        items: [plainColumn("a", "int")],
+        items: [plainColumn("a", ["int"])],
         modifiers: ["unlogged"],
       },
-      { kind: "createTable", ifNotExists: false, name: ["u"], items: [plainColumn("b", "int")], modifiers: ["temp"] },
+      { kind: "createTable", ifNotExists: false, name: ["u"], items: [plainColumn("b", ["int"])], modifiers: ["temp"] },
     ]);
   });
 });
@@ -15534,7 +15651,7 @@ describe("PostgreSQL psql scripts", () => {
 describe("PostgreSQL foreign data", () => {
   const fails = (text: string) => () => postgres.parse(text);
   const ty = (typeName: string, args: number[] = []) => ({
-    name: typeName,
+    name: qn(typeName),
     args,
     array: false,
   });
@@ -16032,7 +16149,7 @@ describe("PostgreSQL XML functions", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const fromItem = (src: string) => (firstStmt(`SELECT * FROM ${src};`) as any).from[0];
   const bad = (src: string) => () => postgres.parse(src);
-  const ty = (typeName: string, args: number[] = []) => ({ name: typeName, args, array: false });
+  const ty = (typeName: string, args: number[] = []) => ({ name: qn(typeName), args, array: false });
   const x = name("x");
 
   it("parses XMLELEMENT with and without attributes and content", () => {
@@ -16077,7 +16194,7 @@ describe("PostgreSQL XML functions", () => {
     // XMLCONCAT's keyword form is a list of expressions: a plain call node.
     expect(colExpr("xmlconcat(a, b || c)")).toEqual({
       kind: "call",
-      name: "xmlconcat",
+      name: ["xmlconcat"],
       args: [name("a"), bin("||", name("b"), name("c"))],
     });
     expect(bad("SELECT xmlforest() FROM t;")).toThrow(/but found "\)"/);
@@ -16303,7 +16420,7 @@ describe("PostgreSQL XML functions", () => {
       kind: "rowsFrom",
       calls: [
         { kind: "xmlPi", name: "a" },
-        { kind: "call", name: "xmlconcat", args: [name("b")] },
+        { kind: "call", name: ["xmlconcat"], args: [name("b")] },
       ],
     });
     expect(fromItem("xmlforest(a) AS f (x xml)")).toMatchObject({
@@ -16327,18 +16444,18 @@ describe("PostgreSQL XML functions", () => {
   });
 
   it("keeps quoted and qualified XML function names ordinary calls", () => {
-    expect(colExpr('"xmlelement"(a, b)')).toEqual({ kind: "call", name: "xmlelement", args: [name("a"), name("b")] });
-    expect(colExpr("s.xmlpi(a)")).toEqual({ kind: "call", name: "s.xmlpi", args: [name("a")] });
-    expect(colExpr('"xmlattributes"(a)')).toEqual({ kind: "call", name: "xmlattributes", args: [name("a")] });
+    expect(colExpr('"xmlelement"(a, b)')).toEqual({ kind: "call", name: ["xmlelement"], args: [name("a"), name("b")] });
+    expect(colExpr("s.xmlpi(a)")).toEqual({ kind: "call", name: ["s", "xmlpi"], args: [name("a")] });
+    expect(colExpr('"xmlattributes"(a)')).toEqual({ kind: "call", name: ["xmlattributes"], args: [name("a")] });
     expect(fromItem('"xmltable"(1) t')).toEqual({
       kind: "function",
-      call: { kind: "call", name: "xmltable", args: [num(1)] },
+      call: { kind: "call", name: ["xmltable"], args: [num(1)] },
       alias: "t",
     });
     // `xmlagg` is an ordinary aggregate, with an ORDER BY.
     expect(colExpr("xmlagg(x ORDER BY y)")).toEqual({
       kind: "call",
-      name: "xmlagg",
+      name: ["xmlagg"],
       args: [x],
       orderBy: [{ expr: name("y"), dir: null, nulls: null }],
     });
@@ -16411,11 +16528,11 @@ describe("PostgreSQL SQL/JSON functions", () => {
   const v = (expr: unknown, over: Record<string, unknown> = {}) => ({ expr, ...over });
   const call = (fnName: string, args: unknown[], over: Record<string, unknown> = {}) => ({
     kind: "call",
-    name: fnName,
+    name: qn(fnName),
     args,
     ...over,
   });
-  const jsonb = { returning: { type: ct("jsonb") } };
+  const jsonb = { returning: { type: ct(["jsonb"]) } };
 
   it("parses JSON_OBJECT with VALUE and colon entries and every clause", () => {
     expect(colExpr("JSON_OBJECT('a' VALUE 1, 'b' : x)")).toEqual({
@@ -16434,7 +16551,7 @@ describe("PostgreSQL SQL/JSON functions", () => {
       entries: [{ key: bin("||", name("k"), str("x")), value: v(name("y"), { format: { encoding: "utf8" } }) }],
       onNull: "absent",
       uniqueKeys: true,
-      returning: { type: ct("jsonb"), format: {} },
+      returning: { type: ct(["jsonb"]), format: {} },
     });
     expect(colExpr("JSON_OBJECT('a': 1 NULL ON NULL WITHOUT UNIQUE)")).toEqual({
       kind: "jsonObject",
@@ -16563,7 +16680,7 @@ describe("PostgreSQL SQL/JSON functions", () => {
     expect(colExpr("JSON_VALUE(doc, '$.a' RETURNING int)")).toEqual({
       kind: "jsonValue",
       ...ctxPath,
-      returning: { type: ct("int") },
+      returning: { type: ct(["int"]) },
     });
     expect(
       colExpr(
@@ -16632,12 +16749,12 @@ describe("PostgreSQL SQL/JSON functions", () => {
     expect(colExpr("JSON_SERIALIZE(x FORMAT JSON RETURNING bytea)")).toEqual({
       kind: "jsonSerialize",
       value: v(x, { format: {} }),
-      returning: { type: ct("bytea") },
+      returning: { type: ct(["bytea"]) },
     });
     expect(colExpr("JSON_SERIALIZE(x RETURNING text)")).toEqual({
       kind: "jsonSerialize",
       value: v(x),
-      returning: { type: ct("text") },
+      returning: { type: ct(["text"]) },
     });
     // JSON_SCALAR takes one expression and no clause, as gram.y's JsonScalarExpr.
     expect(colExpr("JSON_SCALAR(x + 1)")).toEqual({ kind: "jsonScalar", value: bin("+", x, num(1)) });
@@ -16767,8 +16884,8 @@ describe("PostgreSQL SQL/JSON functions", () => {
     expect(colExpr("json_array_length(x)")).toEqual(call("json_array_length", [x]));
     expect(colExpr("json_build_object('a', 1)")).toEqual(call("json_build_object", [str("a"), num(1)]));
     // And `json` still names the type.
-    expect(colExpr("json '{}'")).toEqual({ kind: "typedLiteral", type: ct("json"), value: "{}" });
-    expect(colExpr("x::json")).toEqual({ kind: "cast", expr: x, type: ct("json") });
+    expect(colExpr("json '{}'")).toEqual({ kind: "typedLiteral", type: ct(["json"]), value: "{}" });
+    expect(colExpr("x::json")).toEqual({ kind: "cast", expr: x, type: ct(["json"]) });
   });
 
   // gram.y's func_table is func_expr_windowless, which takes every SQL/JSON
@@ -16844,7 +16961,7 @@ describe("PostgreSQL SQL/JSON functions", () => {
             {
               kind: "value",
               name: "a",
-              type: ct("int"),
+              type: ct(["int"]),
               path: "$.a",
               onEmpty: { kind: "null" },
               onError: { kind: "error" },
@@ -16852,21 +16969,25 @@ describe("PostgreSQL SQL/JSON functions", () => {
             {
               kind: "value",
               name: "b",
-              type: ct("jsonb"),
+              type: ct(["jsonb"]),
               format: {},
               path: "$.b",
               wrapper: "unconditional",
               quotes: "omit",
             },
-            { kind: "value", name: "c", type: ct("text") },
-            { kind: "exists", name: "d", type: ct("bool"), path: "$.d", onError: { kind: "false" } },
+            { kind: "value", name: "c", type: ct(["text"]) },
+            { kind: "exists", name: "d", type: ct(["bool"]), path: "$.d", onError: { kind: "false" } },
             {
               kind: "nested",
               path: "$.items[*]",
               pathName: "items",
-              columns: [{ kind: "value", name: "e", type: ct("int"), path: "$.e" }],
+              columns: [{ kind: "value", name: "e", type: ct(["int"]), path: "$.e" }],
             },
-            { kind: "nested", path: "$.tags", columns: [{ kind: "value", name: "tag", type: ct("text"), path: "$" }] },
+            {
+              kind: "nested",
+              path: "$.tags",
+              columns: [{ kind: "value", name: "tag", type: ct(["text"]), path: "$" }],
+            },
           ],
           onError: { kind: "error" },
         },
@@ -16879,7 +17000,7 @@ describe("PostgreSQL SQL/JSON functions", () => {
       table: {
         context: v(name("t", "doc")),
         path: "$[*]",
-        columns: [{ kind: "value", name: "a", type: ct("int") }],
+        columns: [{ kind: "value", name: "a", type: ct(["int"]) }],
       },
       alias,
       ...over,
@@ -16915,12 +17036,12 @@ describe("PostgreSQL SQL/JSON functions", () => {
     expect(
       from("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (nested int, p path PATH '$.p'));")[0].table.columns,
     ).toEqual([
-      { kind: "value", name: "nested", type: ct("int") },
-      { kind: "value", name: "p", type: ct("path"), path: "$.p" },
+      { kind: "value", name: "nested", type: ct(["int"]) },
+      { kind: "value", name: "p", type: ct(["path"]), path: "$.p" },
     ]);
     expect(
       from("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (NESTED PATH '$.a' COLUMNS (b int)));")[0].table.columns,
-    ).toEqual([{ kind: "nested", path: "$.a", columns: [{ kind: "value", name: "b", type: ct("int") }] }]);
+    ).toEqual([{ kind: "nested", path: "$.a", columns: [{ kind: "value", name: "b", type: ct(["int"]) }] }]);
   });
 
   it("spans the clause forms from the function name to the closing parenthesis", () => {
@@ -17062,9 +17183,9 @@ describe("PostgreSQL SQL/JSON functions", () => {
       firstStmt("SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (columns int, ordinality text, path int PATH '$'));").from[0]
         .table.columns,
     ).toEqual([
-      { kind: "value", name: "columns", type: ct("int") },
-      { kind: "value", name: "ordinality", type: ct("text") },
-      { kind: "value", name: "path", type: ct("int"), path: "$" },
+      { kind: "value", name: "columns", type: ct(["int"]) },
+      { kind: "value", name: "ordinality", type: ct(["text"]) },
+      { kind: "value", name: "path", type: ct(["int"]), path: "$" },
     ]);
   });
 });

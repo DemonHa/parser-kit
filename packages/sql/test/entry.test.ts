@@ -105,6 +105,10 @@ it("types the results with the AST types", () => {
   expectTypeOf<PostgresTypes.PsqlMeta>().toMatchTypeOf<ScriptItem>();
   expectTypeOf<Extract<Stmt, { kind: "select" }>>().toMatchTypeOf<PostgresTypes.Query>();
   expectTypeOf<Extract<PostgresTypes.Expr, { kind: "number" }>["value"]>().toEqualTypeOf<number>();
+  expectTypeOf<Extract<PostgresTypes.Expr, { kind: "number" }>["raw"]>().toEqualTypeOf<string | undefined>();
+  // Qualified names keep one element per part.
+  expectTypeOf<Extract<PostgresTypes.Expr, { kind: "call" }>["name"]>().toEqualTypeOf<string[]>();
+  expectTypeOf<PostgresTypes.ColType["name"]>().toEqualTypeOf<string[]>();
   expectTypeOf<"ident">().toMatchTypeOf<PostgresTypes.PostgresTokenType>();
 });
 

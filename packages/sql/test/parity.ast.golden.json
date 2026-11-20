@@ -401,7 +401,9 @@
                   {
                     "expr": {
                       "kind": "call",
-                      "name": "max",
+                      "name": [
+                        "max"
+                      ],
                       "args": [
                         {
                           "kind": "name",
@@ -520,7 +522,9 @@
               "kind": "window",
               "fn": {
                 "kind": "call",
-                "name": "rank",
+                "name": [
+                  "rank"
+                ],
                 "args": [],
                 "span": {
                   "start": {
@@ -1859,7 +1863,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -1889,7 +1895,9 @@
             "kind": "column",
             "name": "name",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -1943,7 +1951,9 @@
             "kind": "column",
             "name": "a",
             "dataType": {
-              "name": "varchar",
+              "name": [
+                "varchar"
+              ],
               "args": [
                 10
               ],
@@ -1975,7 +1985,9 @@
             "kind": "column",
             "name": "b",
             "dataType": {
-              "name": "numeric",
+              "name": [
+                "numeric"
+              ],
               "args": [
                 10,
                 2
@@ -2008,7 +2020,9 @@
             "kind": "column",
             "name": "c",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": true,
               "span": {
@@ -2038,7 +2052,9 @@
             "kind": "column",
             "name": "d",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": true,
               "span": {
@@ -2093,7 +2109,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -2215,7 +2233,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "lower",
+              "name": [
+                "lower"
+              ],
               "args": [
                 {
                   "kind": "name",
@@ -2445,7 +2465,9 @@
             "kind": "column",
             "name": "c",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -2807,7 +2829,9 @@
                 }
               },
               "type": {
-                "name": "int",
+                "name": [
+                  "int"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -3095,7 +3119,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "coalesce",
+              "name": [
+                "coalesce"
+              ],
               "args": [
                 {
                   "kind": "name",
@@ -3144,7 +3170,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "now",
+              "name": [
+                "now"
+              ],
               "args": [],
               "span": {
                 "start": {
@@ -3609,7 +3637,9 @@
               "kind": "function",
               "call": {
                 "kind": "call",
-                "name": "unnest",
+                "name": [
+                  "unnest"
+                ],
                 "args": [
                   {
                     "kind": "name",
@@ -3931,7 +3961,9 @@
               "kind": "function",
               "call": {
                 "kind": "call",
-                "name": "generate_series",
+                "name": [
+                  "generate_series"
+                ],
                 "args": [
                   {
                     "kind": "number",
@@ -4320,7 +4352,9 @@
             "calls": [
               {
                 "kind": "call",
-                "name": "f",
+                "name": [
+                  "f"
+                ],
                 "args": [
                   {
                     "kind": "number",
@@ -4350,7 +4384,9 @@
               },
               {
                 "kind": "call",
-                "name": "g",
+                "name": [
+                  "g"
+                ],
                 "args": [],
                 "span": {
                   "start": {
@@ -4376,7 +4412,9 @@
             "kind": "function",
             "call": {
               "kind": "call",
-              "name": "unnest",
+              "name": [
+                "unnest"
+              ],
               "args": [
                 {
                   "kind": "name",
@@ -4789,7 +4827,9 @@
                   }
                 },
                 "type": {
-                  "name": "int",
+                  "name": [
+                    "int"
+                  ],
                   "args": [],
                   "array": false,
                   "span": {
@@ -8016,7 +8056,9 @@
             "expr": {
               "kind": "typedLiteral",
               "type": {
-                "name": "date",
+                "name": [
+                  "date"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -8048,7 +8090,9 @@
             "expr": {
               "kind": "typedLiteral",
               "type": {
-                "name": "time",
+                "name": [
+                  "time"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -8080,7 +8124,9 @@
             "expr": {
               "kind": "typedLiteral",
               "type": {
-                "name": "timestamp with time zone",
+                "name": [
+                  "timestamp with time zone"
+                ],
                 "args": [
                   3
                 ],
@@ -8288,7 +8334,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "overlay",
+              "name": [
+                "overlay"
+              ],
               "args": [
                 {
                   "kind": "name",
@@ -8393,7 +8441,9 @@
             "kind": "column",
             "name": "at",
             "dataType": {
-              "name": "timestamp",
+              "name": [
+                "timestamp"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -8451,7 +8501,9 @@
             "kind": "column",
             "name": "d",
             "dataType": {
-              "name": "date",
+              "name": [
+                "date"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -8471,7 +8523,9 @@
                 "expr": {
                   "kind": "typedLiteral",
                   "type": {
-                    "name": "date",
+                    "name": [
+                      "date"
+                    ],
                     "args": [],
                     "array": false,
                     "span": {
@@ -8548,7 +8602,9 @@
               "kind": "aggFilter",
               "fn": {
                 "kind": "call",
-                "name": "count",
+                "name": [
+                  "count"
+                ],
                 "args": [
                   {
                     "kind": "star",
@@ -8678,11 +8734,14 @@
               "kind": "withinGroup",
               "fn": {
                 "kind": "call",
-                "name": "percentile_cont",
+                "name": [
+                  "percentile_cont"
+                ],
                 "args": [
                   {
                     "kind": "number",
                     "value": 0.5,
+                    "raw": "0.5",
                     "span": {
                       "start": {
                         "row": 1,
@@ -8784,7 +8843,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "count",
+              "name": [
+                "count"
+              ],
               "args": [
                 {
                   "kind": "star",
@@ -8857,7 +8918,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "count",
+              "name": [
+                "count"
+              ],
               "args": [
                 {
                   "kind": "name",
@@ -8933,7 +8996,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "array_agg",
+              "name": [
+                "array_agg"
+              ],
               "args": [
                 {
                   "kind": "name",
@@ -9030,7 +9095,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "string_agg",
+              "name": [
+                "string_agg"
+              ],
               "args": [
                 {
                   "kind": "name",
@@ -9141,7 +9208,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "f",
+              "name": [
+                "f"
+              ],
               "args": [
                 {
                   "kind": "namedArg",
@@ -9260,7 +9329,9 @@
                 "kind": "nullTreatment",
                 "fn": {
                   "kind": "call",
-                  "name": "lag",
+                  "name": [
+                    "lag"
+                  ],
                   "args": [
                     {
                       "kind": "name",
@@ -9389,7 +9460,9 @@
                   "kind": "nullTreatment",
                   "fn": {
                     "kind": "call",
-                    "name": "count",
+                    "name": [
+                      "count"
+                    ],
                     "args": [
                       {
                         "kind": "name",
@@ -9579,7 +9652,9 @@
               "kind": "window",
               "fn": {
                 "kind": "call",
-                "name": "sum",
+                "name": [
+                  "sum"
+                ],
                 "args": [
                   {
                     "kind": "name",
@@ -9745,7 +9820,9 @@
               "kind": "window",
               "fn": {
                 "kind": "call",
-                "name": "sum",
+                "name": [
+                  "sum"
+                ],
                 "args": [
                   {
                     "kind": "name",
@@ -9845,7 +9922,9 @@
               "kind": "window",
               "fn": {
                 "kind": "call",
-                "name": "sum",
+                "name": [
+                  "sum"
+                ],
                 "args": [
                   {
                     "kind": "name",
@@ -9964,7 +10043,9 @@
               "kind": "window",
               "fn": {
                 "kind": "call",
-                "name": "sum",
+                "name": [
+                  "sum"
+                ],
                 "args": [
                   {
                     "kind": "name",
@@ -10076,7 +10157,9 @@
               "kind": "window",
               "fn": {
                 "kind": "call",
-                "name": "sum",
+                "name": [
+                  "sum"
+                ],
                 "args": [
                   {
                     "kind": "name",
@@ -10226,7 +10309,9 @@
               "kind": "window",
               "fn": {
                 "kind": "call",
-                "name": "sum",
+                "name": [
+                  "sum"
+                ],
                 "args": [
                   {
                     "kind": "name",
@@ -10299,7 +10384,9 @@
               "kind": "window",
               "fn": {
                 "kind": "call",
-                "name": "sum",
+                "name": [
+                  "sum"
+                ],
                 "args": [
                   {
                     "kind": "name",
@@ -10805,7 +10892,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "count",
+              "name": [
+                "count"
+              ],
               "args": [
                 {
                   "kind": "star",
@@ -11559,7 +11648,9 @@
               "kind": "column",
               "name": "age",
               "dataType": {
-                "name": "int",
+                "name": [
+                  "int"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -11871,7 +11962,9 @@
             "kind": "setDataType",
             "column": "n",
             "dataType": {
-              "name": "bigint",
+              "name": [
+                "bigint"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -12044,7 +12137,9 @@
               "kind": "column",
               "name": "a",
               "dataType": {
-                "name": "int",
+                "name": [
+                  "int"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -12078,7 +12173,9 @@
               "kind": "column",
               "name": "b",
               "dataType": {
-                "name": "text",
+                "name": [
+                  "text"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -12767,7 +12864,9 @@
             "mode": null,
             "name": null,
             "type": {
-              "name": "double precision",
+              "name": [
+                "double precision"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -12787,7 +12886,9 @@
             "mode": null,
             "name": "a",
             "type": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -12834,7 +12935,9 @@
             "mode": null,
             "name": null,
             "type": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -12869,7 +12972,9 @@
             },
             {
               "kind": "set",
-              "parameter": "search_path",
+              "parameter": [
+                "search_path"
+              ],
               "value": {
                 "kind": "list",
                 "values": [
@@ -13121,7 +13226,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -13192,7 +13299,9 @@
             "kind": "column",
             "name": "u",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -13236,7 +13345,9 @@
             "kind": "column",
             "name": "parent",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -13369,7 +13480,9 @@
             "kind": "column",
             "name": "a",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -13413,7 +13526,9 @@
             "kind": "column",
             "name": "b",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -13518,7 +13633,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -13581,7 +13698,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -13734,7 +13853,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -14022,7 +14143,9 @@
             "kind": "column",
             "name": "a",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -14052,7 +14175,9 @@
             "kind": "column",
             "name": "b",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -14118,7 +14243,9 @@
             {
               "expr": {
                 "kind": "call",
-                "name": "lower",
+                "name": [
+                  "lower"
+                ],
                 "args": [
                   {
                     "kind": "name",
@@ -14750,7 +14877,9 @@
             "kind": "column",
             "name": "a",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -14818,7 +14947,9 @@
             "kind": "column",
             "name": "b",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -14982,7 +15113,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "bigint",
+              "name": [
+                "bigint"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -15040,7 +15173,9 @@
             "kind": "column",
             "name": "n",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -15125,7 +15260,9 @@
             "kind": "column",
             "name": "d",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -15213,7 +15350,9 @@
             "kind": "column",
             "name": "s",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -15300,7 +15439,9 @@
               "kind": "column",
               "name": "k",
               "dataType": {
-                "name": "int",
+                "name": [
+                  "int"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -15529,7 +15670,9 @@
           {
             "kind": "as",
             "type": {
-              "name": "bigint",
+              "name": [
+                "bigint"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -15677,7 +15820,9 @@
           "positive"
         ],
         "dataType": {
-          "name": "int",
+          "name": [
+            "int"
+          ],
           "args": [],
           "array": false,
           "span": {
@@ -15769,7 +15914,9 @@
             "mode": null,
             "name": null,
             "type": {
-              "name": "numeric",
+              "name": [
+                "numeric"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -15792,7 +15939,9 @@
             "value": {
               "kind": "type",
               "type": {
-                "name": "numeric_add",
+                "name": [
+                  "numeric_add"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -15813,7 +15962,9 @@
             "value": {
               "kind": "type",
               "type": {
-                "name": "numeric",
+                "name": [
+                  "numeric"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -16097,7 +16248,9 @@
             "mode": null,
             "name": "a",
             "type": {
-              "name": "integer",
+              "name": [
+                "integer"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -16117,7 +16270,9 @@
             "mode": null,
             "name": "b",
             "type": {
-              "name": "integer",
+              "name": [
+                "integer"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -16151,7 +16306,9 @@
           "kind": "type",
           "setof": false,
           "type": {
-            "name": "integer",
+            "name": [
+              "integer"
+            ],
             "args": [],
             "array": false,
             "span": {
@@ -16213,7 +16370,9 @@
           "kind": "type",
           "setof": false,
           "type": {
-            "name": "int",
+            "name": [
+              "int"
+            ],
             "args": [],
             "array": false,
             "span": {
@@ -16256,7 +16415,9 @@
           },
           {
             "kind": "set",
-            "parameter": "x",
+            "parameter": [
+              "x"
+            ],
             "value": {
               "kind": "fromCurrent"
             }
@@ -16295,7 +16456,9 @@
           "kind": "type",
           "setof": false,
           "type": {
-            "name": "int",
+            "name": [
+              "int"
+            ],
             "args": [],
             "array": false,
             "span": {
@@ -16322,7 +16485,9 @@
           },
           {
             "kind": "set",
-            "parameter": "search_path",
+            "parameter": [
+              "search_path"
+            ],
             "value": {
               "kind": "list",
               "values": [
@@ -16431,7 +16596,9 @@
                 }
               },
               "type": {
-                "name": "double precision",
+                "name": [
+                  "double precision"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -16478,7 +16645,9 @@
                 }
               },
               "type": {
-                "name": "timestamp with time zone",
+                "name": [
+                  "timestamp with time zone"
+                ],
                 "args": [
                   3
                 ],
@@ -16527,7 +16696,9 @@
                 }
               },
               "type": {
-                "name": "interval day to second",
+                "name": [
+                  "interval day to second"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -16599,7 +16770,9 @@
             "kind": "column",
             "name": "a",
             "dataType": {
-              "name": "character varying",
+              "name": [
+                "character varying"
+              ],
               "args": [
                 10
               ],
@@ -16631,7 +16804,9 @@
             "kind": "column",
             "name": "b",
             "dataType": {
-              "name": "bit varying",
+              "name": [
+                "bit varying"
+              ],
               "args": [
                 4
               ],
@@ -16663,7 +16838,9 @@
             "kind": "column",
             "name": "c",
             "dataType": {
-              "name": "time without time zone",
+              "name": [
+                "time without time zone"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -16693,7 +16870,9 @@
             "kind": "column",
             "name": "d",
             "dataType": {
-              "name": "double precision",
+              "name": [
+                "double precision"
+              ],
               "args": [],
               "array": true,
               "span": {
@@ -16747,7 +16926,9 @@
             "mode": null,
             "name": null,
             "type": {
-              "name": "double precision",
+              "name": [
+                "double precision"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -16767,7 +16948,9 @@
             "mode": null,
             "name": "a",
             "type": {
-              "name": "timestamp with time zone",
+              "name": [
+                "timestamp with time zone"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -16788,7 +16971,9 @@
           "kind": "type",
           "setof": false,
           "type": {
-            "name": "int",
+            "name": [
+              "int"
+            ],
             "args": [],
             "array": false,
             "span": {
@@ -17055,7 +17240,9 @@
       {
         "kind": "set",
         "scope": null,
-        "name": "search_path",
+        "name": [
+          "search_path"
+        ],
         "values": [
           {
             "kind": "name",
@@ -17108,7 +17295,9 @@
     "ast": [
       {
         "kind": "show",
-        "name": "search_path",
+        "name": [
+          "search_path"
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -17127,7 +17316,9 @@
     "ast": [
       {
         "kind": "reset",
-        "name": "all",
+        "name": [
+          "all"
+        ],
         "span": {
           "start": {
             "row": 1,
@@ -17212,7 +17403,9 @@
         "name": "q",
         "types": [
           {
-            "name": "int",
+            "name": [
+              "int"
+            ],
             "args": [],
             "array": false,
             "span": {
@@ -17227,7 +17420,9 @@
             }
           },
           {
-            "name": "double precision",
+            "name": [
+              "double precision"
+            ],
             "args": [],
             "array": false,
             "span": {
@@ -17242,7 +17437,9 @@
             }
           },
           {
-            "name": "timestamp with time zone",
+            "name": [
+              "timestamp with time zone"
+            ],
             "args": [],
             "array": false,
             "span": {
@@ -17571,6 +17768,7 @@
           {
             "kind": "number",
             "value": 2.5,
+            "raw": "2.5",
             "span": {
               "start": {
                 "row": 1,
@@ -17584,7 +17782,9 @@
           },
           {
             "kind": "call",
-            "name": "now",
+            "name": [
+              "now"
+            ],
             "args": [],
             "span": {
               "start": {
@@ -18280,7 +18480,9 @@
             "kind": "column",
             "name": "flags",
             "dataType": {
-              "name": "bit",
+              "name": [
+                "bit"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -18339,7 +18541,9 @@
             "kind": "column",
             "name": "mask",
             "dataType": {
-              "name": "bit",
+              "name": [
+                "bit"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -18398,7 +18602,9 @@
             "kind": "column",
             "name": "label",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -18483,7 +18689,9 @@
           {
             "expr": {
               "kind": "call",
-              "name": "lower",
+              "name": [
+                "lower"
+              ],
               "args": [
                 {
                   "kind": "name",
@@ -18690,7 +18898,9 @@
             "kind": "column",
             "name": "r",
             "dataType": {
-              "name": "tsrange",
+              "name": [
+                "tsrange"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -18906,7 +19116,9 @@
               "kind": "column",
               "name": "exclude",
               "dataType": {
-                "name": "text",
+                "name": [
+                  "text"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -19304,7 +19516,9 @@
                 "mode": null,
                 "name": null,
                 "type": {
-                  "name": "int",
+                  "name": [
+                    "int"
+                  ],
                   "args": [],
                   "array": false,
                   "span": {
@@ -19324,7 +19538,9 @@
                 "mode": null,
                 "name": null,
                 "type": {
-                  "name": "double precision",
+                  "name": [
+                    "double precision"
+                  ],
                   "args": [],
                   "array": false,
                   "span": {
@@ -19379,7 +19595,9 @@
                 "mode": "in",
                 "name": "a",
                 "type": {
-                  "name": "int",
+                  "name": [
+                    "int"
+                  ],
                   "args": [],
                   "array": false,
                   "span": {
@@ -19399,7 +19617,9 @@
                 "mode": "out",
                 "name": "b",
                 "type": {
-                  "name": "text",
+                  "name": [
+                    "text"
+                  ],
                   "args": [],
                   "array": false,
                   "span": {
@@ -19461,7 +19681,9 @@
                 "mode": null,
                 "name": null,
                 "type": {
-                  "name": "int",
+                  "name": [
+                    "int"
+                  ],
                   "args": [],
                   "array": false,
                   "span": {
@@ -19881,7 +20103,9 @@
                 "kind": "column",
                 "name": "id",
                 "dataType": {
-                  "name": "int",
+                  "name": [
+                    "int"
+                  ],
                   "args": [],
                   "array": false,
                   "span": {
@@ -20109,6 +20333,7 @@
             "value": {
               "kind": "number",
               "value": 1.5,
+              "raw": "1.5",
               "span": {
                 "start": {
                   "row": 1,
@@ -21294,7 +21519,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -21353,7 +21580,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -21383,7 +21612,9 @@
             "kind": "column",
             "name": "note",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -21440,7 +21671,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -21671,7 +21904,9 @@
             "mode": "in",
             "name": "a",
             "type": {
-              "name": "integer",
+              "name": [
+                "integer"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -21691,7 +21926,9 @@
             "mode": null,
             "name": "b",
             "type": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -21995,7 +22232,9 @@
                 "kind": "cast",
                 "expr": {
                   "kind": "call",
-                  "name": "now",
+                  "name": [
+                    "now"
+                  ],
                   "args": [],
                   "span": {
                     "start": {
@@ -22009,7 +22248,9 @@
                   }
                 },
                 "type": {
-                  "name": "timestamp",
+                  "name": [
+                    "timestamp"
+                  ],
                   "args": [],
                   "array": false,
                   "span": {
@@ -22227,7 +22468,9 @@
                 "kind": "cast",
                 "expr": {
                   "kind": "call",
-                  "name": "now",
+                  "name": [
+                    "now"
+                  ],
                   "args": [],
                   "span": {
                     "start": {
@@ -22241,7 +22484,9 @@
                   }
                 },
                 "type": {
-                  "name": "timestamp",
+                  "name": [
+                    "timestamp"
+                  ],
                   "args": [],
                   "array": false,
                   "span": {
@@ -24724,7 +24969,9 @@
             "mode": null,
             "name": "a",
             "type": {
-              "name": "integer",
+              "name": [
+                "integer"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -24744,7 +24991,9 @@
             "mode": null,
             "name": "b",
             "type": {
-              "name": "integer",
+              "name": [
+                "integer"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -24765,7 +25014,9 @@
           "kind": "type",
           "setof": false,
           "type": {
-            "name": "integer",
+            "name": [
+              "integer"
+            ],
             "args": [],
             "array": false,
             "span": {
@@ -25090,7 +25341,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -25134,7 +25387,9 @@
             "kind": "column",
             "name": "name",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -25200,7 +25455,9 @@
               "kind": "column",
               "name": "age",
               "dataType": {
-                "name": "int",
+                "name": [
+                  "int"
+                ],
                 "args": [],
                 "array": false,
                 "span": {
@@ -25288,6 +25545,7 @@
             "expr": {
               "kind": "number",
               "value": 100000,
+              "raw": "1e5",
               "span": {
                 "start": {
                   "row": 1,
@@ -25305,6 +25563,7 @@
             "expr": {
               "kind": "number",
               "value": 0.5,
+              "raw": ".5",
               "span": {
                 "start": {
                   "row": 1,
@@ -25322,6 +25581,7 @@
             "expr": {
               "kind": "number",
               "value": 0.0015,
+              "raw": "1.5e-3",
               "span": {
                 "start": {
                   "row": 1,
@@ -25564,7 +25824,9 @@
           "kind": "type",
           "setof": false,
           "type": {
-            "name": "int",
+            "name": [
+              "int"
+            ],
             "args": [],
             "array": false,
             "span": {
@@ -25731,7 +25993,9 @@
                 }
               },
               "type": {
-                "name": "int",
+                "name": [
+                  "int"
+                ],
                 "args": [],
                 "array": false,
                 "span": {

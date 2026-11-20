@@ -22,7 +22,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -52,7 +54,9 @@
             "kind": "column",
             "name": "ok",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -441,7 +445,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -858,7 +864,9 @@
             "kind": "column",
             "name": "c",
             "dataType": {
-              "name": "interval day",
+              "name": [
+                "interval day"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -965,7 +973,9 @@
             "kind": "column",
             "name": "a",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -1162,7 +1172,9 @@
             "kind": "column",
             "name": "a",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -1192,7 +1204,9 @@
             "kind": "column",
             "name": "b",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -1299,7 +1313,9 @@
             "kind": "column",
             "name": "id",
             "dataType": {
-              "name": "int",
+              "name": [
+                "int"
+              ],
               "args": [],
               "array": false,
               "span": {
@@ -1329,7 +1345,9 @@
             "kind": "column",
             "name": "ok",
             "dataType": {
-              "name": "text",
+              "name": [
+                "text"
+              ],
               "args": [],
               "array": false,
               "span": {
