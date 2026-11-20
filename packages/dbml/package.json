@@ -64,6 +64,7 @@
     "@parser-kit/core": "workspace:^"
   },
   "devDependencies": {
+    "@dbml/core": "catalog:",
     "tsc-alias": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

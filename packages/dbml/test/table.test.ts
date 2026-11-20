@@ -157,6 +157,30 @@ describe("Column types", () => {
     });
   });
 
+  it("reads a `[` opening a line right after the type as an array suffix, as @dbml/core does", () => {
+    expect(column("v int\n[]").dataType.arraySizes).toEqual([null]);
+    expect(column("v int[]\n[]").dataType.arraySizes).toEqual([null, null]);
+    expect(column("v varchar(1)\n  // a comment line\n[]").dataType).toEqual({
+      name: qn("varchar"),
+      args: [{ kind: "number", value: 1 }],
+      arraySizes: [null],
+    });
+    expect(column("v int\n\n  [3]\n  [] [pk]")).toEqual({
+      type: "column",
+      name: id("v"),
+      dataType: { name: qn("int"), args: null, arraySizes: [{ kind: "number", value: 3 }, null] },
+      settings: [{ kind: "pk", spelling: "pk" }],
+    });
+    expect(parseError("Table t {\n  v int\n  [pk]\n}")).toEqual({
+      msg: 'Expected a number or "]" but found "pk"',
+      start: { row: 3, col: 3 },
+    });
+    // Only when the line break directly follows the type: not after a space or a settings list.
+    const item = 'Expected a column, a note, a partial injection, records, "indexes" or "checks" but found "["';
+    expect(parseError("Table t {\n  v int  \n  []\n}")).toEqual({ msg: item, start: { row: 3, col: 2 } });
+    expect(parseError("Table t {\n  v int [pk]\n  []\n}")).toEqual({ msg: item, start: { row: 3, col: 2 } });
+  });
+
   it("parses quoted and schema-qualified types", () => {
     expect(column('v "double precision"').dataType.name).toEqual({ schema: null, name: id("double precision", true) });
     expect(column("status s.job_status").dataType.name).toEqual(qn("job_status", "s"));

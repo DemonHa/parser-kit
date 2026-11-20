@@ -3,6 +3,7 @@ import {
   atEnumConstant,
   atLineEnd,
   atNumber,
+  bracketOnLaterLine,
   type Ctx,
   expectPunc,
   expectSpace,
@@ -27,6 +28,7 @@ import {
   readString,
   type Setting,
   type SettingsSpec,
+  skipNewlines,
   type TT,
   touches,
   type Value,
@@ -86,9 +88,13 @@ const readDataType = (ctx: Ctx): DataType => {
     ctx.next();
   }
   // `[]` or `[3]` touching the type is an array suffix; `int []` is an empty
-  // settings list.
+  // settings list, and so is a `[` after a glued block comment, which the
+  // parse stream has dropped (`@dbml/core` reads a suffix there). As in `@dbml/core`, so is a `[` opening a later line right
+  // after the type (`int⏎[]`).
   const arraySizes: (NumberValue | null)[] = [];
-  while (isPunc(ctx.peek(), "[") && touches(ctx.lastEnd(), ctx.peek())) {
+  for (;;) {
+    if (bracketOnLaterLine(ctx)) skipNewlines(ctx);
+    else if (!(isPunc(ctx.peek(), "[") && touches(ctx.lastEnd(), ctx.peek()))) break;
     ctx.next();
     if (isPunc(ctx.peek(), "]")) {
       arraySizes.push(null);
