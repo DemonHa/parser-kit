@@ -15,7 +15,9 @@ import { LEXER_EDGE_CASES, MALFORMED, MULTI_LINE, SUPPLEMENTAL } from "./parity-
 //
 // This harness closes that gap. It serialises the full AST — spans included,
 // nothing stripped — for every corpus row and every statement in
-// `parity-corpus.ts`, plus the errors `diagnose()` collects for its fixed list of malformed inputs (`MALFORMED`), and compares the result
+// `parity-corpus.ts`'s valid lists (`SUPPLEMENTAL` / `MULTI_LINE` /
+// `LEXER_EDGE_CASES`), plus the errors `diagnose()` collects for its
+// `MALFORMED` list, and compares the result
 // byte-for-byte against a committed golden. A refactor that is supposed to
 // preserve behaviour must leave those files untouched.
 //
