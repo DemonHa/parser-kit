@@ -9,6 +9,7 @@ import {
   type Ident,
   isPunc,
   isWord,
+  lookAhead,
   peekPastNewlines,
   type QualifiedName,
   readHeaderSettings,
@@ -21,6 +22,7 @@ import {
   skipNewlines,
   type TT,
 } from "./common";
+import { report, skipPastClose } from "./recovery";
 
 // The note item of a table or project body, `Note: '…'` (inline) or
 // `Note { '…' }` (block). Its text is dedented like every note's.
@@ -33,13 +35,32 @@ export interface Note {
 }
 
 /**
+ * A block note's `'…' }`, its `{` already read. Under `diagnose`, an error
+ * resumes after the block's `}`, keeping the text if it was read.
+ */
+const readNoteBody = (ctx: Ctx): StringValue => {
+  let value: StringValue | null = null;
+  try {
+    skipNewlines(ctx);
+    value = readNoteString(ctx);
+    skipNewlines(ctx);
+    expectPunc(ctx, "}");
+  } catch (error) {
+    if (!report(ctx, error)) throw error;
+    skipPastClose(ctx);
+    if (value === null) throw error;
+  }
+  return value;
+};
+
+/**
  * `note` (any case) followed by `{`, or by `:` with or without line breaks
  * before it, starts a note item; otherwise the word is a name (a column called
  * `note`). As in `@dbml/core`, `note` with `{` on a later line is a name.
  */
 export const isNoteItem = (ctx: Ctx): boolean => {
   if (!isWord(ctx.peek(), "note")) return false;
-  return isPunc(ctx.peekAhead(1), "{") || isPunc(peekPastNewlines(ctx, 1), ":");
+  return isPunc(lookAhead(ctx, 1), "{") || isPunc(peekPastNewlines(ctx, 1), ":");
 };
 
 export const noteItem = custom<Note, TT>(
@@ -55,10 +76,7 @@ export const noteItem = custom<Note, TT>(
     }
     expectSpace(ctx);
     expectPunc(ctx, "{");
-    skipNewlines(ctx);
-    const value = readNoteString(ctx);
-    skipNewlines(ctx);
-    expectPunc(ctx, "}");
+    const value = readNoteBody(ctx);
     return { type: "note", value, form: "block", span: ctx.spanFrom(start) };
   },
   { expected: '"Note"', first: [{ type: "ident", value: "note" }] },
@@ -96,12 +114,11 @@ export const STICKY_NOTE_SETTINGS: SettingsSpec = {
 export const stickyNoteElement = defineElement("note", "Note", (ctx, start): StickyNote => {
   skipNewlines(ctx);
   const name = readQualifiedName(ctx, "a sticky note name");
-  const { settings, settingsAllowed } = readHeaderSettings(ctx, STICKY_NOTE_SETTINGS);
-  if (!isPunc(ctx.peek(), "{")) fail(ctx, settingsAllowed ? '"[" or "{"' : '"{"');
-  ctx.next();
-  skipNewlines(ctx);
-  const value = readNoteString(ctx);
-  skipNewlines(ctx);
-  expectPunc(ctx, "}");
+  const { settings, settingsAllowed, openSwallowed } = readHeaderSettings(ctx, STICKY_NOTE_SETTINGS);
+  if (!openSwallowed) {
+    if (!isPunc(ctx.peek(), "{")) fail(ctx, settingsAllowed ? '"[" or "{"' : '"{"');
+    ctx.next();
+  }
+  const value = readNoteBody(ctx);
   return { type: "stickyNote", name, settings, value, span: ctx.spanFrom(start) };
 });

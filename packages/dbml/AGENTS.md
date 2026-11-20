@@ -16,14 +16,17 @@ exist yet are the ones still to be written.
 - `src/` — the published code.
   - `index.ts` — the package entry.
   - `lexer.ts` — the lexer, the parse-stream wrapper (comments dropped,
-    identifiers case-folded), the raw-name lookup and the note dedent
-    (`dedentNote`).
+    identifiers case-folded, and, for `diagnose`, line breaks restored after
+    an unterminated string inside brackets), the raw-name lookup and the note
+    dedent (`dedentNote`).
   - `grammar/` — one module per construct (`table.ts`, `column.ts`, `ref.ts`,
     `enum.ts`, `project.ts`, `note.ts`, `indexes.ts`, `group.ts`,
     `partial.ts`, `injection.ts`, `records.ts`), the shared rules in `common.ts` (names,
     strings, values, the settings framework, the `{ … }` body reader and
-    `defineElement`), and two registries: `root.ts` (`ELEMENTS`, the top-level
-    elements, plus the top-level loop and its recovery) and `table-items.ts`
+    `defineElement`), `recovery.ts` (what `diagnose` skips after an error, and
+    which errors it drops as cascades), and two registries: `root.ts`
+    (`ELEMENTS`, the top-level elements, plus the top-level loop and its
+    recovery) and `table-items.ts`
     (`TABLE_ITEMS`, what may appear in a table body besides columns). Each
     module defines its AST types next to its rules; `src/ast.ts` only
     re-exports them. A new construct is a new module plus one line in a
@@ -90,6 +93,14 @@ fixtures reach the tarball.
   written. Double-quoted text where a string is expected (a note, a default, a
   property value) is a string too, as in `@dbml/core`, flagged
   `doubleQuoted: true`. Backtick expressions are kept raw.
+- **Error recovery.** `diagnose` resynchronises at a settings list's next `,`
+  or `]`, a body's next line and the next element that starts a line, and
+  records errors through `report` in `recovery.ts`, never `ctx.report`
+  directly, so cascades are dropped in one place. A body read with `readBody`
+  and a list read with `readSettings` recover with no extra code. Look ahead
+  with `lookAhead` / `peekPastNewlines`, not `ctx.peekAhead`, so a lexer error
+  met in lookahead is recorded rather than losing the item. `parse` must still
+  throw exactly `diagnose`'s first error; the parity harness checks it.
 - **Error messages** use the core style, `Expected X but found Y`, with readable
   displays (`"Table"`, `a column type`, …). Error tests match `ParseError.msg`
   exactly, plus `start`.

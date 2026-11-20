@@ -40,16 +40,16 @@ describe("Document", () => {
     });
   });
 
-  it("diagnose keeps the elements before the first error and reports it", () => {
+  it("diagnose reports every error and keeps what it can recover", () => {
+    // test/recovery.test.ts covers recovery in depth.
     const { ast, errors } = dbml.diagnose("Table a { id int }\nTable b {\n id\n}\nTable c { id int }");
-    expect(ast.elements.map((element) => element.type)).toEqual(["table"]);
+    expect(ast.elements.map((element) => element.type)).toEqual(["table", "table", "table"]);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(ParseError);
     expect(errors[0]!.msg).toBe("Expected a column type but found a new line");
     expect(errors[0]!.start).toEqual({ row: 3, col: 3 });
-    // Recovery skips the rest of the input, still recording lexer errors on the way.
     const later = dbml.diagnose("Table a {\n id\n}\nTable b { x int [note: 'oops }\nTable c { y int }");
-    expect(later.ast.elements).toEqual([]);
+    expect(later.ast.elements.map((element) => element.type)).toEqual(["table", "table", "table"]);
     expect(later.errors.map(({ msg, start }) => ({ msg, start }))).toEqual([
       { msg: "Expected a column type but found a new line", start: { row: 2, col: 3 } },
       { msg: "Unterminated string", start: { row: 4, col: 23 } },

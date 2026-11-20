@@ -3,6 +3,7 @@ import {
   atLineEnd,
   type Ctx,
   type ExpressionValue,
+  expectLineEnd,
   expectPunc,
   expectSpace,
   fail,
@@ -12,6 +13,7 @@ import {
   isNewline,
   isPunc,
   isWord,
+  lookAhead,
   lowerKey,
   peekPastNewlines,
   readBody,
@@ -254,7 +256,7 @@ const readIndexEntry = (ctx: Ctx): IndexEntry => {
 const readCheckEntry = (ctx: Ctx): CheckEntry => {
   const start = ctx.position();
   const expression = readExpression(ctx);
-  if (!isPunc(ctx.peek(), "[") && !atLineEnd(ctx)) fail(ctx, '"[", a new line or "}"');
+  if (!isPunc(ctx.peek(), "[")) expectLineEnd(ctx, '"[", a new line or "}"');
   const settings = readOptionalSettings(ctx, CHECK_SETTINGS);
   return { expression, settings, span: ctx.spanFrom(start) };
 };
@@ -262,7 +264,7 @@ const readCheckEntry = (ctx: Ctx): CheckEntry => {
 // --- Table items ---
 
 /** `keyword` (any case) directly followed by `{` on the same line. */
-const isBlock = (keyword: string) => (ctx: Ctx) => isWord(ctx.peek(), keyword) && isPunc(ctx.peekAhead(1), "{");
+const isBlock = (keyword: string) => (ctx: Ctx) => isWord(ctx.peek(), keyword) && isPunc(lookAhead(ctx, 1), "{");
 
 const readBlockBody = <T>(ctx: Ctx, item: (ctx: Ctx) => T): T[] => {
   ctx.next();

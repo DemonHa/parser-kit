@@ -38,8 +38,8 @@ export const TABLE_PARTIAL_SETTINGS: SettingsSpec = {
 export const tablePartialElement = defineElement("tablepartial", "TablePartial", (ctx, start): TablePartial => {
   skipNewlines(ctx);
   const name = readIdent(ctx, "a table partial name");
-  const { settings, settingsAllowed } = readHeaderSettings(ctx, TABLE_PARTIAL_SETTINGS);
-  if (!isPunc(ctx.peek(), "{")) fail(ctx, settingsAllowed ? '"[" or "{"' : '"{"');
-  const items = readBody(ctx, readPartialItem);
+  const { settings, settingsAllowed, openSwallowed } = readHeaderSettings(ctx, TABLE_PARTIAL_SETTINGS);
+  if (!openSwallowed && !isPunc(ctx.peek(), "{")) fail(ctx, settingsAllowed ? '"[" or "{"' : '"{"');
+  const items = readBody(ctx, readPartialItem, openSwallowed);
   return { type: "tablePartial", name, settings, items, span: ctx.spanFrom(start) };
 });

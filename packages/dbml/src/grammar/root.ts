@@ -1,11 +1,12 @@
-import { custom, type Infer, ParseError, type Position, type Span } from "@parser-kit/core";
-import { fail, isWord, quoteOptions, skipNewlines, type TT } from "./common";
+import { custom, type Infer, type Position, type Span, type Token } from "@parser-kit/core";
+import { type Ctx, fail, isName, isNewline, isPunc, isWord, quoteOptions, skipNewlines, type TT } from "./common";
 import { enumElement } from "./enum";
 import { tableGroupElement } from "./group";
 import { stickyNoteElement } from "./note";
 import { tablePartialElement } from "./partial";
 import { projectElement } from "./project";
 import { recordsElement } from "./records";
+import { registerElementStart, report, skipElement, wasReported } from "./recovery";
 import { refElement } from "./ref";
 import { tableElement } from "./table";
 
@@ -33,14 +34,80 @@ export interface DbmlDocument {
 
 const EXPECTED_ELEMENT = quoteOptions(ELEMENTS.map((element) => `"${element.display}"`));
 
+// Where `diagnose` may resume after a bad element: an element keyword whose
+// line, read ahead, holds a `{` (or, for a short-form `Ref`, a `:`) the way an
+// element header does, and, unless it is `Project` or `Ref`, a name right
+// after it. That keeps body lines such as `note text`, `Note: '…'`,
+// `Note { '…' }` or `records (a) { … }`, met while skipping a table whose `{`
+// is missing, from passing for elements.
+//
+// A later keyword's scan would stop where an earlier one's on the same line
+// did, at the same token, so `cache` remembers where and on what: a keyword
+// before that place gets the answer without rescanning, and a line of stray
+// `} Table t` runs stays linear whatever ends it.
+interface ScanCache {
+  /** The token the last scan stopped at (a `{`, a `:`, a line break or the end of input). */
+  until: Position | null;
+  stop: "{" | ":" | "end";
+}
+
+const before = (a: Position, b: Position): boolean => a.row < b.row || (a.row === b.row && a.col < b.col);
+
+const startsElement = (ctx: Ctx, token: Token<TT>, cache?: ScanCache): boolean => {
+  const element = ELEMENTS.find((candidate) => isWord(token, candidate.keyword));
+  if (element === undefined) return false;
+  const ref = element.keyword === "ref";
+  // A lookahead that runs into a lexer error records it and gives up here,
+  // answering yes (the element then reports what follows) without caching:
+  // the scan never saw where the line ends.
+  const peekAt = (n: number): Token<TT> | null | "error" => {
+    try {
+      return ctx.peekAhead(n);
+    } catch (error) {
+      if (!report(ctx, error)) throw error;
+      return "error";
+    }
+  };
+  if (!ref && element.keyword !== "project") {
+    const name = peekAt(1);
+    if (name === "error") return true;
+    if (!isName(name)) return false;
+  }
+  if (cache?.until != null && before(token.position.start, cache.until)) {
+    return cache.stop === "{" || (cache.stop === ":" && ref);
+  }
+  // A `:` inside a settings list (`Table t [note: 'x'] {`) doesn't count.
+  let depth = 0;
+  for (let n = 1; ; n++) {
+    const next = peekAt(n);
+    if (next === "error") return true;
+    const stop = (at: ScanCache["stop"]): boolean => {
+      if (cache !== undefined) {
+        cache.until = next === null ? { row: Number.POSITIVE_INFINITY, col: 0 } : next.position.start;
+        cache.stop = at;
+      }
+      return at === "{" || (at === ":" && ref);
+    };
+    if (next === null || isNewline(next)) return stop("end");
+    if (isPunc(next, "{")) return stop("{");
+    if (isPunc(next, "[") || isPunc(next, "(")) depth++;
+    else if (isPunc(next, "]") || isPunc(next, ")")) depth--;
+    else if (depth <= 0 && isPunc(next, ":")) return stop(":");
+  }
+};
+
+registerElementStart(startsElement);
+
 // Elements may share a line (`} Table b {`) and blank lines may separate them.
-// The span runs from the first element to the last. On an error, `diagnose`
-// keeps the elements before it, records it and skips the rest of the input
-// (recording any lexer error met while skipping).
+// The span runs from the first element to the last. Under `diagnose`, a bad
+// element is dropped and parsing resumes at the next element keyword that
+// starts a line outside any braces (see `recovery.ts`).
 export const document = custom<DbmlDocument, TT>(
   (ctx) => {
     const elements: Element[] = [];
     let start: Position | null = null;
+    // One for the whole document: the cursor only moves forward.
+    const cache: ScanCache = { until: null, stop: "end" };
     for (;;) {
       try {
         skipNewlines(ctx);
@@ -50,7 +117,10 @@ export const document = custom<DbmlDocument, TT>(
         if (element === undefined) fail(ctx, EXPECTED_ELEMENT);
         elements.push(element.rule.parse(ctx));
       } catch (error) {
-        if (!(error instanceof ParseError) || !ctx.recover(error)) throw error;
+        // An element that resynchronised past its own `}` has nothing left to skip.
+        const resynchronised = wasReported(ctx, error);
+        if (!report(ctx, error)) throw error;
+        if (!resynchronised) skipElement(ctx, (token) => startsElement(ctx, token, cache));
       }
     }
     const last = elements[elements.length - 1];

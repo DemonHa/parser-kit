@@ -4,6 +4,7 @@ import {
   atLineEnd,
   atNumber,
   type Ctx,
+  expectLineEnd,
   expectPunc,
   expectSpace,
   fail,
@@ -168,9 +169,9 @@ export const column = custom<Column, TT>(
     if (isPunc(ctx.peek(), "[")) {
       expectSpace(ctx);
       settings.push(...readSettings(ctx, COLUMN_SETTINGS));
-      if (!atLineEnd(ctx)) fail(ctx, 'a new line or "}"');
-    } else if (!atLineEnd(ctx)) {
-      fail(ctx, '"pk", "unique", "[", a new line or "}"');
+      expectLineEnd(ctx, 'a new line or "}"');
+    } else {
+      expectLineEnd(ctx, '"pk", "unique", "[", a new line or "}"');
     }
     return { type: "column", name, dataType, settings, span: ctx.spanFrom(start) };
   },

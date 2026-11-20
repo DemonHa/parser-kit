@@ -46,11 +46,11 @@ export const tableElement = defineElement("table", "Table", (ctx, start): Table 
   const name = readQualifiedName(ctx, "a table name");
   if (isWord(peekPastNewlines(ctx), "as")) skipNewlines(ctx);
   const alias = readAlias(ctx);
-  const { settings, hasSettings, settingsAllowed } = readHeaderSettings(ctx, TABLE_SETTINGS);
-  if (!isPunc(ctx.peek(), "{")) {
+  const { settings, hasSettings, settingsAllowed, openSwallowed } = readHeaderSettings(ctx, TABLE_SETTINGS);
+  if (!openSwallowed && !isPunc(ctx.peek(), "{")) {
     const options = [alias === null && !hasSettings && '"as"', settingsAllowed && '"["', '"{"'];
     fail(ctx, quoteOptions(options.filter((option): option is string => option !== false)));
   }
-  const items = readBody(ctx, readTableItem);
+  const items = readBody(ctx, readTableItem, openSwallowed);
   return { type: "table", name, alias, settings, items, span: ctx.spanFrom(start) };
 });

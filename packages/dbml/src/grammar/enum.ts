@@ -1,12 +1,13 @@
 import type { Span } from "@parser-kit/core";
 import {
-  atLineEnd,
   type Ctx,
   defineElement,
+  expectLineEnd,
   expectSpace,
   fail,
   type Ident,
   isPunc,
+  lookAhead,
   noteSetting,
   type QualifiedName,
   readAlias,
@@ -47,13 +48,13 @@ export const ENUM_VALUE_SETTINGS: SettingsSpec = {
 const readEnumValue = (ctx: Ctx): EnumValue => {
   const start = ctx.position();
   const name = readIdent(ctx, "an enum value");
-  if (isPunc(ctx.peek(), "[")) {
+  if (isPunc(lookAhead(ctx, 0), "[")) {
     expectSpace(ctx);
     const settings = readSettings(ctx, ENUM_VALUE_SETTINGS);
-    if (!atLineEnd(ctx)) fail(ctx, 'a new line or "}"');
+    expectLineEnd(ctx, 'a new line or "}"');
     return { name, settings, span: ctx.spanFrom(start) };
   }
-  if (!atLineEnd(ctx)) fail(ctx, '"[", a new line or "}"');
+  expectLineEnd(ctx, '"[", a new line or "}"');
   return { name, settings: [], span: ctx.spanFrom(start) };
 };
 
