@@ -4,7 +4,7 @@ A typed DBML parser built on `@parser-kit/core`. The incumbent, and the de facto
 spec, is [`@dbml/core`](https://www.npmjs.com/package/@dbml/core) 12.x (its
 `dbmlv2` parser). The package entry is a `dbml` object with `parse` and
 `diagnose`, plus the lexer (`dbmlLexer`, `DbmlTokenType`) for highlighters. It
-is published to npm as `@parser-kit/dbml`. See
+is published to npm as `@parser-kit/dbml` (first release 0.1.0). See
 `../core/AGENTS.md` for the kit's internals and grammar-authoring gotchas, and
 `../sql` for the package this one mirrors.
 

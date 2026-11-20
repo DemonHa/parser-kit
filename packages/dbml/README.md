@@ -121,7 +121,7 @@ Inline refs are settings on their column (`{ kind: "ref", relation, target }`), 
 import { stripSpans } from "@parser-kit/core";
 
 const [table] = dbml.parse("Table t {\n  price decimal(10, 2) [default: 1.50, note: 'it\\'s']\n}").elements;
-stripSpans(table.items[0]);
+if (table?.type === "table") stripSpans(table.items[0]);
 // {
 //   type: "column",
 //   name: { value: "price" },
@@ -164,7 +164,7 @@ Recovery is a best effort. Some errors take more with them than you might expect
 
 ## Differences from @dbml/core
 
-`@parser-kit/dbml` follows `@dbml/core` 12.1.0's `dbmlv2` parser, not its docs, where the two disagree. Its differential test runs the whole corpus, the malformed inputs and about 830 generated mutants through both parsers. These are the deliberate differences, all syntactic edge cases:
+`@parser-kit/dbml` follows `@dbml/core` 12.1.0's `dbmlv2` parser, not its docs, where the two disagree. Its differential test runs the whole corpus, the malformed inputs and over 800 generated mutants through both parsers. These are the deliberate differences, all syntactic edge cases:
 
 **Semantic checks are not done.** `@dbml/core` validates after parsing; this package doesn't, so it accepts documents core rejects for duplicate names or settings (`[unique, unique]`), unknown tables or columns in refs, empty tables, records whose field count differs from the column list, colors that aren't 3- or 6-digit hex (`#3a5x`), and so on. Partials are not merged.
 
@@ -198,19 +198,19 @@ Recovery is a best effort. Some errors take more with them than you might expect
 
 ## Benchmarks
 
-Measured with vitest bench against `@dbml/core` 12.1.0 and `@dbml/parse` 12.1.0, on Node 22 in a shared cloud container; each range is three runs. Absolute numbers moved by up to a third between runs (the committed `bench-baseline.json` is one of the slower ones), so trust the ratios.
+Measured with vitest bench against `@dbml/core` 12.1.0 and `@dbml/parse` 12.1.0, on Node 22 in a shared cloud container; each range is three runs (the generated schemas' times are the fastest run and the committed baseline). Absolute numbers moved by up to a third between runs (the committed `bench-baseline.json` is one of the slower ones), so trust the ratios.
 
 | Input | `@parser-kit/dbml` | vs `@dbml/parse` (lex + parse) | vs `@dbml/core` `Parser.parse` (full) |
 |---|---|---|---|
 | Whole corpus (107 documents, 23.1 KB) | 163–205 ops/s | 1.9–2.1× faster | 18–22× faster |
 | Six realistic schemas (10.7 KB) | 442–482 ops/s | 1.8–2.4× faster | 14–16× faster |
 | Generated, 1,035 lines (23 KB) | 5.6 ms | 2.0–2.5× faster | 10–13× faster |
-| Generated, 5,052 lines (115 KB) | 24.9 ms | 2.0–2.1× faster | 12–14× faster |
-| Generated, 20,090 lines (463 KB) | 104 ms | 1.9–2.2× faster | 15–17× faster |
+| Generated, 5,052 lines (115 KB) | 24.9–33.9 ms | 2.0–2.1× faster | 12–14× faster |
+| Generated, 20,090 lines (463 KB) | 104–135 ms | 1.9–2.2× faster | 15–17× faster |
 
 - **Like for like** is the `@dbml/parse` column: its compiler's lex and parse stage, which builds a syntax tree and collects syntax errors but doesn't validate or bind. The bench skips that stage's front-matter re-lex, which a real `@dbml/core` call pays, so the ratio there is conservative (about 1.3–1.6× larger without the skip).
 - **`Parser.parse`** is what a `@dbml/core` user calls. It also validates, binds and builds its model, so it is not like for like; it is shown for scale.
-- **Cost per KB** is about 200–265 µs in the runs above, flat from 23 KB to 463 KB. A separate run that kept doubling the generated schema found it flat up to 1.86 MB, and a single string or backtick expression linear up to 2 MB (the committed bench stops at 463 KB and 500 KB).
+- **Cost per KB** is about 195–295 µs in the runs above, flat from 23 KB to 463 KB. A separate run that kept doubling the generated schema found it flat up to 1.86 MB, and a single string or backtick expression linear up to 2 MB (the committed bench stops at 463 KB and 500 KB).
 - **`diagnose`** costs what `parse` costs on valid input, and is about 2× faster than `@dbml/parse`'s recovering parse stage on input with errors.
 
 From a clone of the repository root: `pnpm vitest bench --run packages/dbml/bench`.
