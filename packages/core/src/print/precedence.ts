@@ -15,8 +15,8 @@
 // Where the table can't tell (an unknown tail, a custom parse's associativity),
 // it errs towards parentheses. A key the table doesn't name is an error, not a
 // guess, and so is a table where an operator token means different things at
-// different bps (a postfix and a tighter infix sharing a token, unguarded):
-// there even parentheses can change the parse.
+// different bps (a postfix and a tighter infix sharing a token, unless both
+// have guards): there even parentheses can change the parse.
 import type { Doc } from "./doc";
 
 /** A first-set entry of a `match` rule, as `Rule.first()` returns it. */
@@ -164,21 +164,23 @@ const index = (table: PrecedenceTable, atoms: Readonly<Record<string, number>>) 
       : { lbp: g.bp, rhs: tailOf(g.rhs), chain: g.assoc === "left" || g.assoc === "right" };
     named(g, entry, g.nodes ?? (simple ? g.ops : []), simple);
   }
-  for (const g of table.postfix ?? []) {
+  const postfix = table.postfix ?? [];
+  postfix.forEach((g, at) => {
     bps.push(g.bp);
     // Where a postfix declines for want of bp, pratt offers its token to infix
     // lookup: a tighter infix group on the same token makes the token's meaning
-    // depend on where it sits. Only a guard on the tighter group can tell the
-    // two apart: the looser postfix's guard isn't asked where its bp is too low.
+    // depend on where it sits, unless guards on both tell the two apart (the
+    // postfix takes the token wherever its bp allows and its guard accepts). A
+    // tighter postfix declared later is the same hazard; one declared earlier
+    // wins wherever the looser one could.
     const own = firstOf(g);
-    // Two postfix groups at different bps on one token are the same hazard.
-    for (const i of [...infix, ...(table.postfix ?? [])]) {
-      if (i.bp > g.bp && !i.when && firstOf(i).some((e) => own.some((o) => overlap(e, o)))) {
+    for (const i of [...infix, ...postfix.slice(at + 1)]) {
+      if (i.bp > g.bp && !(i.when && g.when) && firstOf(i).some((e) => own.some((o) => overlap(e, o)))) {
         fail(`an operator token means bp ${g.bp} and bp ${i.bp}`);
       }
     }
     named(g, { lbp: g.bp, rhs: tailOf(g.rhs), chain: true });
-  }
+  });
   for (const k in atoms) add(nodes, k, { lbp: INF, rhs: atoms[k], chain: true });
   bps.sort((a, b) => a - b);
   return {

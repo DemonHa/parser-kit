@@ -340,9 +340,33 @@ describe("precedence", () => {
     expect(() =>
       precedence({ infix: [{ ops: ["!"], bp: 3 }], postfix: [{ match: bang, bp: 5, nodes: ["fact"] }] }, opts),
     ).not.toThrow();
+    // A guard on the tighter group alone isn't enough: the unguarded postfix
+    // takes the token wherever its bp allows.
     expect(() =>
       precedence(
         { infix: [{ ops: ["!"], bp: 20, when: () => true }], postfix: [{ match: bang, bp: 5, nodes: ["fact"] }] },
+        opts,
+      ),
+    ).toThrow("an operator token means bp 5 and bp 20");
+    // Guards on both are assumed to tell them apart by lookahead.
+    expect(() =>
+      precedence(
+        {
+          infix: [{ ops: ["!"], bp: 20, when: () => true }],
+          postfix: [{ match: bang, bp: 5, nodes: ["fact"], when: () => false }],
+        },
+        opts,
+      ),
+    ).not.toThrow();
+    // A tighter postfix declared first always wins where the looser could: no hazard.
+    expect(() =>
+      precedence(
+        {
+          postfix: [
+            { match: bang, bp: 20, nodes: ["bang"] },
+            { match: bang, bp: 5, nodes: ["fact"] },
+          ],
+        },
         opts,
       ),
     ).not.toThrow();
