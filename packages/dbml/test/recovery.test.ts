@@ -537,6 +537,24 @@ describe("Cascading errors", () => {
     ]);
   });
 
+  // When the list's own closer still comes, before any brace, the string
+  // only cut the list short: no line breaks are restored, so the lines up to
+  // the closer stay in the list and nothing valid is reported.
+  it("reports nothing more when a list goes on after a string left open in it", () => {
+    for (const [text, error] of [
+      ["Table t [note: 'x,\n  headercolor: #fff] {\n  a int\n}\nTable b {\n  id int\n}\n", at(1, 15)],
+      ["TableGroup g [note: 'x,\n  color: #fff] {\n  a\n}\nTable b {\n  id int\n}\n", at(1, 20)],
+      ["records t(a) [x: 'y,\n  z: 1] {\n  1\n}\nTable b {\n  id int\n}\n", at(1, 17)],
+      ["Table t [note: 'x, headercolor: #fff,\n  pk] {\n  a int\n}\n", at(1, 15)],
+      ["Table t {\n  a int [note: 'x, pk,\n    unique]\n}\n", at(2, 15)],
+      ["Table t {\n  indexes {\n    (a, 'b,\n     c) [pk]\n  }\n}\n", at(3, 8)],
+      ["Table t {\n  a int [\n    note: 'x,\n    pk\n  ]\n}\n", at(3, 10)],
+      ["records t(a, 'b,\n  c) {\n  1, 2\n}\n", at(1, 13)],
+    ] as const) {
+      expect(diagnose(text).errors).toEqual([{ msg: "Unterminated string", start: error }]);
+    }
+  });
+
   it("ends a body whose } a string left open outside a list swallowed", () => {
     const { elements, errors } = diagnose("Table a { Note: 'x }\nTable b { f int }\n");
     expect(errors).toEqual([{ msg: "Unterminated string", start: at(1, 16) }]);
@@ -615,6 +633,16 @@ describe("Recovery cost", () => {
       const { errors } = dbml.diagnose(text);
       expect(errors.length).toBeGreaterThan(0);
     }
+  });
+
+  it("reads ahead past many lines after a string left open in a list once", () => {
+    // Each token the stream reads ahead is handed out in constant time; this
+    // took ~15 s when the read-ahead buffer was shifted token by token.
+    const swallowed = dbml.diagnose(`Table t {\n  a int [note: 'x\n${"  b int [pk]\n".repeat(32_000)}}\n`);
+    expect(swallowed.errors).toHaveLength(1);
+    expect((swallowed.ast.elements[0] as Table).items).toHaveLength(32_001);
+    const goesOn = dbml.diagnose(`Table t [note: 'x,\n${"  a: 1,\n".repeat(32_000)}  b: 2] {\n  id int\n}\n`);
+    expect(goesOn.errors).toHaveLength(1);
   });
 
   it("handles many keyword-led lines after a string left open in a list", () => {
