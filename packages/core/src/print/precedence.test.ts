@@ -346,6 +346,13 @@ describe("precedence", () => {
         opts,
       ),
     ).not.toThrow();
+    // A guard on the looser postfix can't: it isn't asked where its bp is too low.
+    expect(() =>
+      precedence(
+        { infix: [{ ops: ["!"], bp: 20 }], postfix: [{ match: bang, bp: 5, nodes: ["fact"], when: () => true }] },
+        opts,
+      ),
+    ).toThrow("an operator token means bp 5 and bp 20");
   });
 
   it("tells tails apart by the main table's operators inside a context too", () => {
@@ -399,6 +406,9 @@ describe("precedence", () => {
     const bt = parse("a ~ a + a & a") as Extract<Node, { type: "between" }>;
     expect(b.parens(bt, sum, "right", "b")).toBe(false);
     expect(() => b.operand(sum, 0, "c" as "b")).toThrow('no context "c"');
+    // Even between tokens, a node the context can't build is wrapped.
+    expect(b.parens(sum, parse("a < a"), "inner", "b")).toBe(false);
+    expect(b.parens(sum, parse("a * a"), "inner", "b")).toBe(true);
   });
 
   it("takes a custom wrapper and open atoms", () => {

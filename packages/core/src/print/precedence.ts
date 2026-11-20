@@ -168,11 +168,12 @@ const index = (table: PrecedenceTable, atoms: Readonly<Record<string, number>>) 
     bps.push(g.bp);
     // Where a postfix declines for want of bp, pratt offers its token to infix
     // lookup: a tighter infix group on the same token makes the token's meaning
-    // depend on where it sits. Guards are assumed to tell the two apart.
+    // depend on where it sits. Only a guard on the tighter group can tell the
+    // two apart: the looser postfix's guard isn't asked where its bp is too low.
     const own = firstOf(g);
     // Two postfix groups at different bps on one token are the same hazard.
     for (const i of [...infix, ...(table.postfix ?? [])]) {
-      if (i.bp > g.bp && !i.when && !g.when && firstOf(i).some((e) => own.some((o) => overlap(e, o)))) {
+      if (i.bp > g.bp && !i.when && firstOf(i).some((e) => own.some((o) => overlap(e, o)))) {
         fail(`an operator token means bp ${g.bp} and bp ${i.bp}`);
       }
     }
@@ -246,7 +247,7 @@ export const precedence = <T, C extends string = never>(
     const outer = entry(parent, main);
     const inside = at.get(key(parent));
     const p = inside === FORBIDDEN ? outer : inside;
-    if (c === null || side === "inner") return false;
+    if (c === null || (side === "inner" && c !== FORBIDDEN)) return false;
     if (p === null) return true;
     if (side === "left") return p.lbp >= tail(c) || c.lbp < p.lbp || (c.lbp === p.lbp && !(c.chain && p.chain));
     return c.lbp < (p.rhs ?? INF) || at.norm(tail(c)) < at.norm(tail(p));
