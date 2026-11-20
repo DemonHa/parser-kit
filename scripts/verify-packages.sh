@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Packs every published package the way the release does and checks what a
-# consumer would get. Run after `pnpm build`; CI's "Package" job runs it.
+# Packs every package the way the release does, private ones in development
+# included, and checks what a consumer would get. Run after `pnpm build`; CI's
+# "Package" job runs it.
 #
 # Each tarball must resolve catalog: and workspace: specifiers, ship only what
 # consumers need, and import cleanly from ESM, CJS and TypeScript. Only
@@ -14,9 +15,9 @@ trap 'rm -rf "$WORK"' EXIT
 PACK="$WORK/pack"
 mkdir -p "$PACK"
 
-# verify <package dir> <tarball name prefix>
+# verify <package dir> <tarball name prefix> [allowlist regex]
 verify() {
-  local dir=$1 prefix=$2 tgz
+  local dir=$1 prefix=$2 allowed=${3:-} tgz
   (cd "$ROOT/$dir" && pnpm pack --pack-destination "$PACK" >/dev/null)
   tgz=$(ls "$PACK/$prefix"-*.tgz)
   echo "== $dir: $(basename "$tgz")"
@@ -47,13 +48,29 @@ verify() {
     grep -E "$leaked" "$WORK/entries.txt"
     exit 1
   fi
+  # With an allowlist, every entry must match it. `grep -v` exits 1 when every
+  # line matches, 0 when it printed a stray entry and 2 on error.
+  if [ -n "$allowed" ]; then
+    local status=0
+    grep -vE "$allowed" "$WORK/entries.txt" > "$WORK/unexpected.txt" || status=$?
+    [ "$status" -ne 2 ] || { echo "::error::$dir: grep failed on the allowlist regex"; exit 1; }
+    if [ "$status" -ne 1 ]; then
+      echo "::error::$dir: files outside the allowlist in the tarball"
+      cat "$WORK/unexpected.txt"
+      exit 1
+    fi
+  fi
 }
 
 verify packages/core parser-kit-core
 verify packages/sql parser-kit-sql
+# @parser-kit/dbml is private until its first release, but `pnpm pack` still
+# packs it. Its tarball is held to an allowlist of what consumers need.
+verify packages/dbml parser-kit-dbml '^package/(build/|src/|LICENSE$|README\.md$|CHANGELOG\.md$|package\.json$)'
 
-# Install both tarballs together, so @parser-kit/sql's core dependency is the
-# core packed here rather than the registry copy.
+
+# Install the tarballs together, so the grammars' core dependency is the core
+# packed here rather than the registry copy.
 SMOKE="$WORK/smoke"
 mkdir -p "$SMOKE"
 cd "$SMOKE"
@@ -86,8 +103,22 @@ try {
 console.log(`CJS ok: core ${Object.keys(core).length} exports, sql parses`);
 JS
 
+cat > dbml-esm.mjs <<'JS'
+import { dbml } from "@parser-kit/dbml";
+if (typeof dbml?.parse !== "function" || typeof dbml.diagnose !== "function") throw new Error("dbml: ESM export missing");
+console.log("ESM ok: dbml exports parse and diagnose");
+JS
+
+cat > dbml-cjs.cjs <<'JS'
+const { dbml } = require("@parser-kit/dbml");
+if (typeof dbml?.parse !== "function" || typeof dbml.diagnose !== "function") throw new Error("dbml: CJS export missing");
+console.log("CJS ok: dbml exports parse and diagnose");
+JS
+
 node esm.mjs
 node cjs.cjs
+node dbml-esm.mjs
+node dbml-cjs.cjs
 
 # The declarations, AST types included, must resolve for a TypeScript consumer
 # from both an ES module and a CommonJS one.
@@ -104,3 +135,15 @@ TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
   consumer.mts consumer.cts
 echo "TypeScript ok: @parser-kit/sql types resolve from ESM and CJS (nodenext)"
+
+cat > dbml-consumer.mts <<'TS'
+import { dbml } from "@parser-kit/dbml";
+export const parse: (text: string) => unknown = dbml.parse;
+TS
+cat > dbml-consumer.cts <<'TS'
+import pkg = require("@parser-kit/dbml");
+export const diagnose: (text: string) => unknown = pkg.dbml.diagnose;
+TS
+"$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
+  dbml-consumer.mts dbml-consumer.cts
+echo "TypeScript ok: @parser-kit/dbml types resolve from ESM and CJS (nodenext)"

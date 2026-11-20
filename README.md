@@ -51,6 +51,7 @@ grammar.parse("answer 42");    // → ParseError: Expected ":" but found "42"
 |---|---|
 | [`@parser-kit/core`](packages/core) | The toolkit: lexer, combinators, Pratt engine, grammars |
 | [`@parser-kit/sql`](packages/sql) | A typed SQL parser built on the kit. Its first dialect is PostgreSQL 17: DDL, DML, queries and whole psql / pg_dump scripts. Benchmarked against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser); its [README](packages/sql/README.md) has the PostgreSQL coverage survey and the benchmark results |
+| [`@parser-kit/dbml`](packages/dbml) | **In development, not yet published.** A typed [DBML](https://dbml.dbdiagram.io/docs/) parser built on the kit |
 
 ## Example grammars
 
@@ -63,7 +64,7 @@ Two real grammars double as the kit's genericity and integration tests — and t
 
 ```sh
 pnpm install
-pnpm test          # core unit tests, @parser-kit/sql and js-lite
+pnpm test          # core unit tests, @parser-kit/sql, @parser-kit/dbml and js-lite
 pnpm types:check
 pnpm lint
 pnpm build
