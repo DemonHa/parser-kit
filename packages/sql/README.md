@@ -201,7 +201,7 @@ SELECT 2;
 
 The statements are printed from the tree, so the SQL is canonical as `stringify`'s is. The comments are placed this way:
 
-- A comment between statements that starts on the line the statement before it ends on stays after that statement's `;`, on the same line.
+- A comment between statements that starts on the line the statement before it ends on stays after that statement's `;`, on the same line, unless a `--` comment is already there.
 - Any other comment between statements, or before the first or after the last, goes on a line of its own where it was.
 - A comment inside a statement moves to just before that statement, on a line of its own, and comments keep their order. A block comment after a `COPY … FROM STDIN`'s `;` moves there too, since psql allows only a `--` comment after that `;`.
 - One blank line is kept where the source had one or more between two of these.

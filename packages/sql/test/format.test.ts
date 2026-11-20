@@ -138,6 +138,11 @@ describe("postgres.format", () => {
     expect(postgres.format("select 'a' -- a\n'b'")).toBe("-- a\nSELECT 'ab';\n");
   });
 
+  it("never puts a comment after a -- comment, even where a bare CR ended it", () => {
+    expect(postgres.format("SELECT 1; -- a\r/* b */")).toBe("SELECT 1; -- a\n/* b */\n");
+    expect(postgres.format("SELECT 1 -- a\r-- b\r;")).toBe("SELECT 1; -- a\n-- b\n");
+  });
+
   it("leaves comment look-alikes inside literals alone", () => {
     expect(postgres.format("select '--', E'/*', $$ -- $$, \"--x\"")).toBe("SELECT '--', '/*', ' -- ', \"--x\";\n");
     expect(commentTexts("select '--', E'/*', $$ -- $$, \"--x\"")).toEqual([]);

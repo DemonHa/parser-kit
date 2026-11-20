@@ -5,7 +5,8 @@
 // them by comparing those spans with the items' spans:
 //
 // - a comment between two items that starts on the row the previous item ends
-//   on trails that item, after its `;`, on the same line;
+//   on trails that item, after its `;`, on the same line, unless a `--`
+//   comment trails it already;
 // - any other comment between two items, or before the first, leads the next
 //   item (or ends the output), on a line of its own;
 // - a comment inside an item's span, which the canonical layout has no safe
@@ -107,7 +108,15 @@ export const format = (text: string, options?: FormatOptions): string => {
   };
   const between = (before: number) => {
     for (const c of take(before)) {
-      if (previous !== undefined && previous.item.kind !== "psqlMeta" && c.row === previous.endRow) {
+      // Nothing may follow a `--` comment on its line. A bare CR ends one
+      // without starting a new row, so check the comment before, not the row.
+      const last = previous?.trailing.at(-1);
+      if (
+        previous !== undefined &&
+        previous.item.kind !== "psqlMeta" &&
+        c.row === previous.endRow &&
+        !last?.text.startsWith("--")
+      ) {
         previous.trailing.push(c);
       } else {
         units.push({ text: c.text, row: c.row, endRow: c.endRow });

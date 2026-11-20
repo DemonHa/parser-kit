@@ -34,6 +34,9 @@ export const COMMENT_CASES: string[] = [
   "-- crlf\r\nSELECT 1; -- t\r\n/* a\r\n b */\r\nSELECT 2;\r\n-- end",
   "SELECT 1; /* no newline at the end */",
   "SELECT 1 -- no newline at the end",
+  // A bare CR ends a `--` comment but isn't a new row: what follows must not join it.
+  "SELECT 1; -- a\r/* b */\r-- c\rSELECT 2 -- d\r-- e\r;",
+  "COPY t FROM stdin -- a\r-- b\r;\n1\n\\.\n",
   // psql meta-commands and COPY rows.
   "-- dump\n\\connect db\n/* before copy */\nCOPY t (a, b) FROM stdin; -- rows follow\n1\t-- not a comment\n2\t/* nor this */\n\\.\n\n-- after\n\\x\nSELECT 1;",
   "COPY t FROM stdin /* moved */; -- kept\n1\n\\.\n",
