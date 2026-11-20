@@ -35,11 +35,11 @@ it("takes the DBML source text and returns the document", () => {
 
 it("exports the AST types", () => {
   expectTypeOf<entry.DbmlDocument["elements"][number]["type"]>().toEqualTypeOf<"project" | "table" | "ref" | "enum">();
-  expectTypeOf<entry.TableItem["type"]>().toEqualTypeOf<"column" | "note">();
+  expectTypeOf<entry.TableItem["type"]>().toEqualTypeOf<"column" | "note" | "indexes" | "checks">();
   expectTypeOf<entry.Value["kind"]>().toEqualTypeOf<
     "string" | "number" | "boolean" | "null" | "expression" | "color" | "identifier" | "enumConstant"
   >();
   expectTypeOf<entry.Setting["kind"]>().toEqualTypeOf<
-    "pk" | "null" | "unique" | "increment" | "inactive" | "default" | "note" | "ref" | "action" | "property"
+    "pk" | "null" | "unique" | "increment" | "inactive" | "default" | "note" | "ref" | "action" | "property" | "check"
   >();
 });

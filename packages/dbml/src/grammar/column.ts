@@ -32,6 +32,7 @@ import {
   touches,
   type Value,
 } from "./common";
+import { checkSetting } from "./indexes";
 import { refSetting } from "./ref";
 
 // A table column: `name type [bare flags] [settings]`, one per line.
@@ -145,6 +146,7 @@ export const COLUMN_SETTINGS: SettingsSpec = {
     default: readDefault,
     note: noteSetting,
     ref: refSetting,
+    check: checkSetting,
   },
   custom: true,
 };

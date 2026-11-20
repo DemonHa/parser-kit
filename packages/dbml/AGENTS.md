@@ -68,9 +68,10 @@ fixtures reach the tarball.
 - **AST shape.** Elements and items are discriminated by `type`, values and
   settings by `kind`. Every node carries a `span`; string and identifier spans
   include their quotes. Identifiers keep their raw case and a `quoted?: true`
-  flag; the one exception is the key of a known color setting (`headercolor`,
-  a Ref's `color`), which is lowercased so it reads like the other known
-  settings. Settings are an ordered list in source order, duplicates kept. Fields
+  flag; the one exception is the key of a known `key: value` setting stored
+  as a `property` (`headercolor`, a Ref's `color`, an index's `name` and
+  `type`, a check's `name`), which is lowercased so it reads like the other
+  known settings. Settings are an ordered list in source order, duplicates kept. Fields
   that existed when a node was introduced are always present (`null` or `[]`
   when absent); fields added later are optional and left out when absent, so
   existing trees stay byte-identical. Flags are `?: true`.

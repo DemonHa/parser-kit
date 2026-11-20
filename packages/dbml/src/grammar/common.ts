@@ -340,7 +340,8 @@ export type Setting =
       action: "cascade" | "restrict" | "set null" | "set default" | "no action";
       span: Span;
     }
-  | { kind: "property"; key: Ident; value: Value; span: Span };
+  | { kind: "property"; key: Ident; value: Value; span: Span }
+  | { kind: "check"; expression: ExpressionValue; span: Span };
 
 /**
  * What one context accepts inside `[ … ]`. `flags` are settings without a
@@ -357,10 +358,13 @@ export interface SettingsSpec {
   custom: boolean;
 }
 
+/** The key of a known `key: value` setting stored as a property, lowercased like the other known keys. */
+export const lowerKey = (key: Ident): Ident => ({ ...key, value: key.value.toLowerCase() });
+
 /** A known `key: color` setting (`headercolor`, `color`): a property with a lowercase key. */
 export const colorSetting = (ctx: Ctx, key: Ident, start: Position): Setting => {
   const value = readColor(ctx);
-  return { kind: "property", key: { ...key, value: key.value.toLowerCase() }, value, span: ctx.spanFrom(start) };
+  return { kind: "property", key: lowerKey(key), value, span: ctx.spanFrom(start) };
 };
 
 export const noteSetting = (ctx: Ctx, _key: Ident, start: Position): Setting => {

@@ -17,6 +17,16 @@ export type {
   Value,
 } from "./grammar/common";
 export type { Enum, EnumValue } from "./grammar/enum";
+export type {
+  CheckEntry,
+  Checks,
+  IndexColumn,
+  IndexComposite,
+  IndexEntry,
+  Indexes,
+  IndexField,
+  IndexOrder,
+} from "./grammar/indexes";
 export type { Note } from "./grammar/note";
 export type { Project, ProjectProperty } from "./grammar/project";
 export type { Endpoint, Ref, Relation } from "./grammar/ref";
