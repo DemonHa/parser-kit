@@ -97,24 +97,24 @@ mid-migration onto the rest.
 
 ## Tests
 
-Vitest, co-located as `*.test.ts` per module, plus the `packages/sql/test/`
-and `examples/js-lite/` suites. One `pnpm test` at the repo root runs them all
+Vitest, co-located as `*.test.ts` per module, plus the `packages/sql/test/`,
+`packages/dbml/test/` and `examples/js-lite/` suites. One `pnpm test` at the repo root runs them all
 (`pnpm types:check` / `pnpm lint` / `pnpm build` likewise). When you add a
 feature:
 
 - Add unit tests at the level it lives (lexer / combinator / pratt / rule /
   grammar) **and** exercise it end-to-end in one of the two grammars if it's
-  user-facing — the two grammars are the genericity guard. `@parser-kit/sql` is
-  a published consumer of core, so a core change that moves its output is a
-  user-visible change in both packages.
+  user-facing — the two grammars are the genericity guard. `@parser-kit/sql` and
+  `@parser-kit/dbml` are published consumers of core, so a core change that
+  moves their output is a user-visible change in those packages too.
 - **Keep every feature opt-in.** The kit's tests must stay green, and so must
   the **93 byte-exact dbml goldens** in the downstream
   [database.io](https://github.com/DemonHa/database.io) repo — they are the
   sharpest check that observable parse/error output did not shift. Never
   regenerate a golden to make a change pass.
 - **The parity harness is the in-repo version of that check.**
-  `packages/sql/test/parity.test.ts` and `examples/js-lite/parity.test.ts`
-  serialise the full AST — spans included, nothing
+  `packages/sql/test/parity.test.ts`, `packages/dbml/test/parity.test.ts` and
+  `examples/js-lite/parity.test.ts` serialise the full AST — spans included, nothing
   stripped — for every statement in each grammar's corpus, plus the messages
   `diagnose()` collects for a fixed malformed-input list, and compare the result
   byte-for-byte against committed `parity.*.golden.json` files. A refactor

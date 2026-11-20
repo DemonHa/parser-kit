@@ -51,7 +51,7 @@ grammar.parse("answer 42");    // → ParseError: Expected ":" but found "42"
 |---|---|
 | [`@parser-kit/core`](packages/core) | The toolkit: lexer, combinators, Pratt engine, grammars |
 | [`@parser-kit/sql`](packages/sql) | A typed SQL parser built on the kit. Its first dialect is PostgreSQL 17 (`postgres.parse(sql)`, also importable from `@parser-kit/sql/postgres`): DDL, DML, queries and whole psql / pg_dump scripts. Benchmarked against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser); its [README](packages/sql/README.md) has the PostgreSQL coverage survey and the benchmark results |
-| [`@parser-kit/dbml`](packages/dbml) | **In development, not yet published.** A typed [DBML](https://dbml.dbdiagram.io/docs/) parser built on the kit |
+| [`@parser-kit/dbml`](packages/dbml) | A typed [DBML](https://dbml.dbdiagram.io/docs/) parser built on the kit (`dbml.parse(text)`): `Project`, `Table`, `Ref`, `Enum`, indexes and checks, `TableGroup`, sticky notes, `TablePartial` and `records`, with error recovery in `dbml.diagnose`. Held to [`@dbml/core`](https://www.npmjs.com/package/@dbml/core) by a differential test and benchmarked against it; its [README](packages/dbml/README.md) lists the differences and the results |
 
 ## Example grammars
 
@@ -68,7 +68,7 @@ pnpm test          # core unit tests, @parser-kit/sql, @parser-kit/dbml and js-l
 pnpm types:check
 pnpm lint
 pnpm build
-pnpm bench         # @parser-kit/sql vs node-sql-parser
+pnpm bench         # @parser-kit/sql vs node-sql-parser, @parser-kit/dbml vs @dbml/core
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

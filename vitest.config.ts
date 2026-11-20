@@ -2,8 +2,8 @@ import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
 // One vitest run covers the whole workspace: core's unit tests, the published
-// PostgreSQL grammar (`@parser-kit/sql`), the js-lite example and the DBML
-// package in development (`@parser-kit/dbml`). The PostgreSQL and js-lite
+// PostgreSQL grammar (`@parser-kit/sql`), the published DBML grammar
+// (`@parser-kit/dbml`) and the js-lite example. The PostgreSQL and js-lite
 // grammars double as the kit's genericity/integration guard.
 // `@parser-kit/core` resolves to source so tests and benches need no build.
 export default defineConfig({
