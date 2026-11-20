@@ -152,7 +152,8 @@ const dropItem = (d: Drop, name: string[], i: number): Doc => {
   const sig = d.signatures?.[i];
   if (sig !== undefined && sig !== null) return routineWithArgs(name, sig);
   if (d.objectType !== "type" && d.objectType !== "domain") return qualified(name);
-  // DROP TYPE reads a bare `concurrently` as its option, not as the type's name.
+  // This grammar reads a bare `concurrently` after DROP TYPE as its option (PG
+  // takes CONCURRENTLY only on DROP INDEX); quoted, it is a name to both.
   if (name[0] === "concurrently") return [quoted(name[0]), ...name.slice(1).map((p) => `.${minimalIdent(p)}`)];
   return typeObjectName(name);
 };
