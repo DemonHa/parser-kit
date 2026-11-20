@@ -4,7 +4,8 @@
 // `tables.ts`, `objects.ts`, `roles.ts`), joined here into one statement
 // printer.
 //
-// Internal for now: `stringify` is not on the `postgres` object yet.
+// `stringify` and `stringifyScript` are public as the `postgres` object's
+// methods (`../index.ts`); the rest of this directory is internal.
 //
 // A family module declares, with `defineFamily`, the statement kinds it prints
 // and the ones it doesn't print yet, which throw NotPrintableError. Printing a
@@ -28,7 +29,7 @@ import {
   type Printable,
   render,
 } from "@parser-kit/core/print";
-import type { ColType, Expr, Stmt } from "../ast";
+import type { ColType, Copy, Expr, PsqlMeta, ScriptItem, Stmt } from "../ast";
 import { NotPrintableError, type StringifyOptions, withOptions } from "./context";
 import { dmlFamily } from "./dml";
 import { expr } from "./expr";
@@ -99,6 +100,23 @@ const STATEMENT_KINDS: ReadonlySet<string> = new Set(Object.keys(printStatement.
 /** What `stringify` takes: statements, one statement, an expression or a type. */
 export type StringifyInput = Printable<Stmt> | readonly Printable<Stmt>[] | Printable<Expr> | Printable<ColType>;
 
+/** What `stringifyScript` takes: `parseScript`'s items, statements and psql meta-commands. */
+export type StringifyScriptInput = readonly Printable<ScriptItem>[];
+
+/**
+ * `stringifyScript`'s options: `stringify`'s, less `semicolons`. Every
+ * statement in a script ends in `;`, since psql would otherwise run the next
+ * line into it.
+ */
+export type StringifyScriptOptions = Omit<StringifyOptions, "semicolons">;
+
+/** Lays a doc out for the call's width: one line through `flat`, else `render`. */
+const layoutFor = (options: StringifyOptions | undefined): ((doc: Doc) => string) => {
+  const width = options?.width ?? Number.POSITIVE_INFINITY;
+  const indent = options?.indent ?? 2;
+  return (doc) => (width === Number.POSITIVE_INFINITY ? flat(doc) : null) ?? render(doc, { width, indent });
+};
+
 /**
  * Prints an AST as PostgreSQL. Statements (one or a list) end in `;` by
  * default, one per line; an expression or a type prints alone. The output is
@@ -108,10 +126,7 @@ export type StringifyInput = Printable<Stmt> | readonly Printable<Stmt>[] | Prin
  */
 export const stringify = (node: StringifyInput, options?: StringifyOptions): string =>
   withOptions(options, () => {
-    const width = options?.width ?? Number.POSITIVE_INFINITY;
-    const indent = options?.indent ?? 2;
-    const layout = (doc: Doc): string =>
-      (width === Number.POSITIVE_INFINITY ? flat(doc) : null) ?? render(doc, { width, indent });
+    const layout = layoutFor(options);
     if (typeof node !== "object" || node === null || !("kind" in node || Array.isArray(node))) {
       return layout(typeName(node as ColType));
     }
@@ -129,5 +144,40 @@ export const stringify = (node: StringifyInput, options?: StringifyOptions): str
             : printStatement(stmt),
         ),
       )
+      .join("\n");
+  });
+
+// A COPY's rows: verbatim lines, then the `\.` line that ends them. A row that
+// is itself `\.` would end them early, and rows after anything but
+// `COPY … FROM STDIN` would be read as SQL, so neither can be printed.
+const copyData = (stmt: Printable<Copy>, data: string): string => {
+  if (stmt.direction !== "from" || stmt.location.kind !== "stdin") {
+    throw new TypeError("COPY data can only follow a COPY … FROM STDIN");
+  }
+  const rows = data === "" || data.endsWith("\n") ? data : `${data}\n`;
+  if (/^\\\.\r?$/m.test(rows)) throw new TypeError('COPY data holds a "\\." line, which would end it early');
+  return `${rows}\\.`;
+};
+
+// A meta-command line: psql reads it to the end of the line.
+const psqlMeta = (meta: Printable<PsqlMeta>): string => {
+  if (/[\r\n]/.test(meta.command + meta.args)) throw new TypeError("A psql meta-command must fit on one line");
+  return meta.args === "" ? `\\${meta.command}` : `\\${meta.command} ${meta.args}`;
+};
+
+/**
+ * Prints `parseScript`'s items back as a psql script: each statement laid out
+ * as `stringify` lays it out and ended by `;`, each meta-command on a line of
+ * its own, and a COPY's rows (`Copy.data`) after it, ended by a `\.` line.
+ */
+export const stringifyScript = (items: StringifyScriptInput, options?: StringifyScriptOptions): string =>
+  withOptions(options, () => {
+    const layout = layoutFor(options);
+    return items
+      .map((item) => {
+        if (item.kind === "psqlMeta") return psqlMeta(item);
+        const text = layout([printStatement(item as Stmt), ";"]);
+        return item.kind === "copy" && item.data !== undefined ? `${text}\n${copyData(item, item.data)}` : text;
+      })
       .join("\n");
   });

@@ -1,7 +1,7 @@
 {
   "name": "@parser-kit/sql",
   "version": "0.0.0",
-  "description": "A typed PostgreSQL 17 parser built on @parser-kit/core: DDL, DML, queries and whole psql/pg_dump scripts to a span-annotated AST, with error recovery.",
+  "description": "A typed PostgreSQL 17 parser built on @parser-kit/core: DDL, DML, queries and whole psql/pg_dump scripts to a span-annotated AST, with error recovery, and back to SQL.",
   "keywords": [
     "sql",
     "sql-parser",
@@ -12,6 +12,7 @@
     "ast",
     "ddl",
     "pg_dump",
+    "stringify",
     "lexer",
     "typescript"
   ],
@@ -53,12 +54,25 @@
         "default": "./build/cjs/postgres/index.js"
       }
     },
+    "./postgres/parser": {
+      "import": {
+        "types": "./build/esm/postgres/parser.d.ts",
+        "default": "./build/esm/postgres/parser.js"
+      },
+      "require": {
+        "types": "./build/cjs/postgres/parser.d.ts",
+        "default": "./build/cjs/postgres/parser.js"
+      }
+    },
     "./package.json": "./package.json"
   },
   "typesVersions": {
     "*": {
       "postgres": [
         "./build/esm/postgres/index.d.ts"
+      ],
+      "postgres/parser": [
+        "./build/esm/postgres/parser.d.ts"
       ]
     }
   },

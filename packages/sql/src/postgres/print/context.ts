@@ -330,9 +330,10 @@ export const firstText = (doc: Doc): string => {
 export const OPERATOR_CHARS = new Set("+-*/<>=~!@#%^&|`?");
 
 /**
- * Thrown for a node whose printer has not been written yet. The statement
- * families land one at a time; until a family has its printer, its statements
- * throw this rather than printing something wrong.
+ * Thrown for a statement kind the parser reads but the printer can't print
+ * yet, rather than printing something wrong. Every kind is printable today;
+ * a statement the grammar learns before its printer does throws this until
+ * the printer catches up. `kind` names the statement kind.
  */
 export class NotPrintableError extends Error {
   readonly kind: string;
