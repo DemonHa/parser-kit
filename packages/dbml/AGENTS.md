@@ -18,14 +18,18 @@ exist yet are the ones still to be written.
   - `lexer.ts` — the lexer, the parse-stream wrapper (comments dropped,
     identifiers case-folded), the raw-name lookup and the note dedent
     (`dedentNote`).
-  - `grammar/` — one module per construct (`table.ts`, `ref.ts`, `enum.ts`,
-    `project.ts`, `note.ts`, `indexes.ts`, `group.ts`, `partial.ts`,
-    `records.ts`), the shared rules in `common.ts` (names, strings, values,
-    the settings framework), and two registries: `root.ts` (top-level
-    elements, the top-level loop and its recovery) and `table-items.ts` (what
-    may appear in a table body). Each module defines its AST types next to its
-    rules; `src/ast.ts` only re-exports them. A new construct is a new module
-    plus one line in a registry.
+  - `grammar/` — one module per construct (`table.ts`, `column.ts`, `ref.ts`,
+    `enum.ts`, `project.ts`, `note.ts`, `indexes.ts`, `group.ts`,
+    `partial.ts`, `records.ts`), the shared rules in `common.ts` (names,
+    strings, values, the settings framework, the `{ … }` body reader and
+    `defineElement`), and two registries: `root.ts` (`ELEMENTS`, the top-level
+    elements, plus the top-level loop and its recovery) and `table-items.ts`
+    (`TABLE_ITEMS`, what may appear in a table body besides columns). Each
+    module defines its AST types next to its rules; `src/ast.ts` only
+    re-exports them. A new construct is a new module plus one line in a
+    registry; a new setting is one line in its context's `SettingsSpec`
+    (`COLUMN_SETTINGS`, `TABLE_SETTINGS`, …), plus a member of the `Setting`
+    union in `common.ts` when it has a new `kind`.
 - `test/` — vitest, one file per area (`table.test.ts`, `ref.test.ts`, …) so
   parallel changes add files instead of editing a shared one. `entry.test.ts`
   pins the public surface. The corpus (`corpus.ts`), the parity harness and its
@@ -64,13 +68,16 @@ fixtures reach the tarball.
 - **AST shape.** Elements and items are discriminated by `type`, values and
   settings by `kind`. Every node carries a `span`; string and identifier spans
   include their quotes. Identifiers keep their raw case and a `quoted?: true`
-  flag. Settings are an ordered list in source order, duplicates kept. Fields
+  flag; the one exception is the key of a known color setting (`headercolor`,
+  a Ref's `color`), which is lowercased so it reads like the other known
+  settings. Settings are an ordered list in source order, duplicates kept. Fields
   that existed when a node was introduced are always present (`null` or `[]`
   when absent); fields added later are optional and left out when absent, so
   existing trees stay byte-identical. Flags are `?: true`.
 - **Numbers keep their source text unless it is a plain integer.** A number is
-  `{ kind: "number", value, raw? }`. `raw` is the literal as written, sign
-  included, and is present whenever that text is not exactly what
+  `{ kind: "number", value, raw? }`. `raw` is the literal as written with any
+  sign folded in (a space after the sign is dropped: `- 1.5` gives `-1.5`), and
+  is present whenever that text is not exactly what
   `String(value)` gives back for an integer: any `.`, exponent, trailing zeros,
   leading zeros or a value outside the safe-integer range. `42` and `-7` have no
   `raw`; `1.50`, `1e5`, `-0.0` and `007` do. This matches `@parser-kit/sql`.
@@ -79,7 +86,9 @@ fixtures reach the tarball.
   Only note values are dedented, `'…'` and `'''…'''` alike, with the lexer's
   `dedentNote` (as `@dbml/core` does); an index's `note:` setting is the
   exception, and other strings, such as a `'''` default, keep their text as
-  written. Backtick expressions are kept raw.
+  written. Double-quoted text where a string is expected (a note, a default, a
+  property value) is a string too, as in `@dbml/core`, flagged
+  `doubleQuoted: true`. Backtick expressions are kept raw.
 - **Error messages** use the core style, `Expected X but found Y`, with readable
   displays (`"Table"`, `a column type`, …). Error tests match `ParseError.msg`
   exactly, plus `start`.

@@ -1,6 +1,6 @@
-import type { Lexer } from "@parser-kit/core";
+import type { Lexer, ParseError } from "@parser-kit/core";
 import { expect, expectTypeOf, it } from "vitest";
-import type { DbmlTokenType } from "../src/index";
+import type { DbmlDocument, DbmlTokenType } from "../src/index";
 import * as entry from "../src/index";
 
 // The package's public surface: `src/index.ts` is what `@parser-kit/dbml`
@@ -12,13 +12,11 @@ it("exports the dbml entry point and the lexer", () => {
   expect(Object.keys(entry.dbml).sort()).toEqual(["diagnose", "parse"]);
 });
 
-it("throws until the grammar is implemented", () => {
-  expect(() => entry.dbml.parse("Table users { id int }")).toThrow(
-    "@parser-kit/dbml: dbml.parse() is not implemented yet",
-  );
-  expect(() => entry.dbml.diagnose("Table users { id int }")).toThrow(
-    "@parser-kit/dbml: dbml.diagnose() is not implemented yet",
-  );
+it("is frozen and works with its methods detached", () => {
+  expect(Object.isFrozen(entry.dbml)).toBe(true);
+  const { parse, diagnose } = entry.dbml;
+  expect(parse("Table users { id int }").elements).toHaveLength(1);
+  expect(diagnose("Table users { id int }").errors).toEqual([]);
 });
 
 it("types the lexer over the DBML token vocabulary", () => {
@@ -28,7 +26,20 @@ it("types the lexer over the DBML token vocabulary", () => {
   >();
 });
 
-it("takes the DBML source text", () => {
+it("takes the DBML source text and returns the document", () => {
   expectTypeOf(entry.dbml.parse).parameters.toEqualTypeOf<[text: string]>();
   expectTypeOf(entry.dbml.diagnose).parameters.toEqualTypeOf<[text: string]>();
+  expectTypeOf(entry.dbml.parse).returns.toEqualTypeOf<DbmlDocument>();
+  expectTypeOf(entry.dbml.diagnose).returns.toEqualTypeOf<{ ast: DbmlDocument; errors: ParseError[] }>();
+});
+
+it("exports the AST types", () => {
+  expectTypeOf<entry.DbmlDocument["elements"][number]["type"]>().toEqualTypeOf<"project" | "table" | "ref" | "enum">();
+  expectTypeOf<entry.TableItem["type"]>().toEqualTypeOf<"column" | "note">();
+  expectTypeOf<entry.Value["kind"]>().toEqualTypeOf<
+    "string" | "number" | "boolean" | "null" | "expression" | "color" | "identifier" | "enumConstant"
+  >();
+  expectTypeOf<entry.Setting["kind"]>().toEqualTypeOf<
+    "pk" | "null" | "unique" | "increment" | "inactive" | "default" | "note" | "ref" | "action" | "property"
+  >();
 });
