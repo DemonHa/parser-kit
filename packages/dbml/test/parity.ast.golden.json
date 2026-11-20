@@ -4197,7 +4197,7 @@
   },
   {
     "name": "all column settings",
-    "source": "Table accounts {\n  id integer [primary key, increment]\n  email varchar(320) [unique, not null, note: 'login address']\n  nickname varchar [null]\n  status account_status [default: 'active']\n  referrer_id integer [ref: > accounts.id]\n  owner_id integer [ref: - users.id, not null]\n  balance decimal(12, 2) [default: 0, check: `balance >= 0`, check: `balance < 1000000`]\n  region varchar [pii: false, owner: 'data-team', source system: 'crm']\n}\n\nTable users {\n  id integer [pk]\n}\n",
+    "source": "Table accounts {\n  id integer [primary key, increment]\n  email varchar(320) [unique, not null, note: 'login address']\n  nickname varchar [null]\n  status account_status [default: 'active']\n  referrer_id integer [ref: > accounts.id]\n  owner_id integer [ref: - users.id, not null]\n  balance decimal(12, 2) [default: 0, check: `balance >= 0`, check: `balance < 1000000`]\n  region varchar [pii: false, owner: 'data-team', source system: 'crm', weight: 3, accent: #fff, x: none]\n}\n\nTable users {\n  id integer [pk]\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -5304,6 +5304,138 @@
                       "col": 70
                     }
                   }
+                },
+                {
+                  "kind": "property",
+                  "key": {
+                    "value": "weight",
+                    "span": {
+                      "start": {
+                        "row": 9,
+                        "col": 72
+                      },
+                      "end": {
+                        "row": 9,
+                        "col": 78
+                      }
+                    }
+                  },
+                  "value": {
+                    "kind": "number",
+                    "value": 3,
+                    "span": {
+                      "start": {
+                        "row": 9,
+                        "col": 80
+                      },
+                      "end": {
+                        "row": 9,
+                        "col": 81
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 9,
+                      "col": 72
+                    },
+                    "end": {
+                      "row": 9,
+                      "col": 81
+                    }
+                  }
+                },
+                {
+                  "kind": "property",
+                  "key": {
+                    "value": "accent",
+                    "span": {
+                      "start": {
+                        "row": 9,
+                        "col": 83
+                      },
+                      "end": {
+                        "row": 9,
+                        "col": 89
+                      }
+                    }
+                  },
+                  "value": {
+                    "kind": "color",
+                    "value": "#fff",
+                    "span": {
+                      "start": {
+                        "row": 9,
+                        "col": 91
+                      },
+                      "end": {
+                        "row": 9,
+                        "col": 95
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 9,
+                      "col": 83
+                    },
+                    "end": {
+                      "row": 9,
+                      "col": 95
+                    }
+                  }
+                },
+                {
+                  "kind": "property",
+                  "key": {
+                    "value": "x",
+                    "span": {
+                      "start": {
+                        "row": 9,
+                        "col": 97
+                      },
+                      "end": {
+                        "row": 9,
+                        "col": 98
+                      }
+                    }
+                  },
+                  "value": {
+                    "kind": "identifier",
+                    "value": {
+                      "value": "none",
+                      "span": {
+                        "start": {
+                          "row": 9,
+                          "col": 100
+                        },
+                        "end": {
+                          "row": 9,
+                          "col": 104
+                        }
+                      }
+                    },
+                    "span": {
+                      "start": {
+                        "row": 9,
+                        "col": 100
+                      },
+                      "end": {
+                        "row": 9,
+                        "col": 104
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 9,
+                      "col": 97
+                    },
+                    "end": {
+                      "row": 9,
+                      "col": 104
+                    }
+                  }
                 }
               ],
               "span": {
@@ -5313,7 +5445,7 @@
                 },
                 "end": {
                   "row": 9,
-                  "col": 71
+                  "col": 105
                 }
               }
             }
@@ -12954,7 +13086,7 @@
   },
   {
     "name": "every table setting",
-    "source": "Table audit.events as E [headercolor: #ff8800, note: 'append-only', retention: '90 days'] {\n  id bigint [pk]\n}\n",
+    "source": "Table audit.events as E [headercolor: #ff8800, note: 'append-only', retention: '90 days', weight: 2] {\n  id bigint [pk]\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -13116,6 +13248,46 @@
                 "end": {
                   "row": 1,
                   "col": 88
+                }
+              }
+            },
+            {
+              "kind": "property",
+              "key": {
+                "value": "weight",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 90
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 96
+                  }
+                }
+              },
+              "value": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 98
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 99
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 90
+                },
+                "end": {
+                  "row": 1,
+                  "col": 99
                 }
               }
             }
@@ -19924,7 +20096,7 @@
   },
   {
     "name": "ref every setting",
-    "source": "Table a {\n  w int\n  x int\n  y int\n  z int\n}\n\nTable b {\n  w int\n  x int\n  y int\n  z int\n}\n\nRef: a.w > b.w [delete: set null, update: set default]\nRef: a.x > b.x [delete: restrict, update: cascade, color: #79AD51]\nRef: a.y > b.y [inactive, note: 'legacy link']\nRef: a.z > b.z [delete: no action, owner: 'ops']\n",
+    "source": "Table a {\n  w int\n  x int\n  y int\n  z int\n}\n\nTable b {\n  w int\n  x int\n  y int\n  z int\n}\n\nRef: a.w > b.w [delete: set null, update: set default]\nRef: a.x > b.x [delete: restrict, update: cascade, color: #79AD51]\nRef: a.y > b.y [inactive, note: 'legacy link']\nRef: a.z > b.z [delete: no action, owner: 'ops', weight: 2]\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -21284,6 +21456,46 @@
                   "col": 47
                 }
               }
+            },
+            {
+              "kind": "property",
+              "key": {
+                "value": "weight",
+                "span": {
+                  "start": {
+                    "row": 18,
+                    "col": 49
+                  },
+                  "end": {
+                    "row": 18,
+                    "col": 55
+                  }
+                }
+              },
+              "value": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 18,
+                    "col": 57
+                  },
+                  "end": {
+                    "row": 18,
+                    "col": 58
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 18,
+                  "col": 49
+                },
+                "end": {
+                  "row": 18,
+                  "col": 58
+                }
+              }
             }
           ],
           "span": {
@@ -21293,7 +21505,7 @@
             },
             "end": {
               "row": 18,
-              "col": 48
+              "col": 59
             }
           }
         }
@@ -21305,7 +21517,7 @@
         },
         "end": {
           "row": 18,
-          "col": 48
+          "col": 59
         }
       }
     }
@@ -25833,7 +26045,7 @@
   },
   {
     "name": "table group with settings and note",
-    "source": "Table invoices {\n  id int\n}\n\nTable payments {\n  id int\n}\n\nTable finance.refunds {\n  id int\n}\n\nTableGroup billing [color: #345, note: 'money things'] {\n  invoices\n  payments\n  finance.refunds\n  Note {\n    '''\n    Everything that\n    touches money\n    '''\n  }\n}\n",
+    "source": "Table invoices {\n  id int\n}\n\nTable payments {\n  id int\n}\n\nTable finance.refunds {\n  id int\n}\n\nTableGroup billing [color: #345, note: 'money things', owner: 'finance', n: 2] {\n  invoices\n  payments\n  finance.refunds\n  Note {\n    '''\n    Everything that\n    touches money\n    '''\n  }\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -26259,6 +26471,86 @@
                 "end": {
                   "row": 13,
                   "col": 53
+                }
+              }
+            },
+            {
+              "kind": "property",
+              "key": {
+                "value": "owner",
+                "span": {
+                  "start": {
+                    "row": 13,
+                    "col": 55
+                  },
+                  "end": {
+                    "row": 13,
+                    "col": 60
+                  }
+                }
+              },
+              "value": {
+                "kind": "string",
+                "value": "finance",
+                "span": {
+                  "start": {
+                    "row": 13,
+                    "col": 62
+                  },
+                  "end": {
+                    "row": 13,
+                    "col": 71
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 13,
+                  "col": 55
+                },
+                "end": {
+                  "row": 13,
+                  "col": 71
+                }
+              }
+            },
+            {
+              "kind": "property",
+              "key": {
+                "value": "n",
+                "span": {
+                  "start": {
+                    "row": 13,
+                    "col": 73
+                  },
+                  "end": {
+                    "row": 13,
+                    "col": 74
+                  }
+                }
+              },
+              "value": {
+                "kind": "number",
+                "value": 2,
+                "span": {
+                  "start": {
+                    "row": 13,
+                    "col": 76
+                  },
+                  "end": {
+                    "row": 13,
+                    "col": 77
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 13,
+                  "col": 73
+                },
+                "end": {
+                  "row": 13,
+                  "col": 77
                 }
               }
             }
@@ -26808,7 +27100,7 @@
   },
   {
     "name": "sticky note with settings and multiline text",
-    "source": "Note design_notes [color: #ffcc00] {\n  '''\n  - users own accounts\n  - accounts own orders\n  '''\n}\n",
+    "source": "Note design_notes [color: #ffcc00, owner: 'design'] {\n  '''\n  - users own accounts\n  - accounts own orders\n  '''\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -26878,6 +27170,46 @@
                 "end": {
                   "row": 1,
                   "col": 33
+                }
+              }
+            },
+            {
+              "kind": "property",
+              "key": {
+                "value": "owner",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 35
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 40
+                  }
+                }
+              },
+              "value": {
+                "kind": "string",
+                "value": "design",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 42
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 50
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 35
+                },
+                "end": {
+                  "row": 1,
+                  "col": 50
                 }
               }
             }

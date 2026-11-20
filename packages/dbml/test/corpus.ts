@@ -160,7 +160,7 @@ export const CORPUS: Sample[] = [
   referrer_id integer [ref: > accounts.id]
   owner_id integer [ref: - users.id, not null]
   balance decimal(12, 2) [default: 0, check: \`balance >= 0\`, check: \`balance < 1000000\`]
-  region varchar [pii: false, owner: 'data-team', source system: 'crm']
+  region varchar [pii: false, owner: 'data-team', source system: 'crm', weight: 3, accent: #fff, x: none]
 }
 
 Table users {
@@ -323,7 +323,7 @@ Table s.x {
   {
     category: "table-settings",
     name: "every table setting",
-    dbml: "Table audit.events as E [headercolor: #ff8800, note: 'append-only', retention: '90 days'] {\n  id bigint [pk]\n}\n",
+    dbml: "Table audit.events as E [headercolor: #ff8800, note: 'append-only', retention: '90 days', weight: 2] {\n  id bigint [pk]\n}\n",
   },
 
   // --- refs ---
@@ -409,7 +409,7 @@ Table s.x {
       `Ref: a.w > b.w [delete: set null, update: set default]
 Ref: a.x > b.x [delete: restrict, update: cascade, color: #79AD51]
 Ref: a.y > b.y [inactive, note: 'legacy link']
-Ref: a.z > b.z [delete: no action, owner: 'ops']
+Ref: a.z > b.z [delete: no action, owner: 'ops', weight: 2]
 `,
     ),
   },
@@ -549,7 +549,7 @@ Ref: a.z > b.z [delete: no action, owner: 'ops']
     name: "table group with settings and note",
     dbml: withTables(
       { invoices: ["id"], payments: ["id"], "finance.refunds": ["id"] },
-      `TableGroup billing [color: #345, note: 'money things'] {
+      `TableGroup billing [color: #345, note: 'money things', owner: 'finance', n: 2] {
   invoices
   payments
   finance.refunds
@@ -578,7 +578,7 @@ Ref: a.z > b.z [delete: no action, owner: 'ops']
   {
     category: "sticky-notes",
     name: "sticky note with settings and multiline text",
-    dbml: `Note design_notes [color: #ffcc00] {
+    dbml: `Note design_notes [color: #ffcc00, owner: 'design'] {
   '''
   - users own accounts
   - accounts own orders
