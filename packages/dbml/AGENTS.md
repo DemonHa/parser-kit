@@ -97,7 +97,9 @@ fixtures reach the tarball.
   or `]`, a body's next line and the next element that starts a line, and
   records errors through `report` in `recovery.ts`, never `ctx.report`
   directly, so cascades are dropped in one place. A body read with `readBody`
-  and a list read with `readSettings` recover with no extra code. Look ahead
+  and a list read with `readSettings` recover with no extra code; a header
+  with a list before its `{` also passes on `openSwallowed` (see
+  `readHeaderSettings`), for a `{` an unterminated string took with it. Look ahead
   with `lookAhead` / `peekPastNewlines`, not `ctx.peekAhead`, so a lexer error
   met in lookahead is recorded rather than losing the item. `parse` must still
   throw exactly `diagnose`'s first error; the parity harness checks it.

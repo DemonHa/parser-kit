@@ -111,14 +111,35 @@ export const registerElementStart = (test: ElementStart): void => {
   startsElement = test;
 };
 
+// A lexer error recorded since `open` (a construct's `{`): an unterminated
+// string or the like, which may have swallowed the construct's `}`.
+const lexerErrorSince = (ctx: Ctx, open: Position): Position | null => {
+  const lexer = states.get(ctx)?.lexer ?? null;
+  return lexer !== null && notBefore(lexer, open) ? lexer : null;
+};
+
 /**
- * True when a body has to end at this line: a string left open inside its
- * `[ … ]` swallowed its `}` (`[note: 'oops }`), so the line break before the
- * cursor is one the parse stream restored, and the line starts an element.
+ * True when the `}` of a construct opened at `open` is likely gone: a lexer
+ * error since then ran to its line's end (an unterminated string swallows
+ * the rest of its line), and the cursor is on a later line. The construct
+ * then ends where it stands, with no error of its own.
  */
-export const bodyCutShort = (ctx: Ctx, afterRestoredBreak: boolean): boolean => {
+export const closeSwallowed = (ctx: Ctx, open: Position): boolean => {
+  const lexer = lexerErrorSince(ctx, open);
+  if (lexer === null) return false;
   const token = ctx.peek();
-  return afterRestoredBreak && token !== null && startsElement(ctx, token);
+  return token === null || token.position.start.row > lexer.row;
+};
+
+/**
+ * True when a body opened at `open` has to end at this line: its `}` is likely
+ * gone (`afterRestoredBreak`: a string left open in a `[ … ]` took it; or see
+ * `closeSwallowed`), and the line starts an element.
+ */
+export const bodyCutShort = (ctx: Ctx, afterRestoredBreak: boolean, open: Position): boolean => {
+  const token = ctx.peek();
+  if (token === null || !(afterRestoredBreak || closeSwallowed(ctx, open))) return false;
+  return startsElement(ctx, token);
 };
 
 /**
@@ -158,12 +179,15 @@ export const skipSetting = (ctx: Ctx, close: "]" | ")" = "]"): "," | "]" | ")" |
 };
 
 /**
- * Skip to just past the `}` closing a `{ … }` whose `{` is already consumed,
- * stepping over nested braces, or to the end of the input.
+ * Skip to just past the `}` closing a `{ … }` whose `{` (at `open`) is
+ * already consumed, stepping over nested braces, or to the end of the input.
+ * After a lexer error inside it, which may have swallowed that `}` with the
+ * rest of its line, the skip stops at the line's end instead (not consumed).
  */
-export const skipPastClose = (ctx: Ctx): void => {
+export const skipPastClose = (ctx: Ctx, open: Position): void => {
   let depth = 0;
   for (let token = peekReporting(ctx); token !== null; token = peekReporting(ctx)) {
+    if (depth === 0 && isPunc(token, "\n") && lexerErrorSince(ctx, open) !== null) return;
     ctx.next();
     if (isPunc(token, "{")) depth++;
     else if (isPunc(token, "}") && depth-- === 0) return;

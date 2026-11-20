@@ -1,4 +1,5 @@
 import { custom, type Span } from "@parser-kit/core";
+import { isRestoredBreak } from "../lexer";
 import {
   atEnumConstant,
   atLineEnd,
@@ -188,9 +189,16 @@ export const recordsItem = custom<Records, TT>(
     const columns = isPunc(ctx.peek(), "(") ? readColumnList(ctx) : null;
     const hasSettings = isPunc(ctx.peek(), "[");
     const settings = readOptionalSettings(ctx, RECORDS_SETTINGS);
-    expectBody(ctx, !hasSettings);
-    expectSpace(ctx);
-    const rows = readBody(ctx, readRow);
+    // Under `diagnose`: a string left open in the header took the `{` with it
+    // (see `readHeaderSettings`).
+    const openSwallowed = isRestoredBreak(ctx.peek());
+    if (openSwallowed) {
+      skipNewlines(ctx);
+    } else {
+      expectBody(ctx, !hasSettings);
+      expectSpace(ctx);
+    }
+    const rows = readBody(ctx, readRow, openSwallowed);
     return { type: "records", table: null, columns, settings, rows, span: ctx.spanFrom(start) };
   },
   { expected: '"records"', first: [{ type: "ident", value: "records" }] },

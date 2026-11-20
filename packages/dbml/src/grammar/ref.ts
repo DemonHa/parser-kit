@@ -21,7 +21,7 @@ import {
   type TT,
   touches,
 } from "./common";
-import { report, skipPastClose } from "./recovery";
+import { closeSwallowed, report, skipPastClose } from "./recovery";
 
 // `Ref` in its short (`Ref name: a.b > c.d`) and long (`Ref name { a.b > c.d }`)
 // forms, and the `ref: > c.d` column setting. A long-form body holds exactly
@@ -199,22 +199,32 @@ export const refElement = defineElement("ref", "Ref", (ctx, start): Ref => {
     return { type: "ref", name, form: "short", ...line, span: ctx.spanFrom(start) };
   }
   if (!isPunc(ctx.peek(), "{")) fail(ctx, name === null ? 'a name, ":" or "{"' : '":" or "{"');
+  const open = ctx.position();
   ctx.next();
   let line: ReturnType<typeof readRefLine>["line"] | null = null;
+  const ref = (read: NonNullable<typeof line>): Ref => ({
+    type: "ref",
+    name,
+    form: "long",
+    ...read,
+    span: ctx.spanFrom(start),
+  });
   try {
     skipNewlines(ctx);
     const read = readRefLine(ctx, "long");
     line = read.line;
     expectLineEnd(ctx, read.hasSettings ? 'a new line or "}"' : '"[", a new line or "}"');
     skipNewlines(ctx);
+    // A string left open in the settings may have taken the `}` with it.
+    if (!isPunc(ctx.peek(), "}") && closeSwallowed(ctx, open)) return ref(line);
     // A long-form body holds one relationship: a second line fails here.
     expectPunc(ctx, "}");
   } catch (error) {
     // Under `diagnose`, resume after the body's `}`, keeping the relationship
     // if it was read.
     if (!report(ctx, error)) throw error;
-    skipPastClose(ctx);
+    skipPastClose(ctx, open);
     if (line === null) throw error;
   }
-  return { type: "ref", name, form: "long", ...line, span: ctx.spanFrom(start) };
+  return ref(line);
 });

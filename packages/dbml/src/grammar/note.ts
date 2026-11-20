@@ -22,7 +22,7 @@ import {
   skipNewlines,
   type TT,
 } from "./common";
-import { report, skipPastClose } from "./recovery";
+import { closeSwallowed, report, skipPastClose } from "./recovery";
 
 // The note item of a table or project body, `Note: '…'` (inline) or
 // `Note { '…' }` (block). Its text is dedented like every note's.
@@ -38,16 +38,17 @@ export interface Note {
  * A block note's `'…' }`, its `{` already read. Under `diagnose`, an error
  * resumes after the block's `}`, keeping the text if it was read.
  */
-const readNoteBody = (ctx: Ctx): StringValue => {
+const readNoteBody = (ctx: Ctx, open: Position): StringValue => {
   let value: StringValue | null = null;
   try {
     skipNewlines(ctx);
     value = readNoteString(ctx);
     skipNewlines(ctx);
+    if (!isPunc(ctx.peek(), "}") && closeSwallowed(ctx, open)) return value;
     expectPunc(ctx, "}");
   } catch (error) {
     if (!report(ctx, error)) throw error;
-    skipPastClose(ctx);
+    skipPastClose(ctx, open);
     if (value === null) throw error;
   }
   return value;
@@ -75,8 +76,9 @@ export const noteItem = custom<Note, TT>(
       return { type: "note", value, form: "inline", span: ctx.spanFrom(start) };
     }
     expectSpace(ctx);
+    const open = ctx.position();
     expectPunc(ctx, "{");
-    const value = readNoteBody(ctx);
+    const value = readNoteBody(ctx, open);
     return { type: "note", value, form: "block", span: ctx.spanFrom(start) };
   },
   { expected: '"Note"', first: [{ type: "ident", value: "note" }] },
@@ -119,6 +121,7 @@ export const stickyNoteElement = defineElement("note", "Note", (ctx, start): Sti
     if (!isPunc(ctx.peek(), "{")) fail(ctx, settingsAllowed ? '"[" or "{"' : '"{"');
     ctx.next();
   }
-  const value = readNoteBody(ctx);
+  // From the element's start: a string left open in the header may have taken the `{` too.
+  const value = readNoteBody(ctx, start);
   return { type: "stickyNote", name, settings, value, span: ctx.spanFrom(start) };
 });

@@ -571,6 +571,7 @@ export const readHeaderSettings = (
  * with `openSwallowed` (see `readHeaderSettings`) there is no `{` to read.
  */
 export const readBody = <T>(ctx: Ctx, item: (ctx: Ctx) => T, openSwallowed = false): T[] => {
+  const open = ctx.position();
   if (!openSwallowed) expectPunc(ctx, "{");
   const items: T[] = [];
   // A swallowed `{` came with a restored break, which the header read past.
@@ -584,7 +585,7 @@ export const readBody = <T>(ctx: Ctx, item: (ctx: Ctx) => T, openSwallowed = fal
         return items;
       }
       if (ctx.eof()) fail(ctx, '"}"');
-      if (bodyCutShort(ctx, restored)) return items;
+      if (bodyCutShort(ctx, restored, open)) return items;
       restored = false;
       items.push(item(ctx));
       if (!atLineEnd(ctx)) fail(ctx, 'a new line or "}"');

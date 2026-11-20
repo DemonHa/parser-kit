@@ -459,6 +459,42 @@ describe("Cascading errors", () => {
     expect(outline(elements).at(-1)).toBe("table b: id");
   });
 
+  it("ends a block note, a sticky note or a Ref whose } a string left open swallowed at its line", () => {
+    const sticky = diagnose("Note n { 'abc }\nTable b {\n  y int\n  z\n}\n");
+    expect(sticky.errors).toEqual([
+      { msg: "Unterminated string", start: at(1, 9) },
+      { msg: "Expected a column type but found a new line", start: at(4, 3) },
+    ]);
+    expect(outline(sticky.elements)).toEqual(["table b: y"]);
+    const block = diagnose("Table users {\n  Note { 'abc }\n  name text\n}\nTable b { y int }\n");
+    expect(block.errors).toEqual([{ msg: "Unterminated string", start: at(2, 9) }]);
+    expect(outline(block.elements)).toEqual(["table users: name", "table b: y"]);
+    const apostrophe = diagnose("Table users {\n  Note { 'it's' }\n  name text\n}\n");
+    expect(apostrophe.errors).toEqual([
+      { msg: 'Expected "}" but found "s"', start: at(2, 13) },
+      { msg: "Unterminated string", start: at(2, 14) },
+    ]);
+    expect(outline(apostrophe.elements)).toEqual(["table users: note name"]);
+    const ref = diagnose("Ref r { a.id > b.id [note: 'x] }\nTable c { f int }\n");
+    expect(ref.errors).toEqual([{ msg: "Unterminated string", start: at(1, 27) }]);
+    expect(outline(ref.elements)).toEqual(["ref a > b", "table c: f"]);
+  });
+
+  it("ends a body whose } a string left open outside a list swallowed", () => {
+    const { elements, errors } = diagnose("Table a { Note: 'x }\nTable b { f int }\n");
+    expect(errors).toEqual([{ msg: "Unterminated string", start: at(1, 16) }]);
+    expect(outline(elements)).toEqual(["table a: ", "table b: f"]);
+  });
+
+  it("reads the rows of a records block in a table whose { such a string swallowed", () => {
+    for (const header of ['records (id, "x) {', "records [note: 'x] {"]) {
+      const { elements, errors } = diagnose(`Table t {\n  id int\n  ${header}\n    1\n  }\n  e int\n}\n`);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.msg).toMatch(/^Unterminated /);
+      expect(outline(elements)).toEqual(["table t: id records e"]);
+    }
+  });
+
   it("ends a body whose } a string left open in a settings list swallowed", () => {
     for (const text of [
       "Table b { x int [note: 'oops }\nTable c { y int }\n",
