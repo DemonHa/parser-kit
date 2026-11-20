@@ -92,4 +92,9 @@ export const definePrinter =
 export const extendPrinter = <T, K extends keyof T>(
   base: NodePrinter<T, K>,
   overrides: Partial<Handlers<T, K>>,
-): NodePrinter<T, K> => build(base.key, { ...base.handlers, ...overrides } as Handlers<T, K>);
+): NodePrinter<T, K> => {
+  const handlers: Record<PropertyKey, unknown> = { ...base.handlers };
+  // An `undefined` override (`{ a: flag ? h : undefined }`) keeps the base handler.
+  for (const [tag, h] of Object.entries(overrides)) if (h !== undefined) handlers[tag] = h;
+  return build(base.key, handlers as Handlers<T, K>);
+};

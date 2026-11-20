@@ -122,6 +122,15 @@ describe("fieldCoverage", () => {
     expect(coverage.report()).toEqual({ kinds: ["2"], fields: [] });
   });
 
+  it("writes through to the real node", () => {
+    const coverage = fieldCoverage({ key: "kind" });
+    const node = { kind: "enum" as const, name: "e", values: [] as string[] };
+    const tracked = coverage.track(node) as typeof node & { memo?: string };
+    tracked.memo = "x";
+    expect(tracked.memo).toBe("x");
+    expect((node as { memo?: string }).memo).toBe("x");
+  });
+
   it("reads frozen trees without breaking proxy invariants", () => {
     const coverage = fieldCoverage({ key: "kind" });
     const frozen = Object.freeze({

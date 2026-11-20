@@ -90,6 +90,8 @@ export const fieldCoverage = (options: CoverageOptions): FieldCoverage => {
         return isTracked(value) ? view(value, inner) : value;
       },
       has: (_, prop) => Reflect.has(target, prop),
+      // Writes go to the real node, so a printer that memoises on nodes reads them back.
+      set: (_, prop, value) => Reflect.set(target, prop, value),
       ownKeys: () => Reflect.ownKeys(target),
       getOwnPropertyDescriptor(_, prop) {
         const own = Reflect.getOwnPropertyDescriptor(target, prop);

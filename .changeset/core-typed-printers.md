@@ -9,4 +9,4 @@ Add typed printers, Pratt-table precedence and quoting to `@parser-kit/core/prin
 - `quoting(rules)` prints names and strings bare or quoted from the grammar's lexical rules (quote characters, escape style, start and part characters, reserved words, case folding), in `"minimal"`, `"always"` or `"preserve-if-valid"` mode. Quoting is decided from the value, so hand-built trees print valid text.
 - A new `@parser-kit/core/print/testing` entry exports `fieldCoverage`, a test helper that records which fields a printer reads across a corpus and reports the variants it never printed and the fields it never read.
 
-With these, the `./print` entry is about 2.9 KB minified and gzipped; the testing entry is separate and doesn't count towards it. `PrattPrintMeta` is exported from the root entry.
+With these, the `./print` entry is about 3 KB minified and gzipped; the testing entry is separate and doesn't count towards it. `PrattPrintMeta` is exported from the root entry.

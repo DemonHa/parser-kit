@@ -323,7 +323,19 @@ describe("precedence", () => {
     const opts = { key: () => null, print: () => "" };
     expect(() =>
       precedence({ infix: [{ ops: ["!"], bp: 20 }], postfix: [{ match: bang, bp: 5, nodes: ["fact"] }] }, opts),
-    ).toThrow("a postfix (bp 5) and a tighter infix (bp 20) share a token");
+    ).toThrow("an operator token means bp 5 and bp 20");
+    // Two postfix groups on one token, the looser first: the same hazard.
+    expect(() =>
+      precedence(
+        {
+          postfix: [
+            { match: bang, bp: 5, nodes: ["fact"] },
+            { match: bang, bp: 20, nodes: ["bang"] },
+          ],
+        },
+        opts,
+      ),
+    ).toThrow("an operator token means bp 5 and bp 20");
     // A looser infix on the same token is unreachable: the postfix always wins.
     expect(() =>
       precedence({ infix: [{ ops: ["!"], bp: 3 }], postfix: [{ match: bang, bp: 5, nodes: ["fact"] }] }, opts),
@@ -334,6 +346,34 @@ describe("precedence", () => {
         opts,
       ),
     ).not.toThrow();
+  });
+
+  it("tells tails apart by the main table's operators inside a context too", () => {
+    // An open atom's body is parsed by the full rule, so main-table operators
+    // (`and`) can follow it even inside a restricted operand.
+    type E = { k: "x" } | { k: "neg"; e: E } | { k: "lam"; body: E } | { k: "and"; l: E; r: E };
+    const neg = { ops: ["~"], bp: 7, nodes: ["neg"] };
+    const plus = { ops: ["+"], bp: 10 };
+    const t = { prefix: [neg], infix: [{ ops: ["and"], bp: 3, nodes: ["and"] }, plus] };
+    const p = precedence<E, "b">(t, {
+      key: (n) => (n.k === "x" ? null : n.k),
+      print: () => "",
+      atoms: { lam: 0 },
+      contexts: { b: { prefix: [neg], infix: [plus] } },
+    });
+    const lam: E = { k: "lam", body: { k: "x" } };
+    expect(p.parens({ k: "neg", e: lam }, lam, "right", "b")).toBe(true);
+  });
+
+  it("derives a prefix's tail from its bp, whatever its nodes say", () => {
+    type E = { k: "x" } | { k: "not"; e: E } | { k: "mul"; l: E; r: E };
+    const t = {
+      prefix: [{ ops: ["not"], bp: 4, nodes: { not: "none" as const } }],
+      infix: [{ ops: ["*"], bp: 11, nodes: ["mul"] }],
+    };
+    const p = precedence<E>(t, { key: (n) => (n.k === "x" ? null : n.k), print: () => "" });
+    const not: E = { k: "not", e: { k: "x" } };
+    expect(p.parens({ k: "mul", l: not, r: not }, not, "left")).toBe(true);
   });
 
   it("ignores a tail given for a plain ops group, whose tail the parser derives", () => {

@@ -150,6 +150,9 @@ describe("extendPrinter", () => {
     const dialect = extendPrinter(base, { neg: (n, print) => ["NOT ", print(n.operand)] });
     expect(dialect.handlers.lit).toBe(base.handlers.lit);
     expect(str(base({ kind: "neg", operand: { kind: "lit", v: "a" } }))).toBe("-a");
+    // An undefined override keeps the base handler.
+    const kept = extendPrinter(base, { lit: undefined });
+    expect(str(kept({ kind: "lit", v: "a" }))).toBe("a");
     // @ts-expect-error — overrides must be handlers of the same union.
     extendPrinter(base, { other: () => "" });
   });

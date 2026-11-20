@@ -120,8 +120,11 @@ const INF = Number.POSITIVE_INFINITY;
 
 /** Whether two first-set entries can match the same token. */
 const overlap = (a: FirstLike, b: FirstLike) =>
-  (a.value === undefined || b.value === undefined || a.value === b.value) &&
-  (a.type === undefined || b.type === undefined || a.type === b.type);
+  (!a.value || !b.value || a.value === b.value) && (!a.type || !b.type || a.type === b.type);
+
+const fail = (message: string): never => {
+  throw new Error(`precedence: ${message}`);
+};
 
 const firstOf = (g: PrecedenceGroup): readonly FirstLike[] =>
   g.match ? g.match.first() : (g.ops ?? []).map((value) => ({ type: g.type, value }));
@@ -133,7 +136,7 @@ const index = (table: PrecedenceTable, atoms: Readonly<Record<string, number>>) 
     const seen = map.get(key);
     if (seen === undefined) map.set(key, entry);
     else if (seen.lbp !== entry.lbp || seen.rhs !== entry.rhs || seen.chain !== entry.chain) {
-      throw new Error(`precedence: two groups build "${key}" with different binding powers`);
+      fail(`two groups build "${key}" with different binding powers`);
     }
   };
   const tailOf = (r: number | "none" | undefined) => (r === "none" ? INF : r);
@@ -147,14 +150,14 @@ const index = (table: PrecedenceTable, atoms: Readonly<Record<string, number>>) 
   };
   for (const g of table.prefix ?? []) {
     const entry = { lbp: INF, rhs: g.bp, chain: true };
-    if (g.nodes) named(g, entry);
+    if (g.nodes) named(g, entry, g.nodes, true);
     else for (const op of g.ops ?? []) add(prefixes, op, entry);
   }
   const bps: number[] = [];
   const infix = table.infix ?? [];
   for (const g of infix) {
     bps.push(g.bp);
-    const simple = g.ops !== undefined && g.parse === undefined;
+    const simple = !!g.ops && !g.parse;
     // A plain `ops` group's tail is what the parser does, whatever `rhs` says.
     const entry: Entry = simple
       ? { lbp: g.bp, rhs: g.assoc === "right" ? g.bp : g.bp + 1, chain: g.assoc !== "nonassoc" }
@@ -167,9 +170,10 @@ const index = (table: PrecedenceTable, atoms: Readonly<Record<string, number>>) 
     // lookup: a tighter infix group on the same token makes the token's meaning
     // depend on where it sits. Guards are assumed to tell the two apart.
     const own = firstOf(g);
-    for (const i of infix) {
+    // Two postfix groups at different bps on one token are the same hazard.
+    for (const i of [...infix, ...(table.postfix ?? [])]) {
       if (i.bp > g.bp && !i.when && !g.when && firstOf(i).some((e) => own.some((o) => overlap(e, o)))) {
-        throw new Error(`precedence: a postfix (bp ${g.bp}) and a tighter infix (bp ${i.bp}) share a token`);
+        fail(`an operator token means bp ${g.bp} and bp ${i.bp}`);
       }
     }
     named(g, { lbp: g.bp, rhs: tailOf(g.rhs), chain: true });
@@ -209,13 +213,17 @@ export const precedence = <T, C extends string = never>(
   const levels = new Map<string, Level>();
   for (const name in options.contexts) {
     const own = index(options.contexts[name], atoms);
-    levels.set(name, { get: (k) => (own.has(k) ? own.get(k) : FORBIDDEN), norm: own.norm });
+    // Operators of the main table can still follow a context's operand (after
+    // an open atom's body, or wherever a null context was forgotten), so tails
+    // are told apart by every bp of either table.
+    levels.set(name, {
+      get: (k) => (own.has(k) ? own.get(k) : FORBIDDEN),
+      norm: (x) => Math.min(own.norm(x), main.norm(x)),
+    });
   }
   const entry = (node: T, at: Level): Entry | null => {
     const k = key(node);
-    if (!main.has(k)) {
-      throw new Error(`precedence: no group builds ${JSON.stringify(k)}`);
-    }
+    if (!main.has(k)) fail(`no group builds ${JSON.stringify(k)}`);
     return at.get(k);
   };
 
@@ -227,8 +235,7 @@ export const precedence = <T, C extends string = never>(
     const n = name(context);
     if (n === null) return main;
     const at = levels.get(n);
-    if (!at) throw new Error(`precedence: no context "${n}"`);
-    return at;
+    return at ?? fail(`no context "${n}"`);
   };
 
   const parens = (parent: T, child: T, side: Side, context?: Context<C>): boolean => {
