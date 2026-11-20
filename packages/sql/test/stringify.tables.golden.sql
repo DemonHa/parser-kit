@@ -92,6 +92,32 @@ CREATE TABLE t (
 -- CREATE TABLE t (a text DEFAULT 'a' COLLATE "C")
 CREATE TABLE t (a text DEFAULT 'a' COLLATE "C");
 
+-- CREATE TABLE t ("format" json, "without" time, "nulls" "first", format int)
+CREATE TABLE t ("format" json, "without" time, "nulls" first, "format" int);
+
+-- CREATE TABLE p PARTITION OF parent ("format" NOT NULL) DEFAULT
+CREATE TABLE p PARTITION OF parent ("format" NOT NULL) DEFAULT;
+
+-- CREATE INDEX ON t ("format" json, "without" time, "nulls" "last" DESC, a COLLATE "nulls" "first")
+CREATE INDEX ON t (
+  "format" json,
+  "without" time,
+  "nulls" last DESC,
+  a COLLATE "nulls" first
+);
+
+-- CREATE TABLE t (a int) PARTITION BY RANGE ("format" json, "nulls" "first", "without" time, a COLLATE "nulls" "last")
+CREATE TABLE t (a int)
+PARTITION BY RANGE (
+  "format" json,
+  "nulls" first,
+  "without" time,
+  a COLLATE "nulls" last
+);
+
+-- CREATE TABLE t (a int GENERATED ALWAYS AS IDENTITY (OWNED BY "none"))
+CREATE TABLE t (a int GENERATED ALWAYS AS IDENTITY (OWNED BY "none"));
+
 -- CREATE TABLE t (a int, b int, PRIMARY KEY (a, b) INCLUDE (c) WITH (fillfactor = 90) USING INDEX TABLESPACE ts, UNIQUE NULLS NOT DISTINCT (b) DEFERRABLE INITIALLY DEFERRED)
 CREATE TABLE t (
   a int,
@@ -261,6 +287,18 @@ TABLESPACE ts;
 -- CREATE TABLE t (a int) WITH ("Mixed" = 1, "select" = 2, user = 3)
 CREATE TABLE t (a int) WITH ("Mixed" = 1, select = 2, user = 3);
 
+-- CREATE TABLE t (a int) WITH (x = "between", y = "values", z = "coalesce", w = "setof", v = "national", u = "row", n = none)
+CREATE TABLE t (a int)
+WITH (
+  x = "between",
+  y = "values",
+  z = "coalesce",
+  w = "setof",
+  v = "national",
+  u = "row",
+  n = "none"
+);
+
 -- CREATE TABLE t AS SELECT 1 AS a
 CREATE TABLE t AS SELECT 1 AS a;
 
@@ -311,7 +349,7 @@ CREATE INDEX i ON t USING gist (
 );
 
 -- CREATE INDEX i ON t (nulls NULLS FIRST, a nulls, (x) "asc")
-CREATE INDEX i ON t (nulls NULLS FIRST, a nulls, x "asc");
+CREATE INDEX i ON t ("nulls" NULLS FIRST, a nulls, x "asc");
 
 -- CREATE INDEX "concurrently" ON t (a)
 CREATE INDEX "concurrently" ON t (a);

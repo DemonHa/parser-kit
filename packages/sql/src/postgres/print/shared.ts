@@ -11,7 +11,7 @@ import type {
   RelationOptionValue,
   SequenceOption,
 } from "../ast";
-import { ident, kw, parenList, parens, qualified, quoted, str } from "./context";
+import { ident, isColNameKeyword, kw, parenList, parens, qualified, quoted, str } from "./context";
 import { expr } from "./expr";
 import { typeName } from "./types";
 
@@ -24,8 +24,11 @@ const label = (name: string, bareAllowed = true): string => (bareAllowed && BARE
 const optionScalar = (v: RelationOptionScalar): Doc => {
   switch (v.kind) {
     case "name": {
+      // PG's def_arg takes a type name or a reserved word bare, but not a
+      // col_name keyword (`between`, `values`), and a bare true / false
+      // would read as a boolean.
       const word = v.parts[0]!;
-      return label(word, word !== "true" && word !== "false");
+      return label(word, word !== "true" && word !== "false" && !isColNameKeyword(word));
     }
     case "string":
       return str(v.value);
@@ -117,7 +120,16 @@ export const sequenceOption = (o: SequenceOption): Doc => {
     case "cycle":
       return kw(o.value ? "CYCLE" : "NO CYCLE");
     case "ownedBy":
-      return [kw("OWNED BY"), " ", o.owner === null ? kw("NONE") : qualified(o.owner)];
+      // A one-part `none` is quoted: bare, it is OWNED BY NONE.
+      return [
+        kw("OWNED BY"),
+        " ",
+        o.owner === null
+          ? kw("NONE")
+          : o.owner.length === 1 && o.owner[0] === "none"
+            ? quoted("none")
+            : qualified(o.owner),
+      ];
     case "sequenceName":
       return [kw("SEQUENCE NAME"), " ", qualified(o.name)];
   }

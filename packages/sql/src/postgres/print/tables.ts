@@ -72,7 +72,21 @@ const names = (list: readonly string[]): Doc => parenList(list.map(ident));
 // which never changes what PG reads, and which this grammar requires of a
 // partition key and drops again on parsing.
 const isBareElement = (e: Expr): boolean => (e.kind === "name" && e.parts.length === 1) || e.kind === "call";
-const element = (e: Expr): Doc => (isBareElement(e) ? expr(e) : parens(expr(e)));
+const element = (e: Expr): Doc =>
+  e.kind === "name" && e.parts.length === 1 && LOOKAHEAD_WORDS.has(e.parts[0]!)
+    ? quoted(e.parts[0]!)
+    : isBareElement(e)
+      ? expr(e)
+      : parens(expr(e));
+
+// PG's lexer reads FORMAT before JSON, WITHOUT before TIME and NULLS before
+// FIRST / LAST as one token, which no name can be. So a name written where
+// one of those words may follow it (a column before its type, an element
+// before its operator class) is quoted when it is one of the three.
+const LOOKAHEAD_WORDS = new Set(["format", "without", "nulls"]);
+const leadName = (name: string): string => (LOOKAHEAD_WORDS.has(name) ? quoted(name) : ident(name));
+const collation = (parts: readonly string[]): string =>
+  parts.map((p, i) => (i === parts.length - 1 && LOOKAHEAD_WORDS.has(p) ? quoted(p) : ident(p))).join(".");
 
 // An index or exclusion element: as `element`, but a COLLATE around it is
 // written outside the parentheses, where PG reads it as the element's own
@@ -81,7 +95,7 @@ const element = (e: Expr): Doc => (isBareElement(e) ? expr(e) : parens(expr(e)))
 // reads both spellings as the same tree. (A partition key keeps its own
 // collation apart, so its COLLATE nodes are the parenthesised kind.)
 const indexElement = (e: Expr): Doc =>
-  e.kind === "collate" ? [element(e.expr), " ", kw("COLLATE"), " ", qualified(e.collation)] : element(e);
+  e.kind === "collate" ? [element(e.expr), " ", kw("COLLATE"), " ", collation(e.collation)] : element(e);
 
 // An operator class follows its element's expression, so a word that would
 // continue that expression is quoted (`a "between"`). The others are quoted
@@ -223,7 +237,7 @@ const withConstraints = (head: Doc, constraints: readonly ColConstraint[]): Doc 
 const columnDef = (c: ColumnDef): Doc =>
   withConstraints(
     words(
-      ident(c.name),
+      leadName(c.name),
       typeName(c.dataType),
       c.storage !== undefined ? `${kw("STORAGE")} ${kw(c.storage.toUpperCase())}` : "",
       c.compression !== undefined
@@ -235,7 +249,7 @@ const columnDef = (c: ColumnDef): Doc =>
   );
 
 const columnOptions = (c: ColumnOptions): Doc =>
-  withConstraints(words(ident(c.name), c.withOptions ? kw("WITH OPTIONS") : ""), c.constraints);
+  withConstraints(words(leadName(c.name), c.withOptions ? kw("WITH OPTIONS") : ""), c.constraints);
 
 const tableItem = (item: TableItem): Doc => {
   switch (item.kind) {
@@ -287,7 +301,7 @@ export const partitionBound = (b: PartitionBound): Doc => {
 const partitionKey = (k: PartitionKey): Doc =>
   words(
     element(k.expr),
-    k.collate !== undefined ? `${kw("COLLATE")} ${qualified(k.collate)}` : "",
+    k.collate !== undefined ? `${kw("COLLATE")} ${collation(k.collate)}` : "",
     k.opclass !== undefined ? opclass(k.opclass) : "",
   );
 

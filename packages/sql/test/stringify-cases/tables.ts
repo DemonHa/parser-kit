@@ -15,6 +15,13 @@ export const cases: string[] = [
   // A DEFAULT is a b_expr: a COLLATE, comparison or IS test there is parenthesised.
   "CREATE TABLE t (a text DEFAULT ('a' COLLATE \"C\"), b bool DEFAULT (1 < 2), c bool DEFAULT (x IS NULL) NOT NULL, d int DEFAULT -1)",
   "CREATE TABLE t (a text DEFAULT 'a' COLLATE \"C\")",
+  // Names PG's lexer would join with the next word (FORMAT JSON, WITHOUT TIME, NULLS FIRST).
+  'CREATE TABLE t ("format" json, "without" time, "nulls" "first", format int)',
+  'CREATE TABLE p PARTITION OF parent ("format" NOT NULL) DEFAULT',
+  'CREATE INDEX ON t ("format" json, "without" time, "nulls" "last" DESC, a COLLATE "nulls" "first")',
+  'CREATE TABLE t (a int) PARTITION BY RANGE ("format" json, "nulls" "first", "without" time, a COLLATE "nulls" "last")',
+  // An identity sequence owned by a column named `none`.
+  'CREATE TABLE t (a int GENERATED ALWAYS AS IDENTITY (OWNED BY "none"))',
   // --- table constraints ---
   "CREATE TABLE t (a int, b int, PRIMARY KEY (a, b) INCLUDE (c) WITH (fillfactor = 90) USING INDEX TABLESPACE ts, UNIQUE NULLS NOT DISTINCT (b) DEFERRABLE INITIALLY DEFERRED)",
   "CREATE TABLE t (a int, CONSTRAINT ck CHECK (a > 0) NOT DEFERRABLE INITIALLY IMMEDIATE NO INHERIT NOT VALID, CHECK (a < 10))",
@@ -50,6 +57,8 @@ export const cases: string[] = [
   "CREATE TABLE t (a int) WITHOUT OIDS",
   "CREATE TABLE t (a int) INHERITS (p) PARTITION BY LIST (a) USING heap WITH (x = 'y', z = -1.5, w = on, v = \"true\", u = *) ON COMMIT DROP TABLESPACE ts",
   'CREATE TABLE t (a int) WITH ("Mixed" = 1, "select" = 2, user = 3)',
+  // A col_name keyword is no bare option value to PG.
+  'CREATE TABLE t (a int) WITH (x = "between", y = "values", z = "coalesce", w = "setof", v = "national", u = "row", n = none)',
   // --- CREATE TABLE AS ---
   "CREATE TABLE t AS SELECT 1 AS a",
   "CREATE UNLOGGED TABLE IF NOT EXISTS t (a, b) USING heap WITH (fillfactor = 70) TABLESPACE ts AS SELECT 1, 2 WITH NO DATA",
