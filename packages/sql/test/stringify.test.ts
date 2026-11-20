@@ -141,6 +141,15 @@ const PRINTER_CASES = [
   'SELECT * FROM f() AS (a int, b text COLLATE "C"), g() AS x (a int), h(1) WITH ORDINALITY AS y, LATERAL k(VARIADIC a) z;',
   "SELECT * FROM ONLY t AS x (a) TABLESAMPLE system (10), u TABLESAMPLE bernoulli (5, 6) REPEATABLE (1 + 1), (SELECT 1);",
   'SELECT * FROM "xmltable"(a), "json_table"(b), "rows"(c);',
+  // names shaped like keywords where they stand
+  'SELECT JSON_OBJECT((a, b) OVERLAPS (c, d) : 1), "exists", "exists".x, "exists"(1) FROM "exists";',
+  "SELECT SUBSTRING(a SIMILAR (b LIKE c) ESCAPE d), SUBSTRING(a SIMILAR (NOT b SIMILAR TO c) ESCAPE d), SUBSTRING((a = b) SIMILAR c ESCAPE d);",
+  'SELECT sum(a) OVER (ORDER BY a ROWS "unbounded" PRECEDING), sum(a) OVER (ROWS BETWEEN "current" + 1 PRECEDING AND CURRENT ROW) FROM t;',
+  'SELECT sum(a) OVER ("rows" ORDER BY a) FROM t WINDOW "rows" AS (), w AS ("partition");',
+  'SELECT 1 FROM t ORDER BY a FETCH FIRST "rows" ROWS WITH TIES;',
+  'WITH "recursive" AS (SELECT 1) SELECT 1;',
+  `SELECT "interval" '1', a::"interval", a::"between", "row" 'x';`,
+  'SELECT "system_user", "current_catalog", "current_schema", "collation", "isnull" FROM "similar" AS "full";',
 ];
 
 const SOURCES = [
@@ -212,7 +221,7 @@ describe("stringify round trips", () => {
     { width: 40, keywordCase: "lower", identifierQuote: "always", strings: "escape", indent: "\t" },
   ];
   for (const o of options) {
-    it(`P1: parses back to the same tree with ${JSON.stringify(o)}`, () => {
+    it(`P1: parses back to the same tree with ${JSON.stringify({ ...o, width: String(o.width) })}`, () => {
       const failures: string[] = [];
       for (const { source, stmt } of printable) {
         try {
@@ -374,6 +383,21 @@ describe("stringify on hand-built trees", () => {
     expect(stringify({ kind: "call", name: ["pg_catalog", "numeric"], args: [name("x")] })).toBe(
       "pg_catalog.numeric(x)",
     );
+  });
+
+  it("writes PostgreSQL's spelling where this grammar is more lenient", () => {
+    const print = (sql: string) => stringify(postgres.parse(sql)[0]!);
+    // OVERLAPS is an a_expr to PG: parenthesised in b_expr and c_expr positions.
+    const overlaps = "SELECT x BETWEEN ((a, b) OVERLAPS (c, d)) AND y, POSITION(((a, b) OVERLAPS (c, d)) IN x);";
+    expect(print(overlaps)).toBe(overlaps);
+    const xml = "SELECT XMLEXISTS(((a, b) OVERLAPS (c, d)) PASSING x), (a, b) OVERLAPS (c, d) AND e;";
+    expect(print(xml)).toBe(xml);
+    // POSITION's operands are both b_expr.
+    const position = `SELECT POSITION('a' IN (b COLLATE "C")), POSITION('a' IN b || c);`;
+    expect(print(position)).toBe(position);
+    // A reserved-to-PG or function-only word is quoted as a column or table name.
+    const names = 'SELECT "system_user", "collation" FROM "similar";';
+    expect(print(names)).toBe(names);
   });
 
   it("throws NotPrintableError for a statement family not printed yet", () => {

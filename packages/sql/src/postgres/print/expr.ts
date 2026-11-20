@@ -44,6 +44,7 @@ import { bExprTable, expressionTable } from "../grammar";
 import {
   commaList,
   firstChar,
+  firstText,
   functionWord,
   ident,
   isColNameKeyword,
@@ -131,11 +132,30 @@ const prec = precedence<Expr, "b">(expressionTable, {
 // it skips `precedence` entirely: most nodes are atoms, and this is the hot path.
 
 /** An expression where the grammar reads a whole one: a call argument, a clause, a list item. */
-export const expr = (e: Expr): Doc => (exprKey(e) === null ? printExpr(e) : prec.operand(e, 0, null));
+export const expr = (e: Expr): Doc =>
+  within(false, () => (exprKey(e) === null ? printExpr(e) : prec.operand(e, 0, null)));
 /** An expression where the grammar reads PG's restricted `b_expr`. */
-export const bExpr = (e: Expr): Doc => prec.operand(e, 0, "b");
+export const bExpr = (e: Expr): Doc => within(true, () => prec.operand(e, 0, "b"));
+/** Whether a node is PG's c_expr, which stands anywhere an operand does: an atom, but not OVERLAPS. */
+export const isAtom = (e: Expr): boolean => exprKey(e) === null && e.kind !== "overlaps";
 /** An expression where the grammar reads a bare atom (PG's c_expr): anything else is parenthesised. */
-export const atomic = (e: Expr): Doc => (exprKey(e) === null ? expr(e) : ["(", expr(e), ")"]);
+export const atomic = (e: Expr): Doc => (isAtom(e) ? expr(e) : ["(", expr(e), ")"]);
+
+// `row OVERLAPS row` is an atom to this grammar but an a_expr to PG, so in a
+// b_expr position it is parenthesised by hand. `inB` says whether the operand
+// being printed is one (set by `bExpr`, cleared by `expr`); a pair of
+// parentheses `precedence` adds around a part of it leaves it set, which can
+// only add parentheses.
+let inB = false;
+const within = <T>(b: boolean, print: () => T): T => {
+  const outer = inB;
+  inB = b;
+  try {
+    return print();
+  } finally {
+    inB = outer;
+  }
+};
 
 // PG declares IN and the IS tests non-associative (`a IS NULL IS NULL` is a
 // syntax error), but they are postfix groups here, which `precedence` treats
@@ -294,10 +314,17 @@ const frameBound = (b: WindowFrameBound): Doc => {
     case "currentRow":
       return kw("CURRENT ROW");
     case "preceding":
-      return [expr(b.offset), " ", kw("PRECEDING")];
+      return [frameOffset(b.offset), " ", kw("PRECEDING")];
     case "following":
-      return [expr(b.offset), " ", kw("FOLLOWING")];
+      return [frameOffset(b.offset), " ", kw("FOLLOWING")];
   }
+};
+
+// An offset that opens with a word a bound or BETWEEN opens with (a column
+// named `unbounded`, `current`) would read as that bound: parenthesised.
+const frameOffset = (e: Expr): Doc => {
+  const doc = expr(e);
+  return /^(?:unbounded|current|between)(?![a-z0-9_$])/.test(firstText(doc)) ? ["(", doc, ")"] : doc;
 };
 
 const EXCLUSIONS = { currentRow: "CURRENT ROW", group: "GROUP", ties: "TIES", noOthers: "NO OTHERS" } as const;
@@ -311,10 +338,13 @@ const frame = (f: WindowFrame): Doc => [
   f.exclude !== undefined ? [" ", kw("EXCLUDE"), " ", kw(EXCLUSIONS[f.exclude])] : "",
 ];
 
+const WINDOW_CLAUSE_WORDS = new Set(["partition", "order", "rows", "range", "groups"]);
+
 /** A window specification in parentheses: `(w PARTITION BY a ORDER BY b ROWS …)`. */
 export const windowSpec = (s: WindowSpec): Doc => {
   const parts: Doc[] = [];
-  if (s.name !== null) parts.push(ident(s.name));
+  // A base window named like a clause word would read as that clause.
+  if (s.name !== null) parts.push(WINDOW_CLAUSE_WORDS.has(s.name) ? quoted(s.name) : ident(s.name));
   if (s.partitionBy !== null) {
     parts.push(group([kw("PARTITION BY"), indent([line, commaList(s.partitionBy.map(expr))])]));
   }
@@ -424,7 +454,7 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   star: (e) => (e.table === null ? "*" : [qualified(e.table), ".*"]),
   bitString: (e) => `${kw(e.hex ? "X" : "B")}'${e.value}'`,
   sqlValueFunction: (e) => [kw(e.name.toUpperCase()), e.precision !== undefined ? `(${e.precision})` : ""],
-  typedLiteral: (e) => [typeName(e.type), " ", str(e.value)],
+  typedLiteral: (e) => [typeName(e.type, true), " ", str(e.value)],
   // The precision goes before the literal, or on the trailing SECOND field.
   interval: (e) => {
     const p = e.precision !== undefined ? `(${e.precision})` : "";
@@ -491,7 +521,7 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       " ",
       kw("BETWEEN"),
       e.symmetric !== undefined ? ` ${kw(e.symmetric ? "SYMMETRIC" : "ASYMMETRIC")}` : "",
-      indent([line, prec.operand(e.lo, 11, "b"), " ", kw("AND"), " ", right(e, e.hi)]),
+      indent([line, within(true, () => prec.operand(e.lo, 11, "b")), " ", kw("AND"), " ", right(e, e.hi)]),
     ]),
   in: (e) => [left(e, e.expr), not(e.negated), " ", kw("IN"), " ", parenList(e.list.map(expr))],
   inSubquery: (e) => [left(e, e.expr), not(e.negated), " ", kw("IN"), " ", parens(printQuery(e.query))],
@@ -515,7 +545,10 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   array: (e) => [kw("ARRAY"), brackets(e)],
   row: (e) =>
     e.implicit && e.items.length > 1 ? parenList(e.items.map(expr)) : [kw("ROW"), parenList(e.items.map(expr))],
-  overlaps: (e, print) => [print(e.left), " ", kw("OVERLAPS"), " ", print(e.right)],
+  overlaps: (e, print) => {
+    const doc = [print(e.left), " ", kw("OVERLAPS"), " ", print(e.right)];
+    return inB ? ["(", doc, ")"] : doc;
+  },
   subscript: (e) => chain(e),
   fieldSelect: (e) => chain(e),
   extract: (e) => fn("EXTRACT", parens([minimalIdent(e.field), " ", kw("FROM"), " ", expr(e.source)])),
@@ -531,11 +564,24 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   substringSimilar: (e) =>
     fn(
       "SUBSTRING",
-      parens([expr(e.value), " ", kw("SIMILAR"), " ", expr(e.pattern), " ", kw("ESCAPE"), " ", expr(e.escape)]),
+      // Both operands are parenthesised from LIKE's tier down: PG reads a
+      // looser value's SIMILAR as SIMILAR TO, and a pattern ending in LIKE or
+      // SIMILAR TO would take the ESCAPE.
+      parens([
+        within(false, () => prec.operand(e.value, 11, null)),
+        " ",
+        kw("SIMILAR"),
+        " ",
+        within(false, () => prec.operand(e.pattern, 11, null)),
+        " ",
+        kw("ESCAPE"),
+        " ",
+        expr(e.escape),
+      ]),
     ),
   normalize: (e) => fn("NORMALIZE", parens([expr(e.value), ", ", kw(e.form.toUpperCase())])),
   collationFor: (e) => [kw("COLLATION FOR"), " ", parens(expr(e.expr))],
-  position: (e) => fn("POSITION", parens([bExpr(e.substring), " ", kw("IN"), " ", expr(e.string)])),
+  position: (e) => fn("POSITION", parens([bExpr(e.substring), " ", kw("IN"), " ", bExpr(e.string)])),
   trim: (e) =>
     fn(
       "TRIM",

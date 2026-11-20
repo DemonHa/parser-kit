@@ -62,17 +62,57 @@ export const withOptions = <T>(options: StringifyOptions | undefined, print: () 
 /** A keyword, or a run of keywords, written upper-case in the source. */
 export const kw = (text: string): string => (state.lower ? text.toLowerCase() : text);
 
+// PG's reserved words beyond the grammar's RESERVED: two it reads as functions
+// when bare (the grammar reads them as names, so it doesn't reserve them).
+const ALSO_RESERVED: ReadonlySet<string> = new Set(["current_catalog", "system_user"]);
+// PG's type_func_name_keyword list: a function or type may be named one, but
+// not a column, table or alias, so those are quoted. `exists` is a
+// col_name_keyword, fine as a column name to PG, but the grammar here reads it
+// as EXISTS wherever an expression starts.
+const NOT_COLUMN_NAMES: ReadonlySet<string> = new Set([
+  "authorization",
+  "binary",
+  "collation",
+  "concurrently",
+  "cross",
+  "current_schema",
+  "freeze",
+  "full",
+  "ilike",
+  "inner",
+  "is",
+  "isnull",
+  "join",
+  "left",
+  "like",
+  "natural",
+  "notnull",
+  "outer",
+  "overlaps",
+  "right",
+  "similar",
+  "tablesample",
+  "verbose",
+  "exists",
+]);
+const reservedRoutine = (w: string): boolean => RESERVED.has(w) || ALSO_RESERVED.has(w);
+const reservedName = (w: string): boolean => reservedRoutine(w) || NOT_COLUMN_NAMES.has(w);
+
 // PG's bare identifier, as the grammar reads one: a lower-case word that is
 // not reserved. Anything else is written quoted, `"` doubled.
-const quoteName = quoting({ quote: '"', start: /[a-z_]/, part: /[a-z0-9_$]/, reserved: RESERVED, fold: "lower" });
+const rules = { quote: '"', start: /[a-z_]/, part: /[a-z0-9_$]/, fold: "lower" } as const;
+const quoteName = quoting({ ...rules, reserved: reservedName });
+const quoteRoutine = quoting({ ...rules, reserved: reservedRoutine });
 
 // The common case, a bare word, without the general rules' per-character scan.
 const BARE_WORD = /^[a-z_][a-z0-9_$]*$/;
 const minimal = (name: string): string =>
-  BARE_WORD.test(name) && !RESERVED.has(name) ? name : quoteName(name, "minimal");
+  BARE_WORD.test(name) && !reservedRoutine(name) ? name : quoteRoutine(name, "minimal");
+const minimalName = (name: string): string =>
+  BARE_WORD.test(name) && !reservedName(name) ? name : quoteName(name, "minimal");
 
 /** A table, column, alias or other object name. */
-export const ident = (name: string): string => (state.always ? quoteName(name, "always") : minimal(name));
+export const ident = (name: string): string => (state.always ? quoteName(name, "always") : minimalName(name));
 /** A dotted name, each part through `ident`. */
 export const qualified = (parts: readonly string[]): string => parts.map(ident).join(".");
 /** A name always written quoted. */
@@ -210,12 +250,15 @@ export const clause = (keyword: Doc, body: Doc): Doc => group([keyword, indent([
  * The first character a doc prints, or "" when it prints nothing. Follows the
  * leftmost path only (and the flat branch of an `ifBreak`), so it is cheap.
  */
-export const firstChar = (doc: Doc): string => {
+export const firstChar = (doc: Doc): string => firstText(doc)[0] ?? "";
+
+/** The first non-empty text a doc prints (" " for a line), or "". */
+export const firstText = (doc: Doc): string => {
   const todo: Doc[] = [doc];
   while (todo.length > 0) {
     const d = todo.pop()!;
     if (typeof d === "string") {
-      if (d !== "") return d[0]!;
+      if (d !== "") return d;
     } else if (Array.isArray(d)) {
       for (let i = d.length - 1; i >= 0; i--) todo.push(d[i]!);
     } else {

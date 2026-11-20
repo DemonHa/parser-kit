@@ -23,12 +23,23 @@ import type {
   XmlNamespace,
   XmlTableColumn,
 } from "../ast";
-import { clause, commaList, firstChar, functionWord, ident, kw, parenList, parens, qualified, str } from "./context";
+import {
+  clause,
+  commaList,
+  firstChar,
+  functionWord,
+  ident,
+  kw,
+  parenList,
+  parens,
+  qualified,
+  quoted,
+  str,
+} from "./context";
 import {
   atomic,
   bExpr,
   expr,
-  exprKey,
   jsonBehavior,
   jsonFormat,
   jsonPassing,
@@ -65,7 +76,8 @@ const QUERY_KINDS = new Set(["select", "values", "tableCmd", "setOp"]);
 const isQuery = (s: Preparable): s is Query => QUERY_KINDS.has(s.kind);
 
 const cte = (c: Cte): Doc => [
-  ident(c.name),
+  // A first CTE named `recursive` would read as the keyword.
+  c.name === "recursive" ? quoted(c.name) : ident(c.name),
   c.columns !== null ? [" ", parenList(c.columns.map(ident))] : "",
   " ",
   kw("AS"),
@@ -264,7 +276,7 @@ const locking = (l: LockingClause): Doc => [
 
 // A FETCH count is PG's select_fetch_first_value, a c_expr or a signed
 // constant: anything else is parenthesised.
-const fetchCount = (e: Expr): Doc => (exprKey(e) === null ? expr(e) : ["(", expr(e), ")"]);
+const fetchCount = (e: Expr): Doc => (e.kind === "number" || e.kind === "param" ? expr(e) : ["(", expr(e), ")"]);
 
 // LIMIT n OFFSET m, or the standard OFFSET m FETCH FIRST n ROWS … when the
 // limit needs the FETCH spelling (WITH TIES, or the count-less ROW ONLY).

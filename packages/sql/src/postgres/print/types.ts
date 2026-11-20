@@ -2,7 +2,7 @@
 // `SETOF record`, `"char"`.
 import type { Doc } from "@parser-kit/core/print";
 import type { ColType } from "../ast";
-import { kw, minimalQualified, quoted } from "./context";
+import { isColNameKeyword, kw, minimalQualified, quoted } from "./context";
 
 // The multi-word spellings the grammar folds into one name part
 // (`["double precision"]`), keyed by their lead word. A part holding one of
@@ -17,8 +17,37 @@ const isMultiWord = (part: string): boolean => {
 // TIME and TIMESTAMP spell their precision before the rest of the name.
 const ARGS_BEFORE_TAIL = new Set(["timestamp", "time"]);
 
-/** A type name, written as the grammar folded it (lower-case); `SETOF` is the one keyword. */
-export const typeName = (t: ColType): Doc => {
+// PG's col_name keywords that are type names in their own right. Any other
+// col_name keyword (`between`, `row`, `values`, …) can't stand bare as a type
+// name, so it is quoted (`isColNameKeyword`).
+const KEYWORD_TYPES = new Set([
+  "bigint",
+  "bit",
+  "boolean",
+  "char",
+  "character",
+  "dec",
+  "decimal",
+  "float",
+  "int",
+  "integer",
+  "interval",
+  "national",
+  "nchar",
+  "numeric",
+  "real",
+  "smallint",
+  "time",
+  "timestamp",
+  "varchar",
+]);
+
+/**
+ * A type name, written as the grammar folded it (lower-case); `SETOF` is the
+ * one keyword. `literal` is set for a typed literal's type, where a bare
+ * `interval` would read as an INTERVAL literal instead.
+ */
+export const typeName = (t: ColType, literal = false): Doc => {
   const args = t.args.length > 0 ? `(${t.args.join(", ")})` : "";
   let name: string;
   if (t.name.length === 1 && t.quoted) {
@@ -29,6 +58,11 @@ export const typeName = (t: ColType): Doc => {
     const space = words.indexOf(" ");
     const lead = words.slice(0, space);
     name = ARGS_BEFORE_TAIL.has(lead) ? `${lead}${args}${words.slice(space)}` : `${words}${args}`;
+  } else if (
+    t.name.length === 1 &&
+    ((isColNameKeyword(t.name[0]!) && !KEYWORD_TYPES.has(t.name[0]!)) || (literal && t.name[0] === "interval"))
+  ) {
+    name = `${quoted(t.name[0]!)}${args}`;
   } else {
     name = `${minimalQualified(t.name)}${args}`;
   }
