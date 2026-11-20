@@ -647,6 +647,13 @@ SELECT
   EXTRACT('value' FROM a)
 FROM JSON_TABLE(js, '$' COLUMNS ("nested" path, "nested" path PATH '$')) AS j;
 
+-- SELECT JSON_QUERY(j, (p IS JSON) WITH WRAPPER), JSON_QUERY(j, (p IS JSON ARRAY) WITHOUT WRAPPER), "collation".foo '1', 'x'::"collation".foo;
+SELECT
+  JSON_QUERY(j, (p IS JSON) WITH UNCONDITIONAL WRAPPER),
+  JSON_QUERY(j, (p IS JSON ARRAY) WITHOUT WRAPPER),
+  "collation".foo '1',
+  'x'::collation.foo;
+
 -- SELECT * FROM users u;
 SELECT * FROM users AS u;
 

@@ -2,7 +2,7 @@
 // `SETOF record`, `"char"`.
 import type { Doc } from "@parser-kit/core/print";
 import type { ColType } from "../ast";
-import { isColNameKeyword, kw, quoted, typeQualified } from "./context";
+import { functionQualified, isColNameKeyword, kw, quoted, typeQualified } from "./context";
 
 // The multi-word spellings the grammar folds into one name part
 // (`["double precision"]`), keyed by their lead word. A part holding one of
@@ -64,7 +64,8 @@ export const typeName = (t: ColType, literal = false): Doc => {
   ) {
     name = `${quoted(t.name[0]!)}${args}`;
   } else {
-    name = `${typeQualified(t.name)}${args}`;
+    // A typed literal's type is PG's func_name, whose first part is a column name.
+    name = `${literal && t.name.length > 1 ? functionQualified(t.name) : typeQualified(t.name)}${args}`;
   }
   return `${t.setof ? `${kw("SETOF")} ` : ""}${name}${t.array ? "[]" : ""}`;
 };

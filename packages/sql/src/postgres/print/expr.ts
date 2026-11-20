@@ -213,6 +213,49 @@ const right = (parent: Expr, child: Expr): Doc =>
 
 type Call = Extract<Expr, { kind: "call" }>;
 type Binary = Extract<Expr, { kind: "binary" }>;
+type Unary = Extract<Expr, { kind: "unary" }>;
+type Postfix = Extract<Expr, { kind: "cast" | "collate" | "atTimeZone" | "atLocal" }>;
+
+// A prefix operator the grammar reads by value, rather than `OPERATOR(op) x`.
+const isPrefix = (n: Unary): boolean => n.opSchema === undefined && PREFIX_OPS.has(n.op);
+// One prefix operator before its operand's doc.
+const prefixed = (n: Unary, operand: Doc): Doc => {
+  if (n.op === "not") return [kw("NOT"), " ", operand];
+  if (!isPrefix(n)) return [operator(n.op, n.opSchema ?? []), " ", operand];
+  // `- -1` must not print as `--1`, a comment, nor `@ -1` as the operator `@-`.
+  return [n.op, OPERATOR_CHARS.has(firstChar(operand)) ? " " : "", operand];
+};
+
+// A run of `::` casts, COLLATE and AT TIME ZONE / AT LOCAL (`x::int::text`),
+// walked in a loop for the same reason.
+const POSTFIX_KINDS = new Set<Expr["kind"]>(["cast", "collate", "atTimeZone", "atLocal"]);
+const postfixChain = (e: Postfix): Doc => {
+  const spine: Postfix[] = [e];
+  let node = e;
+  while (POSTFIX_KINDS.has(node.expr.kind) && !prec.parens(node, node.expr, "left")) {
+    node = node.expr as Postfix;
+    spine.push(node);
+  }
+  const parts: Doc[] = [left(node, node.expr)];
+  for (let i = spine.length - 1; i >= 0; i--) {
+    const n = spine[i]!;
+    switch (n.kind) {
+      case "cast":
+        parts.push("::", typeName(n.type));
+        break;
+      case "collate":
+        parts.push(` ${kw("COLLATE")} `, qualified(n.collation));
+        break;
+      case "atTimeZone":
+        parts.push(` ${kw("AT TIME ZONE")} `, right(n, n.zone));
+        break;
+      case "atLocal":
+        parts.push(` ${kw("AT LOCAL")}`);
+        break;
+    }
+  }
+  return parts;
+};
 
 // PG's extract_arg is an identifier, one of six field keywords, or a string:
 // any other keyword can't stand bare. The fields PG knows are bare words
@@ -392,14 +435,16 @@ export const jsonFormat = (f: JsonFormat | undefined): Doc =>
     ? ""
     : [" ", kw("FORMAT JSON"), f.encoding !== undefined ? [" ", kw("ENCODING"), " ", minimalIdent(f.encoding)] : ""];
 export const jsonValue = (v: JsonValueExpr): Doc => [expr(v.expr), jsonFormat(v.format)];
-// The value right before a `{WITH | WITHOUT} UNIQUE` clause: one ending in an
-// `IS JSON` test with no clause of its own would take it, so it is parenthesised.
+// An expression right before a clause opening with WITH or WITHOUT (`… UNIQUE
+// KEYS`, `… WRAPPER`): one ending in an `IS JSON` test with no uniqueness
+// clause of its own would take the WITH, so it is parenthesised.
 const IS_JSON_TAIL = /(?:^|[\s(])(?:json|value|scalar|array|object)$/i;
-const jsonValueBeforeUnique = (v: JsonValueExpr, unique: boolean): Doc => {
-  if (!unique || v.format !== undefined) return jsonValue(v);
-  const doc = expr(v.expr);
-  return IS_JSON_TAIL.test(lastText(doc)) ? ["(", doc, ")"] : doc;
+const beforeWith = (e: Expr, guard: boolean): Doc => {
+  const doc = expr(e);
+  return guard && IS_JSON_TAIL.test(lastText(doc)) ? ["(", doc, ")"] : doc;
 };
+const jsonValueBeforeUnique = (v: JsonValueExpr, unique: boolean): Doc =>
+  !unique || v.format !== undefined ? jsonValue(v) : beforeWith(v.expr, true);
 const jsonReturning = (r: JsonReturning | undefined): Doc[] =>
   r === undefined ? [] : [[kw("RETURNING"), " ", typeName(r.type), jsonFormat(r.format)]];
 const jsonOnNull = (n: "null" | "absent" | undefined): Doc[] =>
@@ -493,7 +538,12 @@ const operator = (op: string, opSchema: string[] | undefined): string =>
 // --- the expression printer ---
 
 export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind", {
-  number: (e) => e.raw ?? String(e.value),
+  number: (e) => {
+    if (e.raw !== undefined) return e.raw;
+    // NaN or ±Infinity would print as a name; PG spells them as strings cast to numeric.
+    if (!Number.isFinite(e.value)) throw new TypeError(`A number node holds ${e.value} and no raw text`);
+    return String(e.value);
+  },
   string: (e) => str(e.value),
   bool: (e) => kw(e.value ? "TRUE" : "FALSE"),
   null: () => kw("NULL"),
@@ -512,14 +562,18 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   },
   call: (e) => [callName(e), callArgs(e)],
   namedArg: (e) => [functionWord(e.name), " => ", expr(e.value)],
+  // A run of prefix operators (`- - - x`, `NOT NOT a`) is walked in a loop,
+  // like a binary chain, so a long one doesn't run out of stack.
   unary: (e) => {
-    const operand =
-      e.opSchema === undefined && PREFIX_OPS.has(e.op) ? right(e, e.operand) : prec.operand(e.operand, OP_OPERAND);
-    if (e.op === "not") return [kw("NOT"), " ", operand];
-    const op = PREFIX_OPS.has(e.op) && e.opSchema === undefined ? e.op : operator(e.op, e.opSchema ?? []);
-    // `- -1` must not print as `--1`, a comment, nor `@ -1` as the operator `@-`.
-    const space = !PREFIX_OPS.has(e.op) || e.opSchema !== undefined || OPERATOR_CHARS.has(firstChar(operand));
-    return [op, space ? " " : "", operand];
+    const spine: Unary[] = [e];
+    let node = e;
+    while (isPrefix(node) && node.operand.kind === "unary" && !prec.parens(node, node.operand, "right")) {
+      node = node.operand;
+      spine.push(node);
+    }
+    let doc = isPrefix(node) ? right(node, node.operand) : prec.operand(node.operand, OP_OPERAND);
+    for (let i = spine.length - 1; i >= 0; i--) doc = prefixed(spine[i]!, doc);
+    return doc;
   },
   // A left-deep chain (`a OR b OR c …`, as generated filters run to thousands
   // of terms) is walked in a loop rather than recursed into, one group for the
@@ -547,10 +601,10 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
     " ",
     e.right.kind === "subquery" ? printExpr(e.right) : ["(", expr(e.right), ")"],
   ],
-  cast: (e) => [left(e, e.expr), "::", typeName(e.type)],
-  collate: (e) => [left(e, e.expr), " ", kw("COLLATE"), " ", qualified(e.collation)],
-  atTimeZone: (e) => [left(e, e.expr), " ", kw("AT TIME ZONE"), " ", right(e, e.zone)],
-  atLocal: (e) => [left(e, e.expr), " ", kw("AT LOCAL")],
+  cast: (e) => postfixChain(e),
+  collate: (e) => postfixChain(e),
+  atTimeZone: (e) => postfixChain(e),
+  atLocal: (e) => postfixChain(e),
   is: (e) => isTail(e, kw("NULL")),
   isTest: (e) => isTail(e, kw(e.test.toUpperCase())),
   isDocument: (e) => isTail(e, kw("DOCUMENT")),
@@ -714,7 +768,10 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   jsonQuery: (e) =>
     clauses(
       "JSON_QUERY",
-      [jsonValue(e.context), expr(e.path)],
+      [
+        jsonValue(e.context),
+        beforeWith(e.path, e.passing === undefined && e.returning === undefined && e.wrapper !== undefined),
+      ],
       [
         ...jsonPassing(e.passing),
         ...jsonReturning(e.returning),

@@ -18,6 +18,7 @@ import type {
   Query,
   SelectItem,
   SelectStmt,
+  SetOperation,
   SetOpKind,
   TableSample,
   XmlNamespace,
@@ -187,10 +188,20 @@ const body = (q: Query, hoisted: Query | null, parts: Doc[]): void => {
       parts.push([kw("TABLE"), " ", q.only ? `${kw("ONLY")} ` : "", qualified(q.name)]);
       return;
     case "setOp": {
-      const level = LEVEL[q.op];
-      arm(q.left, hoisted, (a) => a.kind === "setOp" && LEVEL[a.op] < level, parts);
-      parts.push(kw(SET_OPS[q.op]));
-      arm(q.right, null, (a) => a.kind === "setOp" && LEVEL[a.op] <= level, parts);
+      // A left-deep run of set operations (`SELECT 1 UNION ALL SELECT 2 …`, as
+      // generated bulk SQL runs to thousands) is walked in a loop.
+      const spine: SetOperation[] = [q];
+      let node = q;
+      while (node.left.kind === "setOp" && !needsParens(node.left, hoisted, LEVEL[node.left.op] < LEVEL[node.op])) {
+        node = node.left;
+        spine.push(node);
+      }
+      arm(node.left, hoisted, (a) => a.kind === "setOp" && LEVEL[a.op] < LEVEL[node.op], parts);
+      for (let i = spine.length - 1; i >= 0; i--) {
+        const n = spine[i]!;
+        parts.push(kw(SET_OPS[n.op]));
+        arm(n.right, null, (a) => a.kind === "setOp" && LEVEL[a.op] <= LEVEL[n.op], parts);
+      }
       return;
     }
   }
@@ -199,8 +210,10 @@ const body = (q: Query, hoisted: Query | null, parts: Doc[]): void => {
 // A set-operation arm, parenthesised when it has a WITH or a tail of its own
 // (which would otherwise belong to the whole query) or binds looser than the
 // set operation it is in.
+const needsParens = (a: Query, hoisted: Query | null, looser: boolean): boolean =>
+  hasTail(a) || (hasWith(a) && a !== hoisted) || looser;
 const arm = (a: Query, hoisted: Query | null, looser: (a: Query) => boolean, parts: Doc[]): void => {
-  if (hasTail(a) || (hasWith(a) && a !== hoisted) || looser(a)) {
+  if (needsParens(a, hoisted, looser(a))) {
     parts.push(parens(printQuery(a, hoisted)));
   } else {
     body(a, hoisted, parts);
@@ -363,8 +376,22 @@ type Join = Extract<FromItem, { kind: "join" }>;
 // A join without its alias clause. Joins nest to the left, so the left item is
 // written bare; a join on the right is parenthesised (PG nests `a JOIN b JOIN
 // c ON p ON q` that way, and the parentheses say so).
-const joinBody = (j: Join): Doc => [
-  printFrom(j.left),
+// A left-deep run of joins (`a JOIN b ON … JOIN c ON …`) is walked in a loop,
+// so thousands of them don't run out of stack.
+const joinBody = (j: Join): Doc => {
+  const spine: Join[] = [j];
+  let node = j;
+  while (node.left.kind === "join" && node.left.alias === undefined) {
+    node = node.left;
+    spine.push(node);
+  }
+  const parts: Doc[] = [printFrom(node.left)];
+  for (let i = spine.length - 1; i >= 0; i--) parts.push(joinStep(spine[i]!));
+  return parts;
+};
+
+// One join after its left item: the join words, the right item and the qualifier.
+const joinStep = (j: Join): Doc => [
   line,
   j.natural ? `${kw("NATURAL")} ` : "",
   kw(JOINS[j.joinType]),

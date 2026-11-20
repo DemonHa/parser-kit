@@ -356,6 +356,29 @@ describe("stringify on hand-built trees", () => {
     expect(stringify(stmt!, { width: 80 }).split("\n").length).toBeGreaterThan(5000);
   });
 
+  it("prints other long chains the parser accepts without running out of stack", () => {
+    const n = (count: number, f: (i: number) => string, sep: string) =>
+      Array.from({ length: count }, (_, i) => f(i)).join(sep);
+    const chains = [
+      `SELECT * FROM t0 ${n(4000, (i) => `JOIN t${i + 1} ON true`, " ")}`,
+      n(10000, (i) => `SELECT ${i}`, " UNION ALL "),
+      `SELECT 1${"::int".repeat(4000)}`,
+      `SELECT ${"NOT ".repeat(3000)}true`,
+      `SELECT ${"- ".repeat(3000)}1`,
+    ];
+    // Compared as text (printing what it printed gives it back): a deep
+    // comparison of these trees would itself run out of stack.
+    for (const sql of chains) {
+      const out = stringify(postgres.parse(sql)[0]!);
+      expect(stringify(postgres.parse(out)[0]!)).toBe(out);
+    }
+  });
+
+  it("throws for a number with no text to print", () => {
+    expect(() => stringify(num(Number.NaN))).toThrow("A number node holds NaN and no raw text");
+    expect(stringify({ kind: "number", value: Number.POSITIVE_INFINITY, raw: "1e400" })).toBe("1e400");
+  });
+
   it("throws NotPrintableError for a statement family not printed yet", () => {
     const [stmt] = postgres.parse("CREATE TABLE t (a int)");
     expect(() => stringify(stmt!)).toThrow(NotPrintableError);
