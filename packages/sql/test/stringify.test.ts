@@ -394,8 +394,8 @@ describe("stringify on hand-built trees", () => {
     const [stmt] = postgres.parse("CREATE TABLE t (a int)");
     expect(() => stringify(stmt!)).toThrow(NotPrintableError);
     expect(() => stringify(stmt!)).toThrow('A "createTable" statement is not yet printable');
-    // Nested in a query, as a data-modifying CTE body, it throws all the same.
-    const [cte] = postgres.parse("WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d");
-    expect(() => stringify(cte!)).toThrow('A "delete" statement is not yet printable');
+    // Nested in a printable statement (EXPLAIN's body), it throws all the same.
+    const [explain] = postgres.parse("EXPLAIN CREATE TABLE t AS SELECT 1");
+    expect(() => stringify(explain!)).toThrow('A "createTableAs" statement is not yet printable');
   });
 });
