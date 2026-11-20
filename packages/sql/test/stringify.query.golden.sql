@@ -675,6 +675,24 @@ WHERE
       kind = 'dddddddddd'
   );
 
+-- SELECT * FROM orders AS o WHERE (o.status = 'shipped' OR o.status = 'delivered' OR o.status = 'returned_to_sender') AND o.created_at > now() - INTERVAL '30 days';
+SELECT *
+FROM orders AS o
+WHERE
+  (
+    o.status = 'shipped' OR
+      o.status = 'delivered' OR
+      o.status = 'returned_to_sender'
+  ) AND
+    o.created_at > now() - INTERVAL '30 days';
+
+-- SELECT * FROM t WHERE (((s = 'active' OR s = 'trialing_customer') AND r = 'eu-west-1') OR p > 5) AND c > '2024-01-01';
+SELECT *
+FROM t
+WHERE
+  ((s = 'active' OR s = 'trialing_customer') AND r = 'eu-west-1' OR p > 5) AND
+    c > '2024-01-01';
+
 -- SELECT * FROM users u;
 SELECT * FROM users AS u;
 

@@ -601,10 +601,12 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       node = node.left;
       spine.push(node);
     }
-    // A tighter chain on the left takes one more indent, so where it breaks its
-    // lines stand apart from this chain's operands.
+    // A tighter chain on the left, printed bare, takes one more indent, so where
+    // it breaks its lines stand apart from this chain's operands. (A
+    // parenthesised one is set apart by its parentheses already.)
     const first = left(node, node.left);
-    const parts: Doc[] = [node.left.kind === "binary" ? indent(first) : first];
+    const tighter = node.left.kind === "binary" && !prec.parens(node, node.left, "left");
+    const parts: Doc[] = [tighter ? indent(first) : first];
     for (let i = spine.length - 1; i >= 0; i--) {
       const n = spine[i]!;
       parts.push(` ${operator(n.op, n.opSchema)}`, indent([line, right(n, n.right)]));

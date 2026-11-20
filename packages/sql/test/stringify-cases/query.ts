@@ -121,6 +121,8 @@ export const cases = [
   `SELECT JSON_QUERY(j, (p IS JSON) WITH WRAPPER), JSON_QUERY(j, (p IS JSON ARRAY) WITHOUT WRAPPER), "collation".foo '1', 'x'::"collation".foo;`,
   "SELECT * FROM orders WHERE status = 'paid' AND created_at >= '2024-01-01' AND customer_id = 42 AND total > 100 OR a * b + c * d - e > f;",
   "SELECT * FROM events WHERE NOT (kind = 'aaaaaaaaaa' OR kind = 'bbbbbbbbbb' OR kind = 'cccccccccc' OR kind = 'dddddddddd');",
+  "SELECT * FROM orders AS o WHERE (o.status = 'shipped' OR o.status = 'delivered' OR o.status = 'returned_to_sender') AND o.created_at > now() - INTERVAL '30 days';",
+  "SELECT * FROM t WHERE (((s = 'active' OR s = 'trialing_customer') AND r = 'eu-west-1') OR p > 5) AND c > '2024-01-01';",
 ];
 
 // Variants of the nested unions the printer reads (beyond expressions, FROM
