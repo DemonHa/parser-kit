@@ -1,0 +1,895 @@
+// Expressions: every `Expr` kind, plus the pieces several of them share
+// (ORDER BY items, window specifications, SQL/JSON clauses).
+//
+// Parentheses come from the grammar's own Pratt tables through `precedence`:
+// a binary node is keyed by its operator, an operator node by the key its
+// group lists in `nodes`, and an atom by null. Positions the grammar parses
+// with its restricted `b_expr` table (POSITION's operands, BETWEEN's lower
+// bound, XMLTABLE's PATH and DEFAULT, XMLNAMESPACES URIs) print in the `b` context, which wraps
+// whatever that table can't build. Positions that take a bare atom (PG's
+// c_expr: XMLEXISTS's path, a JSON_OBJECT key before VALUE) wrap anything that
+// isn't one.
+//
+// `expr.ts` and `query.ts` import each other (expressions hold subqueries,
+// queries hold expressions), so neither may use the other's exports at module
+// load (no top-level calls, spreads or `extendPrinter` of them), only inside
+// functions.
+import {
+  type Doc,
+  definePrinter,
+  group,
+  ifBreak,
+  indent,
+  join,
+  line,
+  type NodePrinter,
+  type PrecedenceKey,
+  precedence,
+  softline,
+} from "@parser-kit/core/print";
+import type {
+  Expr,
+  JsonBehavior,
+  JsonFormat,
+  JsonPassingArg,
+  JsonReturning,
+  JsonValueExpr,
+  OrderItem,
+  WindowFrame,
+  WindowFrameBound,
+  WindowSpec,
+  XmlNamedValue,
+  XmlPassing,
+} from "../ast";
+import { bExprTable, expressionTable } from "../grammar";
+import {
+  commaList,
+  firstChar,
+  firstText,
+  functionQualified,
+  functionWord,
+  ident,
+  isColNameKeyword,
+  kw,
+  lastText,
+  minimalIdent,
+  OPERATOR_CHARS,
+  parenList,
+  parens,
+  qualified,
+  quoted,
+  str,
+} from "./context";
+import { printQuery } from "./query";
+import { typeName } from "./types";
+
+// --- precedence keys ---
+
+// The operators the tables name a node for: every op of a plain `ops` infix
+// group, and every key a custom group lists in `nodes`. A binary node with any
+// other operator is the generic catch-all's (`op`), as is one spelled
+// `OPERATOR(…)`.
+// Each with its group's bp, which a binary chain compares.
+const NAMED_INFIX = new Map<string, number>();
+for (const g of expressionTable.infix) {
+  if ("ops" in g && g.ops && !g.parse) for (const op of g.ops) NAMED_INFIX.set(op, g.bp);
+  const nodes = (g as { nodes?: readonly string[] | Record<string, unknown> }).nodes;
+  if (nodes) for (const k of Array.isArray(nodes) ? nodes : Object.keys(nodes)) NAMED_INFIX.set(k, g.bp);
+}
+// The prefix operators the grammar reads by value. Any other one can only be
+// written `OPERATOR(op) x`.
+const PREFIX_OPS = new Set(expressionTable.prefix.flatMap((g) => g.ops));
+
+const isWordOp = (op: string): boolean => /^[a-z]/.test(op);
+
+const binaryKey = (op: string, opSchema: string[] | undefined): string =>
+  opSchema === undefined && NAMED_INFIX.has(op) ? op : "op";
+
+/** The node's entry in the Pratt table, as `precedence` reads it. */
+const exprKey = (e: Expr): PrecedenceKey => {
+  switch (e.kind) {
+    case "binary":
+      return binaryKey(e.op, e.opSchema);
+    case "unary":
+      return e.opSchema === undefined && PREFIX_OPS.has(e.op) ? { prefix: e.op } : "unary operator";
+    case "anyAll":
+      return e.opSchema === undefined && NAMED_INFIX.has(`any ${e.op}`) ? `any ${e.op}` : "any op";
+    case "in":
+    case "inSubquery":
+      return e.negated ? `not ${e.kind}` : e.kind;
+    case "exists":
+      return e.negated ? { prefix: "not" } : null;
+    case "number":
+      // A negative value (folded in elsewhere, or built by hand) reads back as a sign.
+      return e.value < 0 || e.raw?.startsWith("-") ? { prefix: "-" } : null;
+    case "like":
+    case "similarTo":
+    case "between":
+    case "is":
+    case "isDistinct":
+    case "isTest":
+    case "isNormalized":
+    case "isDocument":
+    case "isJson":
+    case "cast":
+    case "subscript":
+    case "collate":
+    case "atTimeZone":
+    case "atLocal":
+      return e.kind;
+    default:
+      return null;
+  }
+};
+
+// The bp a group reads a node's trailing operand at, from its `nodes` record:
+// what a position the grammar parses the same way reads too.
+const tailOf = (key: string): number => {
+  for (const g of expressionTable.infix) {
+    const nodes = (g as { nodes?: unknown }).nodes;
+    if (nodes && !Array.isArray(nodes)) {
+      const rhs = (nodes as Record<string, number | "none">)[key];
+      if (typeof rhs === "number") return rhs;
+    }
+  }
+  throw new Error(`No group reads a "${key}" operand`);
+};
+// Op's operand (`a OPERATOR(+) b`, and the prefix `OPERATOR(-) b`), and the
+// LIKE / BETWEEN tier's (a BETWEEN bound, SUBSTRING … SIMILAR's operands).
+const OP_OPERAND = tailOf("op");
+const LIKE_OPERAND = tailOf("like");
+
+const prec = precedence<Expr, "b">(expressionTable, {
+  key: exprKey,
+  print: (e): Doc => printExpr(e),
+  // `OPERATOR(op) x`: the atom rule reads its operand at Op's bp + 1.
+  atoms: { "unary operator": OP_OPERAND },
+  contexts: { b: bExprTable },
+  // Parentheses it adds open onto their own lines when their contents break.
+  wrap: parens,
+});
+
+// An atom never needs parentheses from `precedence`, and nothing it prints
+// reads `precedence`'s operand context (its own operands go through `expr` and
+// friends, which set one), so it skips `precedence` entirely: most nodes are
+// atoms, and this is the hot path. (OVERLAPS, an atom here, reads `inB` below.)
+
+/** An expression where the grammar reads a whole one: a call argument, a clause, a list item. */
+export const expr = (e: Expr): Doc =>
+  within(false, () => (exprKey(e) === null ? printExpr(e) : prec.operand(e, 0, null)));
+/** An expression where the grammar reads PG's restricted `b_expr`. */
+export const bExpr = (e: Expr): Doc => within(true, () => prec.operand(e, 0, "b"));
+/** Whether a node is PG's c_expr, which stands anywhere an operand does: an atom, but not OVERLAPS. */
+const isAtom = (e: Expr): boolean => exprKey(e) === null && e.kind !== "overlaps";
+/** An expression where the grammar reads a bare atom (PG's c_expr): anything else is parenthesised. */
+export const atomic = (e: Expr): Doc => (isAtom(e) ? expr(e) : ["(", expr(e), ")"]);
+
+// `row OVERLAPS row` is an atom to this grammar but an a_expr to PG, so in a
+// b_expr position it is parenthesised by hand. `inB` says whether the operand
+// being printed is one (set by `bExpr`, cleared by `expr`); a pair of
+// parentheses `precedence` adds around a part of it leaves it set, which can
+// only add parentheses.
+let inB = false;
+const within = <T>(b: boolean, print: () => T): T => {
+  const outer = inB;
+  inB = b;
+  try {
+    return print();
+  } finally {
+    inB = outer;
+  }
+};
+
+// PG declares IN and the IS tests non-associative (`a IS NULL IS NULL` is a
+// syntax error), but they are postfix groups here, which `precedence` treats
+// as chaining and the parser lets chain. So one of them as the left operand of
+// another at the same bp is parenthesised by hand; the bps come from the table.
+// (The infix groups of those tiers, LIKE / BETWEEN / comparisons, chain to
+// nothing already: they have no `assoc`.)
+const NONASSOC_POSTFIX = new Set([
+  "in",
+  "inSubquery",
+  "is",
+  "isDistinct",
+  "isTest",
+  "isNormalized",
+  "isDocument",
+  "isJson",
+]);
+const TIER = new Map<string, number>();
+for (const g of expressionTable.postfix) {
+  const nodes = g.nodes === undefined ? [] : Array.isArray(g.nodes) ? g.nodes : Object.keys(g.nodes);
+  for (const k of nodes) if (NONASSOC_POSTFIX.has(k)) TIER.set(k, g.bp);
+}
+const tierOf = (e: Expr): number | undefined => {
+  const k = exprKey(e);
+  return typeof k === "string" ? TIER.get(k) : undefined;
+};
+const left = (parent: Expr, child: Expr): Doc => {
+  const tier = tierOf(parent);
+  if (tier !== undefined && tierOf(child) === tier) return ["(", expr(child), ")"];
+  return exprKey(child) === null ? printExpr(child) : prec.child(parent, child, "left");
+};
+// A left operand followed by a tail that may open a bracket (`IN (`, `ANY (`,
+// `IS DISTINCT FROM (…)`, `AT TIME ZONE (…)`). An operator chain on the left
+// breaks with a hanging indent, and a bracket opened on its last line would
+// close at the chain's first column instead. So when the node breaks, a
+// non-atomic left operand gets parentheses on their own lines (only then: flat,
+// none are added), and the tail follows the closing one at the node's column.
+const leftThen = (parent: Expr, child: Expr, tail: Doc): Doc => {
+  const doc = left(parent, child);
+  const tier = tierOf(parent);
+  const wrapped = (tier !== undefined && tierOf(child) === tier) || prec.parens(parent, child, "left");
+  if (exprKey(child) === null || wrapped) return [doc, tail];
+  return group([ifBreak(parens(doc), doc), tail]);
+};
+const right = (parent: Expr, child: Expr): Doc =>
+  exprKey(child) === null ? printExpr(child) : prec.child(parent, child, "right");
+
+// --- names and calls ---
+
+const BARE_FUNCTIONS = new Set(["current_schema", "current_catalog", "system_user"]);
+
+type Call = Extract<Expr, { kind: "call" }>;
+type Binary = Extract<Expr, { kind: "binary" }>;
+const binaryBp = (b: Binary): number | undefined => NAMED_INFIX.get(binaryKey(b.op, b.opSchema));
+type Unary = Extract<Expr, { kind: "unary" }>;
+type Postfix = Extract<Expr, { kind: "cast" | "collate" | "atTimeZone" | "atLocal" }>;
+
+// A prefix operator the grammar reads by value, rather than `OPERATOR(op) x`.
+const isPrefix = (n: Unary): boolean => n.opSchema === undefined && PREFIX_OPS.has(n.op);
+// One prefix operator before its operand's doc.
+const prefixed = (n: Unary, operand: Doc): Doc => {
+  if (n.op === "not") return [kw("NOT"), " ", operand];
+  if (!isPrefix(n)) return [operator(n.op, n.opSchema ?? []), " ", operand];
+  // `- -1` must not print as `--1`, a comment, nor `@ -1` as the operator `@-`.
+  return [n.op, OPERATOR_CHARS.has(firstChar(operand)) ? " " : "", operand];
+};
+
+// A run of `::` casts, COLLATE and AT TIME ZONE / AT LOCAL (`x::int::text`),
+// walked in a loop, as a binary chain is, so a long one doesn't run out of stack.
+const POSTFIX_KINDS = new Set<Expr["kind"]>(["cast", "collate", "atTimeZone", "atLocal"]);
+const postfixChain = (e: Postfix): Doc => {
+  const spine: Postfix[] = [e];
+  let node = e;
+  while (POSTFIX_KINDS.has(node.expr.kind) && !prec.parens(node, node.expr, "left")) {
+    node = node.expr as Postfix;
+    spine.push(node);
+  }
+  const parts: Doc[] = [];
+  for (let i = spine.length - 1; i >= 0; i--) {
+    const n = spine[i]!;
+    switch (n.kind) {
+      case "cast":
+        parts.push("::", typeName(n.type));
+        break;
+      case "collate":
+        parts.push(` ${kw("COLLATE")} `, qualified(n.collation));
+        break;
+      case "atTimeZone":
+        parts.push(` ${kw("AT TIME ZONE")} `, right(n, n.zone));
+        break;
+      case "atLocal":
+        parts.push(` ${kw("AT LOCAL")}`);
+        break;
+    }
+  }
+  return spine.some((n) => n.kind === "atTimeZone") ? leftThen(node, node.expr, parts) : [left(node, node.expr), parts];
+};
+
+// PG's extract_arg is an identifier, one of six field keywords, or a string:
+// any other keyword can't stand bare. The fields PG knows are bare words
+// except those six; anything else is written as the string it may be.
+const EXTRACT_FIELDS = new Set(
+  "year month day hour minute second century decade dow doy epoch isodow isoyear julian microseconds millennium milliseconds quarter timezone timezone_hour timezone_minute week".split(
+    " ",
+  ),
+);
+const extractField = (field: string): string => (EXTRACT_FIELDS.has(field) ? field : str(field));
+// No DISTINCT, ALL, VARIADIC or ORDER BY, and no `*` or named argument.
+const isPlain = (c: Call): boolean =>
+  !c.distinct &&
+  !c.all &&
+  !c.variadic &&
+  c.orderBy === undefined &&
+  c.args.every((a) => a.kind !== "namedArg" && !(a.kind === "star" && a.table === null));
+
+// A one-part call named by one of PG's col_name keywords is written quoted, an
+// ordinary function to PG, unless it has the shape of the keyword form PG (and
+// this grammar) read as a plain call: `coalesce(a, b)`, `substring(a, 1)`,
+// `normalize(a)`, a legacy `json_object(…)`. TRIM, EXTRACT, POSITION and ROW
+// are left bare whatever their shape: quoted, this grammar still reads them as
+// the keyword form, so no spelling of another shape would parse back.
+const bareForm = (name: string, c: Call): boolean => {
+  switch (name) {
+    case "nullif":
+      return isPlain(c) && c.args.length === 2;
+    case "coalesce":
+    case "greatest":
+    case "least":
+    case "grouping":
+    case "xmlconcat":
+      return isPlain(c) && c.args.length > 0;
+    case "normalize":
+      return isPlain(c) && c.args.length === 1;
+    case "json_object":
+      return c.args.length > 0 && !c.distinct && !c.all && !c.variadic && c.orderBy === undefined;
+    case "substring":
+    case "overlay":
+    case "trim":
+    case "extract":
+    case "position":
+    case "row":
+      return true;
+    default:
+      return false;
+  }
+};
+// `operator(` opens PG's OPERATOR(op) spelling, so a function of that name is quoted too.
+const callName = (c: Call): string => {
+  const name = c.name[0]!;
+  return c.name.length === 1 && ((isColNameKeyword(name) && !bareForm(name, c)) || name === "operator")
+    ? quoted(name)
+    : functionQualified(c.name);
+};
+
+const callArgs = (c: Call): Doc => {
+  if (c.args.length === 0 && !c.distinct && !c.all && c.orderBy === undefined) return "()";
+  const args = c.args.map((a, i) => {
+    const doc = expr(a);
+    return c.variadic && i === c.args.length - 1 ? [kw("VARIADIC"), " ", doc] : doc;
+  });
+  const head = c.distinct ? `${kw("DISTINCT")} ` : c.all ? `${kw("ALL")} ` : "";
+  const order = c.orderBy ? [line, orderBy(c.orderBy)] : "";
+  return parens([head, commaList(args), order]);
+};
+
+/** `name(args)`. */
+const fn = (name: string, args: Doc): Doc => [kw(name), args];
+
+// --- subscripts and field selections ---
+
+// A run of `[…]` and `.field` steps over a root. PG takes them after a column
+// reference (`a[1].f`, but `a.f` would be a dotted name), a parameter's
+// subscripts (`$1[1]`), or a parenthesised expression or subquery; any other
+// root is parenthesised, so `f(x)[1]` prints as PG's `(f(x))[1]`.
+const chain = (e: Expr): Doc => {
+  const steps: Doc[] = [];
+  let root = e;
+  let fields = false;
+  for (;;) {
+    if (root.kind === "subscript") {
+      const lo = root.index === null ? "" : expr(root.index);
+      const hi = root.upper === undefined ? "" : [":", root.upper === null ? "" : expr(root.upper)];
+      steps.push(["[", lo, hi, "]"]);
+      root = root.base;
+    } else if (root.kind === "fieldSelect") {
+      steps.push(root.field === null ? ".*" : [".", ident(root.field)]);
+      fields = true;
+      root = root.expr;
+    } else {
+      break;
+    }
+  }
+  steps.reverse();
+  const bare =
+    (root.kind === "name" && firstStepKind(e) === "subscript") ||
+    (root.kind === "param" && !fields) ||
+    root.kind === "subquery";
+  // A name root is a column reference, whether bare or parenthesised (before a
+  // field step), never one of the functions a lone name prints as.
+  const head =
+    root.kind === "name"
+      ? bare
+        ? qualified(root.parts)
+        : ["(", qualified(root.parts), ")"]
+      : bare
+        ? printExpr(root)
+        : ["(", expr(root), ")"];
+  return [head, steps];
+};
+// The kind of the step nearest the root.
+const firstStepKind = (e: Expr): "subscript" | "fieldSelect" => {
+  let node = e;
+  let kind: "subscript" | "fieldSelect" = "subscript";
+  while (node.kind === "subscript" || node.kind === "fieldSelect") {
+    kind = node.kind;
+    node = node.kind === "subscript" ? node.base : node.expr;
+  }
+  return kind;
+};
+
+// --- shared clause pieces ---
+
+/** `ORDER BY a DESC NULLS LAST, b`. */
+export const orderBy = (items: readonly OrderItem[]): Doc =>
+  group([kw("ORDER BY"), indent([line, commaList(items.map(orderItem))])]);
+
+const orderItem = (o: OrderItem): Doc => [
+  expr(o.expr),
+  o.dir === "asc" ? ` ${kw("ASC")}` : o.dir === "desc" ? ` ${kw("DESC")}` : "",
+  o.using !== undefined ? [` ${kw("USING")} `, o.using] : "",
+  o.nulls === "first" ? ` ${kw("NULLS FIRST")}` : o.nulls === "last" ? ` ${kw("NULLS LAST")}` : "",
+];
+
+const frameBound = (b: WindowFrameBound): Doc => {
+  switch (b.kind) {
+    case "unboundedPreceding":
+      return kw("UNBOUNDED PRECEDING");
+    case "unboundedFollowing":
+      return kw("UNBOUNDED FOLLOWING");
+    case "currentRow":
+      return kw("CURRENT ROW");
+    case "preceding":
+      return [frameOffset(b.offset), " ", kw("PRECEDING")];
+    case "following":
+      return [frameOffset(b.offset), " ", kw("FOLLOWING")];
+  }
+};
+
+// An offset that opens with a word a bound or BETWEEN opens with (a column
+// named `unbounded`, `current`) would read as that bound: parenthesised.
+const frameOffset = (e: Expr): Doc => {
+  const doc = expr(e);
+  return /^(?:unbounded|current|between)(?![a-z0-9_$])/.test(firstText(doc)) ? ["(", doc, ")"] : doc;
+};
+
+const EXCLUSIONS = { currentRow: "CURRENT ROW", group: "GROUP", ties: "TIES", noOthers: "NO OTHERS" } as const;
+
+const frame = (f: WindowFrame): Doc => [
+  kw(f.mode.toUpperCase()),
+  " ",
+  f.end === null
+    ? frameBound(f.start)
+    : [kw("BETWEEN"), " ", frameBound(f.start), " ", kw("AND"), " ", frameBound(f.end)],
+  f.exclude !== undefined ? [" ", kw("EXCLUDE"), " ", kw(EXCLUSIONS[f.exclude])] : "",
+];
+
+const WINDOW_CLAUSE_WORDS = new Set(["partition", "order", "rows", "range", "groups"]);
+
+/** A window specification in parentheses: `(w PARTITION BY a ORDER BY b ROWS …)`. */
+export const windowSpec = (s: WindowSpec): Doc => {
+  const parts: Doc[] = [];
+  // A base window named like a clause word would read as that clause.
+  if (s.name !== null) parts.push(WINDOW_CLAUSE_WORDS.has(s.name) ? quoted(s.name) : ident(s.name));
+  if (s.partitionBy !== null) {
+    parts.push(group([kw("PARTITION BY"), indent([line, commaList(s.partitionBy.map(expr))])]));
+  }
+  if (s.orderBy !== null) parts.push(orderBy(s.orderBy));
+  if (s.frame !== null) parts.push(frame(s.frame));
+  return group(["(", indent([softline, join(line, parts)]), softline, ")"]);
+};
+
+export const jsonFormat = (f: JsonFormat | undefined): Doc =>
+  f === undefined
+    ? ""
+    : [" ", kw("FORMAT JSON"), f.encoding !== undefined ? [" ", kw("ENCODING"), " ", minimalIdent(f.encoding)] : ""];
+export const jsonValue = (v: JsonValueExpr): Doc => [expr(v.expr), jsonFormat(v.format)];
+// An expression right before a clause opening with WITH or WITHOUT (`… UNIQUE
+// KEYS`, `… WRAPPER`): one ending in an `IS JSON` test with no uniqueness
+// clause of its own would take the WITH, so it is parenthesised.
+const IS_JSON_TAIL = /(?:^|[\s(])(?:json|value|scalar|array|object)$/i;
+const beforeWith = (e: Expr, guard: boolean): Doc => {
+  const doc = expr(e);
+  return guard && IS_JSON_TAIL.test(lastText(doc)) ? ["(", doc, ")"] : doc;
+};
+const jsonValueBeforeUnique = (v: JsonValueExpr, unique: boolean): Doc =>
+  !unique || v.format !== undefined ? jsonValue(v) : beforeWith(v.expr, true);
+const jsonReturning = (r: JsonReturning | undefined): Doc[] =>
+  r === undefined ? [] : [[kw("RETURNING"), " ", typeName(r.type), jsonFormat(r.format)]];
+const jsonOnNull = (n: "null" | "absent" | undefined): Doc[] =>
+  n === undefined ? [] : [kw(n === "null" ? "NULL ON NULL" : "ABSENT ON NULL")];
+const jsonUnique = (u: boolean | undefined): Doc[] =>
+  u === undefined ? [] : [kw(u ? "WITH UNIQUE KEYS" : "WITHOUT UNIQUE KEYS")];
+export const jsonPassing = (p: JsonPassingArg[] | undefined): Doc[] =>
+  p === undefined
+    ? []
+    : [
+        group([
+          kw("PASSING"),
+          indent([line, commaList(p.map((a) => [jsonValue(a.value), " ", kw("AS"), " ", ident(a.name)]))]),
+        ]),
+      ];
+const BEHAVIORS = {
+  error: "ERROR",
+  null: "NULL",
+  true: "TRUE",
+  false: "FALSE",
+  unknown: "UNKNOWN",
+  emptyArray: "EMPTY ARRAY",
+  emptyObject: "EMPTY OBJECT",
+} as const;
+export const jsonBehavior = (b: JsonBehavior | undefined, on: "EMPTY" | "ERROR"): Doc[] =>
+  b === undefined
+    ? []
+    : [[b.kind === "default" ? [kw("DEFAULT"), " ", expr(b.expr)] : kw(BEHAVIORS[b.kind]), " ", kw(`ON ${on}`)]];
+export const jsonWrapper = (w: "without" | "conditional" | "unconditional" | undefined): Doc[] =>
+  w === undefined
+    ? []
+    : [
+        kw(
+          w === "without"
+            ? "WITHOUT WRAPPER"
+            : w === "conditional"
+              ? "WITH CONDITIONAL WRAPPER"
+              : "WITH UNCONDITIONAL WRAPPER",
+        ),
+      ];
+export const jsonQuotes = (q: "keep" | "omit" | undefined): Doc[] =>
+  q === undefined ? [] : [kw(q === "keep" ? "KEEP QUOTES" : "OMIT QUOTES")];
+
+// A JSON_OBJECT key before VALUE is a c_expr: an operator expression there is
+// parenthesised (before `:` it needn't be, but VALUE is the one spelling here).
+const jsonKeyValue = (key: Expr, value: JsonValueExpr, beforeUnique = false): Doc => [
+  atomic(key),
+  " ",
+  kw("VALUE"),
+  " ",
+  jsonValueBeforeUnique(value, beforeUnique),
+];
+
+/** `name(head, clause, clause)`, the clauses after the arguments separated by lines. */
+const clauses = (name: string, args: Doc[], tail: Doc[]): Doc =>
+  fn(
+    name,
+    parens(tail.length === 0 ? commaList(args) : [commaList(args), args.length > 0 ? line : "", join(line, tail)]),
+  );
+
+const xmlNamed = (v: XmlNamedValue): Doc =>
+  v.name === undefined ? expr(v.value) : [expr(v.value), " ", kw("AS"), " ", ident(v.name)];
+/** `PASSING [BY REF] doc [BY VALUE]`; the document is an atom. */
+export const xmlPassing = (p: XmlPassing): Doc => [
+  kw("PASSING"),
+  p.byBefore !== undefined ? [" ", kw(p.byBefore === "ref" ? "BY REF" : "BY VALUE")] : "",
+  " ",
+  atomic(p.expr),
+  p.byAfter !== undefined ? [" ", kw(p.byAfter === "ref" ? "BY REF" : "BY VALUE")] : "",
+];
+
+// The NOT a negated predicate puts after its operand.
+const not = (negated: boolean): string => (negated ? ` ${kw("NOT")}` : "");
+const isTail = (e: Extract<Expr, { kind: `is${string}` }>, rest: Doc): Doc =>
+  leftThen(e, e.expr, [` ${kw("IS")}`, not(e.negated), " ", rest]);
+
+// The operator of a binary or quantified node: a keyword, a symbol, or the
+// explicit `OPERATOR(schema.op)` spelling.
+const operator = (op: string, opSchema: string[] | undefined): string =>
+  opSchema !== undefined
+    ? `${kw("OPERATOR")}(${[...opSchema.map(ident), op].join(".")})`
+    : isWordOp(op)
+      ? kw(op.toUpperCase())
+      : op;
+
+// --- the expression printer ---
+
+export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind", {
+  number: (e) => {
+    if (e.raw !== undefined) return e.raw;
+    // NaN or ±Infinity would print as a name; PG spells them as strings cast to numeric.
+    if (!Number.isFinite(e.value)) throw new TypeError(`A number node holds ${e.value} and no raw text`);
+    return String(e.value);
+  },
+  string: (e) => str(e.value),
+  bool: (e) => kw(e.value ? "TRUE" : "FALSE"),
+  null: () => kw("NULL"),
+  // `current_schema`, `current_catalog` and `system_user` bare are PG's
+  // functions; quoted, columns. The tree can't tell them apart, so a lone one
+  // in an expression keeps the common meaning and prints bare.
+  name: (e) => (e.parts.length === 1 && BARE_FUNCTIONS.has(e.parts[0]!) ? e.parts[0]! : qualified(e.parts)),
+  param: (e) => `$${e.name}`,
+  star: (e) => (e.table === null ? "*" : [qualified(e.table), ".*"]),
+  bitString: (e) => `${kw(e.hex ? "X" : "B")}'${e.value}'`,
+  sqlValueFunction: (e) => [kw(e.name.toUpperCase()), e.precision !== undefined ? `(${e.precision})` : ""],
+  typedLiteral: (e) => [typeName(e.type, true), " ", str(e.value)],
+  // The precision goes before the literal, or on the trailing SECOND field.
+  interval: (e) => {
+    const p = e.precision !== undefined ? `(${e.precision})` : "";
+    return e.fields === undefined
+      ? [kw("INTERVAL"), p, " ", str(e.value)]
+      : [kw("INTERVAL"), " ", str(e.value), " ", kw(e.fields.toUpperCase()), p];
+  },
+  call: (e) => [callName(e), callArgs(e)],
+  namedArg: (e) => [functionWord(e.name), " => ", expr(e.value)],
+  // A run of prefix operators (`- - - x`, `NOT NOT a`) is walked in a loop,
+  // like a binary chain, so a long one doesn't run out of stack.
+  unary: (e) => {
+    const spine: Unary[] = [e];
+    let node = e;
+    while (isPrefix(node) && node.operand.kind === "unary" && !prec.parens(node, node.operand, "right")) {
+      node = node.operand;
+      spine.push(node);
+    }
+    let doc = isPrefix(node) ? right(node, node.operand) : prec.operand(node.operand, OP_OPERAND);
+    for (let i = spine.length - 1; i >= 0; i--) doc = prefixed(spine[i]!, doc);
+    return doc;
+  },
+  // A left-deep chain of one tier (`a OR b OR c …`, as generated filters run
+  // to thousands of terms) is walked in a loop rather than recursed into, one
+  // group for the whole chain. A tighter left operand (the `=` of `a = 1 AND
+  // b`) is no part of it: it prints through `left`, as a group of its own.
+  binary: (e) => {
+    const spine: Binary[] = [e];
+    let node = e;
+    while (
+      node.left.kind === "binary" &&
+      binaryBp(node.left) === binaryBp(node) &&
+      !prec.parens(node, node.left, "left")
+    ) {
+      node = node.left;
+      spine.push(node);
+    }
+    const parts: Doc[] = [left(node, node.left)];
+    for (let i = spine.length - 1; i >= 0; i--) {
+      const n = spine[i]!;
+      parts.push(` ${operator(n.op, n.opSchema)}`, indent([line, right(n, n.right)]));
+    }
+    return group(parts);
+  },
+  anyAll: (e) =>
+    leftThen(e, e.left, [
+      " ",
+      operator(e.op, e.opSchema),
+      " ",
+      kw(e.quantifier.toUpperCase()),
+      " ",
+      e.right.kind === "subquery" ? printExpr(e.right) : parens(expr(e.right)),
+    ]),
+  cast: (e) => postfixChain(e),
+  collate: (e) => postfixChain(e),
+  atTimeZone: (e) => postfixChain(e),
+  atLocal: (e) => postfixChain(e),
+  is: (e) => isTail(e, kw("NULL")),
+  isTest: (e) => isTail(e, kw(e.test.toUpperCase())),
+  isDocument: (e) => isTail(e, kw("DOCUMENT")),
+  isNormalized: (e) => isTail(e, [e.form !== null ? `${kw(e.form.toUpperCase())} ` : "", kw("NORMALIZED")]),
+  isJson: (e) =>
+    isTail(e, [
+      kw("JSON"),
+      e.itemType !== null ? ` ${kw(e.itemType.toUpperCase())}` : "",
+      e.uniqueKeys !== null ? ` ${kw(e.uniqueKeys ? "WITH UNIQUE KEYS" : "WITHOUT UNIQUE KEYS")}` : "",
+    ]),
+  isDistinct: (e) => isTail(e, [kw("DISTINCT FROM"), " ", right(e, e.from)]),
+  like: (e) =>
+    group([
+      left(e, e.expr),
+      not(e.negated),
+      " ",
+      kw(e.ci ? "ILIKE" : "LIKE"),
+      indent([line, right(e, e.pattern), e.escape !== undefined ? [" ", kw("ESCAPE"), " ", right(e, e.escape)] : ""]),
+    ]),
+  similarTo: (e) =>
+    group([
+      left(e, e.expr),
+      not(e.negated),
+      " ",
+      kw("SIMILAR TO"),
+      indent([line, right(e, e.pattern), e.escape !== undefined ? [" ", kw("ESCAPE"), " ", right(e, e.escape)] : ""]),
+    ]),
+  between: (e) =>
+    group([
+      left(e, e.expr),
+      not(e.negated),
+      " ",
+      kw("BETWEEN"),
+      e.symmetric !== undefined ? ` ${kw(e.symmetric ? "SYMMETRIC" : "ASYMMETRIC")}` : "",
+      // Each bound on a line of its own when they break.
+      indent([line, within(true, () => prec.operand(e.lo, LIKE_OPERAND, "b")), line, kw("AND"), " ", right(e, e.hi)]),
+    ]),
+  in: (e) => leftThen(e, e.expr, [not(e.negated), " ", kw("IN"), " ", parenList(e.list.map(expr))]),
+  inSubquery: (e) => leftThen(e, e.expr, [not(e.negated), " ", kw("IN"), " ", parens(printQuery(e.query))]),
+  exists: (e) => [e.negated ? `${kw("NOT")} ` : "", kw("EXISTS"), " ", parens(printQuery(e.query))],
+  subquery: (e) => parens(printQuery(e.query)),
+  arraySubquery: (e) => [kw("ARRAY"), parens(printQuery(e.query))],
+  case: (e) =>
+    group([
+      kw("CASE"),
+      e.operand !== null ? [" ", expr(e.operand)] : "",
+      indent(
+        e.whens.map((w) => [
+          line,
+          group([kw("WHEN"), " ", expr(w.when), indent([line, kw("THEN"), " ", expr(w.then_)])]),
+        ]),
+      ),
+      e.else_ !== null ? indent([line, kw("ELSE"), " ", expr(e.else_)]) : "",
+      line,
+      kw("END"),
+    ]),
+  array: (e) => [kw("ARRAY"), brackets(e)],
+  row: (e) =>
+    e.implicit && e.items.length > 1 ? parenList(e.items.map(expr)) : [kw("ROW"), parenList(e.items.map(expr))],
+  overlaps: (e, print) => {
+    const doc = [print(e.left), " ", kw("OVERLAPS"), " ", print(e.right)];
+    return inB ? ["(", doc, ")"] : doc;
+  },
+  subscript: (e) => chain(e),
+  fieldSelect: (e) => chain(e),
+  extract: (e) => fn("EXTRACT", parens([extractField(e.field), " ", kw("FROM"), " ", expr(e.source)])),
+  substring: (e) =>
+    fn(
+      "SUBSTRING",
+      parens([
+        expr(e.value),
+        e.from !== null ? [" ", kw("FROM"), " ", expr(e.from)] : "",
+        e.for_ !== null ? [" ", kw("FOR"), " ", expr(e.for_)] : "",
+      ]),
+    ),
+  substringSimilar: (e) =>
+    fn(
+      "SUBSTRING",
+      // Both operands are parenthesised from LIKE's tier down: PG reads a
+      // looser value's SIMILAR as SIMILAR TO, and a pattern ending in LIKE or
+      // SIMILAR TO would take the ESCAPE.
+      parens([
+        within(false, () => prec.operand(e.value, LIKE_OPERAND, null)),
+        " ",
+        kw("SIMILAR"),
+        " ",
+        within(false, () => prec.operand(e.pattern, LIKE_OPERAND, null)),
+        " ",
+        kw("ESCAPE"),
+        " ",
+        expr(e.escape),
+      ]),
+    ),
+  normalize: (e) => fn("NORMALIZE", parens([expr(e.value), ", ", kw(e.form.toUpperCase())])),
+  collationFor: (e) => [kw("COLLATION FOR"), " ", parens(expr(e.expr))],
+  position: (e) => fn("POSITION", parens([bExpr(e.substring), " ", kw("IN"), " ", bExpr(e.string)])),
+  trim: (e) =>
+    fn(
+      "TRIM",
+      parens([
+        e.side !== null ? `${kw(e.side.toUpperCase())} ` : "",
+        e.characters !== null ? [expr(e.characters), " "] : "",
+        e.side !== null || e.characters !== null ? `${kw("FROM")} ` : "",
+        expr(e.source),
+      ]),
+    ),
+  overlay: (e) =>
+    fn(
+      "OVERLAY",
+      parens([
+        expr(e.value),
+        " ",
+        kw("PLACING"),
+        " ",
+        expr(e.placing),
+        " ",
+        kw("FROM"),
+        " ",
+        expr(e.from),
+        e.for_ !== null ? [" ", kw("FOR"), " ", expr(e.for_)] : "",
+      ]),
+    ),
+  jsonObject: (e) =>
+    clauses(
+      "JSON_OBJECT",
+      e.entries.map((kv, i) =>
+        jsonKeyValue(
+          kv.key,
+          kv.value,
+          i === e.entries.length - 1 && e.onNull === undefined && e.uniqueKeys !== undefined,
+        ),
+      ),
+      [...jsonOnNull(e.onNull), ...jsonUnique(e.uniqueKeys), ...jsonReturning(e.returning)],
+    ),
+  jsonArray: (e) =>
+    clauses("JSON_ARRAY", e.elements.map(jsonValue), [...jsonOnNull(e.onNull), ...jsonReturning(e.returning)]),
+  jsonArrayQuery: (e) =>
+    clauses("JSON_ARRAY", [[printQuery(e.query), jsonFormat(e.format)]], jsonReturning(e.returning)),
+  jsonObjectAgg: (e) =>
+    clauses(
+      "JSON_OBJECTAGG",
+      [jsonKeyValue(e.key, e.value, e.onNull === undefined && e.uniqueKeys !== undefined)],
+      [...jsonOnNull(e.onNull), ...jsonUnique(e.uniqueKeys), ...jsonReturning(e.returning)],
+    ),
+  jsonArrayAgg: (e) =>
+    clauses(
+      "JSON_ARRAYAGG",
+      [[jsonValue(e.value), e.orderBy !== undefined ? [line, orderBy(e.orderBy)] : ""]],
+      [...jsonOnNull(e.onNull), ...jsonReturning(e.returning)],
+    ),
+  jsonValue: (e) =>
+    clauses(
+      "JSON_VALUE",
+      [jsonValue(e.context), expr(e.path)],
+      [
+        ...jsonPassing(e.passing),
+        ...jsonReturning(e.returning),
+        ...jsonBehavior(e.onEmpty, "EMPTY"),
+        ...jsonBehavior(e.onError, "ERROR"),
+      ],
+    ),
+  jsonQuery: (e) =>
+    clauses(
+      "JSON_QUERY",
+      [
+        jsonValue(e.context),
+        beforeWith(e.path, e.passing === undefined && e.returning === undefined && e.wrapper !== undefined),
+      ],
+      [
+        ...jsonPassing(e.passing),
+        ...jsonReturning(e.returning),
+        ...jsonWrapper(e.wrapper),
+        ...jsonQuotes(e.quotes),
+        ...jsonBehavior(e.onEmpty, "EMPTY"),
+        ...jsonBehavior(e.onError, "ERROR"),
+      ],
+    ),
+  jsonExists: (e) =>
+    clauses(
+      "JSON_EXISTS",
+      [jsonValue(e.context), expr(e.path)],
+      [...jsonPassing(e.passing), ...jsonBehavior(e.onError, "ERROR")],
+    ),
+  jsonParse: (e) =>
+    clauses("JSON", [jsonValueBeforeUnique(e.value, e.uniqueKeys !== undefined)], jsonUnique(e.uniqueKeys)),
+  jsonScalar: (e) => fn("JSON_SCALAR", parens(expr(e.value))),
+  jsonSerialize: (e) => clauses("JSON_SERIALIZE", [jsonValue(e.value)], jsonReturning(e.returning)),
+  window: (e, print) => [
+    print(e.fn),
+    " ",
+    kw("OVER"),
+    " ",
+    e.partitionBy === null && e.orderBy === null && e.frame === null && e.name !== null ? ident(e.name) : windowSpec(e),
+  ],
+  aggFilter: (e, print) => [print(e.fn), " ", kw("FILTER"), " ", parens([kw("WHERE"), " ", expr(e.where)])],
+  withinGroup: (e, print) => [print(e.fn), " ", kw("WITHIN GROUP"), " ", parens(orderBy(e.orderBy))],
+  nullTreatment: (e, print) => [print(e.fn), " ", kw(e.treatment === "ignore" ? "IGNORE NULLS" : "RESPECT NULLS")],
+  xmlElement: (e) =>
+    fn(
+      "XMLELEMENT",
+      parenList([
+        [kw("NAME"), " ", ident(e.name)],
+        ...(e.attributes !== undefined ? [fn("XMLATTRIBUTES", parenList(e.attributes.map(xmlNamed)))] : []),
+        ...(e.content ?? []).map(expr),
+      ]),
+    ),
+  xmlForest: (e) => fn("XMLFOREST", parenList(e.items.map(xmlNamed))),
+  xmlPi: (e) =>
+    fn("XMLPI", parenList([[kw("NAME"), " ", ident(e.name)], ...(e.content !== undefined ? [expr(e.content)] : [])])),
+  xmlRoot: (e) =>
+    fn(
+      "XMLROOT",
+      parenList([
+        expr(e.expr),
+        [kw("VERSION"), " ", e.version !== undefined ? expr(e.version) : kw("NO VALUE")],
+        ...(e.standalone !== undefined ? [[kw("STANDALONE"), " ", kw(e.standalone.toUpperCase())]] : []),
+      ]),
+    ),
+  xmlParse: (e) =>
+    fn(
+      "XMLPARSE",
+      parens([
+        kw(e.option.toUpperCase()),
+        " ",
+        expr(e.expr),
+        e.whitespace !== undefined
+          ? [" ", kw(e.whitespace === "preserve" ? "PRESERVE WHITESPACE" : "STRIP WHITESPACE")]
+          : "",
+      ]),
+    ),
+  xmlSerialize: (e) =>
+    fn(
+      "XMLSERIALIZE",
+      parens([
+        kw(e.option.toUpperCase()),
+        " ",
+        expr(e.expr),
+        " ",
+        kw("AS"),
+        " ",
+        typeName(e.type),
+        e.indent !== undefined ? [" ", kw(e.indent ? "INDENT" : "NO INDENT")] : "",
+      ]),
+    ),
+  xmlExists: (e) => fn("XMLEXISTS", parens([atomic(e.path), " ", xmlPassing(e.passing)])),
+});
+
+// `[a, b]`: an ARRAY's elements, a row of a multidimensional one written as bare brackets.
+const brackets = (e: Extract<Expr, { kind: "array" }>): Doc =>
+  group([
+    "[",
+    indent([softline, commaList(e.elements.map((x) => (x.kind === "array" && x.implicit ? brackets(x) : expr(x))))]),
+    softline,
+    "]",
+  ]);

@@ -229,6 +229,18 @@ export const touches = (end: Position, token: Tok | null): boolean =>
   token !== null && token.position.start.row === end.row && token.position.start.col === end.col;
 
 /**
+ * True when a line break directly follows the last token (nothing, not even a
+ * space, between them) and the next line, past any blank ones, opens with
+ * `[`: `@dbml/core` then binds that `[` to the token before the break (a
+ * column type's array suffix, an index column's sort order). Two cases differ
+ * from `@dbml/core`, which also binds across a `\r` (CRLF) or a comment glued
+ * to the token (`id// c`, or a block comment): the parse stream has dropped
+ * both, so their break no longer touches the token.
+ */
+export const bracketOnLaterLine = (ctx: Ctx): boolean =>
+  isNewline(ctx.peek()) && touches(ctx.lastEnd(), ctx.peek()) && isPunc(peekPastNewlines(ctx), "[");
+
+/**
  * `fail`, except that under `diagnose` the error is only recorded and the
  * caller carries on. For junk after a complete item: the item is kept, and the
  * enclosing body or the top level skips the junk, whose error there starts at

@@ -2599,7 +2599,8 @@ export type Preparable = Query | Insert | Update | Delete | Merge;
 // `text`, …) stays usable as a name for free, because the fold-and-match strategy
 // never took it away. Non-reserved keywords used by the grammar (`index`,
 // `enum`, `cascade`, `between`, `ilike`, …) are matched by value regardless.
-const RESERVED: ReadonlySet<string> = new Set([
+// Exported for the printer, which must quote these wherever it writes a name.
+export const RESERVED: ReadonlySet<string> = new Set([
   "all",
   "analyse",
   "analyze",
@@ -4946,6 +4947,12 @@ const quantifiedTwin = (group: { ops: readonly string[]; bp: number }) => ({
   ops: group.ops,
   bp: group.bp,
   type: "op" as const,
+  // Printer-only (see `precedence` in @parser-kit/core/print): each twin builds
+  // an `anyAll` node, keyed by its operator, that ends in its own `)`. The
+  // parser ignores both fields, and `assoc` too on a group with a custom parse.
+  nodes: group.ops.map((op) => `any ${op}`),
+  rhs: "none" as const,
+  assoc: "left" as const,
   when: (ctx: ParseContext<SqlTokenType>) => isQuantifier(ctx.peekAhead(1)),
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => quantifiedTail(ctx, ctx.next()!.value, left),
 });
@@ -4965,6 +4972,10 @@ const isGenericOp = (tok: Token<SqlTokenType> | null): boolean => tok !== null &
 const genericInfix = {
   match: anyOperator,
   bp: 12,
+  // Printer-only: the catch-all's binary nodes, keyed "op", read their right
+  // operand at 13 and chain to the left.
+  nodes: { op: 13 },
+  assoc: "left" as const,
   when: (ctx: ParseContext<SqlTokenType>) => isGenericOp(ctx.peek()),
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
     const op = ctx.next()!.value;
@@ -4979,6 +4990,10 @@ const genericInfix = {
 const quantifiedGeneric = {
   match: anyOperator,
   bp: 12,
+  // Printer-only, as on quantifiedTwin.
+  nodes: ["any op"],
+  rhs: "none" as const,
+  assoc: "left" as const,
   when: (ctx: ParseContext<SqlTokenType>) => {
     const tok = ctx.peek();
     return isQuantifier(ctx.peekAhead(1)) && isGenericOp(tok) && !COMPARISON_OPS.includes(tok!.value);
@@ -5064,6 +5079,10 @@ function readOperatorSpelling(ctx: ParseContext<SqlTokenType>): { op: string; op
 const operatorRefInfix = (quantified: boolean) => ({
   match: fixedFirst(kw("operator")),
   bp: 12,
+  // Printer-only: the nodes it builds, keyed as genericInfix's and
+  // quantifiedGeneric's are, since they bind the same.
+  nodes: (quantified ? { op: 13, "any op": "none" } : { op: 13 }) as Readonly<Record<string, number | "none">>,
+  assoc: "left" as const,
   when: startsOperatorRef,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
     const { op, opSchema } = readOperatorSpelling(ctx);
@@ -5159,6 +5178,9 @@ const arithInfix = [
 const castPostfix = {
   match: punc("::"),
   bp: 19,
+  // Printer-only: the node it builds, which ends in a type, not an operand.
+  nodes: ["cast"],
+  rhs: "none" as const,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
     ctx.next(); // "::"
     const type = ctx.parse(typeRef);
@@ -5195,6 +5217,8 @@ function subscriptNode(ctx: ParseContext<SqlTokenType>, left: Expr): Expr {
 const subscriptPostfix = {
   match: punc("["),
   bp: 19,
+  nodes: ["subscript"],
+  rhs: "none" as const,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => subscriptNode(ctx, left),
 };
 
@@ -5229,6 +5253,8 @@ function parseIndirection(ctx: ParseContext<SqlTokenType>, base: Expr, start: Po
 const collatePostfix = {
   match: kw("collate"),
   bp: 17,
+  nodes: ["collate"],
+  rhs: "none" as const,
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr): Expr => {
     ctx.parse(kw("collate"));
     const collation = ctx.parse(qualName);
@@ -5238,6 +5264,7 @@ const collatePostfix = {
 const atTimeZonePostfix = {
   match: kw("at"),
   bp: 16,
+  nodes: { atTimeZone: 17, atLocal: "none" as const },
   when: (ctx: ParseContext<SqlTokenType>): boolean => isWordAhead(ctx, 1, "local") || isWordAhead(ctx, 1, "time"),
   parse: (ctx: ParseContext<SqlTokenType>, left: Expr, h: PrattHelpers<Expr>): Expr => {
     if (isWordAhead(ctx, 1, "local")) {
@@ -5253,6 +5280,11 @@ const atTimeZonePostfix = {
 // The comparison operators (`!=` is PG's spelling of `<>`), shared by the full
 // expression's quantifiable comparison group and the b-expression's plain one.
 const COMPARISON_OPS = ["<", ">", "<=", ">=", "=", "<>", "!="];
+// What the full expression's comparison group builds, for the printer.
+const COMPARISON_NODES: Readonly<Record<string, number | "none">> = Object.fromEntries([
+  ...COMPARISON_OPS.map((op) => [op, 10] as const),
+  ...COMPARISON_OPS.map((op) => [`any ${op}`, "none"] as const),
+]);
 
 // `DISTINCT FROM x`, entered just past `IS [NOT]`. The RHS binds like a
 // comparison operand (bp 9), so it stops before AND / OR but past tighter
@@ -5275,7 +5307,7 @@ const notPrefix = {
       : { kind: "unary", op: "not", operand, span },
 };
 
-const expressionTable: PrattTable = {
+export const expressionTable: PrattTable = {
   prefix: [unarySignPrefix, genericPrefix, notPrefix],
   infix: [
     // The quantified twins go first, so each plain group below still sees every
@@ -5289,6 +5321,11 @@ const expressionTable: PrattTable = {
       // the pattern is quantified (`LIKE ANY (…)`, which takes no ESCAPE).
       match: token("ident", { values: ["like", "ilike", "similar"] }),
       bp: 10,
+      // Printer-only: the nodes this group and the next two build, with the bp
+      // each reads its trailing operand at (`none` for one ending in `)`).
+      // With no `assoc`, the printer parenthesises chains of them, which PG's
+      // grammar rejects as non-associative.
+      nodes: { like: 11, similarTo: 11, "any like": "none", "any ilike": "none" },
       // `similar` is a bare label in PG, and SUBSTRING's SIMILAR form follows
       // its value with one: without TO it is no operator here.
       when: (ctx) => ctx.peek()!.value !== "similar" || isWordAhead(ctx, 1, "to"),
@@ -5325,6 +5362,7 @@ const expressionTable: PrattTable = {
       // BETWEEN [SYMMETRIC | ASYMMETRIC] lo AND hi — see betweenTail.
       match: kw("between"),
       bp: 10,
+      nodes: { between: 11 },
       parse: (ctx, left, h): Expr => {
         ctx.parse(kw("between"));
         return betweenTail(ctx, left, h, false);
@@ -5336,6 +5374,15 @@ const expressionTable: PrattTable = {
       // internally on the following word.
       match: kw("not"),
       bp: 10,
+      nodes: {
+        like: 11,
+        similarTo: 11,
+        between: 11,
+        "not in": "none",
+        "not inSubquery": "none",
+        "any not like": "none",
+        "any not ilike": "none",
+      },
       parse: (ctx, left, h): Expr => {
         ctx.parse(kw("not"));
         if (ctx.is("ident", ["like", "ilike"])) {
@@ -5389,6 +5436,9 @@ const expressionTable: PrattTable = {
       ops: COMPARISON_OPS,
       bp: 9,
       type: "op",
+      // Printer-only: the binary nodes read their right operand at 10, and the
+      // quantified ones end in `)`. With no `assoc`, chains are parenthesised.
+      nodes: COMPARISON_NODES,
       parse: (ctx, left, h): Expr => {
         const op = ctx.next()!.value;
         if (isQuantifier(ctx.peek())) return quantifiedTail(ctx, op, left);
@@ -5414,6 +5464,7 @@ const expressionTable: PrattTable = {
     {
       match: kw("is"),
       bp: 8,
+      nodes: { is: "none", isDistinct: 9, isJson: "none", isDocument: "none", isNormalized: "none", isTest: "none" },
       parse: (ctx, left, h): Expr => {
         ctx.parse(kw("is"));
         const negated = ctx.eat("ident", "not") !== null;
@@ -5468,6 +5519,8 @@ const expressionTable: PrattTable = {
       // them alone and `SELECT a isnull FROM t` is the test, never an alias.
       match: fixedFirst(token("ident", { values: ["isnull", "notnull"] })),
       bp: 8,
+      nodes: ["is"],
+      rhs: "none",
       parse: (ctx, left): Expr => {
         const negated = ctx.next()!.value === "notnull";
         return { kind: "is", expr: left, negated, span: closeSpan(left, ctx.lastEnd()) };
@@ -5476,6 +5529,7 @@ const expressionTable: PrattTable = {
     {
       match: kw("in"),
       bp: 10,
+      nodes: { in: "none", inSubquery: "none" },
       parse: (ctx, left): Expr => {
         ctx.parse(kw("in"));
         return inTail(ctx, left, false);
@@ -5509,7 +5563,7 @@ const expressionRule = pratt<Expr, SqlTokenType>({ atom: expressionAtom, ...expr
 // above. (OVERLAPS lives in the shared atom, so it is the one predicate that
 // still reaches it.) A parenthesised operand is a full expression again, as in
 // PG.
-const bExprTable: PrattTable = {
+export const bExprTable: PrattTable = {
   prefix: [unarySignPrefix, genericPrefix],
   infix: [
     ...arithInfix,
@@ -5532,6 +5586,7 @@ const bExprTable: PrattTable = {
       // NULL with an error, as PG's grammar does.
       match: kw("is"),
       bp: 8,
+      nodes: { isDocument: "none", isDistinct: 9 },
       parse: (ctx, left, h): Expr => {
         ctx.parse(kw("is"));
         const negated = ctx.eat("ident", "not") !== null;

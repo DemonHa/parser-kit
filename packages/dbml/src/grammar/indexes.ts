@@ -1,6 +1,7 @@
 import { custom, type Position, type Span } from "@parser-kit/core";
 import {
   atLineEnd,
+  bracketOnLaterLine,
   type Ctx,
   type ExpressionValue,
   expectLineEnd,
@@ -10,12 +11,10 @@ import {
   type Ident,
   identFrom,
   isName,
-  isNewline,
   isPunc,
   isWord,
   lookAhead,
   lowerKey,
-  peekPastNewlines,
   readBody,
   readExpression,
   readIdent,
@@ -190,15 +189,6 @@ const readComposite = (ctx: Ctx): IndexComposite => {
 
 const readIndexField = (ctx: Ctx): IndexField =>
   isPunc(ctx.peek(), "(") ? readComposite(ctx) : readIndexColumn(ctx, false);
-
-// True when a line break directly follows the last token (nothing, not even
-// a space, between them) and the next line, past any blank ones, opens with
-// `[`: `@dbml/core` then binds that `[` to the token before the break. Two
-// cases differ from `@dbml/core`, which also binds across a `\r` (CRLF) or a
-// comment glued to the token (`id// c`): the parse stream has dropped both, so
-// their break no longer touches the token.
-const bracketOnLaterLine = (ctx: Ctx): boolean =>
-  isNewline(ctx.peek()) && touches(ctx.lastEnd(), ctx.peek()) && isPunc(peekPastNewlines(ctx), "[");
 
 // A `[` that binds to an entry which takes no sort order.
 function unboundBracket(ctx: Ctx): never {

@@ -1,0 +1,50 @@
+// The DML, transaction and session statements: INSERT / UPDATE / DELETE /
+// MERGE, COPY, TRUNCATE, transactions, SET / SHOW, PREPARE, cursors, EXPLAIN,
+// maintenance and the rest.
+//
+// Not printed yet: each kind in the list throws NotPrintableError. Printing
+// one means adding its handler to the `{}` table and taking it out of the list.
+import { defineFamily } from "./registry";
+
+export const dmlFamily = defineFamily("dml", {}, [
+  "insert",
+  "update",
+  "delete",
+  "merge",
+  "copy",
+  "truncate",
+  "begin",
+  "commit",
+  "rollback",
+  "savepoint",
+  "releaseSavepoint",
+  "prepareTransaction",
+  "commitPrepared",
+  "rollbackPrepared",
+  "set",
+  "setTransaction",
+  "setConstraints",
+  "show",
+  "reset",
+  "do",
+  "deallocate",
+  "prepare",
+  "execute",
+  "explain",
+  "analyze",
+  "vacuum",
+  "cluster",
+  "reindex",
+  "checkpoint",
+  "load",
+  "discard",
+  "listen",
+  "notify",
+  "unlisten",
+  "lock",
+  "callProcedure",
+  "declare",
+  "fetch",
+  "move",
+  "close",
+]);
