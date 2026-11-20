@@ -148,6 +148,12 @@ describe("postgres.format", () => {
     expect(commentTexts("select '--', E'/*', $$ -- $$, \"--x\"")).toEqual([]);
   });
 
+  it("treats a run of CRs before an LF in a block comment as one line break, so formatting twice changes nothing", () => {
+    const once = postgres.format("/* a\r\r\nb\rc */ select 1");
+    expect(once).toBe("/* a\nb\rc */\nSELECT 1;\n");
+    expect(postgres.format(once)).toBe(once);
+  });
+
   it("keeps nested block comments whole", () => {
     expect(postgres.format("/* a /* b */ c */ select 1")).toBe("/* a /* b */ c */\nSELECT 1;\n");
   });

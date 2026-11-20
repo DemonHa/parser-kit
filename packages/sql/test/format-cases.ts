@@ -68,7 +68,7 @@ export const commentTexts = (text: string): string[] => {
   for (const { start, end } of comments) {
     const from = lines[start.row - 1]! + start.col;
     const raw = text.slice(from, lines[end.row - 1]! + end.col);
-    seen.set(from, raw.startsWith("--") ? raw.replace(/\r$/, "") : raw.replace(/\r\n/g, "\n"));
+    seen.set(from, raw.startsWith("--") ? raw.replace(/\r$/, "") : raw.replace(/\r+\n/g, "\n"));
   }
   return [...seen.values()].sort();
 };

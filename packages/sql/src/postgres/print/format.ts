@@ -14,10 +14,11 @@
 //   source order. So is a block comment trailing a `COPY … FROM STDIN`, since
 //   psql allows only a `--` comment after that `;`.
 //
-// Comments are copied verbatim (a block comment's CRLFs become LFs), so no
-// comment is lost or changed. Every comment ends up outside any statement and
-// is followed by a line break, so it can't run into the SQL around it. One blank
-// line is kept where the source had at least one between two of these units.
+// Comments are copied verbatim (in a block comment, CRs before an LF are
+// dropped), so no comment is lost or changed. Every comment ends up outside
+// any statement and is followed by a line break, so it can't run into the SQL
+// around it. One blank line is kept where the source had at least one between
+// two of these units.
 import type { Position, Span } from "@parser-kit/core";
 import type { ScriptItem, Stmt } from "../ast";
 import { postgresScriptGrammar } from "../grammar";
@@ -67,7 +68,7 @@ export const format = (text: string, options?: FormatOptions): string => {
       end: offset(end),
       row: start.row,
       endRow: end.row,
-      text: raw.startsWith("--") ? raw.replace(/\r$/, "") : raw.replace(/\r\n/g, "\n"),
+      text: raw.startsWith("--") ? raw.replace(/\r$/, "") : raw.replace(/\r+\n/g, "\n"),
     });
   }
   const comments = [...byStart.values()].sort((a, b) => a.start - b.start);
