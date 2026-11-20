@@ -24,6 +24,9 @@ catalogs:
     '@dbml/core':
       specifier: 12.1.0
       version: 12.1.0
+    '@dbml/parse':
+      specifier: 12.1.0
+      version: 12.1.0
     esbuild:
       specifier: ^0.28.2
       version: 0.28.2
@@ -110,6 +113,9 @@ importers:
         version: link:../core
     devDependencies:
       '@dbml/core':
+        specifier: 'catalog:'
+        version: 12.1.0
+      '@dbml/parse':
         specifier: 'catalog:'
         version: 12.1.0
       tsc-alias:

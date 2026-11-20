@@ -35,7 +35,7 @@ pnpm types:check   # tsc --noEmit across every package
 pnpm lint          # biome
 pnpm lint:fix
 pnpm build         # tsc → packages/{core,sql}/build/{esm,cjs}
-pnpm bench         # @parser-kit/sql vs node-sql-parser
+pnpm bench         # @parser-kit/sql vs node-sql-parser, @parser-kit/dbml vs @dbml/core
 ```
 
 `pre-commit` runs `pnpm lint && pnpm test`, and `commit-msg` runs commitlint.
@@ -72,7 +72,7 @@ pnpm bench:compare   # diff against the committed baseline
 pnpm bench:save      # refresh it after an intentional change
 ```
 
-Absolute numbers drift with machine load — trust the @parser-kit/sql-vs-node-sql-parser ratio and the compare deltas over raw `hz`. Benchmarks don't run in CI.
+Absolute numbers drift with machine load — trust the ratios against the incumbents (node-sql-parser, @dbml/core) and the compare deltas over raw `hz`. Benchmarks don't run in CI.
 
 ## Releases
 
