@@ -140,7 +140,7 @@ postgres.stringifyScript(items);
 // "\\connect app\nCOPY t (a, b) FROM STDIN;\n1\tx\n\\.\nSELECT 1;"
 ```
 
-`stringify` prints the same COPY without its rows, since the server never receives them as SQL. `stringifyScript` throws a `TypeError` for rows it can't write: rows on a COPY that isn't `FROM STDIN`, or a row that is exactly `\.`.
+`stringify` prints the same COPY without its rows, since the server never receives them as SQL. `stringifyScript` throws a `TypeError` for what it can't write: rows on a COPY that isn't `FROM STDIN`, a row that is exactly `\.`, or a meta-command holding a line break.
 
 ### What is guaranteed
 
@@ -153,11 +153,12 @@ The same tree is not the same meaning if both spellings parse to one tree, so th
 - **Comments are dropped**, and so is the source's layout. A text-to-text formatter that keeps comments is planned.
 - **Spellings that share a tree print in one form.** Most of these mean the same to PostgreSQL: `cast(a AS t)` and `a::t`, `ABORT` and `ROLLBACK`, `FETCH FIRST n ROWS ONLY` and `LIMIT n`, `LIMIT ALL` and no limit, `int[3]` and `int[]`, `N'x'` and `bpchar 'x'`, a string's escape or dollar quoting (routine bodies are written `$$…$$`, `DO` bodies `'…'`). A few do not, so for these inputs the output can mean something different from the source:
   - every entry under [Known wrong ASTs](#known-wrong-asts): a quoted special parameter name (`SET "time zone"`, `RESET "all"`, `SET schema = 'x'`), a parenthesised arm with its own `WITH`, and a lone quoted `"system_user"` / `"current_catalog"` / `"current_schema"`;
-  - `x = ANY (SELECT …)` (a set) and `x = ANY ((SELECT …))` (an array); the first is printed;
-  - a quoted role named `"current_user"`, `"current_role"`, `"session_user"` or `"public"`, which prints as the keyword;
-  - a call to a user function named `"rollup"` or `"cube"` inside `GROUP BY ROLLUP / CUBE / GROUPING SETS`, which prints as the construct.
+  - a quoted role named `"current_user"`, `"current_role"` or `"session_user"`, which prints as the keyword;
+  - a call to a user function named `"rollup"` or `"cube"` directly in a `GROUPING SETS` list (`GROUPING SETS ("rollup"(a))`), which prints as the construct;
+  - an index element `(c COLLATE "C")` (an expression) and `c COLLATE "C"` (the column with its own collation); the second is printed;
+  - a quoted type name `"int"` or `"char"` in `DROP TYPE` / `DROP DOMAIN`, which prints as the built-in type (a cast keeps `::"int"`).
 
-  Of these, only the `ANY`, `WITH`, value-function and `rollup` / `cube` cases are statements PostgreSQL runs; the others name a parameter or role it rejects, so only input that already fails there changes.
+  The special parameter names are the only ones of these PostgreSQL rejects when run; the rest change what a statement PostgreSQL runs does.
 - **Hand-built trees are printed as they are, not validated.** A shape the parser never produces (an empty list where one is required, an empty name, a call named `row`, `trim`, `position` or `extract` that isn't in that construct's shape) may print SQL that doesn't parse, or parses to a different tree. A number node with no `raw` must hold a finite `value`; `NaN` throws a `TypeError`.
 - **`NotPrintableError`** is thrown for a statement kind the parser reads but the printer can't print yet, rather than printing something wrong. Every statement kind prints today; it is there for kinds a later version learns to parse before it can print them.
 
@@ -171,7 +172,7 @@ import { postgres, type Stmt } from "@parser-kit/sql/postgres/parser";
 
 ### Coming from node-sql-parser
 
-`postgres.parse` is `astify` and `postgres.stringify` is `sqlify`, each on its own AST. `sqlify` writes one line with every name quoted, which is `postgres.stringify(ast, { identifierQuote: "always" })` here.
+`postgres.parse` is `astify` and `postgres.stringify` is `sqlify`, each on its own AST. `sqlify` writes one line, quoting table and alias names but not columns; the closest here is `postgres.stringify(ast, { identifierQuote: "always" })`, which quotes columns too.
 
 ## AST conventions
 

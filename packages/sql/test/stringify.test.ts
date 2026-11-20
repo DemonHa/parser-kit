@@ -142,6 +142,7 @@ describe("stringify round trips", () => {
     { keywordCase: "lower", identifierQuote: "always", strings: "escape" },
     { width: 40, keywordCase: "lower", identifierQuote: "always", strings: "escape", indent: "\t" },
     { semicolons: "never" },
+    { semicolons: "between", width: 40, indent: 4 },
   ];
   for (const o of options) {
     it(`P1: parses back to the same tree with ${JSON.stringify({ ...o, width: String(o.width) })}`, () => {
