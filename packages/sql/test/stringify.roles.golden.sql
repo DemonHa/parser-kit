@@ -113,10 +113,10 @@ ALTER ROLE r SET TIME ZONE INTERVAL '-08:00' HOUR TO MINUTE;
 ALTER ROLE r SET TIME ZONE -7;
 
 -- ALTER ROLE r SET SCHEMA 'app'
-ALTER ROLE r SET schema TO 'app';
+ALTER ROLE r SET SCHEMA 'app';
 
 -- ALTER ROLE r SET NAMES 'UTF8'
-ALTER ROLE r SET names TO 'UTF8';
+ALTER ROLE r SET NAMES 'UTF8';
 
 -- ALTER ROLE r SET ROLE admin
 ALTER ROLE r SET role TO admin;
@@ -138,6 +138,60 @@ ALTER ROLE r SET time TO 1;
 
 -- ALTER ROLE r SET "time zone" FROM CURRENT
 ALTER ROLE r SET "time zone" FROM CURRENT;
+
+-- ALTER ROLE "current_user" RENAME TO x
+ALTER ROLE "current_user" RENAME TO x;
+
+-- ALTER ROLE "session_user" RENAME TO "current_role"
+ALTER ROLE "session_user" RENAME TO "current_role";
+
+-- ALTER ROLE r SET "time zone" TO a, b
+ALTER ROLE r SET "time zone" TO a, b;
+
+-- ALTER ROLE r SET "time zone" TO true
+ALTER ROLE r SET "time zone" TO TRUE;
+
+-- ALTER ROLE r SET "xml option" TO 'x'
+ALTER ROLE r SET "xml option" TO 'x';
+
+-- ALTER ROLE r SET "xml option" TO on
+ALTER ROLE r SET "xml option" TO "on";
+
+-- ALTER ROLE r SET "xml option" TO "DOCUMENT"
+ALTER ROLE r SET "xml option" TO "DOCUMENT";
+
+-- ALTER ROLE r SET "session authorization" TO 1
+ALTER ROLE r SET "session authorization" TO 1;
+
+-- ALTER ROLE r SET "transaction snapshot" TO x
+ALTER ROLE r SET "transaction snapshot" TO x;
+
+-- ALTER ROLE r SET schema TO 'a', 'b'
+ALTER ROLE r SET schema TO 'a', 'b';
+
+-- ALTER ROLE r SET names TO utf8
+ALTER ROLE r SET names TO utf8;
+
+-- ALTER ROLE r SET TIME ZONE "local"
+ALTER ROLE r SET TIME ZONE "local";
+
+-- ALTER ROLE r SET "time zone" TO "local"
+ALTER ROLE r SET TIME ZONE "local";
+
+-- ALTER ROLE r SET TIME ZONE "zone"
+ALTER ROLE r SET TIME ZONE "zone";
+
+-- ALTER ROLE r SET TIME ZONE europe_paris
+ALTER ROLE r SET TIME ZONE "europe_paris";
+
+-- ALTER ROLE r SET SESSION AUTHORIZATION bob
+ALTER ROLE r SET SESSION AUTHORIZATION "bob";
+
+-- ALTER ROLE r SET NAMES
+ALTER ROLE r SET NAMES DEFAULT;
+
+-- ALTER ROLE r SET NAMES DEFAULT
+ALTER ROLE r SET NAMES DEFAULT;
 
 -- ALTER ROLE r RESET ALL
 ALTER ROLE r RESET ALL;

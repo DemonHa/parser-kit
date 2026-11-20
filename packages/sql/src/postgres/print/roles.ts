@@ -174,7 +174,9 @@ export const rolesFamily = defineFamily(
         n.options,
       ),
     alterRole: (n) => {
-      const head: Doc[] = [kw(n.user ? "ALTER USER" : "ALTER ROLE"), n.name === null ? kw("ALL") : roleSpec(n.name)];
+      // RENAME takes a plain role name, never a pseudo-role.
+      const role = n.name === null ? kw("ALL") : n.action.kind === "rename" ? ident(n.name) : roleSpec(n.name);
+      const head: Doc[] = [kw(n.user ? "ALTER USER" : "ALTER ROLE"), role];
       if (n.database !== undefined) head.push(kw("IN DATABASE"), ident(n.database));
       const a = n.action;
       switch (a.kind) {

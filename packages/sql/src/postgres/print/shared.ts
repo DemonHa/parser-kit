@@ -2,8 +2,8 @@
 // self-contained: a family that needs one imports it from here rather than
 // writing its own.
 import { type Doc, group, indent, join, line } from "@parser-kit/core/print";
-import type { AlterConfigAction, ColType, DropSignature, FunctionArg, ObjectRef } from "../ast";
-import { commaList, ident, kw, parenList, qualified, quoted } from "./context";
+import type { AlterConfigAction, ColType, DropSignature, Expr, FunctionArg, ObjectRef } from "../ast";
+import { commaList, ident, kw, parenList, qualified, quoted, str } from "./context";
 import { expr } from "./expr";
 import { typeName } from "./types";
 
@@ -92,13 +92,74 @@ export const objectRef = (o: ObjectRef): Doc => {
   return join(" ", parts);
 };
 
-// SET's special forms, by the name the grammar gives them. Their names hold a
-// space, so no generic `name TO value` spells them.
-const SPECIAL_SETS: Record<string, string> = {
-  "time zone": "TIME ZONE",
-  "session authorization": "SESSION AUTHORIZATION",
-  "transaction snapshot": "TRANSACTION SNAPSHOT",
-  "xml option": "XML OPTION",
+type ConfigValues = Exclude<Extract<AlterConfigAction, { kind: "set" }>["values"], "fromCurrent">;
+
+const oneValue = (values: ConfigValues): Expr | null =>
+  values !== "default" && values.length === 1 ? values[0]! : null;
+const isString = (v: Expr | null): v is Extract<Expr, { kind: "string" }> => v?.kind === "string";
+const isNumber = (v: Expr | null): boolean =>
+  v?.kind === "number" || (v?.kind === "unary" && (v.op === "-" || v.op === "+") && v.operand.kind === "number");
+// A word value, written quoted: TIME ZONE and SESSION AUTHORIZATION take an
+// IDENT there, which no PG keyword is unless quoted (`"local"` is a zone,
+// LOCAL the default).
+const word = (v: Expr | null): string | null =>
+  v?.kind === "name" && v.parts.length === 1 ? quoted(v.parts[0]!) : null;
+
+// SET's special forms, by the name the grammar gives them: each one's
+// keywords, and its value when the values fit the form (else null, and the
+// generic `"name" TO value` spells them). SCHEMA and NAMES are kept special
+// though a generic spelling would parse to the same tree: to PG they set
+// search_path and client_encoding, while `schema TO …` names a parameter that
+// doesn't exist.
+const SPECIAL_SETS: Record<string, { keywords: string; value: (values: ConfigValues) => Doc | null }> = {
+  "time zone": {
+    keywords: "TIME ZONE",
+    value: (values) => {
+      if (values === "default") return kw("DEFAULT");
+      const v = oneValue(values);
+      return isString(v) || isNumber(v) || v?.kind === "interval" ? expr(v!) : word(v);
+    },
+  },
+  "session authorization": {
+    keywords: "SESSION AUTHORIZATION",
+    value: (values) => {
+      if (values === "default") return kw("DEFAULT");
+      const v = oneValue(values);
+      return isString(v) ? str(v.value) : word(v);
+    },
+  },
+  "transaction snapshot": {
+    keywords: "TRANSACTION SNAPSHOT",
+    value: (values) => {
+      const v = oneValue(values);
+      return isString(v) ? str(v.value) : null;
+    },
+  },
+  // The grammar matches DOCUMENT and CONTENT bare, by value.
+  "xml option": {
+    keywords: "XML OPTION",
+    value: (values) => {
+      const v = oneValue(values);
+      return v?.kind === "name" && v.parts.length === 1 && (v.parts[0] === "document" || v.parts[0] === "content")
+        ? kw(v.parts[0].toUpperCase())
+        : null;
+    },
+  },
+  schema: {
+    keywords: "SCHEMA",
+    value: (values) => {
+      const v = oneValue(values);
+      return isString(v) ? str(v.value) : null;
+    },
+  },
+  names: {
+    keywords: "NAMES",
+    value: (values) => {
+      if (values === "default") return kw("DEFAULT");
+      const v = oneValue(values);
+      return isString(v) ? str(v.value) : null;
+    },
+  },
 };
 
 // RESET's (and SHOW's) multi-word targets.
@@ -109,7 +170,7 @@ const SPECIAL_RESETS: Record<string, string> = {
   "session authorization": "SESSION AUTHORIZATION",
 };
 
-const configValues = (values: Exclude<Extract<AlterConfigAction, { kind: "set" }>["values"], "fromCurrent">): Doc =>
+const configValues = (values: ConfigValues): Doc =>
   values === "default" ? kw("DEFAULT") : commaList(values.map(expr));
 
 /**
@@ -122,14 +183,10 @@ export const alterConfigAction = (a: AlterConfigAction): Doc => {
     const special = a.name.length === 1 ? SPECIAL_RESETS[a.name[0]!] : undefined;
     return [kw("RESET"), " ", special !== undefined ? kw(special) : qualified(a.name)];
   }
-  const special = a.name.length === 1 && Object.hasOwn(SPECIAL_SETS, a.name[0]!) ? SPECIAL_SETS[a.name[0]!]! : null;
-  if (special !== null && a.values !== "fromCurrent") {
-    // XML OPTION's value is a keyword the grammar matches bare.
-    const value =
-      a.name[0] === "xml option" && a.values !== "default" && a.values.length === 1 && a.values[0]!.kind === "name"
-        ? kw(a.values[0]!.parts.join(".").toUpperCase())
-        : configValues(a.values);
-    return group([kw("SET"), " ", kw(special), indent([line, value])]);
+  if (a.values !== "fromCurrent" && a.name.length === 1 && Object.hasOwn(SPECIAL_SETS, a.name[0]!)) {
+    const special = SPECIAL_SETS[a.name[0]!]!;
+    const value = special.value(a.values);
+    if (value !== null) return group([kw("SET"), " ", kw(special.keywords), indent([line, value])]);
   }
   if (a.values === "fromCurrent") return [kw("SET"), " ", qualified(a.name), " ", kw("FROM CURRENT")];
   return group([kw("SET"), " ", qualified(a.name), " ", kw("TO"), indent([line, configValues(a.values)])]);
