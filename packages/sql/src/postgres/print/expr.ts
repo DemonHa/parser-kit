@@ -363,7 +363,16 @@ const chain = (e: Expr): Doc => {
     (root.kind === "param" && !fields) ||
     root.kind === "subquery";
   // A name root is a column reference here, never one of the bare functions.
-  const head = root.kind === "name" && bare ? qualified(root.parts) : bare ? printExpr(root) : ["(", expr(root), ")"];
+  // A name root is a column reference, whether bare or parenthesised (before a
+  // field step), never one of the functions a lone name prints as.
+  const head =
+    root.kind === "name"
+      ? bare
+        ? qualified(root.parts)
+        : ["(", qualified(root.parts), ")"]
+      : bare
+        ? printExpr(root)
+        : ["(", expr(root), ")"];
   return [head, steps];
 };
 // The kind of the step nearest the root.
@@ -601,12 +610,7 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       node = node.left;
       spine.push(node);
     }
-    // A tighter chain on the left, printed bare, takes one more indent, so where
-    // it breaks its lines stand apart from this chain's operands. (A
-    // parenthesised one is set apart by its parentheses already.)
-    const first = left(node, node.left);
-    const tighter = node.left.kind === "binary" && !prec.parens(node, node.left, "left");
-    const parts: Doc[] = [tighter ? indent(first) : first];
+    const parts: Doc[] = [left(node, node.left)];
     for (let i = spine.length - 1; i >= 0; i--) {
       const n = spine[i]!;
       parts.push(` ${operator(n.op, n.opSchema)}`, indent([line, right(n, n.right)]));
@@ -660,7 +664,8 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       " ",
       kw("BETWEEN"),
       e.symmetric !== undefined ? ` ${kw(e.symmetric ? "SYMMETRIC" : "ASYMMETRIC")}` : "",
-      indent([line, within(true, () => prec.operand(e.lo, LIKE_OPERAND, "b")), " ", kw("AND"), " ", right(e, e.hi)]),
+      // Each bound on a line of its own when they break.
+      indent([line, within(true, () => prec.operand(e.lo, LIKE_OPERAND, "b")), line, kw("AND"), " ", right(e, e.hi)]),
     ]),
   in: (e) => [left(e, e.expr), not(e.negated), " ", kw("IN"), " ", parenList(e.list.map(expr))],
   inSubquery: (e) => [left(e, e.expr), not(e.negated), " ", kw("IN"), " ", parens(printQuery(e.query))],

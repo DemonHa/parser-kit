@@ -347,9 +347,11 @@ describe("stringify on hand-built trees", () => {
     expect(print('SELECT "system_user", current_schema FROM "current_catalog";')).toBe(
       'SELECT system_user, current_schema FROM "current_catalog";',
     );
-    // Subscripted, it is a column: PG takes no subscript on the function.
-    expect(print('SELECT "current_schema"[1], "system_user"[1:2] FROM t;')).toBe(
-      'SELECT "current_schema"[1], "system_user"[1:2] FROM t;',
+    // Before a subscript or field step it prints as a column: the tree can't
+    // tell `(current_schema)[1]` from `"current_schema"[1]`, and bare
+    // `current_schema[1]` is a syntax error to PG.
+    expect(print('SELECT "current_schema"[1], "system_user"[1:2], ("current_catalog").f FROM t;')).toBe(
+      'SELECT "current_schema"[1], "system_user"[1:2], ("current_catalog").f FROM t;',
     );
   });
 
