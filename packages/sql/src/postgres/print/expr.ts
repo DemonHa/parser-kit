@@ -18,6 +18,7 @@ import {
   type Doc,
   definePrinter,
   group,
+  ifBreak,
   indent,
   join,
   line,
@@ -209,6 +210,19 @@ const left = (parent: Expr, child: Expr): Doc => {
   if (tier !== undefined && tierOf(child) === tier) return ["(", expr(child), ")"];
   return exprKey(child) === null ? printExpr(child) : prec.child(parent, child, "left");
 };
+// A left operand followed by a tail that may open a bracket (`IN (`, `ANY (`,
+// `IS DISTINCT FROM (…)`, `AT TIME ZONE (…)`). An operator chain on the left
+// breaks with a hanging indent, and a bracket opened on its last line would
+// close at the chain's first column instead. So when the node breaks, a
+// non-atomic left operand gets parentheses of its own lines (only then: flat,
+// none are added), and the tail follows the closing one at the node's column.
+const leftThen = (parent: Expr, child: Expr, tail: Doc): Doc => {
+  const doc = left(parent, child);
+  const tier = tierOf(parent);
+  const wrapped = (tier !== undefined && tierOf(child) === tier) || prec.parens(parent, child, "left");
+  if (exprKey(child) === null || wrapped) return [doc, tail];
+  return group([ifBreak(parens(doc), doc), tail]);
+};
 const right = (parent: Expr, child: Expr): Doc =>
   exprKey(child) === null ? printExpr(child) : prec.child(parent, child, "right");
 
@@ -242,7 +256,7 @@ const postfixChain = (e: Postfix): Doc => {
     node = node.expr as Postfix;
     spine.push(node);
   }
-  const parts: Doc[] = [left(node, node.expr)];
+  const parts: Doc[] = [];
   for (let i = spine.length - 1; i >= 0; i--) {
     const n = spine[i]!;
     switch (n.kind) {
@@ -260,7 +274,7 @@ const postfixChain = (e: Postfix): Doc => {
         break;
     }
   }
-  return parts;
+  return spine.some((n) => n.kind === "atTimeZone") ? leftThen(node, node.expr, parts) : [left(node, node.expr), parts];
 };
 
 // PG's extract_arg is an identifier, one of six field keywords, or a string:
@@ -362,7 +376,6 @@ const chain = (e: Expr): Doc => {
     (root.kind === "name" && firstStepKind(e) === "subscript") ||
     (root.kind === "param" && !fields) ||
     root.kind === "subquery";
-  // A name root is a column reference here, never one of the bare functions.
   // A name root is a column reference, whether bare or parenthesised (before a
   // field step), never one of the functions a lone name prints as.
   const head =
@@ -535,13 +548,8 @@ export const xmlPassing = (p: XmlPassing): Doc => [
 
 // The NOT a negated predicate puts after its operand.
 const not = (negated: boolean): string => (negated ? ` ${kw("NOT")}` : "");
-const isTail = (e: Extract<Expr, { kind: `is${string}` }>, rest: Doc): Doc => [
-  left(e, e.expr),
-  ` ${kw("IS")}`,
-  not(e.negated),
-  " ",
-  rest,
-];
+const isTail = (e: Extract<Expr, { kind: `is${string}` }>, rest: Doc): Doc =>
+  leftThen(e, e.expr, [` ${kw("IS")}`, not(e.negated), " ", rest]);
 
 // The operator of a binary or quantified node: a keyword, a symbol, or the
 // explicit `OPERATOR(schema.op)` spelling.
@@ -617,15 +625,15 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
     }
     return group(parts);
   },
-  anyAll: (e) => [
-    left(e, e.left),
-    " ",
-    operator(e.op, e.opSchema),
-    " ",
-    kw(e.quantifier.toUpperCase()),
-    " ",
-    e.right.kind === "subquery" ? printExpr(e.right) : ["(", expr(e.right), ")"],
-  ],
+  anyAll: (e) =>
+    leftThen(e, e.left, [
+      " ",
+      operator(e.op, e.opSchema),
+      " ",
+      kw(e.quantifier.toUpperCase()),
+      " ",
+      e.right.kind === "subquery" ? printExpr(e.right) : parens(expr(e.right)),
+    ]),
   cast: (e) => postfixChain(e),
   collate: (e) => postfixChain(e),
   atTimeZone: (e) => postfixChain(e),
@@ -667,8 +675,8 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       // Each bound on a line of its own when they break.
       indent([line, within(true, () => prec.operand(e.lo, LIKE_OPERAND, "b")), line, kw("AND"), " ", right(e, e.hi)]),
     ]),
-  in: (e) => [left(e, e.expr), not(e.negated), " ", kw("IN"), " ", parenList(e.list.map(expr))],
-  inSubquery: (e) => [left(e, e.expr), not(e.negated), " ", kw("IN"), " ", parens(printQuery(e.query))],
+  in: (e) => leftThen(e, e.expr, [not(e.negated), " ", kw("IN"), " ", parenList(e.list.map(expr))]),
+  inSubquery: (e) => leftThen(e, e.expr, [not(e.negated), " ", kw("IN"), " ", parens(printQuery(e.query))]),
   exists: (e) => [e.negated ? `${kw("NOT")} ` : "", kw("EXISTS"), " ", parens(printQuery(e.query))],
   subquery: (e) => parens(printQuery(e.query)),
   arraySubquery: (e) => [kw("ARRAY"), parens(printQuery(e.query))],

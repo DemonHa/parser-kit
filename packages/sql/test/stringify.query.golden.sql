@@ -693,6 +693,30 @@ WHERE
   ((s = 'active' OR s = 'trialing_customer') AND r = 'eu-west-1' OR p > 5) AND
     c > '2024-01-01';
 
+-- SELECT id FROM customers WHERE lower(first_name) || ' ' || lower(middle_name) || ' ' || lower(last_name) || ' ' || lower(suffix) IN (SELECT full_name FROM vip_list WHERE active AND region = 'emea' AND tier > 2);
+SELECT id
+FROM customers
+WHERE
+  (
+    lower(first_name) ||
+      ' ' ||
+      lower(middle_name) ||
+      ' ' ||
+      lower(last_name) ||
+      ' ' ||
+      lower(suffix)
+  ) IN (
+    SELECT full_name FROM vip_list WHERE active AND region = 'emea' AND tier > 2
+  );
+
+-- SELECT 1 FROM t WHERE aaaaaaaaaaaaaaaaaaaaaaaaaa + bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb = ANY (ARRAY[cccccccccccccccccccc, dddddddddddddddddddddd]);
+SELECT 1
+FROM t
+WHERE
+  (aaaaaaaaaaaaaaaaaaaaaaaaaa + bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) = ANY (
+    ARRAY[cccccccccccccccccccc, dddddddddddddddddddddd]
+  );
+
 -- SELECT * FROM users u;
 SELECT * FROM users AS u;
 
