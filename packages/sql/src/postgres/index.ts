@@ -1,4 +1,5 @@
 import { type PostgresParser, postgres as parser } from "./parser";
+import { type FormatOptions, format } from "./print/format";
 import {
   type StringifyInput,
   type StringifyOptions,
@@ -19,6 +20,7 @@ import {
 
 export type * from "./ast";
 export type { Diagnosis, PostgresParser, PostgresTokenType } from "./parser";
+export type { FormatOptions } from "./print/format";
 export {
   NotPrintableError,
   type StringifyInput,
@@ -36,7 +38,7 @@ export interface PostgresDialect extends PostgresParser {
   /**
    * Print statements (one or a list), an expression or a type as SQL. The
    * output is canonical and parses back to the same tree; comments are not
-   * kept. Statements end in `;` by default, one per line.
+   * kept (`format` keeps them). Statements end in `;` by default, one per line.
    */
   readonly stringify: (node: StringifyInput, options?: StringifyOptions) => string;
   /**
@@ -44,6 +46,14 @@ export interface PostgresDialect extends PostgresParser {
    * `;`, meta-command lines, and each `COPY … FROM stdin`'s rows after it.
    */
   readonly stringifyScript: (items: StringifyScriptInput, options?: StringifyScriptOptions) => string;
+  /**
+   * Format a psql script, text to text: parse it as `parseScript` does and
+   * print it as `stringifyScript` does, keeping its comments. Comments outside
+   * statements stay where they were (on their own lines, or after a `;` on the
+   * same line); comments inside a statement move to just before it. Throws the
+   * first `ParseError`.
+   */
+  readonly format: (text: string, options?: FormatOptions) => string;
 }
 
-export const postgres: PostgresDialect = Object.freeze({ ...parser, stringify, stringifyScript });
+export const postgres: PostgresDialect = Object.freeze({ ...parser, stringify, stringifyScript, format });

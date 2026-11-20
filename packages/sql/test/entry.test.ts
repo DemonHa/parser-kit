@@ -29,7 +29,7 @@ it("exports a parse-only dialect object from /postgres/parser", () => {
   expect(Object.isFrozen(parser)).toBe(true);
   expect(Object.keys(parser).sort()).toEqual(
     Object.keys(postgres)
-      .filter((key) => key !== "stringify" && key !== "stringifyScript")
+      .filter((key) => key !== "stringify" && key !== "stringifyScript" && key !== "format")
       .sort(),
   );
   for (const key of Object.keys(parser) as (keyof typeof parser)[]) expect(parser[key]).toBe(postgres[key]);
@@ -60,6 +60,7 @@ describe("postgres", () => {
     expect(Object.keys(postgres).sort()).toEqual([
       "diagnose",
       "diagnoseScript",
+      "format",
       "lexer",
       "parse",
       "parseScript",
@@ -91,8 +92,9 @@ describe("postgres", () => {
   });
 
   it("works with its methods detached", () => {
-    const { parse, diagnose, parseScript, diagnoseScript, stringify, stringifyScript } = postgres;
+    const { parse, diagnose, parseScript, diagnoseScript, stringify, stringifyScript, format } = postgres;
     expect(stringify(parse("select 1"))).toBe("SELECT 1;");
+    expect(format("select 1 -- one")).toBe("SELECT 1; -- one\n");
     expect(stringifyScript(parseScript("\\x\nselect 1"))).toBe("\\x\nSELECT 1;");
     expect(["SELECT 1", "SELECT 2"].map(parse)).toHaveLength(2);
     expect(diagnose("SELECT 1").errors).toEqual([]);
@@ -148,6 +150,8 @@ it("types the results with the AST types", () => {
   expectTypeOf(postgres.stringifyScript).toEqualTypeOf<
     (items: PostgresTypes.StringifyScriptInput, options?: PostgresTypes.StringifyScriptOptions) => string
   >();
+  expectTypeOf(postgres.format).toEqualTypeOf<(text: string, options?: PostgresTypes.FormatOptions) => string>();
+  expectTypeOf<PostgresTypes.FormatOptions>().toEqualTypeOf<PostgresTypes.StringifyScriptOptions>();
   expectTypeOf<PostgresTypes.PostgresDialect>().toMatchTypeOf<PostgresTypes.PostgresParser>();
   expectTypeOf(parserEntry.postgres).toEqualTypeOf<ParserTypes.PostgresParser>();
   expectTypeOf<ParserTypes.PostgresParser>().toEqualTypeOf<PostgresTypes.PostgresParser>();
@@ -156,6 +160,8 @@ it("types the results with the AST types", () => {
   expectTypeOf<ParserTypes.PostgresTokenType>().toEqualTypeOf<PostgresTypes.PostgresTokenType>();
   // @ts-expect-error -- the parse-only object has no printer
   expectTypeOf(parserEntry.postgres.stringify);
+  // @ts-expect-error -- nor the formatter
+  expectTypeOf(parserEntry.postgres.format);
   expectTypeOf<PostgresTypes.PsqlMeta>().toMatchTypeOf<ScriptItem>();
   expectTypeOf<Extract<Stmt, { kind: "select" }>>().toMatchTypeOf<PostgresTypes.Query>();
   expectTypeOf<Extract<PostgresTypes.Expr, { kind: "number" }>["value"]>().toEqualTypeOf<number>();
