@@ -79,6 +79,8 @@ const RELOPTIONS =
   "CREATE TABLE's WITH (…) takes the general option shape COPY's options use, so `x -1`, `force_quote *` and `force_null (a, 'b')` parse there; PostgreSQL's reloptions take only `name [= value]`.";
 const QUALIFIED_OPTIONS =
   "COPY's and utility statements' (…) option lists take the general option shape, so a qualified name (`toast.x`) and a number in a value list (`list ('a', 2)`) parse; PostgreSQL's take neither.";
+const EMPTY_AGGREGATE_SIGNATURE =
+  "CREATE AGGREGATE takes an empty `()` signature before its definition list; PostgreSQL has none (a zero-argument aggregate is `(*)`, and the old-style form has no signature at all).";
 
 // Each "ours" entry is in the README's "Accepted, but PostgreSQL rejects" list.
 const PARSER_DIFFERENCES: ParserDifference[] = [
@@ -125,6 +127,21 @@ const PARSER_DIFFERENCES: ParserDifference[] = [
     acceptedBy: "postgres",
     reason:
       "PostgreSQL's lexer takes any characters in B'…' and checks the digits only when the value is read; this lexer rejects a digit other than 0 or 1 while lexing (a MALFORMED row).",
+  },
+  {
+    sql: `ALTER VIEW v SET (x = (1, 'b', on, true, -2), y = *, toast.z = "Off")`,
+    acceptedBy: "ours",
+    reason: RELOPTIONS,
+  },
+  {
+    sql: 'CREATE AGGREGATE agg () ("Odd" = f, SFUNC = f, STYPE = int)',
+    acceptedBy: "ours",
+    reason: EMPTY_AGGREGATE_SIGNATURE,
+  },
+  {
+    sql: "CREATE AGGREGATE agg () (HYPOTHETICAL, SFUNC = f, STYPE = int)",
+    acceptedBy: "ours",
+    reason: EMPTY_AGGREGATE_SIGNATURE,
   },
   { sql: "CLUSTER (x.verbose)", acceptedBy: "ours", reason: QUALIFIED_OPTIONS },
   { sql: "COPY binary t FROM STDIN (toast.header)", acceptedBy: "ours", reason: QUALIFIED_OPTIONS },
@@ -267,7 +284,19 @@ const PRINTER_DIFFERENCES: PrinterDifference[] = [
     paths: DO_PATHS,
     reason: DO_ORDER,
   },
+  {
+    sql: "CREATE STATISTICS (mcv) ON (a::int), (b) FROM t",
+    paths: ["$.0.CreateStatsStmt.exprs.1.StatsElem.expr", "$.0.CreateStatsStmt.exprs.1.StatsElem.name"],
+    reason:
+      "A parenthesised column `(b)` gives the same tree as the column `b`, which the printer writes. PostgreSQL's tree has an expression element for the source and a column element for the print; CREATE STATISTICS stores both as the column (same `stxkeys`, no `stxexprs`, checked on PostgreSQL 16).",
+  },
   // Printer known limits: real meaning changes our tree can't express.
+  {
+    sql: "ALTER FUNCTION f(int) SET schema = 'x'",
+    paths: ["$.0.AlterFunctionStmt.actions.0.DefElem.arg.VariableSetStmt.name"],
+    reason:
+      "A generic SET of a parameter named `schema` gives the same tree as the SCHEMA form (`search_path`), which the printer writes: the form is the one that sets a real parameter, while PostgreSQL rejects `schema` as an unrecognised parameter when the statement runs.",
+  },
   {
     sql: "(WITH a AS (SELECT 1) SELECT 2 ORDER BY 1) UNION SELECT 3;",
     paths: ["$.0.SelectStmt.larg.withClause", "$.0.SelectStmt.withClause"],

@@ -1,20 +1,22 @@
 // Printers for AST pieces several statement families share. Each is
 // self-contained: a family that needs one imports it from here rather than
 // writing its own.
-import { type Doc, group, indent, join, line } from "@parser-kit/core/print";
+import { type Doc, group, indent, line } from "@parser-kit/core/print";
 import type {
   AlterConfigAction,
+  AlterGenericOption,
   ColType,
   DropSignature,
   Expr,
   FunctionArg,
+  GenericOption,
   ObjectRef,
   PartitionKey,
   RelationOption,
   RelationOptionValue,
 } from "../ast";
 import { RESERVED } from "../grammar";
-import { commaList, ident, isColNameKeyword, kw, parenList, qualified, quoted } from "./context";
+import { commaList, ident, isColNameKeyword, kw, parenList, qualified, quoted, str } from "./context";
 import { expr } from "./expr";
 import { typeName } from "./types";
 
@@ -61,7 +63,8 @@ export interface OptionStyle {
   reservedValues: boolean;
 }
 
-const optionValue = (v: RelationOptionValue, style: OptionStyle): Doc => {
+/** An option's value: a word, a number, a string, a boolean, `*` or a list. */
+export const optionValue = (v: RelationOptionValue, style: OptionStyle): Doc => {
   switch (v.kind) {
     case "star":
       return "*";
@@ -111,22 +114,56 @@ export const partitionKey = (k: PartitionKey): Doc => [
   k.opclass !== undefined ? [" ", qualified(k.opclass)] : "",
 ];
 
-// --- object references, routine signatures and roles ---
+// --- names ---
 
-/** An object keyword, or run of them, as the AST folds it (`"text search dictionary"`). */
-export const objectKeyword = (objectType: string): string => kw(objectType.toUpperCase());
+/**
+ * An option or definition name, PG's ColLabel: any word, reserved ones
+ * included, so it is quoted only when it isn't a lower-case word (or when
+ * `identifierQuote` is "always").
+ */
+// (`ident("a")` comes back quoted only under identifierQuote: "always".)
+export const optionLabel = (name: string): string => (BARE_WORD.test(name) && ident("a") === "a" ? name : quoted(name));
 
-// PG's pseudo-roles, which the grammar matches bare, by value, where a role is
-// specified (OWNER TO, GRANT, ALTER ROLE): quoted, they would name a role
-// called `current_user`.
-const PSEUDO_ROLES: ReadonlySet<string> = new Set(["current_user", "current_role", "session_user"]);
+// The CURRENT_ / SESSION_ pseudo-roles, which are keywords where a role is
+// specified. A role really named one of them has the same tree, so it prints
+// as the keyword too.
+const ROLE_KEYWORDS: ReadonlySet<string> = new Set(["current_user", "current_role", "session_user"]);
 
-/** A role where PG takes a role spec: a name, or a pseudo-role written as its keyword. */
-export const roleSpec = (name: string): string => (PSEUDO_ROLES.has(name) ? kw(name.toUpperCase()) : ident(name));
+/** A role where PG takes a role spec: a name, or one of the pseudo-role keywords. */
+export const roleSpec = (role: string): string => (ROLE_KEYWORDS.has(role) ? kw(role.toUpperCase()) : ident(role));
 
-// Words that would read as something other than an argument's name before its
-// type: an argument mode, SETOF, and the lead words of multi-word type names
-// (`double precision`). Quoted, each is a plain name.
+/** `[schema.]op`: an operator's dotted name, its last part the symbol. */
+export const operatorName = (parts: readonly string[]): string =>
+  [...parts.slice(0, -1).map(ident), parts[parts.length - 1]!].join(".");
+
+// --- generic options ---
+
+/** `OPTIONS (name 'value', …)`: a CREATE's generic options. */
+export const genericOptions = (options: readonly GenericOption[]): Doc => [
+  kw("OPTIONS"),
+  " ",
+  parenList(options.map((o) => [optionLabel(o.name), " ", str(o.value)])),
+];
+
+/** `OPTIONS ([ADD | SET] name 'value' | DROP name, …)`: an ALTER's generic options. */
+export const alterGenericOptions = (options: readonly AlterGenericOption[]): Doc => [
+  kw("OPTIONS"),
+  " ",
+  parenList(
+    options.map((o) =>
+      o.action === "drop"
+        ? [kw("DROP"), " ", optionLabel(o.name)]
+        : [o.action !== undefined ? `${kw(o.action.toUpperCase())} ` : "", optionLabel(o.name), " ", str(o.value)],
+    ),
+  ),
+];
+
+// --- routine arguments ---
+
+// Words a routine argument's name can't be bare as, beyond PG's col_name
+// keywords (which its param_name excludes): a mode word would read as the
+// mode, and the lead word of a multi-word type name would read, with the type
+// after it, as one type (`double precision`).
 const ARG_NAME_QUOTED: ReadonlySet<string> = new Set([
   "in",
   "out",
@@ -143,17 +180,43 @@ const ARG_NAME_QUOTED: ReadonlySet<string> = new Set([
   "interval",
 ]);
 
-/** One argument of a routine signature: `[mode] [name] type [DEFAULT expr]`. */
+/** A routine argument's or RETURNS TABLE column's name, PG's param_name. */
+export const argName = (name: string): string =>
+  ARG_NAME_QUOTED.has(name) || isColNameKeyword(name) ? quoted(name) : ident(name);
+
+/** `[mode] [name] type [DEFAULT expr]`: one argument of a routine's or aggregate's signature. */
 export const functionArg = (a: FunctionArg): Doc => [
   a.mode !== null ? `${kw(a.mode.toUpperCase())} ` : "",
-  // PG's param_name is a type_function_name: no col_name keyword either.
-  a.name !== null ? `${ARG_NAME_QUOTED.has(a.name) || isColNameKeyword(a.name) ? quoted(a.name) : ident(a.name)} ` : "",
+  a.name !== null ? `${argName(a.name)} ` : "",
   typeName(a.type),
-  a.defaultValue !== null ? [` ${kw("DEFAULT")} `, expr(a.defaultValue)] : "",
+  a.defaultValue !== null ? [" ", kw("DEFAULT"), " ", expr(a.defaultValue)] : "",
 ];
 
-/** A routine's or aggregate's argument list: `(*)` or `(arg, …)`. */
-export const signature = (s: DropSignature): Doc => (s.star ? "(*)" : parenList(s.args.map(functionArg)));
+/** `(arg, …)`, or an aggregate's `(*)`. */
+export const signature = (s: DropSignature): Doc =>
+  s.star && s.args.length === 0 ? "(*)" : parenList(s.args.map(functionArg));
+
+// --- object references ---
+
+const operandType = (t: ColType | null): Doc => (t === null ? kw("NONE") : typeName(t));
+
+/** `(left, right)`: an operator's operand types, NONE for a prefix operator's missing side. */
+export const operandTypes = (operands: readonly [ColType | null, ColType | null]): Doc => [
+  "(",
+  operandType(operands[0]),
+  ", ",
+  operandType(operands[1]),
+  ")",
+];
+
+/** A cast's `(source AS target)`. */
+export const castTypes = (source: ColType, target: ColType): Doc => [
+  "(",
+  typeName(source),
+  ` ${kw("AS")} `,
+  typeName(target),
+  ")",
+];
 
 /**
  * A routine or aggregate named with its argument list: PG's func_name, so a
@@ -189,130 +252,124 @@ export const numberText = (n: number): string =>
         ? "-0"
         : String(n);
 
-/** An operator name, `[schema.]op`: the qualifying parts are names, the last the symbol. */
-export const operatorName = (name: readonly string[]): string =>
-  [...name.slice(0, -1).map(ident), name[name.length - 1]!].join(".");
-
-/** An operator's `(left, right)` operand types, NONE for a missing side. */
-export const operandTypes = (operands: readonly [ColType | null, ColType | null]): Doc =>
-  parenList(operands.map((t) => (t === null ? kw("NONE") : typeName(t))));
-
-/** A cast's `(source AS target)`. */
-export const castTypes = (source: ColType, target: ColType): Doc => [
-  "(",
-  typeName(source),
-  ` ${kw("AS")} `,
-  typeName(target),
-  ")",
-];
-
 /**
- * One existing object as COMMENT ON and SECURITY LABEL name it (and ALTER
- * EXTENSION and the generic ALTER, once printed): its keyword(s), then the
- * reference its kind takes.
+ * The reference part of an object, as COMMENT ON, SECURITY LABEL, ALTER
+ * EXTENSION ADD / DROP and the generic ALTER name it: everything after the
+ * object kind's keywords.
  */
-export const objectRef = (o: ObjectRef): Doc => {
-  const parts: Doc[] = [objectKeyword(o.objectType)];
-  if (o.oid !== undefined) parts.push(numberText(o.oid));
-  if (o.source !== undefined && o.target !== undefined) parts.push(castTypes(o.source, o.target));
-  if (o.type !== undefined) {
-    parts.push(kw("FOR"), typeName(o.type));
-    if (o.language !== undefined) parts.push(kw("LANGUAGE"), ident(o.language));
-  }
-  if (o.name !== undefined) {
-    if (o.operands !== undefined) {
-      parts.push(operatorName(o.name), operandTypes(o.operands));
-    } else if (o.signature !== undefined) {
-      parts.push(routineWithArgs(o.name, o.signature));
-    } else if (o.objectType === "type" || o.objectType === "domain") {
-      parts.push(typeObjectName(o.name));
+export const objectRefName = (ref: ObjectRef): Doc => {
+  const parts: Doc[] = [];
+  if (ref.source !== undefined && ref.target !== undefined) parts.push(castTypes(ref.source, ref.target));
+  if (ref.type !== undefined) parts.push([kw("FOR"), " ", typeName(ref.type)]);
+  if (ref.language !== undefined) parts.push([kw("LANGUAGE"), " ", ident(ref.language)]);
+  if (ref.oid !== undefined) parts.push(numberText(ref.oid));
+  if (ref.name !== undefined) {
+    if (ref.operands !== undefined) {
+      parts.push([operatorName(ref.name), " ", operandTypes(ref.operands)]);
     } else {
-      parts.push(qualified(o.name));
+      parts.push(
+        ref.signature !== undefined
+          ? routineWithArgs(ref.name, ref.signature)
+          : ref.objectType === "type" || ref.objectType === "domain"
+            ? typeObjectName(ref.name)
+            : qualified(ref.name),
+      );
     }
   }
-  if (o.table !== undefined) parts.push(kw("ON"), qualified(o.table));
-  if (o.domain !== undefined) parts.push(kw("ON DOMAIN"), qualified(o.domain));
-  if (o.using !== undefined) parts.push(kw("USING"), ident(o.using));
-  return join(" ", parts);
+  if (ref.using !== undefined) parts.push([kw("USING"), " ", ident(ref.using)]);
+  if (ref.table !== undefined) {
+    // `DOMAIN` after ON reads as the keyword when a name follows it.
+    const table = ref.table.length === 1 && ref.table[0] === "domain" ? quoted("domain") : qualified(ref.table);
+    parts.push([kw("ON"), " ", table]);
+  }
+  if (ref.domain !== undefined) parts.push([kw("ON DOMAIN"), " ", qualified(ref.domain)]);
+  return parts.flatMap((p, i) => (i === 0 ? [p] : [" ", p]));
 };
 
-// --- SET / RESET ---
+/** `kind reference`: an object's kind keywords, then its reference. */
+export const objectRef = (ref: ObjectRef): Doc => [kw(ref.objectType.toUpperCase()), " ", objectRefName(ref)];
 
-// The multi-word targets SHOW, RESET and SET name as one name part.
-const CONFIG_FORMS: Record<string, string> = {
-  "time zone": "TIME ZONE",
-  "transaction isolation level": "TRANSACTION ISOLATION LEVEL",
-  "session authorization": "SESSION AUTHORIZATION",
-};
+// --- actions ---
 
-/** SHOW and RESET's target: ALL, a multi-word form, or a dotted parameter name. */
-export const configTarget = (name: string[]): Doc => {
-  if (name.length === 1 && name[0] === "all") return kw("ALL");
-  const form = name.length === 1 ? CONFIG_FORMS[name[0]!] : undefined;
-  return form !== undefined ? kw(form) : qualified(name);
-};
+/** RENAME TO, OWNER TO and SET SCHEMA, the actions most ALTER targets share. */
+export const commonAlterAction = (
+  a: { kind: "rename"; to: string } | { kind: "ownerTo"; owner: string } | { kind: "setSchema"; schema: string },
+): Doc =>
+  a.kind === "rename"
+    ? [kw("RENAME TO"), " ", ident(a.to)]
+    : a.kind === "ownerTo"
+      ? [kw("OWNER TO"), " ", roleSpec(a.owner)]
+      : [kw("SET SCHEMA"), " ", ident(a.schema)];
 
-// One value of a SET list: a number, a string, a boolean or a word (a name
-// node). `on`, reserved, is a value word to the grammar; any other word is
-// written as a name would be.
-const configValue = (e: Expr, words: "value" | "word" | "zone"): Doc => {
-  if (e.kind !== "name") return expr(e);
-  const word = e.parts[0]!;
-  if (words === "value" && word === "on") return word;
-  // PG's zone_value takes an IDENT, no keyword: a word is always quoted
-  // (bare LOCAL, for one, is TIME ZONE's DEFAULT).
-  if (words === "zone") return quoted(word);
-  return ident(word);
-};
+// --- parameter defaults ---
 
-// A value SET's special forms take, by form; the generic `name TO value` form
-// takes anything else.
-const isString = (v: Expr): boolean => v.kind === "string";
-const isWord = (v: Expr): boolean => v.kind === "string" || (v.kind === "name" && v.parts.length === 1);
-const isZone = (v: Expr): boolean => v.kind === "number" || v.kind === "unary" || v.kind === "interval" || isWord(v);
-
-const SPECIAL_SET: Record<string, { words: string; one: (v: Expr) => boolean; byDefault: boolean }> = {
-  "time zone": { words: "TIME ZONE", one: isZone, byDefault: true },
-  schema: { words: "SCHEMA", one: isString, byDefault: false },
-  names: { words: "NAMES", one: isString, byDefault: true },
-  role: { words: "ROLE", one: isWord, byDefault: false },
-  "session authorization": { words: "SESSION AUTHORIZATION", one: isWord, byDefault: true },
-  "xml option": {
-    words: "XML OPTION",
-    one: (v) => v.kind === "name" && v.parts.length === 1 && (v.parts[0] === "document" || v.parts[0] === "content"),
-    byDefault: false,
+// The parameters PG spells as a form of their own, keyword words and no TO.
+// The tree holds a form's name as one part (`["time zone"]`), as it does a
+// quoted generic name of the same text (`SET "time zone" TO …`), so a form is
+// written only where the value is one the form reads; anything else is written
+// as the generic, quoted name, which reads back the same.
+type Values = readonly Expr[] | "default" | "fromCurrent";
+const one = (values: Values): Expr | null => (Array.isArray(values) && values.length === 1 ? values[0]! : null);
+const ZONE_VALUES: ReadonlySet<string> = new Set(["string", "number", "unary", "name", "interval"]);
+const SET_FORMS: Record<string, (values: Values) => Doc | null> = {
+  // PG's zone_value takes a name only as a plain identifier, no keyword of any
+  // kind (and a bare LOCAL reads as DEFAULT), so a zone name is always quoted.
+  "time zone": (values) => {
+    if (values === "default") return kw("DEFAULT");
+    const v = one(values);
+    if (v === null || !ZONE_VALUES.has(v.kind)) return null;
+    return v.kind === "name" && v.parts.length === 1 ? quoted(v.parts[0]!) : expr(v);
   },
-  "transaction snapshot": { words: "TRANSACTION SNAPSHOT", one: isString, byDefault: false },
+  "session authorization": (values) => {
+    if (values === "default") return kw("DEFAULT");
+    const v = one(values);
+    return v !== null && (v.kind === "string" || (v.kind === "name" && v.parts.length === 1))
+      ? parameterValue(v)
+      : null;
+  },
+  "xml option": (values) => {
+    const v = one(values);
+    return v?.kind === "name" && (v.parts[0] === "document" || v.parts[0] === "content")
+      ? kw(v.parts[0].toUpperCase())
+      : null;
+  },
+  "transaction snapshot": (values) => (one(values)?.kind === "string" ? expr(one(values)!) : null),
+  // SCHEMA and NAMES are PG's search_path and client_encoding: a parameter
+  // written `schema` or `names` would be another one.
+  schema: (values) => (one(values)?.kind === "string" ? expr(one(values)!) : null),
+  names: (values) =>
+    values === "default" ? kw("DEFAULT") : one(values)?.kind === "string" ? expr(one(values)!) : null,
 };
+// The forms RESET takes.
+const RESET_FORMS: ReadonlySet<string> = new Set(["time zone", "transaction isolation level", "session authorization"]);
+
+// ON is reserved but a SET value all the same, as OFF is. Any other word is a
+// name, quoted when it must be: `expr` would write the words PG reads as
+// functions (`system_user`) bare, which no value may be.
+const parameterValue = (v: Expr): Doc =>
+  v.kind !== "name" || v.parts.length !== 1 ? expr(v) : v.parts[0] === "on" ? kw("ON") : ident(v.parts[0]!);
 
 /**
- * What follows `SET [scope]` in the SET statement, and `SET` in ALTER ROLE /
- * ALTER DATABASE: one of SET's special forms where the value fits it, else
- * `name TO value, …`, `name TO DEFAULT` or `name FROM CURRENT`.
+ * `name {TO value[, …] | TO DEFAULT | FROM CURRENT}`, the SET of a parameter
+ * as a routine, a role or a database sets it (after the SET keyword), or one
+ * of PG's own forms (`TIME ZONE 'UTC'`, `SCHEMA 'x'`).
  */
-export const configSet = (configName: string[], values: Expr[] | "default" | "fromCurrent"): Doc => {
-  const special = configName.length === 1 ? SPECIAL_SET[configName[0]!] : undefined;
-  if (special !== undefined) {
-    if (values === "default" && special.byDefault) return [kw(special.words), " ", kw("DEFAULT")];
-    if (Array.isArray(values) && values.length === 1 && special.one(values[0]!)) {
-      const v = values[0]!;
-      const word = configName[0] === "time zone" ? "zone" : configName[0] === "xml option" ? "value" : "word";
-      return [
-        kw(special.words),
+export const parameterSet = (name: readonly string[], values: Values): Doc => {
+  const form = name.length === 1 && Object.hasOwn(SET_FORMS, name[0]!) ? SET_FORMS[name[0]!]!(values) : null;
+  if (form !== null) return [kw(name[0]!.toUpperCase()), " ", form];
+  if (values === "fromCurrent") return [qualified(name), " ", kw("FROM CURRENT")];
+  const value = values === "default" ? kw("DEFAULT") : commaList(values.map(parameterValue));
+  return group([qualified(name), " ", kw("TO"), indent([line, value])]);
+};
+
+/** `SET name …` or `RESET name`: the SET / RESET of a role's or database's parameter default. */
+export const alterConfig = (a: AlterConfigAction): Doc =>
+  a.kind === "set"
+    ? [kw("SET"), " ", parameterSet(a.name, a.values)]
+    : [
+        kw("RESET"),
         " ",
-        configName[0] === "xml option" ? kw((v as { parts: string[] }).parts[0]!.toUpperCase()) : configValue(v, word),
+        a.name.length === 1 && (a.name[0] === "all" || RESET_FORMS.has(a.name[0]!))
+          ? kw(a.name[0]!.toUpperCase())
+          : qualified(a.name),
       ];
-    }
-  }
-  const name = qualified(configName);
-  if (values === "fromCurrent") return [name, " ", kw("FROM CURRENT")];
-  if (values === "default") return [name, " ", kw("TO DEFAULT")];
-  return group([name, " ", kw("TO"), indent([line, commaList(values.map((v) => configValue(v, "value")))])]);
-};
-
-/**
- * The SET / RESET of parameter defaults ALTER ROLE and ALTER DATABASE take:
- * `SET …` as the SET statement's, `RESET target` as the RESET statement's.
- */
-export const alterConfigAction = (a: AlterConfigAction): Doc =>
-  a.kind === "reset" ? [kw("RESET"), " ", configTarget(a.name)] : [kw("SET"), " ", configSet(a.name, a.values)];

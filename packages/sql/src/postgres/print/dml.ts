@@ -39,7 +39,7 @@ import {
 import { expr } from "./expr";
 import { aliasClause, printFrom, printQuery, selectItems, withClause } from "./query";
 import { defineFamily, statementPrinter } from "./registry";
-import { configSet, configTarget, type OptionStyle, partitionKey, relationOptions } from "./shared";
+import { type OptionStyle, partitionKey, relationOptions } from "./shared";
 import { typeName } from "./types";
 
 // --- shared pieces ---
@@ -317,6 +317,75 @@ const chain = (c: boolean): string => (c ? ` ${kw("AND CHAIN")}` : "");
 const scope = (s: "session" | "local" | null): string =>
   s === "session" ? `${kw("SESSION")} ` : s === "local" ? `${kw("LOCAL")} ` : "";
 
+// The multi-word targets SHOW, RESET and SET name as one name part.
+const CONFIG_FORMS: Record<string, string> = {
+  "time zone": "TIME ZONE",
+  "transaction isolation level": "TRANSACTION ISOLATION LEVEL",
+  "session authorization": "SESSION AUTHORIZATION",
+};
+
+// SHOW and RESET's target: ALL, a multi-word form, or a dotted parameter name.
+const configTarget = (name: string[]): Doc => {
+  if (name.length === 1 && name[0] === "all") return kw("ALL");
+  const form = name.length === 1 ? CONFIG_FORMS[name[0]!] : undefined;
+  return form !== undefined ? kw(form) : qualified(name);
+};
+
+// One value of a SET list: a number, a string, a boolean or a word (a name
+// node). `on`, reserved, is a value word to the grammar; any other word is
+// written as a name would be.
+const configValue = (e: Expr, words: "value" | "word" | "zone"): Doc => {
+  if (e.kind !== "name") return expr(e);
+  const word = e.parts[0]!;
+  if (words === "value" && word === "on") return word;
+  // PG's zone_value takes an IDENT, no keyword: a word is always quoted
+  // (bare LOCAL, for one, is TIME ZONE's DEFAULT).
+  if (words === "zone") return quoted(word);
+  return ident(word);
+};
+
+// A value SET's special forms take, by form; the generic `name TO value` form
+// takes anything else.
+const isString = (v: Expr): boolean => v.kind === "string";
+const isWord = (v: Expr): boolean => v.kind === "string" || (v.kind === "name" && v.parts.length === 1);
+const isZone = (v: Expr): boolean => v.kind === "number" || v.kind === "unary" || v.kind === "interval" || isWord(v);
+
+const SPECIAL_SET: Record<string, { words: string; one: (v: Expr) => boolean; byDefault: boolean }> = {
+  "time zone": { words: "TIME ZONE", one: isZone, byDefault: true },
+  schema: { words: "SCHEMA", one: isString, byDefault: false },
+  names: { words: "NAMES", one: isString, byDefault: true },
+  role: { words: "ROLE", one: isWord, byDefault: false },
+  "session authorization": { words: "SESSION AUTHORIZATION", one: isWord, byDefault: true },
+  "xml option": {
+    words: "XML OPTION",
+    one: (v) => v.kind === "name" && v.parts.length === 1 && (v.parts[0] === "document" || v.parts[0] === "content"),
+    byDefault: false,
+  },
+  "transaction snapshot": { words: "TRANSACTION SNAPSHOT", one: isString, byDefault: false },
+};
+
+const setStmt = (s: Extract<Stmt, { kind: "set" }>): Doc => {
+  const head = [kw("SET"), " ", scope(s.scope)];
+  const special = s.name.length === 1 ? SPECIAL_SET[s.name[0]!] : undefined;
+  if (special !== undefined) {
+    if (s.values === "default" && special.byDefault) return [head, kw(special.words), " ", kw("DEFAULT")];
+    if (Array.isArray(s.values) && s.values.length === 1 && special.one(s.values[0]!)) {
+      const v = s.values[0]!;
+      const word = s.name[0] === "time zone" ? "zone" : s.name[0] === "xml option" ? "value" : "word";
+      return [
+        head,
+        kw(special.words),
+        " ",
+        s.name[0] === "xml option" ? kw((v as { parts: string[] }).parts[0]!.toUpperCase()) : configValue(v, word),
+      ];
+    }
+  }
+  const name = qualified(s.name);
+  if (s.values === "fromCurrent") return [head, name, " ", kw("FROM CURRENT")];
+  if (s.values === "default") return [head, name, " ", kw("TO DEFAULT")];
+  return group([head, name, " ", kw("TO"), indent([line, commaList(s.values.map((v) => configValue(v, "value")))])]);
+};
+
 // --- cursors ---
 
 const direction = (d: CursorDirection): string => {
@@ -443,7 +512,7 @@ export const dmlFamily = defineFamily(
     prepareTransaction: (s) => [kw("PREPARE TRANSACTION"), " ", str(s.gid)],
     commitPrepared: (s) => [kw("COMMIT PREPARED"), " ", str(s.gid)],
     rollbackPrepared: (s) => [kw("ROLLBACK PREPARED"), " ", str(s.gid)],
-    set: (s) => [kw("SET"), " ", scope(s.scope), configSet(s.name, s.values)],
+    set: setStmt,
     setTransaction: (s) => [
       kw("SET"),
       " ",

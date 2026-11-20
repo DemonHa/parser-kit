@@ -95,7 +95,7 @@ ALTER ROLE r SET x FROM CURRENT;
 ALTER ROLE r SET statement_timeout TO 0;
 
 -- ALTER ROLE r SET x TO on, off, true, -1.5
-ALTER ROLE r SET x TO on, off, TRUE, -1.5;
+ALTER ROLE r SET x TO ON, off, TRUE, -1.5;
 
 -- ALTER ROLE ALL SET log_statement TO 'all'
 ALTER ROLE ALL SET log_statement TO 'all';
@@ -119,7 +119,7 @@ ALTER ROLE r SET SCHEMA 'app';
 ALTER ROLE r SET NAMES 'UTF8';
 
 -- ALTER ROLE r SET ROLE admin
-ALTER ROLE r SET ROLE admin;
+ALTER ROLE r SET role TO admin;
 
 -- ALTER ROLE r SET SESSION AUTHORIZATION DEFAULT
 ALTER ROLE r SET SESSION AUTHORIZATION DEFAULT;
@@ -155,7 +155,7 @@ ALTER ROLE r SET "time zone" TO TRUE;
 ALTER ROLE r SET "xml option" TO 'x';
 
 -- ALTER ROLE r SET "xml option" TO on
-ALTER ROLE r SET "xml option" TO on;
+ALTER ROLE r SET "xml option" TO ON;
 
 -- ALTER ROLE r SET "xml option" TO "DOCUMENT"
 ALTER ROLE r SET "xml option" TO "DOCUMENT";
@@ -203,7 +203,7 @@ ALTER ROLE r WITH CONNECTION LIMIT -0;
 ALTER ROLE r SET x TO "system_user", "current_catalog", "current_schema";
 
 -- ALTER ROLE r SET ROLE "system_user"
-ALTER ROLE r SET ROLE "system_user";
+ALTER ROLE r SET role TO "system_user";
 
 -- ALTER ROLE r RESET ALL
 ALTER ROLE r RESET ALL;
@@ -537,7 +537,7 @@ COMMENT ON CONSTRAINT c ON s.t IS 'x';
 COMMENT ON CONSTRAINT c ON DOMAIN s.d IS 'x';
 
 -- COMMENT ON CONSTRAINT c ON "domain" IS 'x'
-COMMENT ON CONSTRAINT c ON domain IS 'x';
+COMMENT ON CONSTRAINT c ON "domain" IS 'x';
 
 -- COMMENT ON POLICY p ON t IS 'x'
 COMMENT ON POLICY p ON t IS 'x';

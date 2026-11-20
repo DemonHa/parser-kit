@@ -6,10 +6,9 @@ import type { DefaultPrivilegesAction, GrantObject, Privilege, RoleGrantOption, 
 import { clause, commaList, ident, kw, minimalIdent, parenList, qualified, quoted, str } from "./context";
 import { defineFamily } from "./registry";
 import {
-  alterConfigAction,
+  alterConfig,
   castTypes,
   numberText,
-  objectKeyword,
   objectRef,
   operandTypes,
   operatorName,
@@ -17,6 +16,9 @@ import {
   routineWithArgs,
   typeObjectName,
 } from "./shared";
+
+/** An object kind's keyword(s), as the tree folds them (`"foreign data wrapper"`). */
+const kwObject = (objectType: string): string => kw(objectType.toUpperCase());
 
 /**
  * A statement: its `head` words on one line, then each of the `rest` on a line
@@ -114,7 +116,7 @@ const grantObject = (o: GrantObject): Doc => {
           return sig !== undefined && sig !== null ? routineWithArgs(name, sig) : qualified(name);
         });
   // The kind is always written, TABLE too: then no object name can read as a kind word.
-  return clause(objectKeyword(o.objectType), commaList(items));
+  return clause(kwObject(o.objectType), commaList(items));
 };
 
 // PUBLIC, or a role spec.
@@ -159,7 +161,7 @@ const dropItem = (d: Drop, name: string[], i: number): Doc => {
 };
 
 const dropStmt = (d: Drop): Doc => {
-  const head: Doc[] = [kw("DROP"), objectKeyword(d.objectType)];
+  const head: Doc[] = [kw("DROP"), kwObject(d.objectType)];
   if (d.concurrently) head.push(kw("CONCURRENTLY"));
   if (d.ifExists) head.push(kw("IF EXISTS"));
   const items: Doc[] =
@@ -193,7 +195,7 @@ export const rolesFamily = defineFamily(
         case "rename":
           return stmt(head, [`${kw("RENAME TO")} ${ident(a.to)}`]);
         default:
-          return stmt(head, [alterConfigAction(a)]);
+          return stmt(head, [alterConfig(a)]);
       }
     },
     grant: (n) => {
