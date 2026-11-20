@@ -44,7 +44,24 @@
         "default": "./build/cjs/index.js"
       }
     },
+    "./print": {
+      "import": {
+        "types": "./build/esm/print/index.d.ts",
+        "default": "./build/esm/print/index.js"
+      },
+      "require": {
+        "types": "./build/cjs/print/index.d.ts",
+        "default": "./build/cjs/print/index.js"
+      }
+    },
     "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "print": [
+        "./build/cjs/print/index.d.ts"
+      ]
+    }
   },
   "files": [
     "build",

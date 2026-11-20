@@ -63,7 +63,9 @@ verify() {
   fi
 }
 
-verify packages/core parser-kit-core
+# core's opt-in ./print entry ships in both formats, with declarations.
+verify packages/core parser-kit-core "" build/esm/print/index.js build/cjs/print/index.js \
+  build/esm/print/index.d.ts build/cjs/print/index.d.ts
 # Each SQL dialect is also a subpath export (`@parser-kit/sql/postgres`).
 verify packages/sql parser-kit-sql "" build/esm/postgres/index.js build/cjs/postgres/index.js \
   build/esm/postgres/index.d.ts build/cjs/postgres/index.d.ts
@@ -82,9 +84,11 @@ npm install --no-audit --no-fund "$PACK"/*.tgz >/dev/null
 
 cat > esm.mjs <<'JS'
 import * as core from "@parser-kit/core";
+import { doc, render } from "@parser-kit/core/print";
 import * as sql from "@parser-kit/sql";
 import { postgres } from "@parser-kit/sql/postgres";
 if (!core.defineGrammar) throw new Error("core: ESM export missing");
+if (render(doc.group(["a", doc.line, "b"]), { width: 1 }) !== "a\nb") throw new Error("core/print: ESM render failed");
 if (Object.keys(sql).join() !== "postgres") throw new Error(`sql: unexpected ESM exports ${Object.keys(sql)}`);
 if (sql.postgres !== postgres) throw new Error("sql: the root and /postgres entries load separate copies");
 const [stmt] = postgres.parse("SELECT 1 AS one");
@@ -96,9 +100,11 @@ JS
 
 cat > cjs.cjs <<'JS'
 const core = require("@parser-kit/core");
+const { doc, render } = require("@parser-kit/core/print");
 const sql = require("@parser-kit/sql");
 const { postgres } = require("@parser-kit/sql/postgres");
 if (!core.defineGrammar) throw new Error("core: CJS export missing");
+if (render(doc.group(["a", doc.line, "b"]), { width: 1 }) !== "a\nb") throw new Error("core/print: CJS render failed");
 if (Object.keys(sql).join() !== "postgres") throw new Error(`sql: unexpected CJS exports ${Object.keys(sql)}`);
 if (sql.postgres !== postgres) throw new Error("sql: the root and /postgres entries load separate copies");
 const [stmt] = postgres.parse("SELECT 1 AS one");
@@ -174,3 +180,41 @@ TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
   dbml-consumer.mts dbml-consumer.cts
 echo "TypeScript ok: @parser-kit/dbml types resolve from ESM and CJS (nodenext)"
+
+# core's ./print subpath: types from ESM and CJS (nodenext), and under the
+# legacy node10 resolution through core's typesVersions map.
+cat > print-consumer.mts <<'TS'
+import { type Doc, group, line, render } from "@parser-kit/core/print";
+const d: Doc = group(["a", line, "b"]);
+export const text: string = render(d, { width: 80, indent: "\t" });
+TS
+cat > print-consumer.cts <<'TS'
+import print = require("@parser-kit/core/print");
+const d: print.Doc = print.doc.group(["a", print.doc.line, "b"]);
+export const text: string = print.render(d, { width: Number.POSITIVE_INFINITY });
+TS
+"$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
+  print-consumer.mts print-consumer.cts
+cat > print-legacy.ts <<'TS'
+import { defineGrammar } from "@parser-kit/core";
+import { type Doc, render } from "@parser-kit/core/print";
+const d: Doc = ["a", "b"];
+export const text: string = render(d);
+export const g: unknown = defineGrammar;
+TS
+"$ROOT/node_modules/.bin/tsc" --noEmit --strict --target es2022 --module commonjs --moduleResolution node --ignoreDeprecations 5.0 \
+  print-legacy.ts
+echo "TypeScript ok: @parser-kit/core/print types resolve from ESM and CJS (nodenext) and under moduleResolution node"
+
+# Size budget for the print entry, measured the way a consumer's bundler sees
+# it: bundled from the installed tarball, minified, gzipped. esbuild comes from
+# the workspace (pinned by the lockfile); it resolves the import from this
+# directory, so the installed tarball is what gets measured.
+PRINT_BUDGET=3072
+echo 'export * from "@parser-kit/core/print";' > print-entry.mjs
+PRINT_SIZE=$("$ROOT/node_modules/.bin/esbuild" print-entry.mjs --bundle --minify --format=esm --log-level=error | gzip -9 | wc -c)
+if [ "$PRINT_SIZE" -gt "$PRINT_BUDGET" ]; then
+  echo "::error::@parser-kit/core/print is $PRINT_SIZE bytes min+gz, over the $PRINT_BUDGET byte budget"
+  exit 1
+fi
+echo "Size ok: @parser-kit/core/print is $PRINT_SIZE bytes min+gz (budget $PRINT_BUDGET)"

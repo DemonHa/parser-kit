@@ -8,9 +8,11 @@ import { defineConfig } from "vitest/config";
 // `@parser-kit/core` resolves to source so tests and benches need no build.
 export default defineConfig({
   resolve: {
-    alias: {
-      "@parser-kit/core": resolve(import.meta.dirname, "packages/core/src/index.ts"),
-    },
+    // The subpath comes first: aliases match by prefix, first entry wins.
+    alias: [
+      { find: "@parser-kit/core/print", replacement: resolve(import.meta.dirname, "packages/core/src/print/index.ts") },
+      { find: "@parser-kit/core", replacement: resolve(import.meta.dirname, "packages/core/src/index.ts") },
+    ],
   },
   test: {
     include: [
