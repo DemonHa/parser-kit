@@ -388,6 +388,7 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **Column-name keywords as routine or type names.** PostgreSQL never takes a bare SQL/JSON or XML function name (`json_array`, `xmlelement`, …) as a `func_name` or a type name. Here those positions still take one: `CALL json_array()`, `CREATE FUNCTION json_value() …`, `x::xmlelement`. In an expression or a `FROM` item, the bare name followed by `(` is always the keyword form, as in PostgreSQL.
 - **`CREATE INDEX IF NOT EXISTS ON t (…)`** with no index name.
 - **`CREATE OR REPLACE MATERIALIZED VIEW`.**
+- **An empty `()` aggregate signature** (`CREATE AGGREGATE agg () (…)`). PostgreSQL spells a zero-argument aggregate `(*)`.
 - **Publication and subscription `WITH (…)` lists** take the general option shape, so `ns.name` keys and parenthesised values parse. PostgreSQL's `definition` has neither.
 - **Storage parameter lists** (`CREATE TABLE … WITH (…)`) take the general option shape too, so `x -1`, `force_quote *` and `force_null (a, 'b')` parse. PostgreSQL's reloptions take only `name [= value]`.
 - **`COPY` and utility statement option lists** (`COPY … (…)`, `CLUSTER (…)`) take a qualified option name (`toast.x 1`) and numbers in a parenthesised value list (`list ('a', 2)`). PostgreSQL's take neither.

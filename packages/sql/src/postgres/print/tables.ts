@@ -32,19 +32,17 @@ import { defineFamily, statementPrinter } from "./registry";
 import {
   alterGenericOptions,
   collationName,
+  commonAlterAction,
   genericOptions,
   keyElement,
   leadName,
   opclassName,
-  ownerTo,
   partitionKey,
   relationOptions,
-  renameTo,
   roleSpec,
   STORAGE_PARAMETERS,
   sequenceOption,
   sequenceOptions,
-  setSchema,
   signedZero,
 } from "./shared";
 import { typeName } from "./types";
@@ -471,9 +469,9 @@ const alterAction = (a: AlterAction): Doc => {
     case "renameConstraint":
       return `${kw("RENAME CONSTRAINT")} ${ident(a.from)} ${kw("TO")} ${ident(a.to)}`;
     case "renameTable":
-      return renameTo(a.to);
+      return commonAlterAction({ kind: "rename", to: a.to });
     case "ownerTo":
-      return ownerTo(a.owner);
+      return commonAlterAction(a);
     case "replicaIdentity":
       return a.mode === "usingIndex"
         ? `${kw("REPLICA IDENTITY USING INDEX")} ${ident(a.index!)}`
@@ -488,7 +486,7 @@ const alterAction = (a: AlterAction): Doc => {
     case "validateConstraint":
       return `${kw("VALIDATE CONSTRAINT")} ${ident(a.name)}`;
     case "setSchema":
-      return setSchema(a.schema);
+      return commonAlterAction(a);
     case "setTablespace":
       return `${kw("SET TABLESPACE")} ${ident(a.tablespace)}`;
     case "setOptions":
@@ -559,7 +557,7 @@ const alterTable = (t: AlterTable): Doc =>
 const alterIndexAction = (a: AlterIndexAction): Doc => {
   switch (a.kind) {
     case "rename":
-      return renameTo(a.to);
+      return commonAlterAction(a);
     case "attachPartition":
       return `${kw("ATTACH PARTITION")} ${qualified(a.partition)}`;
     case "setStatistics":
