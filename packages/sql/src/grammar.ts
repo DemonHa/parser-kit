@@ -867,8 +867,9 @@ export type AlterSequenceAction =
 // discriminated by `form`. The enum form keeps its original `values` payload;
 // `base` is the `( definition )` of a base type, and `shell` the bare `CREATE
 // TYPE name` that reserves a name for one.
-// A composite type's attribute is a column definition, `name type [COLLATE
-// collation]` (PG's TableFuncElement); RETURNS TABLE's columns take no COLLATE.
+// One `name type` column of RETURNS TABLE (PG's table_func_column), which
+// takes no COLLATE. A composite type's attributes are ColumnDefinitions, `name
+// type [COLLATE collation]` (PG's TableFuncElement).
 export type CompositeAttr = { name: string; type: ColType };
 // A `name = value` option in a `RANGE` type body (`SUBTYPE = float8`, …). `value`
 // is the raw (possibly qualified) name / type on the right of the `=`.
@@ -2886,9 +2887,9 @@ const functionArg: Rule<Expr, SqlTokenType> = lazy(() =>
 // VARIADIC alone: PG's grammar reads the other three there too, but its
 // analysis rejects DISTINCT and ORDER BY outside an aggregate, and this
 // grammar has never read them there (nor the no-op ALL). `takeOver` sees the
-// call after each argument is read, and again after an aggregate's ORDER BY,
-// and may take the rest of it over from there, returning its node as `taken`
-// (OVERLAY's PLACING form, see columnRef), or decline with null.
+// call after each argument is read, and may take the rest of it over from
+// there, returning its node as `taken` (OVERLAY's PLACING form, see
+// columnRef), or decline with null.
 type CallArgs = {
   args: Expr[];
   quantifier: "distinct" | "all" | null;
@@ -2899,10 +2900,10 @@ type CallArgs = {
   // argument starts on is checked, which it peeks anyway.
   integerArgs: boolean;
 };
-function parseCallArgs<T = Expr>(
+function parseCallArgs(
   ctx: ParseContext<SqlTokenType>,
-  opts: { aggregate: boolean; takeOver?: (call: CallArgs) => T | null },
-): CallArgs & { taken?: T } {
+  opts: { aggregate: boolean; takeOver?: (call: CallArgs) => Expr | null },
+): CallArgs & { taken?: Expr } {
   const quantifier = opts.aggregate
     ? ((ctx.eat("ident", ["distinct", "all"])?.value ?? null) as CallArgs["quantifier"])
     : null;
@@ -2928,10 +2929,7 @@ function parseCallArgs<T = Expr>(
     readArg();
     taken = opts.takeOver?.(call) ?? null;
   }
-  if (taken === null && opts.aggregate && ctx.is("ident", "order")) {
-    call.orderBy = ctx.parse(orderByClause);
-    taken = opts.takeOver?.(call) ?? null;
-  }
+  if (taken === null && opts.aggregate && ctx.is("ident", "order")) call.orderBy = ctx.parse(orderByClause);
   return taken === null ? call : { ...call, taken };
 }
 // Whether the arguments read so far are ordinary operands: no DISTINCT or ALL,
@@ -6940,7 +6938,7 @@ const enumValues = delimited(
   token("string").map((n) => n.value),
   { interleaved: true },
 );
-// One `field type` attribute of a composite type.
+// One `name type` column of RETURNS TABLE (see CompositeAttr).
 const compositeAttr = seq(field("name", nameWord), field("type", typeRef)).map(
   ({ name, type }): CompositeAttr => ({ name, type }),
 );
@@ -9375,6 +9373,7 @@ const SHARED_VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
     },
   },
   owner: { parse: parseOwnerTo },
+  set: { parse: (ctx) => parseViewSet(ctx, false) },
   reset: { parse: parseResetOptions },
 };
 // A materialized view has storage, so it takes the table actions that act on
@@ -9388,7 +9387,6 @@ const MATERIALIZED_VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
 };
 const VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
   ...SHARED_VIEW_ACTIONS,
-  set: { parse: (ctx) => parseViewSet(ctx, false) },
   alter: {
     parse: (ctx) => {
       ctx.next(); // ALTER

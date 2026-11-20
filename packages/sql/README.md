@@ -394,7 +394,7 @@ These breaks landed while the grammar was the unpublished `examples/sql-lite` ex
   - `normalize(x, 'NFC')` and other non-keyword forms;
   - `substring(x SIMILAR p)` without `ESCAPE`;
   - bare `xmlattributes(…)` / `xmlnamespaces(…)` outside XMLELEMENT / XMLTABLE, `xmltable(…)` in an expression, and XML function names in ordinary call shapes (`xmlparse(x)`, `xmlpi(x)`). These used to parse as plain calls;
-  - SQL/JSON function names in call shapes their gram.y forms don't take: `json_objectagg(k, v)`, `json_arrayagg(DISTINCT a)`, `json_arrayagg(a, b)`, `json_array(a => 1)`, `json_array(*)`, `json_value(a)`, `json_exists()`, `json_scalar(a, b)`, `json()`, a `FILTER` / `OVER` on a non-aggregate (`json_array(1) OVER ()`), and `DISTINCT`, `VARIADIC`, `*`, `ORDER BY` or `OVER` on the legacy `json_object(…)` call. These used to parse as plain calls. A quoted or qualified name still does;
+  - SQL/JSON function names in call shapes their gram.y forms don't take: `json_objectagg(k, v)`, `json_arrayagg(DISTINCT a)`, `json_arrayagg(a, b)`, `json_array(a => 1)`, `json_array(*)`, `json_array(a ORDER BY a)`, `json_value(a)`, `json_exists()`, `json_scalar(a, b)`, `json()`, `WITHIN GROUP` on an aggregate (`json_arrayagg(a) WITHIN GROUP (ORDER BY a)`), a `FILTER` / `OVER` on a non-aggregate (`json_array(1) OVER ()`), and `DISTINCT`, `VARIADIC`, `*`, `ORDER BY` or `OVER` on the legacy `json_object(…)` call. These used to parse as plain calls. A quoted or qualified name still does;
   - `json_table(…)` in an expression or in `ROWS FROM`, and a bare `json_table(…)` in `FROM` without its path string and `COLUMNS` (`FROM json_table(a, b)`), which used to parse as a table-function call.
 - **Types:** interval field specs outside PostgreSQL's thirteen (`DAY TO YEAR`, `MONTH TO DAY`), a precision on anything but `SECOND`, `int ARRAY[]`, `int ARRAY[3][4]`, `RETURNS SETOF SETOF int`.
 - **DDL:**
@@ -416,7 +416,6 @@ These breaks landed while the grammar was the unpublished `examples/sql-lite` ex
 
 - A count-less `FETCH FIRST ROW ONLY` / `FETCH NEXT ROWS WITH TIES` gives `limit: { kind: "number", value: 1, implicit: true }`, not `limit: null`.
 - A bare SQL/JSON function written with none of its clauses gives its SQL/JSON node, not a `call`: `json_array(1, 2)` is a `jsonArray`, `JSON_OBJECT()` a `jsonObject` with no entries, `json_arrayagg(x ORDER BY x)` a `jsonArrayAgg`, `JSON_VALUE(j, '$')` a `jsonValue`, `json(x)` a `jsonParse`, `json_serialize(x)` a `jsonSerialize`, and `JSON_SCALAR(x)` the new `jsonScalar`. So does one written as a `FROM` item (`FROM json_array(1, 2)`). JSON_OBJECT's legacy form stays a `call`.
-
 - Operator precedence follows PostgreSQL. `-2 ^ 2` is `(-2) ^ 2`, `-x COLLATE "C"` is `(-x) COLLATE "C"`, and chained `AT TIME ZONE` nests to the left.
 - `2^-2` lexes as the single operator `^-`, as in PostgreSQL. `2 ^ -2` (spaced) is unchanged.
 - `INTERSECT` binds tighter than `UNION` / `EXCEPT`, so `SELECT 1 UNION SELECT 2 INTERSECT SELECT 3` is `1 ∪ (2 ∩ 3)`. A tail after a set operation moved from the right arm to the `setOp` node.
