@@ -170,7 +170,7 @@ SELECT
 -- SELECT extract(epoch FROM x), extract('Day' FROM x), overlay(a PLACING b FROM 1 FOR 2), overlay(a PLACING b FROM 1), COLLATION FOR (a);
 SELECT
   EXTRACT(epoch FROM x),
-  EXTRACT("Day" FROM x),
+  EXTRACT('Day' FROM x),
   OVERLAY(a PLACING b FROM 1 FOR 2),
   OVERLAY(a PLACING b FROM 1),
   COLLATION FOR (a);
@@ -624,6 +624,28 @@ SELECT "interval" '1', a::interval, a::"between", "row" 'x';
 -- SELECT "system_user", "current_catalog", "current_schema", "collation", "isnull" FROM "similar" AS "full";
 SELECT "system_user", "current_catalog", "current_schema", "collation", "isnull"
 FROM "similar" AS "full";
+
+-- SELECT JSON_OBJECT('a' VALUE (x IS JSON) WITH UNIQUE KEYS), JSON((x IS JSON OBJECT) WITHOUT UNIQUE KEYS), JSON_OBJECTAGG(k VALUE (v IS JSON) WITH UNIQUE KEYS) FROM t;
+SELECT
+  JSON_OBJECT('a' VALUE (x IS JSON) WITH UNIQUE KEYS),
+  JSON((x IS JSON OBJECT) WITHOUT UNIQUE KEYS),
+  JSON_OBJECTAGG(k VALUE (v IS JSON) WITH UNIQUE KEYS)
+FROM t;
+
+-- SELECT 1 FROM t GROUP BY (rollup(a)) + 1, (cube(a))::int, (rollup(a)) IS NULL, rollup, cube + 1;
+SELECT 1
+FROM t
+GROUP BY (rollup(a) + 1), (cube(a)::int), (rollup(a) IS NULL), rollup, cube + 1;
+
+-- SELECT "national" 'x', 1::"national", "nullif"(1), nullif(1, 2), "operator"(1), EXTRACT("value" FROM a) FROM JSON_TABLE(js, '$' COLUMNS ("nested" path, "nested" "path" PATH '$')) AS j;
+SELECT
+  "national" 'x',
+  1::"national",
+  "nullif"(1),
+  nullif(1, 2),
+  "operator"(1),
+  EXTRACT('value' FROM a)
+FROM JSON_TABLE(js, '$' COLUMNS ("nested" path, "nested" path PATH '$')) AS j;
 
 -- SELECT * FROM users u;
 SELECT * FROM users AS u;

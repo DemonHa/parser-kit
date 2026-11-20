@@ -115,6 +115,9 @@ export const cases = [
   'WITH "recursive" AS (SELECT 1) SELECT 1;',
   `SELECT "interval" '1', a::"interval", a::"between", "row" 'x';`,
   'SELECT "system_user", "current_catalog", "current_schema", "collation", "isnull" FROM "similar" AS "full";',
+  "SELECT JSON_OBJECT('a' VALUE (x IS JSON) WITH UNIQUE KEYS), JSON((x IS JSON OBJECT) WITHOUT UNIQUE KEYS), JSON_OBJECTAGG(k VALUE (v IS JSON) WITH UNIQUE KEYS) FROM t;",
+  "SELECT 1 FROM t GROUP BY (rollup(a)) + 1, (cube(a))::int, (rollup(a)) IS NULL, rollup, cube + 1;",
+  `SELECT "national" 'x', 1::"national", "nullif"(1), nullif(1, 2), "operator"(1), EXTRACT("value" FROM a) FROM JSON_TABLE(js, '$' COLUMNS ("nested" path, "nested" "path" PATH '$')) AS j;`,
 ];
 
 // Variants of the nested unions the printer reads (beyond expressions, FROM

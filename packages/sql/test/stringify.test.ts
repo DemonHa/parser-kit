@@ -321,6 +321,18 @@ describe("stringify on hand-built trees", () => {
     expect(print(names)).toBe(names);
   });
 
+  it("quotes a name PostgreSQL would read as its own syntax there", () => {
+    const sql = `SELECT "nullif"(1), nullif(1, 2), "operator"(1), EXTRACT('value' FROM a), EXTRACT(year FROM a), 1::"national";`;
+    expect(stringify(postgres.parse(sql)[0]!)).toBe(sql);
+  });
+
+  it("prints a long left-deep chain without running out of stack", () => {
+    const terms = Array.from({ length: 5000 }, (_, i) => `id = ${i}`);
+    const [stmt] = postgres.parse(`SELECT 1 FROM t WHERE ${terms.join(" OR ")}`);
+    expect(stringify(stmt!)).toBe(`SELECT 1 FROM t WHERE ${terms.join(" OR ")};`);
+    expect(stringify(stmt!, { width: 80 }).split("\n").length).toBeGreaterThan(5000);
+  });
+
   it("throws NotPrintableError for a statement family not printed yet", () => {
     const [stmt] = postgres.parse("CREATE TABLE t (a int)");
     expect(() => stringify(stmt!)).toThrow(NotPrintableError);

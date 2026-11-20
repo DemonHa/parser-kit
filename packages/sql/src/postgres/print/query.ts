@@ -27,6 +27,7 @@ import {
   clause,
   commaList,
   firstChar,
+  firstText,
   functionWord,
   ident,
   kw,
@@ -51,6 +52,7 @@ import {
   windowSpec,
   xmlPassing,
 } from "./expr";
+import { flat } from "./flat";
 import { defineFamily, statementPrinter } from "./registry";
 import { typeName } from "./types";
 
@@ -242,12 +244,16 @@ const groupByItem = (g: GroupByItem): Doc => {
     case "emptyGrouping":
       return "()";
     default: {
-      // A call named like the ROLLUP / CUBE constructs would read as one.
-      const named = g.kind === "call" && g.name.length === 1 && (g.name[0] === "rollup" || g.name[0] === "cube");
-      return named ? ["(", expr(g), ")"] : expr(g);
+      // An item opening with a call named like the ROLLUP / CUBE constructs
+      // would read as one.
+      const doc = expr(g);
+      return /^(?:rollup|cube)$/.test(firstText(doc)) && opensCall(doc) ? ["(", doc, ")"] : doc;
     }
   }
 };
+
+// Whether the doc's first word is followed by `(`.
+const opensCall = (doc: Doc): boolean => /^[a-z]+\(/.test(flat(group(doc)) ?? "");
 
 // One grouping inside ROLLUP / CUBE / GROUPING SETS: `a`, `(a, b)` or `()`. A
 // lone expression that itself opens with `(` is parenthesised once more, or
@@ -395,13 +401,16 @@ const xmlTableColumn = (c: XmlTableColumn): Doc => {
 
 const jsonPath = (path: string | undefined): Doc[] => (path === undefined ? [] : [[kw("PATH"), " ", str(path)]]);
 
+// A column named `nested` would open a NESTED PATH entry.
+const jsonColumnName = (name: string): string => (name === "nested" ? quoted(name) : ident(name));
+
 const jsonTableColumn = (c: JsonTableColumn): Doc => {
   switch (c.kind) {
     case "ordinality":
-      return [ident(c.name), " ", kw("FOR ORDINALITY")];
+      return [jsonColumnName(c.name), " ", kw("FOR ORDINALITY")];
     case "exists":
       return join(" ", [
-        ident(c.name),
+        jsonColumnName(c.name),
         typeName(c.type),
         kw("EXISTS"),
         ...jsonPath(c.path),
@@ -409,7 +418,7 @@ const jsonTableColumn = (c: JsonTableColumn): Doc => {
       ]);
     case "value":
       return join(" ", [
-        [ident(c.name), " ", typeName(c.type), jsonFormat(c.format)],
+        [jsonColumnName(c.name), " ", typeName(c.type), jsonFormat(c.format)],
         ...jsonPath(c.path),
         ...jsonWrapper(c.wrapper),
         ...jsonQuotes(c.quotes),

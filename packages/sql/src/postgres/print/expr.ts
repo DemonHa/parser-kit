@@ -50,6 +50,7 @@ import {
   ident,
   isColNameKeyword,
   kw,
+  lastText,
   minimalIdent,
   OPERATOR_CHARS,
   parenList,
@@ -211,6 +212,17 @@ const right = (parent: Expr, child: Expr): Doc =>
 // --- names and calls ---
 
 type Call = Extract<Expr, { kind: "call" }>;
+type Binary = Extract<Expr, { kind: "binary" }>;
+
+// PG's extract_arg is an identifier, one of six field keywords, or a string:
+// any other keyword can't stand bare. The fields PG knows are bare words
+// except those six; anything else is written as the string it may be.
+const EXTRACT_FIELDS = new Set(
+  "year month day hour minute second century decade dow doy epoch isodow isoyear julian microseconds millennium milliseconds quarter timezone timezone_hour timezone_minute week".split(
+    " ",
+  ),
+);
+const extractField = (field: string): string => (EXTRACT_FIELDS.has(field) ? field : str(field));
 // No DISTINCT, ALL, VARIADIC or ORDER BY, and no `*` or named argument.
 const isPlain = (c: Call): boolean =>
   !c.distinct &&
@@ -227,10 +239,11 @@ const isPlain = (c: Call): boolean =>
 // the keyword form, so no spelling of another shape would parse back.
 const bareForm = (name: string, c: Call): boolean => {
   switch (name) {
+    case "nullif":
+      return isPlain(c) && c.args.length === 2;
     case "coalesce":
     case "greatest":
     case "least":
-    case "nullif":
     case "grouping":
     case "xmlconcat":
       return isPlain(c) && c.args.length > 0;
@@ -249,9 +262,12 @@ const bareForm = (name: string, c: Call): boolean => {
       return false;
   }
 };
+// `operator(` opens PG's OPERATOR(op) spelling, so a function of that name is quoted too.
 const callName = (c: Call): string => {
   const name = c.name[0]!;
-  return c.name.length === 1 && isColNameKeyword(name) && !bareForm(name, c) ? quoted(name) : functionQualified(c.name);
+  return c.name.length === 1 && ((isColNameKeyword(name) && !bareForm(name, c)) || name === "operator")
+    ? quoted(name)
+    : functionQualified(c.name);
 };
 
 const callArgs = (c: Call): Doc => {
@@ -376,6 +392,14 @@ export const jsonFormat = (f: JsonFormat | undefined): Doc =>
     ? ""
     : [" ", kw("FORMAT JSON"), f.encoding !== undefined ? [" ", kw("ENCODING"), " ", minimalIdent(f.encoding)] : ""];
 export const jsonValue = (v: JsonValueExpr): Doc => [expr(v.expr), jsonFormat(v.format)];
+// The value right before a `{WITH | WITHOUT} UNIQUE` clause: one ending in an
+// `IS JSON` test with no clause of its own would take it, so it is parenthesised.
+const IS_JSON_TAIL = /(?:^|[\s(])(?:json|value|scalar|array|object)$/i;
+const jsonValueBeforeUnique = (v: JsonValueExpr, unique: boolean): Doc => {
+  if (!unique || v.format !== undefined) return jsonValue(v);
+  const doc = expr(v.expr);
+  return IS_JSON_TAIL.test(lastText(doc)) ? ["(", doc, ")"] : doc;
+};
 const jsonReturning = (r: JsonReturning | undefined): Doc[] =>
   r === undefined ? [] : [[kw("RETURNING"), " ", typeName(r.type), jsonFormat(r.format)]];
 const jsonOnNull = (n: "null" | "absent" | undefined): Doc[] =>
@@ -421,7 +445,13 @@ export const jsonQuotes = (q: "keep" | "omit" | undefined): Doc[] =>
 
 // A JSON_OBJECT key before VALUE is a c_expr: an operator expression there is
 // parenthesised (before `:` it needn't be, but VALUE is the one spelling here).
-const jsonKeyValue = (key: Expr, value: JsonValueExpr): Doc => [atomic(key), " ", kw("VALUE"), " ", jsonValue(value)];
+const jsonKeyValue = (key: Expr, value: JsonValueExpr, beforeUnique = false): Doc => [
+  atomic(key),
+  " ",
+  kw("VALUE"),
+  " ",
+  jsonValueBeforeUnique(value, beforeUnique),
+];
 
 /** `name(head, clause, clause)`, the clauses after the arguments separated by lines. */
 const clauses = (name: string, args: Doc[], tail: Doc[]): Doc =>
@@ -491,7 +521,23 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
     const space = !PREFIX_OPS.has(e.op) || e.opSchema !== undefined || OPERATOR_CHARS.has(firstChar(operand));
     return [op, space ? " " : "", operand];
   },
-  binary: (e) => group([left(e, e.left), ` ${operator(e.op, e.opSchema)}`, indent([line, right(e, e.right)])]),
+  // A left-deep chain (`a OR b OR c …`, as generated filters run to thousands
+  // of terms) is walked in a loop rather than recursed into, one group for the
+  // whole chain: what `left` would print unwrapped joins the chain.
+  binary: (e) => {
+    const spine: Binary[] = [e];
+    let node = e;
+    while (node.left.kind === "binary" && !prec.parens(node, node.left, "left")) {
+      node = node.left;
+      spine.push(node);
+    }
+    const parts: Doc[] = [left(node, node.left)];
+    for (let i = spine.length - 1; i >= 0; i--) {
+      const n = spine[i]!;
+      parts.push(` ${operator(n.op, n.opSchema)}`, indent([line, right(n, n.right)]));
+    }
+    return group(parts);
+  },
   anyAll: (e) => [
     left(e, e.left),
     " ",
@@ -569,7 +615,7 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   },
   subscript: (e) => chain(e),
   fieldSelect: (e) => chain(e),
-  extract: (e) => fn("EXTRACT", parens([minimalIdent(e.field), " ", kw("FROM"), " ", expr(e.source)])),
+  extract: (e) => fn("EXTRACT", parens([extractField(e.field), " ", kw("FROM"), " ", expr(e.source)])),
   substring: (e) =>
     fn(
       "SUBSTRING",
@@ -629,7 +675,13 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   jsonObject: (e) =>
     clauses(
       "JSON_OBJECT",
-      e.entries.map((kv) => jsonKeyValue(kv.key, kv.value)),
+      e.entries.map((kv, i) =>
+        jsonKeyValue(
+          kv.key,
+          kv.value,
+          i === e.entries.length - 1 && e.onNull === undefined && e.uniqueKeys !== undefined,
+        ),
+      ),
       [...jsonOnNull(e.onNull), ...jsonUnique(e.uniqueKeys), ...jsonReturning(e.returning)],
     ),
   jsonArray: (e) =>
@@ -639,7 +691,7 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   jsonObjectAgg: (e) =>
     clauses(
       "JSON_OBJECTAGG",
-      [jsonKeyValue(e.key, e.value)],
+      [jsonKeyValue(e.key, e.value, e.onNull === undefined && e.uniqueKeys !== undefined)],
       [...jsonOnNull(e.onNull), ...jsonUnique(e.uniqueKeys), ...jsonReturning(e.returning)],
     ),
   jsonArrayAgg: (e) =>
@@ -678,7 +730,8 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       [jsonValue(e.context), expr(e.path)],
       [...jsonPassing(e.passing), ...jsonBehavior(e.onError, "ERROR")],
     ),
-  jsonParse: (e) => clauses("JSON", [jsonValue(e.value)], jsonUnique(e.uniqueKeys)),
+  jsonParse: (e) =>
+    clauses("JSON", [jsonValueBeforeUnique(e.value, e.uniqueKeys !== undefined)], jsonUnique(e.uniqueKeys)),
   jsonScalar: (e) => fn("JSON_SCALAR", parens(expr(e.value))),
   jsonSerialize: (e) => clauses("JSON_SERIALIZE", [jsonValue(e.value)], jsonReturning(e.returning)),
   window: (e, print) => [

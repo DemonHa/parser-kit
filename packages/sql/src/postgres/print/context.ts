@@ -265,6 +265,24 @@ export const clause = (keyword: Doc, body: Doc): Doc => group([keyword, indent([
  */
 export const firstChar = (doc: Doc): string => firstText(doc)[0] ?? "";
 
+/** The last non-empty text a doc prints (" " for a line), or "". */
+export const lastText = (doc: Doc): string => {
+  const todo: Doc[] = [doc];
+  while (todo.length > 0) {
+    const d = todo.pop()!;
+    if (typeof d === "string") {
+      if (d !== "") return d;
+    } else if (Array.isArray(d)) {
+      for (const c of d) todo.push(c);
+    } else {
+      const c = d as Exclude<Doc, string | readonly Doc[]>;
+      if (c.type === "line") return " ";
+      todo.push(c.type === "ifBreak" ? c.flatContents : c.contents);
+    }
+  }
+  return "";
+};
+
 /** The first non-empty text a doc prints (" " for a line), or "". */
 export const firstText = (doc: Doc): string => {
   const todo: Doc[] = [doc];
