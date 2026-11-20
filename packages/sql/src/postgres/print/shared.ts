@@ -1,7 +1,7 @@
 // Printers for AST pieces several statement families share. Each is
 // self-contained: a family that needs one imports it from here rather than
 // writing its own.
-import { type Doc, group, indent, line } from "@parser-kit/core/print";
+import { type Doc, group, indent, join, line } from "@parser-kit/core/print";
 import type {
   AlterConfigAction,
   AlterGenericOption,
@@ -14,9 +14,10 @@ import type {
   PartitionKey,
   RelationOption,
   RelationOptionValue,
+  SequenceOption,
 } from "../ast";
 import { RESERVED } from "../grammar";
-import { commaList, ident, isColNameKeyword, kw, parenList, qualified, quoted, str } from "./context";
+import { commaList, ident, isColNameKeyword, kw, parenList, parens, qualified, quoted, str } from "./context";
 import { expr } from "./expr";
 import { typeName } from "./types";
 
@@ -73,13 +74,17 @@ export const optionValue = (v: RelationOptionValue, style: OptionStyle): Doc => 
     case "name": {
       // `true` / `false` bare would read as booleans.
       const word = v.parts[0]!;
+      // PG's def_arg (`reservedValues`) takes a reserved word bare but not a
+      // col_name keyword (`between`, `values`), bar NONE, its own keyword there.
       const bare =
         BARE_WORD.test(word) &&
         word !== "true" &&
         word !== "false" &&
-        (style.reservedValues || word === "on" || !reserved(word));
+        (style.reservedValues ? word === "none" || !isColNameKeyword(word) : word === "on" || !reserved(word));
       return bare ? word : quoted(word);
     }
+    case "number":
+      return signedZero(v.value, v.raw) ?? expr(v);
     default:
       return expr(v);
   }
@@ -95,23 +100,60 @@ export const relationOption = (o: RelationOption, style: OptionStyle): Doc => {
   return o.value === null ? name : [name, style.eq ? " = " : " ", optionValue(o.value, style)];
 };
 
+/** Storage parameters, `WITH (fillfactor = 70)`: PG's reloptions and def_arg values. */
+export const STORAGE_PARAMETERS: OptionStyle = { eq: true, keywords: false, reservedNames: true, reservedValues: true };
+
 /** `(option, …)`. */
 export const relationOptions = (options: readonly RelationOption[], style: OptionStyle): Doc =>
   parenList(options.map((o) => relationOption(o, style)));
 
 // --- PartitionKey ---
 
+// PG's lexer reads FORMAT before JSON, WITHOUT before TIME and NULLS before
+// FIRST / LAST as one token, which no name can be. So a name written where
+// one of those words may follow it (a column before its type, an element
+// before its operator class) is quoted when it is one of the three.
+const LOOKAHEAD_WORDS: ReadonlySet<string> = new Set(["format", "without", "nulls"]);
+
+/** A name another word may follow: a column before its type. */
+export const leadName = (name: string): string => (LOOKAHEAD_WORDS.has(name) ? quoted(name) : ident(name));
+
+/** A collation name, which an operator class may follow. */
+export const collationName = (parts: readonly string[]): string =>
+  parts.map((p, i) => (i === parts.length - 1 && LOOKAHEAD_WORDS.has(p) ? quoted(p) : ident(p))).join(".");
+
+// BETWEEN continues any expression; OVER and FILTER a call when a `(` (the
+// operator class's options) follows. The other words that would continue one
+// are quoted by `ident` already (reserved words, IS, ISNULL, LIKE, …).
+const CONTINUING_WORDS: ReadonlySet<string> = new Set(["between", "over", "filter"]);
+
+/** An operator class, which follows its element's expression. */
+export const opclassName = (parts: readonly string[]): string =>
+  parts.map((p, i) => (i === 0 && CONTINUING_WORDS.has(p) ? quoted(p) : ident(p))).join(".");
+
+/**
+ * What PG's index_elem, part_elem and exclusion element take: a column (one
+ * name part) or a call bare, anything else parenthesised, which never changes
+ * what PG reads, and which this grammar requires of a partition key and drops
+ * again on parsing.
+ */
+export const keyElement = (e: Expr): Doc =>
+  e.kind === "name" && e.parts.length === 1
+    ? LOOKAHEAD_WORDS.has(e.parts[0]!)
+      ? quoted(e.parts[0]!)
+      : expr(e)
+    : e.kind === "call"
+      ? expr(e)
+      : parens(expr(e));
+
 /**
  * A partition key or ON CONFLICT arbiter element: `column | func(…) | (expr)`,
- * then `[COLLATE collation] [opclass]`. Anything but a one-part column or a
- * call is parenthesised, as the grammar requires.
+ * then `[COLLATE collation] [opclass]`.
  */
 export const partitionKey = (k: PartitionKey): Doc => [
-  (k.expr.kind === "name" && k.expr.parts.length === 1) || k.expr.kind === "call"
-    ? expr(k.expr)
-    : ["(", expr(k.expr), ")"],
-  k.collate !== undefined ? [" ", kw("COLLATE"), " ", qualified(k.collate)] : "",
-  k.opclass !== undefined ? [" ", qualified(k.opclass)] : "",
+  keyElement(k.expr),
+  k.collate !== undefined ? [" ", kw("COLLATE"), " ", collationName(k.collate)] : "",
+  k.opclass !== undefined ? [" ", opclassName(k.opclass)] : "",
 ];
 
 // --- names ---
@@ -373,3 +415,48 @@ export const alterConfig = (a: AlterConfigAction): Doc =>
           ? kw(a.name[0]!.toUpperCase())
           : qualified(a.name),
       ];
+
+// --- sequence options ---
+
+/** One sequence option, as CREATE / ALTER SEQUENCE and an identity column take it. */
+export const sequenceOption = (o: SequenceOption): Doc => {
+  switch (o.kind) {
+    case "as":
+      return [kw("AS"), " ", typeName(o.type)];
+    case "increment":
+      return [kw("INCREMENT BY"), " ", expr(o.value)];
+    case "minValue":
+      return o.value === null ? kw("NO MINVALUE") : [kw("MINVALUE"), " ", expr(o.value)];
+    case "maxValue":
+      return o.value === null ? kw("NO MAXVALUE") : [kw("MAXVALUE"), " ", expr(o.value)];
+    case "start":
+      return [kw("START WITH"), " ", expr(o.value)];
+    case "restart":
+      return o.value === null ? kw("RESTART") : [kw("RESTART WITH"), " ", expr(o.value)];
+    case "cache":
+      return [kw("CACHE"), " ", expr(o.value)];
+    case "cycle":
+      return kw(o.value ? "CYCLE" : "NO CYCLE");
+    case "ownedBy":
+      // A one-part `none` is quoted: bare, it is OWNED BY NONE.
+      return [
+        kw("OWNED BY"),
+        " ",
+        o.owner === null
+          ? kw("NONE")
+          : o.owner.length === 1 && o.owner[0] === "none"
+            ? quoted("none")
+            : qualified(o.owner),
+      ];
+    case "sequenceName":
+      return [kw("SEQUENCE NAME"), " ", qualified(o.name)];
+  }
+};
+
+/** `(option option …)`: sequence options, which PG separates with spaces, not commas. */
+export const sequenceOptions = (options: readonly SequenceOption[]): Doc =>
+  parens(join(line, options.map(sequenceOption)));
+
+/** `-0` for a negative zero with no text of its own, which the number printer would write as `0`. */
+export const signedZero = (value: number, raw?: string): string | null =>
+  Object.is(value, -0) && raw === undefined ? "-0" : null;

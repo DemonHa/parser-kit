@@ -32,7 +32,6 @@ import type {
   PublicationObject,
   RelationOption,
   RoutineBody,
-  SequenceOption,
   Stmt,
 } from "../ast";
 import { RESERVED } from "../grammar";
@@ -57,6 +56,7 @@ import {
   parameterSet,
   relationOptions,
   roleSpec,
+  sequenceOption,
   signature,
 } from "./shared";
 import { typeName } from "./types";
@@ -140,40 +140,6 @@ const definitionElem = (e: DefinitionElem): Doc =>
 const definition = (elems: readonly DefinitionElem[]): Doc => parenList(elems.map(definitionElem));
 
 // --- sequences ---
-
-const sequenceOption = (o: SequenceOption): Doc => {
-  switch (o.kind) {
-    case "as":
-      return [kw("AS"), " ", typeName(o.type)];
-    case "increment":
-      return [kw("INCREMENT BY"), " ", expr(o.value)];
-    case "minValue":
-      return o.value === null ? kw("NO MINVALUE") : [kw("MINVALUE"), " ", expr(o.value)];
-    case "maxValue":
-      return o.value === null ? kw("NO MAXVALUE") : [kw("MAXVALUE"), " ", expr(o.value)];
-    case "start":
-      return [kw("START WITH"), " ", expr(o.value)];
-    case "restart":
-      return o.value === null ? kw("RESTART") : [kw("RESTART WITH"), " ", expr(o.value)];
-    case "cache":
-      return [kw("CACHE"), " ", expr(o.value)];
-    case "cycle":
-      return kw(o.value ? "CYCLE" : "NO CYCLE");
-    case "ownedBy":
-      // A one-part `none` would read as NONE.
-      return [
-        kw("OWNED BY"),
-        " ",
-        o.owner === null
-          ? kw("NONE")
-          : o.owner.length === 1 && o.owner[0] === "none"
-            ? quoted("none")
-            : qualified(o.owner),
-      ];
-    case "sequenceName":
-      return [kw("SEQUENCE NAME"), " ", qualified(o.name)];
-  }
-};
 
 // --- domains ---
 
