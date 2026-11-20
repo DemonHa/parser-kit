@@ -1,7 +1,7 @@
 import { stripSpans } from "@parser-kit/core";
 import { Parser } from "node-sql-parser";
 import { describe, expect, it } from "vitest";
-import { sqlLite } from "./index";
+import { sqlLite } from "../src/index";
 import { type Bucket, PG_BATTERY } from "./pg-coverage";
 
 // Re-measures the PostgreSQL coverage battery in `pg-coverage.ts` and pins

@@ -1,7 +1,7 @@
 import type { ParseError } from "@parser-kit/core";
 import { expect, it } from "vitest";
+import { sqlLite } from "../src/index";
 import { CORPUS } from "./corpus";
-import { sqlLite } from "./index";
 
 // --- byte-exact parity harness ---
 //

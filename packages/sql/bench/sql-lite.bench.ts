@@ -1,7 +1,7 @@
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
-import { CORPUS } from "./corpus";
-import { sqlLite } from "./index";
+import { sqlLite } from "../src/index";
+import { CORPUS } from "../test/corpus";
 
 // Benchmark the sql-lite example grammar against the popular `node-sql-parser`
 // package. The corpus lives in `corpus.ts` so this bench and the byte-exact

@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
-import { sqlLite } from "./index";
-import { splitPsqlScript } from "./psql-split";
+import { sqlLite } from "../src/index";
+import { splitPsqlScript } from "../src/psql-split";
 
 // Large-file throughput: how do sql-lite and node-sql-parser compare when fed a
 // single big multi-statement SQL blob (think a schema dump or migration file)?
@@ -90,7 +90,7 @@ for (const { sql } of BLOBS) {
 // the whole file's worth of work, failures included. The time moves as more
 // of the dump parses; the pass rate is printed alongside.
 const PAGILA = splitPsqlScript(
-  readFileSync(new URL("./fixtures/pg-dump/pagila-schema.sql", import.meta.url), "utf8"),
+  readFileSync(new URL("../test/fixtures/pg-dump/pagila-schema.sql", import.meta.url), "utf8"),
 ).statements.map((s) => s.sql);
 
 const parses = (sql: string) => {
