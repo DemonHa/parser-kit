@@ -3,7 +3,7 @@
 // writing its own.
 import { type Doc, group, indent, join, line } from "@parser-kit/core/print";
 import type { AlterConfigAction, ColType, DropSignature, Expr, FunctionArg, ObjectRef } from "../ast";
-import { commaList, ident, kw, parenList, qualified, quoted, str } from "./context";
+import { commaList, ident, isColNameKeyword, kw, parenList, qualified, quoted, str } from "./context";
 import { expr } from "./expr";
 import { typeName } from "./types";
 
@@ -40,13 +40,47 @@ const ARG_NAME_QUOTED: ReadonlySet<string> = new Set([
 /** One argument of a routine signature: `[mode] [name] type [DEFAULT expr]`. */
 export const functionArg = (a: FunctionArg): Doc => [
   a.mode !== null ? `${kw(a.mode.toUpperCase())} ` : "",
-  a.name !== null ? `${ARG_NAME_QUOTED.has(a.name) ? quoted(a.name) : ident(a.name)} ` : "",
+  // PG's param_name is a type_function_name: no col_name keyword either.
+  a.name !== null ? `${ARG_NAME_QUOTED.has(a.name) || isColNameKeyword(a.name) ? quoted(a.name) : ident(a.name)} ` : "",
   typeName(a.type),
   a.defaultValue !== null ? [` ${kw("DEFAULT")} `, expr(a.defaultValue)] : "",
 ];
 
 /** A routine's or aggregate's argument list: `(*)` or `(arg, …)`. */
 export const signature = (s: DropSignature): Doc => (s.star ? "(*)" : parenList(s.args.map(functionArg)));
+
+/**
+ * A routine or aggregate named with its argument list: PG's func_name, so a
+ * one-part name can't be a col_name keyword (`"coalesce"(int)`).
+ */
+export const routineWithArgs = (name: readonly string[], sig: DropSignature): Doc => [
+  name.length === 1 && isColNameKeyword(name[0]!) ? quoted(name[0]!) : qualified(name),
+  signature(sig),
+];
+
+/**
+ * A type or domain named as DROP, COMMENT ON and SECURITY LABEL name one: PG's
+ * Typename, written as a type name is (a bare `int` is int4, a quoted `"int"`
+ * a type called that). A name holding a space came from a quoted name, which
+ * stays quoted.
+ */
+export const typeObjectName = (name: readonly string[]): Doc =>
+  name.length === 1 && /\s/.test(name[0]!)
+    ? quoted(name[0]!)
+    : typeName({ name: [...name], args: [], array: false } as unknown as ColType);
+
+/**
+ * A number the grammar read with `Number`, written so it reads back the same:
+ * an overflow is Infinity, and a `-0` keeps its sign.
+ */
+export const numberText = (n: number): string =>
+  n === Number.POSITIVE_INFINITY
+    ? "1e999"
+    : n === Number.NEGATIVE_INFINITY
+      ? "-1e999"
+      : Object.is(n, -0)
+        ? "-0"
+        : String(n);
 
 /** An operator name, `[schema.]op`: the qualifying parts are names, the last the symbol. */
 export const operatorName = (name: readonly string[]): string =>
@@ -71,7 +105,7 @@ export const castTypes = (source: ColType, target: ColType): Doc => [
  */
 export const objectRef = (o: ObjectRef): Doc => {
   const parts: Doc[] = [objectKeyword(o.objectType)];
-  if (o.oid !== undefined) parts.push(String(o.oid));
+  if (o.oid !== undefined) parts.push(numberText(o.oid));
   if (o.source !== undefined && o.target !== undefined) parts.push(castTypes(o.source, o.target));
   if (o.type !== undefined) {
     parts.push(kw("FOR"), typeName(o.type));
@@ -81,7 +115,9 @@ export const objectRef = (o: ObjectRef): Doc => {
     if (o.operands !== undefined) {
       parts.push(operatorName(o.name), operandTypes(o.operands));
     } else if (o.signature !== undefined) {
-      parts.push([qualified(o.name), signature(o.signature)]);
+      parts.push(routineWithArgs(o.name, o.signature));
+    } else if (o.objectType === "type" || o.objectType === "domain") {
+      parts.push(typeObjectName(o.name));
     } else {
       parts.push(qualified(o.name));
     }

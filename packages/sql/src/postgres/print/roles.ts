@@ -8,12 +8,14 @@ import { defineFamily } from "./registry";
 import {
   alterConfigAction,
   castTypes,
+  numberText,
   objectKeyword,
   objectRef,
   operandTypes,
   operatorName,
   roleSpec,
-  signature,
+  routineWithArgs,
+  typeObjectName,
 } from "./shared";
 
 /**
@@ -104,10 +106,10 @@ const grantObject = (o: GrantObject): Doc => {
   }
   const items: Doc[] =
     o.oids !== undefined
-      ? o.oids.map(String)
+      ? o.oids.map(numberText)
       : o.names.map((name, i) => {
           const sig = o.signatures?.[i];
-          return sig !== undefined && sig !== null ? [qualified(name), signature(sig)] : qualified(name);
+          return sig !== undefined && sig !== null ? routineWithArgs(name, sig) : qualified(name);
         });
   // The kind is always written, TABLE too: then no object name can read as a kind word.
   return clause(objectKeyword(o.objectType), commaList(items));
@@ -146,8 +148,8 @@ type Drop = Extract<Stmt, { kind: "drop" }>;
 const dropItem = (d: Drop, name: string[], i: number): Doc => {
   if (d.operands !== undefined) return [operatorName(name), " ", operandTypes(d.operands[i]!)];
   const sig = d.signatures?.[i];
-  if (sig !== undefined && sig !== null) return [qualified(name), signature(sig)];
-  return qualified(name);
+  if (sig !== undefined && sig !== null) return routineWithArgs(name, sig);
+  return d.objectType === "type" || d.objectType === "domain" ? typeObjectName(name) : qualified(name);
 };
 
 const dropStmt = (d: Drop): Doc => {
@@ -236,7 +238,7 @@ export const rolesFamily = defineFamily(
       stmt(
         [
           kw("SECURITY LABEL"),
-          ...(n.provider !== undefined ? [kw("FOR"), ident(n.provider)] : []),
+          ...(n.provider !== undefined ? [kw("FOR"), n.provider === "" ? str("") : ident(n.provider)] : []),
           kw("ON"),
           objectRef(n),
         ],

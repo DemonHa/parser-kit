@@ -575,6 +575,54 @@ COMMENT ON TABLE "My Table" IS 'it''s';
 COMMENT ON FUNCTION f("out" int, "setof" int, "double" int, "variadic" text)
   IS 'x';
 
+-- DROP FUNCTION f("int" integer, "between" int, "none" int, "position" int)
+DROP FUNCTION f("int" integer, "between" int, "none" int, "position" int);
+
+-- DROP FUNCTION "between"(int), "int"(text), s.between(int), "row"
+DROP FUNCTION "between"(int), "int"(text), s.between(int), row;
+
+-- COMMENT ON FUNCTION "coalesce"(int) IS 'x'
+COMMENT ON FUNCTION "coalesce"(int) IS 'x';
+
+-- DROP AGGREGATE "nullif"(*)
+DROP AGGREGATE "nullif"(*);
+
+-- GRANT EXECUTE ON FUNCTION "between"(int) TO u
+GRANT EXECUTE ON FUNCTION "between"(int) TO u;
+
+-- DROP TYPE "between", int, "int", "double precision", s.ty
+DROP TYPE "between", int, int, "double precision", s.ty;
+
+-- COMMENT ON TYPE "position" IS 'x'
+COMMENT ON TYPE "position" IS 'x';
+
+-- COMMENT ON TYPE int IS 'x'
+COMMENT ON TYPE int IS 'x';
+
+-- SECURITY LABEL ON TYPE "row" IS 'x'
+SECURITY LABEL ON TYPE "row" IS 'x';
+
+-- SECURITY LABEL ON DOMAIN bigint IS 'x'
+SECURITY LABEL ON DOMAIN bigint IS 'x';
+
+-- DROP DOMAIN "int", integer, "setof"
+DROP DOMAIN int, integer, "setof";
+
+-- COMMENT ON LARGE OBJECT 1e400 IS 'x'
+COMMENT ON LARGE OBJECT 1e999 IS 'x';
+
+-- SECURITY LABEL ON LARGE OBJECT -1e400 IS 'x'
+SECURITY LABEL ON LARGE OBJECT -1e999 IS 'x';
+
+-- COMMENT ON LARGE OBJECT -0 IS 'x'
+COMMENT ON LARGE OBJECT -0 IS 'x';
+
+-- GRANT SELECT ON LARGE OBJECT 1e400, -0 TO u
+GRANT SELECT ON LARGE OBJECT 1e999, -0 TO u;
+
+-- SECURITY LABEL FOR '' ON TABLE t IS 'x'
+SECURITY LABEL FOR '' ON TABLE t IS 'x';
+
 -- SECURITY LABEL ON TABLE t IS 'x'
 SECURITY LABEL ON TABLE t IS 'x';
 
