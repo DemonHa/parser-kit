@@ -569,6 +569,9 @@ EXPLAIN ("select" 1, "values", "with", "table", "all", FORMAT "select")
 -- VACUUM ("select", index_cleanup "null", full, x left, y "values") t
 VACUUM ("select", INDEX_CLEANUP "null", FULL, X left, Y "values") t;
 
+-- VACUUM (INDEX_CLEANUP on, x "system_user", y "current_catalog", z "on") t
+VACUUM (INDEX_CLEANUP on, X "system_user", Y "current_catalog", Z on) t;
+
 -- EXPLAIN VALUES (1)
 EXPLAIN VALUES (1);
 
@@ -613,6 +616,12 @@ CLUSTER VERBOSE;
 
 -- CLUSTER (VERBOSE)
 CLUSTER VERBOSE;
+
+-- CLUSTER (verbose false)
+CLUSTER (VERBOSE FALSE);
+
+-- CLUSTER (x.verbose)
+CLUSTER (X.VERBOSE);
 
 -- CLUSTER t
 CLUSTER t;
