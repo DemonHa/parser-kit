@@ -196,6 +196,46 @@ const DO_ORDER =
   "Our tree keeps DO's language and body, not their order, and the printer writes `DO LANGUAGE l 'body'`. PostgreSQL's tree lists them in source order; the order means nothing.";
 
 const PRINTER_DIFFERENCES: PrinterDifference[] = [
+  // The roles family: spellings our tree doesn't tell apart, printed as the keyword form.
+  {
+    sql: 'ALTER ROLE "current_user" WITH LOGIN',
+    paths: ["$.0.AlterRoleStmt.role.roletype", "$.0.AlterRoleStmt.role.rolename"],
+    reason:
+      'A quoted `"current_user"` gives the same tree as the CURRENT_USER pseudo-role (parseRoleSpec), and the printer writes the keyword. To PostgreSQL the quoted one is a role of that name.',
+  },
+  {
+    sql: 'ALTER ROLE r SET "time zone" TO "local"',
+    paths: ["$.0.AlterRoleSetStmt.setstmt.name"],
+    reason:
+      'A parameter quoted as `"time zone"` gives the same tree as SET TIME ZONE, and the printer writes the special form, which PostgreSQL reads as `timezone`.',
+  },
+  {
+    sql: 'DROP TYPE "between", int, "int", "double precision", s.ty',
+    paths: ["$.0.DropStmt.objects.2.TypeName.names"],
+    reason:
+      "A quoted `\"int\"` gives the same tree as `int` (the name's quoting isn't kept), and the printer writes the keyword type, which PostgreSQL reads as `pg_catalog.int4`.",
+  },
+  {
+    sql: 'DROP DOMAIN "int", integer, "setof"',
+    paths: ["$.0.DropStmt.objects.0.TypeName.names"],
+    reason: 'A quoted `"int"`, as in the row above.',
+  },
+  {
+    sql: "COMMENT ON LARGE OBJECT 1e400 IS 'x'",
+    paths: ["$.0.CommentStmt.object.Float.fval"],
+    reason:
+      "A large object's number is kept as a JavaScript number, so one that overflows is Infinity and prints as `1e999`, which reads back as Infinity. PostgreSQL keeps the text, and rejects both as out of an oid's range.",
+  },
+  {
+    sql: "SECURITY LABEL ON LARGE OBJECT -1e400 IS 'x'",
+    paths: ["$.0.SecLabelStmt.object.Float.fval"],
+    reason: "An overflowing large object number, as in the row above.",
+  },
+  {
+    sql: "GRANT SELECT ON LARGE OBJECT 1e400, -0 TO u",
+    paths: ["$.0.GrantStmt.objects.0.Float.fval"],
+    reason: "An overflowing large object number, as in the rows above.",
+  },
   // Our tree loses the difference, and PostgreSQL resolves both to the same thing.
   {
     sql: "SELECT N'national', n'char';",

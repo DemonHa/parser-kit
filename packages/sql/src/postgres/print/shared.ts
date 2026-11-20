@@ -251,6 +251,49 @@ export const operandTypes = (operands: readonly [ColType | null, ColType | null]
   ")",
 ];
 
+/** A cast's `(source AS target)`. */
+export const castTypes = (source: ColType, target: ColType): Doc => [
+  "(",
+  typeName(source),
+  ` ${kw("AS")} `,
+  typeName(target),
+  ")",
+];
+
+/**
+ * A routine or aggregate named with its argument list: PG's func_name, so a
+ * one-part name can't be a col_name keyword (`"coalesce"(int)`).
+ */
+export const routineWithArgs = (name: readonly string[], sig: DropSignature): Doc => [
+  name.length === 1 && isColNameKeyword(name[0]!) ? quoted(name[0]!) : qualified(name),
+  signature(sig),
+];
+
+/**
+ * A type or domain named as DROP, COMMENT ON and SECURITY LABEL name one: PG's
+ * Typename, written as a type name is: `int` bare (int4), a col_name keyword
+ * that names no type (`"between"`) quoted. The tree doesn't record quoting, so
+ * a source `"int"` prints as `int` too. A name holding a space came from a
+ * quoted name, which stays quoted.
+ */
+export const typeObjectName = (name: readonly string[]): Doc =>
+  name.length === 1 && /\s/.test(name[0]!)
+    ? quoted(name[0]!)
+    : typeName({ name: [...name], args: [], array: false } as unknown as ColType);
+
+/**
+ * A number the grammar read with `Number`, written so it reads back the same:
+ * an overflow is Infinity, and a `-0` keeps its sign.
+ */
+export const numberText = (n: number): string =>
+  n === Number.POSITIVE_INFINITY
+    ? "1e999"
+    : n === Number.NEGATIVE_INFINITY
+      ? "-1e999"
+      : Object.is(n, -0)
+        ? "-0"
+        : String(n);
+
 /**
  * The reference part of an object, as COMMENT ON, SECURITY LABEL, ALTER
  * EXTENSION ADD / DROP and the generic ALTER name it: everything after the
@@ -258,17 +301,21 @@ export const operandTypes = (operands: readonly [ColType | null, ColType | null]
  */
 export const objectRefName = (ref: ObjectRef): Doc => {
   const parts: Doc[] = [];
-  if (ref.source !== undefined && ref.target !== undefined) {
-    parts.push(["(", typeName(ref.source), ` ${kw("AS")} `, typeName(ref.target), ")"]);
-  }
+  if (ref.source !== undefined && ref.target !== undefined) parts.push(castTypes(ref.source, ref.target));
   if (ref.type !== undefined) parts.push([kw("FOR"), " ", typeName(ref.type)]);
   if (ref.language !== undefined) parts.push([kw("LANGUAGE"), " ", ident(ref.language)]);
-  if (ref.oid !== undefined) parts.push(Object.is(ref.oid, -0) ? "-0" : String(ref.oid));
+  if (ref.oid !== undefined) parts.push(numberText(ref.oid));
   if (ref.name !== undefined) {
     if (ref.operands !== undefined) {
       parts.push([operatorName(ref.name), " ", operandTypes(ref.operands)]);
     } else {
-      parts.push(ref.signature !== undefined ? [qualified(ref.name), signature(ref.signature)] : qualified(ref.name));
+      parts.push(
+        ref.signature !== undefined
+          ? routineWithArgs(ref.name, ref.signature)
+          : ref.objectType === "type" || ref.objectType === "domain"
+            ? typeObjectName(ref.name)
+            : qualified(ref.name),
+      );
     }
   }
   if (ref.using !== undefined) parts.push([kw("USING"), " ", ident(ref.using)]);
@@ -318,7 +365,9 @@ const SET_FORMS: Record<string, (values: Values) => Doc | null> = {
   "session authorization": (values) => {
     if (values === "default") return kw("DEFAULT");
     const v = one(values);
-    return v !== null && (v.kind === "string" || (v.kind === "name" && v.parts.length === 1)) ? expr(v) : null;
+    return v !== null && (v.kind === "string" || (v.kind === "name" && v.parts.length === 1))
+      ? parameterValue(v)
+      : null;
   },
   "xml option": (values) => {
     const v = one(values);
@@ -336,9 +385,11 @@ const SET_FORMS: Record<string, (values: Values) => Doc | null> = {
 // The forms RESET takes.
 const RESET_FORMS: ReadonlySet<string> = new Set(["time zone", "transaction isolation level", "session authorization"]);
 
-// ON is reserved but a SET value all the same, as OFF is.
+// ON is reserved but a SET value all the same, as OFF is. Any other word is a
+// name, quoted when it must be: `expr` would write the words PG reads as
+// functions (`system_user`) bare, which no value may be.
 const parameterValue = (v: Expr): Doc =>
-  v.kind === "name" && v.parts.length === 1 && v.parts[0] === "on" ? kw("ON") : expr(v);
+  v.kind !== "name" || v.parts.length !== 1 ? expr(v) : v.parts[0] === "on" ? kw("ON") : ident(v.parts[0]!);
 
 /**
  * `name {TO value[, …] | TO DEFAULT | FROM CURRENT}`, the SET of a parameter
