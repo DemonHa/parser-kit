@@ -1,6 +1,9 @@
 // The package entry: `@parser-kit/dbml` resolves here. The DBML grammar is not
 // written yet, so `dbml` only fixes the shape of the public API — every method
-// throws until the parser lands.
+// throws until the parser lands. The lexer is public for highlighters; the
+// parse stream and the raw-name lookup are grammar internals and stay out.
+
+export { type DbmlTokenType, dbmlLexer } from "./lexer";
 
 function notImplemented(method: string): never {
   throw new Error(`@parser-kit/dbml: dbml.${method}() is not implemented yet`);

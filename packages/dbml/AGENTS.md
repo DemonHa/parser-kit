@@ -2,8 +2,9 @@
 
 A typed DBML parser built on `@parser-kit/core`. The incumbent, and the de facto
 spec, is [`@dbml/core`](https://www.npmjs.com/package/@dbml/core) 12.x (its
-`dbmlv2` parser). The package entry is a single `dbml` object with `parse` and
-`diagnose`. It is in development: `private: true`, not yet published. See
+`dbmlv2` parser). The package entry is a `dbml` object with `parse` and
+`diagnose`, plus the lexer (`dbmlLexer`, `DbmlTokenType`) for highlighters. It
+is in development: `private: true`, not yet published. See
 `../core/AGENTS.md` for the kit's internals and grammar-authoring gotchas, and
 `../sql` for the package this one mirrors.
 
@@ -15,7 +16,8 @@ exist yet are the ones still to be written.
 - `src/` — the published code.
   - `index.ts` — the package entry.
   - `lexer.ts` — the lexer, the parse-stream wrapper (comments dropped,
-    identifiers case-folded) and the raw-name lookup.
+    identifiers case-folded), the raw-name lookup and the note dedent
+    (`dedentNote`).
   - `grammar/` — one module per construct (`table.ts`, `ref.ts`, `enum.ts`,
     `project.ts`, `note.ts`, `indexes.ts`, `group.ts`, `partial.ts`,
     `records.ts`), the shared rules in `common.ts` (names, strings, values,
@@ -72,9 +74,12 @@ fixtures reach the tarball.
   `String(value)` gives back for an integer: any `.`, exponent, trailing zeros,
   leading zeros or a value outside the safe-integer range. `42` and `-7` have no
   `raw`; `1.50`, `1e5`, `-0.0` and `007` do. This matches `@parser-kit/sql`.
-- **Strings are decoded.** `'…'` is single-line and processes escapes; `'''…'''`
-  is dedented the way `@dbml/core` does it and carries `multiline: true`.
-  Backtick expressions are kept raw.
+- **Strings are decoded.** `'…'` is single-line and processes escapes;
+  `'''…'''` may span lines, processes escapes and carries `multiline: true`.
+  Only note values are dedented, `'…'` and `'''…'''` alike, with the lexer's
+  `dedentNote` (as `@dbml/core` does); an index's `note:` setting is the
+  exception, and other strings, such as a `'''` default, keep their text as
+  written. Backtick expressions are kept raw.
 - **Error messages** use the core style, `Expected X but found Y`, with readable
   displays (`"Table"`, `a column type`, …). Error tests match `ParseError.msg`
   exactly, plus `start`.
