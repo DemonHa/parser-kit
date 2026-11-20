@@ -5,7 +5,6 @@
 // (set and restored by `withOptions`), so the printers stay plain functions of
 // a node and need no options argument threaded through every handler.
 import { type Doc, group, indent, join, line, quoting, softline } from "@parser-kit/core/print";
-import type { Stmt } from "../ast";
 import { RESERVED } from "../grammar";
 
 export interface StringifyOptions {
@@ -74,12 +73,92 @@ const minimal = (name: string): string =>
 
 /** A table, column, alias or other object name. */
 export const ident = (name: string): string => (state.always ? quoteName(name, "always") : minimal(name));
-/** A function or type name: quoted only when it must be, whatever `identifierQuote` says. */
-export const bareIdent = minimal;
 /** A dotted name, each part through `ident`. */
 export const qualified = (parts: readonly string[]): string => parts.map(ident).join(".");
-/** A dotted function or type name, each part through `bareIdent`. */
-export const bareQualified = (parts: readonly string[]): string => parts.map(bareIdent).join(".");
+/** A name always written quoted. */
+export const quoted = (name: string): string => quoteName(name, "always");
+/**
+ * A type name part, or a word PG reads as a name (an EXTRACT field, an
+ * encoding): quoted only when it must be, whatever `identifierQuote` says.
+ */
+export const minimalIdent = minimal;
+/** A dotted type name, each part through `minimalIdent`. */
+export const minimalQualified = (parts: readonly string[]): string => parts.map(minimal).join(".");
+
+// PG's col_name_keyword list (gram.y): words a column may be named, but not
+// a one-part function, a named argument or a TABLESAMPLE method, so those are
+// quoted. (Most are type names or keyword forms this grammar reads by value.)
+const COL_NAME_KEYWORDS: ReadonlySet<string> = new Set([
+  "between",
+  "bigint",
+  "bit",
+  "boolean",
+  "char",
+  "character",
+  "coalesce",
+  "dec",
+  "decimal",
+  "exists",
+  "extract",
+  "float",
+  "greatest",
+  "grouping",
+  "inout",
+  "int",
+  "integer",
+  "interval",
+  "json",
+  "json_array",
+  "json_arrayagg",
+  "json_exists",
+  "json_object",
+  "json_objectagg",
+  "json_query",
+  "json_scalar",
+  "json_serialize",
+  "json_table",
+  "json_value",
+  "least",
+  "merge_action",
+  "national",
+  "nchar",
+  "none",
+  "normalize",
+  "nullif",
+  "numeric",
+  "out",
+  "overlay",
+  "position",
+  "precision",
+  "real",
+  "row",
+  "setof",
+  "smallint",
+  "substring",
+  "time",
+  "timestamp",
+  "treat",
+  "trim",
+  "values",
+  "varchar",
+  "xmlattributes",
+  "xmlconcat",
+  "xmlelement",
+  "xmlexists",
+  "xmlforest",
+  "xmlnamespaces",
+  "xmlparse",
+  "xmlpi",
+  "xmlroot",
+  "xmlserialize",
+  "xmltable",
+]);
+
+/** Whether a one-part function name is one of PG's col_name keywords. */
+export const isColNameKeyword = (name: string): boolean => COL_NAME_KEYWORDS.has(name);
+
+/** A named argument's name or a TABLESAMPLE method: PG's type_function_name. */
+export const functionWord = (name: string): string => (COL_NAME_KEYWORDS.has(name) ? quoted(name) : minimal(name));
 
 // What `E'…'` writes with a backslash: control characters and the backslash
 // itself (the quote is doubled, as in `'…'`).
@@ -148,17 +227,6 @@ export const firstChar = (doc: Doc): string => {
   return "";
 };
 
-/**
- * The statement printer, set by `index.ts` once every family is loaded. A
- * family module that prints a nested statement (a CTE body) calls it through
- * here rather than importing `index.ts`, which imports the family modules.
- */
-export const statementPrinter: { print: (stmt: Stmt) => Doc } = {
-  print: () => {
-    throw new Error("The statement printer is not loaded");
-  },
-};
-
 /** PG's operator characters: two of them side by side lex as one operator, `--` as a comment. */
 export const OPERATOR_CHARS = new Set("+-*/<>=~!@#%^&|`?");
 
@@ -168,8 +236,10 @@ export const OPERATOR_CHARS = new Set("+-*/<>=~!@#%^&|`?");
  * throw this rather than printing something wrong.
  */
 export class NotPrintableError extends Error {
-  constructor(readonly kind: string) {
+  readonly kind: string;
+  constructor(kind: string) {
     super(`A "${kind}" statement is not yet printable`);
+    this.kind = kind;
     this.name = "NotPrintableError";
   }
 }

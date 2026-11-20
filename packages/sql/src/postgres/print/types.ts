@@ -2,7 +2,7 @@
 // `SETOF record`, `"char"`.
 import type { Doc } from "@parser-kit/core/print";
 import type { ColType } from "../ast";
-import { bareQualified, kw } from "./context";
+import { kw, minimalQualified, quoted } from "./context";
 
 // The multi-word spellings the grammar folds into one name part
 // (`["double precision"]`), keyed by their lead word. A part holding one of
@@ -23,14 +23,14 @@ export const typeName = (t: ColType): Doc => {
   let name: string;
   if (t.name.length === 1 && t.quoted) {
     // A quoted keyword spelling (`"char"`, `"int"`) is quoted even though it is a bare word.
-    name = `"${t.name[0]!.replace(/"/g, '""')}"${args}`;
+    name = `${quoted(t.name[0]!)}${args}`;
   } else if (t.name.length === 1 && isMultiWord(t.name[0]!)) {
     const words = t.name[0]!;
     const space = words.indexOf(" ");
     const lead = words.slice(0, space);
     name = ARGS_BEFORE_TAIL.has(lead) ? `${lead}${args}${words.slice(space)}` : `${words}${args}`;
   } else {
-    name = `${bareQualified(t.name)}${args}`;
+    name = `${minimalQualified(t.name)}${args}`;
   }
   return `${t.setof ? `${kw("SETOF")} ` : ""}${name}${t.array ? "[]" : ""}`;
 };

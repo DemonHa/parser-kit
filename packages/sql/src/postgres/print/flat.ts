@@ -1,15 +1,23 @@
 // One-line output without the general renderer: what `stringify` does at its
-// default width. Every `line` is a space, every soft line nothing, every
-// `ifBreak` its flat branch. A doc that must break somewhere (a hard line, or
-// a group built to break) is left to `render`, which this returns null for.
+// default width, and what `render` gives at width Infinity. Inside a group
+// every `line` is a space, every soft line nothing and every `ifBreak` its flat
+// branch. Where `render` would break instead (a hard line, a group built to
+// break, or a line or `ifBreak` outside every group, which `render` lays out
+// broken), this returns null and leaves the doc to `render`.
 import type { Doc, DocCommand } from "@parser-kit/core/print";
+
+// Pops back out of a group's contents.
+const LEAVE = Symbol("leave");
 
 export const flat = (doc: Doc): string | null => {
   let out = "";
-  const todo: Doc[] = [doc];
+  let depth = 0;
+  const todo: (Doc | typeof LEAVE)[] = [doc];
   while (todo.length > 0) {
     const d = todo.pop()!;
-    if (typeof d === "string") {
+    if (d === LEAVE) {
+      depth--;
+    } else if (typeof d === "string") {
       out += d;
     } else if (Array.isArray(d)) {
       for (let i = d.length - 1; i >= 0; i--) todo.push(d[i]!);
@@ -18,16 +26,18 @@ export const flat = (doc: Doc): string | null => {
       switch (c.type) {
         case "group":
           if (c.break) return null;
-          todo.push(c.contents);
+          depth++;
+          todo.push(LEAVE, c.contents);
           break;
         case "indent":
           todo.push(c.contents);
           break;
         case "ifBreak":
+          if (depth === 0) return null;
           todo.push(c.flatContents);
           break;
         case "line":
-          if (c.hard) return null;
+          if (c.hard || depth === 0) return null;
           if (!c.soft) out += " ";
           break;
       }

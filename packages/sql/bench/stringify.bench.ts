@@ -2,7 +2,7 @@ import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
 import type { Stmt } from "../src/postgres/ast";
 import { postgres } from "../src/postgres/index";
-import { stringify } from "../src/postgres/print/index";
+import { NotPrintableError, stringify } from "../src/postgres/print/index";
 import { CORPUS } from "../test/corpus";
 
 // Printing speed: the PostgreSQL printer against node-sql-parser's `sqlify`,
@@ -41,12 +41,14 @@ const QUERIES = [
    LIMIT 100;`,
 ];
 
+// A statement whose family has no printer yet is left out; any other throw fails the run.
 const prints = (stmt: Stmt): boolean => {
   try {
     stringify(stmt);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (error instanceof NotPrintableError) return false;
+    throw error;
   }
 };
 
@@ -68,7 +70,9 @@ for (const sql of QUERIES) {
   }
 }
 
-describe(`stringify vs sqlify (${ours.length} statements)`, () => {
+// A fixed group name: `bench-baseline.json` keys on it, and the statement count
+// grows as statement families get printers.
+describe("stringify vs sqlify", () => {
   bench("@parser-kit/sql stringify (compact)", () => {
     for (const stmt of ours) stringify(stmt);
   });

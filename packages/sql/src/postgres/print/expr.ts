@@ -9,6 +9,11 @@
 // whatever that table can't build. Positions that take a bare atom (PG's
 // c_expr: XMLEXISTS's path, a JSON_OBJECT key before VALUE) wrap anything that
 // isn't one.
+//
+// `expr.ts` and `query.ts` import each other (expressions hold subqueries,
+// queries hold expressions), so neither may use the other's exports at module
+// load (no top-level calls, spreads or `extendPrinter` of them), only inside
+// functions.
 import {
   type Doc,
   definePrinter,
@@ -37,16 +42,19 @@ import type {
 } from "../ast";
 import { bExprTable, expressionTable } from "../grammar";
 import {
-  bareIdent,
-  bareQualified,
   commaList,
   firstChar,
+  functionWord,
   ident,
+  isColNameKeyword,
   kw,
+  minimalIdent,
+  minimalQualified,
   OPERATOR_CHARS,
   parenList,
   parens,
   qualified,
+  quoted,
   str,
 } from "./context";
 import { printQuery } from "./query";
@@ -129,27 +137,34 @@ export const bExpr = (e: Expr): Doc => prec.operand(e, 0, "b");
 /** An expression where the grammar reads a bare atom (PG's c_expr): anything else is parenthesised. */
 export const atomic = (e: Expr): Doc => (exprKey(e) === null ? expr(e) : ["(", expr(e), ")"]);
 
-// Infix and postfix nodes whose own group never chains (comparisons, LIKE,
-// IN, IS, BETWEEN), which PG's grammar declares non-associative: as the left
-// operand of another of the same tier they are parenthesised, where the
-// grammar here would accept the chain and PG would not. `precedence` already
-// does this for the infix groups; the postfix IN and IS groups chain to it.
-const TIER: Partial<Record<Expr["kind"], number>> = {
-  in: 10,
-  inSubquery: 10,
-  like: 10,
-  similarTo: 10,
-  between: 10,
-  is: 8,
-  isDistinct: 8,
-  isTest: 8,
-  isNormalized: 8,
-  isDocument: 8,
-  isJson: 8,
+// PG declares IN and the IS tests non-associative (`a IS NULL IS NULL` is a
+// syntax error), but they are postfix groups here, which `precedence` treats
+// as chaining and the parser lets chain. So one of them as the left operand of
+// another at the same bp is parenthesised by hand; the bps come from the table.
+// (The infix groups of those tiers, LIKE / BETWEEN / comparisons, chain to
+// nothing already: they have no `assoc`.)
+const NONASSOC_POSTFIX = new Set([
+  "in",
+  "inSubquery",
+  "is",
+  "isDistinct",
+  "isTest",
+  "isNormalized",
+  "isDocument",
+  "isJson",
+]);
+const TIER = new Map<string, number>();
+for (const g of expressionTable.postfix) {
+  const nodes = g.nodes === undefined ? [] : Array.isArray(g.nodes) ? g.nodes : Object.keys(g.nodes);
+  for (const k of nodes) if (NONASSOC_POSTFIX.has(k)) TIER.set(k, g.bp);
+}
+const tierOf = (e: Expr): number | undefined => {
+  const k = exprKey(e);
+  return typeof k === "string" ? TIER.get(k) : undefined;
 };
 const left = (parent: Expr, child: Expr): Doc => {
-  const tier = TIER[parent.kind];
-  if (tier !== undefined && TIER[child.kind] === tier) return ["(", expr(child), ")"];
+  const tier = tierOf(parent);
+  if (tier !== undefined && tierOf(child) === tier) return ["(", expr(child), ")"];
   return exprKey(child) === null ? printExpr(child) : prec.child(parent, child, "left");
 };
 const right = (parent: Expr, child: Expr): Doc =>
@@ -157,58 +172,54 @@ const right = (parent: Expr, child: Expr): Doc =>
 
 // --- names and calls ---
 
-// Function names the grammar reads as a keyword form when written bare and
-// single-part, so a plain `call` of that name is written quoted (an ordinary
-// function to PG) — except in the shape the keyword form itself gives back as
-// a plain call.
-const XML_FUNCTIONS = new Set([
-  "xmlconcat",
-  "xmlelement",
-  "xmlforest",
-  "xmlpi",
-  "xmlroot",
-  "xmlparse",
-  "xmlserialize",
-  "xmlexists",
-  "xmlattributes",
-  "xmlnamespaces",
-  "xmltable",
-]);
-const JSON_FUNCTIONS = new Set([
-  "json",
-  "json_object",
-  "json_array",
-  "json_objectagg",
-  "json_arrayagg",
-  "json_value",
-  "json_query",
-  "json_exists",
-  "json_scalar",
-  "json_serialize",
-  "json_table",
-]);
 type Call = Extract<Expr, { kind: "call" }>;
+// No DISTINCT, ALL, VARIADIC or ORDER BY, and no `*` or named argument.
 const isPlain = (c: Call): boolean =>
   !c.distinct &&
   !c.all &&
   !c.variadic &&
   c.orderBy === undefined &&
   c.args.every((a) => a.kind !== "namedArg" && !(a.kind === "star" && a.table === null));
-const mustQuoteCallName = (c: Call): boolean => {
-  if (c.name.length !== 1) return false;
-  const name = c.name[0]!;
-  if (name === "normalize") return !(isPlain(c) && c.args.length === 1);
-  if (name === "xmlconcat") return !(isPlain(c) && c.args.length > 0);
-  if (name === "json_object") return !(c.args.length > 0 && !c.distinct && !c.all && !c.variadic && !c.orderBy);
-  return XML_FUNCTIONS.has(name) || JSON_FUNCTIONS.has(name);
+
+// A one-part call named by one of PG's col_name keywords is written quoted, an
+// ordinary function to PG, unless it has the shape of the keyword form PG (and
+// this grammar) read as a plain call: `coalesce(a, b)`, `substring(a, 1)`,
+// `normalize(a)`, a legacy `json_object(…)`. TRIM, EXTRACT, POSITION and ROW
+// are left bare whatever their shape: quoted, this grammar still reads them as
+// the keyword form, so no spelling of another shape would parse back.
+const bareForm = (name: string, c: Call): boolean => {
+  switch (name) {
+    case "coalesce":
+    case "greatest":
+    case "least":
+    case "nullif":
+    case "grouping":
+    case "xmlconcat":
+      return isPlain(c) && c.args.length > 0;
+    case "normalize":
+      return isPlain(c) && c.args.length === 1;
+    case "json_object":
+      return c.args.length > 0 && !c.distinct && !c.all && !c.variadic && c.orderBy === undefined;
+    case "substring":
+    case "overlay":
+    case "trim":
+    case "extract":
+    case "position":
+    case "row":
+      return true;
+    default:
+      return false;
+  }
 };
-const callName = (c: Call): string =>
-  mustQuoteCallName(c) ? `"${c.name[0]!.replace(/"/g, '""')}"` : bareQualified(c.name);
+const callName = (c: Call): string => {
+  const name = c.name[0]!;
+  return c.name.length === 1 && isColNameKeyword(name) && !bareForm(name, c) ? quoted(name) : minimalQualified(c.name);
+};
 
 const callArgs = (c: Call): Doc => {
   if (c.args.length === 0 && !c.distinct && !c.all && c.orderBy === undefined) return "()";
   const args = c.args.map((a, i) => {
-    const doc = a.kind === "star" && a.table === null ? "*" : expr(a);
+    const doc = expr(a);
     return c.variadic && i === c.args.length - 1 ? [kw("VARIADIC"), " ", doc] : doc;
   });
   const head = c.distinct ? `${kw("DISTINCT")} ` : c.all ? `${kw("ALL")} ` : "";
@@ -315,7 +326,7 @@ export const windowSpec = (s: WindowSpec): Doc => {
 export const jsonFormat = (f: JsonFormat | undefined): Doc =>
   f === undefined
     ? ""
-    : [" ", kw("FORMAT JSON"), f.encoding !== undefined ? [" ", kw("ENCODING"), " ", bareIdent(f.encoding)] : ""];
+    : [" ", kw("FORMAT JSON"), f.encoding !== undefined ? [" ", kw("ENCODING"), " ", minimalIdent(f.encoding)] : ""];
 export const jsonValue = (v: JsonValueExpr): Doc => [expr(v.expr), jsonFormat(v.format)];
 const jsonReturning = (r: JsonReturning | undefined): Doc[] =>
   r === undefined ? [] : [[kw("RETURNING"), " ", typeName(r.type), jsonFormat(r.format)]];
@@ -422,7 +433,7 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       : [kw("INTERVAL"), " ", str(e.value), " ", kw(e.fields.toUpperCase()), p];
   },
   call: (e) => [callName(e), callArgs(e)],
-  namedArg: (e) => [ident(e.name), " => ", expr(e.value)],
+  namedArg: (e) => [functionWord(e.name), " => ", expr(e.value)],
   unary: (e) => {
     const operand =
       e.opSchema === undefined && PREFIX_OPS.has(e.op) ? right(e, e.operand) : prec.operand(e.operand, 13);
@@ -507,7 +518,7 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   overlaps: (e, print) => [print(e.left), " ", kw("OVERLAPS"), " ", print(e.right)],
   subscript: (e) => chain(e),
   fieldSelect: (e) => chain(e),
-  extract: (e) => fn("EXTRACT", parens([bareIdent(e.field), " ", kw("FROM"), " ", expr(e.source)])),
+  extract: (e) => fn("EXTRACT", parens([minimalIdent(e.field), " ", kw("FROM"), " ", expr(e.source)])),
   substring: (e) =>
     fn(
       "SUBSTRING",

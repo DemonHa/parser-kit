@@ -1,5 +1,10 @@
 // Queries: SELECT, VALUES, TABLE and set operations, with their WITH and
 // ORDER BY / LIMIT / OFFSET / FETCH / locking tails, and every FROM item.
+//
+// `expr.ts` and `query.ts` import each other (expressions hold subqueries,
+// queries hold expressions), so neither may use the other's exports at module
+// load (no top-level calls, spreads or `extendPrinter` of them), only inside
+// functions.
 import { type Doc, definePrinter, group, indent, join, line, type NodePrinter } from "@parser-kit/core/print";
 import type {
   ColumnDefinition,
@@ -9,6 +14,7 @@ import type {
   GroupByItem,
   JsonTableColumn,
   LockingClause,
+  Preparable,
   Query,
   SelectItem,
   SelectStmt,
@@ -17,19 +23,7 @@ import type {
   XmlNamespace,
   XmlTableColumn,
 } from "../ast";
-import {
-  bareIdent,
-  clause,
-  commaList,
-  firstChar,
-  ident,
-  kw,
-  parenList,
-  parens,
-  qualified,
-  statementPrinter,
-  str,
-} from "./context";
+import { clause, commaList, firstChar, functionWord, ident, kw, parenList, parens, qualified, str } from "./context";
 import {
   atomic,
   bExpr,
@@ -46,6 +40,7 @@ import {
   windowSpec,
   xmlPassing,
 } from "./expr";
+import { defineFamily, statementPrinter } from "./registry";
 import { typeName } from "./types";
 
 // --- names and aliases ---
@@ -59,16 +54,15 @@ const aliasClause = (alias: string | null | undefined, columns?: string[]): Doc 
       : [` ${kw("AS")} ${ident(alias)} `, parenList(columns.map(ident))];
 
 const selectItem = (i: SelectItem): Doc =>
-  i.expr.kind === "star" && i.expr.table === null
-    ? "*"
-    : i.alias !== null
-      ? [expr(i.expr), ` ${kw("AS")} ${ident(i.alias)}`]
-      : expr(i.expr);
+  i.alias !== null ? [expr(i.expr), ` ${kw("AS")} ${ident(i.alias)}`] : expr(i.expr);
 
 /** A RETURNING-shaped list: what a SELECT list holds. */
 export const selectItems = (items: readonly SelectItem[]): Doc => commaList(items.map(selectItem));
 
 // --- WITH ---
+
+const QUERY_KINDS = new Set(["select", "values", "tableCmd", "setOp"]);
+const isQuery = (s: Preparable): s is Query => QUERY_KINDS.has(s.kind);
 
 const cte = (c: Cte): Doc => [
   ident(c.name),
@@ -77,27 +71,21 @@ const cte = (c: Cte): Doc => [
   kw("AS"),
   " ",
   c.materialized === true ? `${kw("MATERIALIZED")} ` : c.materialized === false ? `${kw("NOT MATERIALIZED")} ` : "",
-  parens(statementPrinter.print(c.query)),
+  parens(isQuery(c.query) ? printQuery(c.query) : statementPrinter.print(c.query)),
   c.search !== undefined
     ? [
         line,
-        kw("SEARCH"),
-        " ",
-        kw(c.search.order === "depth" ? "DEPTH FIRST BY" : "BREADTH FIRST BY"),
-        " ",
-        commaList(c.search.by.map(ident)),
-        " ",
-        kw("SET"),
-        " ",
-        ident(c.search.set),
+        clause(
+          kw(c.search.order === "depth" ? "SEARCH DEPTH FIRST BY" : "SEARCH BREADTH FIRST BY"),
+          commaList(c.search.by.map(ident)),
+        ),
+        ` ${kw("SET")} ${ident(c.search.set)}`,
       ]
     : "",
   c.cycle !== undefined
     ? [
         line,
-        kw("CYCLE"),
-        " ",
-        commaList(c.cycle.columns.map(ident)),
+        clause(kw("CYCLE"), commaList(c.cycle.columns.map(ident))),
         " ",
         kw("SET"),
         " ",
@@ -268,8 +256,9 @@ const STRENGTHS = {
 } as const;
 
 const locking = (l: LockingClause): Doc => [
-  kw(STRENGTHS[l.strength]),
-  l.of.length > 0 ? [" ", kw("OF"), " ", commaList(l.of.map(qualified))] : "",
+  l.of.length > 0
+    ? clause(`${kw(STRENGTHS[l.strength])} ${kw("OF")}`, commaList(l.of.map(qualified)))
+    : kw(STRENGTHS[l.strength]),
   l.wait === "nowait" ? ` ${kw("NOWAIT")}` : l.wait === "skipLocked" ? ` ${kw("SKIP LOCKED")}` : "",
 ];
 
@@ -334,7 +323,7 @@ const tablesample = (t: TableSample | undefined): Doc =>
         " ",
         kw("TABLESAMPLE"),
         " ",
-        bareIdent(t.method),
+        functionWord(t.method),
         " ",
         parenList(t.args.map(expr)),
         t.repeatable !== null ? [" ", kw("REPEATABLE"), " ", parens(expr(t.repeatable))] : "",
@@ -431,15 +420,12 @@ const jsonTableColumn = (c: JsonTableColumn): Doc => {
 
 /** A FROM item. */
 export const printFrom: NodePrinter<FromItem, "kind"> = definePrinter<FromItem>()("kind", {
-  table: (t) =>
-    t.columns === undefined && t.tablesample === undefined && !t.only
-      ? `${qualified(t.name)}${t.alias !== null ? ` ${kw("AS")} ${ident(t.alias)}` : ""}`
-      : [
-          t.only ? `${kw("ONLY")} ` : "",
-          qualified(t.name),
-          aliasClause(t.alias, t.columns),
-          tablesample(t.tablesample),
-        ],
+  table: (t) => [
+    t.only ? `${kw("ONLY")} ` : "",
+    qualified(t.name),
+    aliasClause(t.alias, t.columns),
+    tablesample(t.tablesample),
+  ],
   subquery: (s) => [lateral(s.lateral), parens(printQuery(s.query)), aliasClause(s.alias, s.columns)],
   function: (f) => [
     lateral(f.lateral),
@@ -495,10 +481,14 @@ export const printFrom: NodePrinter<FromItem, "kind"> = definePrinter<FromItem>(
   join: (j) => (j.alias === undefined ? joinBody(j) : [parens(joinBody(j)), aliasClause(j.alias, j.columns)]),
 });
 
-/** The query statements, for the statement printer. */
-export const queryStatements = {
-  select: (q: SelectStmt) => printQuery(q),
-  values: (q: Extract<Query, { kind: "values" }>) => printQuery(q),
-  tableCmd: (q: Extract<Query, { kind: "tableCmd" }>) => printQuery(q),
-  setOp: (q: Extract<Query, { kind: "setOp" }>) => printQuery(q),
-};
+/** The query statements. */
+export const queryFamily = defineFamily(
+  "query",
+  {
+    select: (q: SelectStmt) => printQuery(q),
+    values: (q: Extract<Query, { kind: "values" }>) => printQuery(q),
+    tableCmd: (q: Extract<Query, { kind: "tableCmd" }>) => printQuery(q),
+    setOp: (q: Extract<Query, { kind: "setOp" }>) => printQuery(q),
+  },
+  [],
+);

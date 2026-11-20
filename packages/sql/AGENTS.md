@@ -25,23 +25,25 @@ internals and grammar-authoring gotchas.
 - `src/postgres/print/` — the printer, AST back to SQL (internal: not on the
   `postgres` object or any entry yet). `context.ts` holds the options and the
   lexical rules (keywords, name quoting, strings), `expr.ts` every expression,
-  `types.ts` type names, `query.ts` queries and FROM items, and `index.ts`
-  joins one module per statement family into the statement printer and
-  `stringify`. A statement family still without a module is listed in
-  `index.ts`'s NOT_YET_PRINTABLE and throws `NotPrintableError`; adding one is
-  a new module plus one line there (see the comment at the top of `index.ts`).
+  `types.ts` type names, and each statement family has a module declared with
+  `defineFamily` (`registry.ts`): `query.ts` (queries and FROM items),
+  `dml.ts`, `tables.ts`, `objects.ts` and `roles.ts`. A family lists the kinds
+  it prints and the kinds it doesn't print yet, which throw
+  `NotPrintableError`; printing a kind touches only its family's module.
+  `index.ts` joins the families into the statement printer and `stringify`.
   Parentheses come from the grammar's Pratt tables through `precedence`, so a
   group that builds a new node kind needs its printer-only `nodes` / `rhs`
-  annotation too.
+  annotation too. `expr.ts` and `query.ts` import each other: neither may use
+  the other's exports at module load, only inside functions.
 - `test/` — unit tests (`postgres.test.ts`), the entry-surface pin
   (`entry.test.ts`), the parity harness and its goldens, the PostgreSQL coverage
   battery (`pg-coverage.ts`) and the pg_dump corpus (`pg-dump-corpus.ts`,
   `fixtures/pg-dump/`, pagila vendored under the PostgreSQL License) and
   `psql-split.ts`, the psql-style statement splitter the corpus test uses.
   `stringify.test.ts` round-trips every valid statement of those suites through
-  the printer (`stringify.golden.sql` pins its width-80 output and
-  `stringify.coverage.golden.json` the statements not yet printable), and
-  `parity-corpus.ts` holds the parity lists both harnesses read.
+  the printer (`stringify.<family>.golden.sql` pin its width-80 output per
+  statement family), and `parity-corpus.ts` holds the parity lists both
+  harnesses read.
 - `bench/` — the node-sql-parser comparisons. `bench-baseline.json` at the repo
   root keys on their file paths and group names.
 
@@ -65,7 +67,7 @@ fixtures reach the tarball.
   conventions).
 - **Never regenerate a golden to make a change pass.** `test/parity.*.golden.json`
   pin every corpus AST (spans included) and every `diagnose()` message, and
-  `test/stringify.*` the printer's output and coverage. When
+  `test/stringify.*.golden.sql` the printer's output. When
   output is meant to move, regenerate with `pnpm test -- -u` from the repo root
   and call the diff out.
 - **Keep the README's lists in step with the battery.** A change that moves a

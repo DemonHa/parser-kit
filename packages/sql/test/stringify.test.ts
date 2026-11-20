@@ -1,11 +1,18 @@
 import { stripSpans } from "@parser-kit/core";
-import type { Printable } from "@parser-kit/core/print";
+import { type Printable, render } from "@parser-kit/core/print";
 import { fieldCoverage } from "@parser-kit/core/print/testing";
 import { describe, expect, it } from "vitest";
 import type { Expr, Stmt } from "../src/postgres/ast";
 import { postgres } from "../src/postgres/index";
 import { printExpr } from "../src/postgres/print/expr";
-import { NotPrintableError, type StringifyOptions, stringify } from "../src/postgres/print/index";
+import { flat } from "../src/postgres/print/flat";
+import {
+  FAMILIES,
+  NotPrintableError,
+  printStatement,
+  type StringifyOptions,
+  stringify,
+} from "../src/postgres/print/index";
 import { printFrom } from "../src/postgres/print/query";
 import { CORPUS } from "./corpus";
 import { LEXER_EDGE_CASES, MULTI_LINE, SUPPLEMENTAL } from "./parity-corpus";
@@ -13,21 +20,24 @@ import { PG_BATTERY } from "./pg-coverage";
 
 // The printer's round-trip harness, over every valid statement the other
 // suites hold: the benchmark corpus, the parity lists and the accepted
-// PostgreSQL coverage battery rows.
+// PostgreSQL coverage battery rows, plus PRINTER_CASES below.
 //
 //   P1  parse(stringify(ast)) is the same tree, at widths ∞, 80, 40 and 1
 //       (width 1 breaks every line the layout allows, which is where a break
-//       the lexer reads as meaning would show);
+//       the lexer reads as meaning would show), and with every non-default
+//       option;
 //   P2  printing is idempotent: stringify(parse(stringify(ast))) is the same text;
-//   P3  `stringify.golden.sql` pins the width-80 output of the corpus and
-//       the parity SUPPLEMENTAL list, so a layout change shows in review;
+//   P3  `stringify.<family>.golden.sql` pins each statement family's width-80
+//       output of the corpus and the parity SUPPLEMENTAL list, so a layout
+//       change shows in review (one file per family, so families landing in
+//       parallel touch different files);
 //   P4  every variant and every field the printed trees hold was read by the
 //       printer, so a field it forgets fails here rather than vanishing.
 //
-// Statement families still without a printer throw NotPrintableError; those
-// statements are skipped, and `stringify.coverage.golden.json` records how many
-// of each kind, so the list visibly shrinks as families land. Regenerate the
-// goldens with `pnpm test -- -u` only when the change in them is intended.
+// Statements of a kind its family doesn't print yet throw NotPrintableError
+// and are skipped; the test checks that every skip is such a kind, and logs
+// how many of each remain. Regenerate the goldens with `pnpm test -- -u` only
+// when the change in them is intended.
 
 // Statements written for the printer: the expression kinds no other suite
 // reaches, and the cases its rules exist for — operators that would glue into
@@ -142,9 +152,18 @@ const SOURCES = [
   ...PG_BATTERY.filter((row) => row.expect === "both" || row.expect === "sql-lite").map((row) => row.sql),
 ];
 
-const QUERY_KINDS = ["select", "values", "tableCmd", "setOp"];
-
 const WIDTHS = [Number.POSITIVE_INFINITY, 80, 40, 1];
+
+// Each statement kind's family, and the kinds the families print.
+const FAMILY_OF = new Map<string, string>();
+const PRINTED_KINDS = new Set<string>();
+for (const family of FAMILIES) {
+  for (const kind of Object.keys(family.statements)) {
+    FAMILY_OF.set(kind, family.name);
+    PRINTED_KINDS.add(kind);
+  }
+  for (const kind of family.pending) FAMILY_OF.set(kind, family.name);
+}
 
 type Case = { source: string; stmt: Stmt };
 
@@ -157,6 +176,7 @@ for (const source of SOURCES) {
       printable.push({ source, stmt });
     } catch (error) {
       if (!(error instanceof NotPrintableError)) throw error;
+      // A data-modifying CTE body counts under the kind of its statement.
       skipped.set(error.kind, (skipped.get(error.kind) ?? 0) + 1);
     }
   }
@@ -165,94 +185,93 @@ for (const source of SOURCES) {
 const roundTrip = (stmt: Stmt, options: StringifyOptions): unknown =>
   stripSpans(postgres.parse(stringify(stmt, options)));
 
+// A failure line: the source, what was printed, and the first line of the error.
+const failure = (source: string, stmt: Stmt, options: StringifyOptions, error: unknown): string => {
+  let out: string;
+  try {
+    out = stringify(stmt, options);
+  } catch (e) {
+    out = `(threw ${String(e)})`;
+  }
+  return `${JSON.stringify(options)}: ${source}\n  printed: ${out}\n  ${String(error).split("\n")[0]}`;
+};
+
 describe("stringify round trips", () => {
-  it("records which statements print and which are not yet printable", async () => {
-    const coverage = {
-      printed: printable.length,
-      notYetPrintable: Object.fromEntries([...skipped].sort(([a], [b]) => a.localeCompare(b))),
-    };
-    await expect(`${JSON.stringify(coverage, null, 2)}\n`).toMatchFileSnapshot("./stringify.coverage.golden.json");
+  it("skips only the kinds a family doesn't print yet", () => {
+    const report = [...skipped]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([kind, count]) => `${FAMILY_OF.get(kind)}/${kind}: ${count}`);
+    // eslint-disable-next-line no-console
+    console.log(`[stringify] ${printable.length} statements printed; not yet printable:\n  ${report.join("\n  ")}`);
+    expect([...skipped.keys()].filter((kind) => PRINTED_KINDS.has(kind) || !FAMILY_OF.has(kind))).toEqual([]);
   });
 
-  it("P1: parses back to the same tree at every width", () => {
-    const failures: string[] = [];
-    for (const { source, stmt } of printable) {
-      const expected = stripSpans([stmt]);
-      for (const width of WIDTHS) {
-        let out = "";
+  const options: StringifyOptions[] = [
+    ...WIDTHS.map((width) => ({ width })),
+    { keywordCase: "lower", identifierQuote: "always", strings: "escape" },
+    { width: 40, keywordCase: "lower", identifierQuote: "always", strings: "escape", indent: "\t" },
+  ];
+  for (const o of options) {
+    it(`P1: parses back to the same tree with ${JSON.stringify(o)}`, () => {
+      const failures: string[] = [];
+      for (const { source, stmt } of printable) {
         try {
-          out = stringify(stmt, { width });
-          expect(roundTrip(stmt, { width })).toEqual(expected);
+          expect(roundTrip(stmt, o)).toStrictEqual(stripSpans([stmt]));
         } catch (error) {
-          failures.push(`width ${width}: ${source}\n  printed: ${out}\n  ${String(error).split("\n")[0]}`);
-          break;
+          failures.push(failure(source, stmt, o, error));
         }
       }
-    }
-    expect(failures).toEqual([]);
-  });
-
-  it("P1: parses back to the same tree with lower-case keywords, quoted names and E-strings", () => {
-    const options: StringifyOptions = { keywordCase: "lower", identifierQuote: "always", strings: "escape" };
-    const failures = printable
-      .filter(({ stmt }) => {
-        try {
-          return !equal(roundTrip(stmt, options), stripSpans([stmt]));
-        } catch {
-          return true;
-        }
-      })
-      .map(({ source }) => source);
-    expect(failures).toEqual([]);
-  });
+      expect(failures).toEqual([]);
+    });
+  }
 
   it("P2: printing what it printed gives the same text", () => {
     const failures: string[] = [];
     for (const { source, stmt } of printable) {
-      for (const width of [Number.POSITIVE_INFINITY, 80]) {
+      for (const width of WIDTHS) {
         const once = stringify(stmt, { width });
         const twice = stringify(postgres.parse(once), { width });
-        if (twice !== once) failures.push(`${source}\n  once:  ${once}\n  twice: ${twice}`);
+        if (twice !== once) failures.push(`width ${width}: ${source}\n  once:  ${once}\n  twice: ${twice}`);
       }
     }
     expect(failures).toEqual([]);
   });
 
-  it("P3: pins the width-80 output", async () => {
-    const out = [...CORPUS.map((sample) => sample.sql), ...SUPPLEMENTAL]
-      .map((source) => {
-        const printed = postgres.parse(source).map((stmt) => {
-          try {
-            return stringify(stmt, { width: 80 });
-          } catch (error) {
-            if (!(error instanceof NotPrintableError)) throw error;
-            return `-- not yet printable: ${error.kind}`;
-          }
-        });
-        return `-- ${source.replace(/\n/g, "\n-- ")}\n${printed.join("\n")}\n`;
-      })
-      .join("\n");
-    await expect(out).toMatchFileSnapshot("./stringify.golden.sql");
+  // The one-line fast path lays out what the general renderer would.
+  it("prints one line at width Infinity exactly as render does", () => {
+    const differ = printable.filter(({ stmt }) => {
+      const doc = printStatement(stmt);
+      return flat(doc) !== render(doc, { width: Number.POSITIVE_INFINITY });
+    });
+    expect(differ.map(({ source }) => source)).toEqual([]);
   });
 
+  const pinnedSources = new Set([...CORPUS.map((sample) => sample.sql), ...SUPPLEMENTAL]);
+  const pinned = printable.filter(({ source }) => pinnedSources.has(source));
+  for (const family of FAMILIES) {
+    const own = pinned.filter(({ stmt }) => FAMILY_OF.get(stmt.kind) === family.name);
+    if (own.length === 0) continue;
+    it(`P3: pins the width-80 output of the ${family.name} statements`, async () => {
+      const out = own.map(
+        ({ source, stmt }) => `-- ${source.replace(/\n/g, "\n-- ")}\n${stringify(stmt, { width: 80 })}\n`,
+      );
+      await expect(out.join("\n")).toMatchFileSnapshot(`./stringify.${family.name}.golden.sql`);
+    });
+  }
+
+  // `fieldCoverage` names a variant by its `kind` alone, so two unions' variants
+  // of one name (an expression and a FROM item `subquery`) count as one: a
+  // field read on either counts for both. P1's full-tree comparison is what
+  // catches a dropped field there.
   it("P4: reads every variant and field of the trees it prints", () => {
-    // Every expression, FROM item and query variant is listed, so one the
-    // corpus never reaches is reported too.
-    const kinds = [...Object.keys(printExpr.handlers), ...Object.keys(printFrom.handlers), ...QUERY_KINDS];
+    // Every variant the printed families can hold is listed, so one the corpus
+    // never reaches is reported too.
+    const kinds = [...Object.keys(printExpr.handlers), ...Object.keys(printFrom.handlers), ...PRINTED_KINDS];
     const coverage = fieldCoverage({ key: "kind", kinds });
     for (const { stmt } of printable) stringify(coverage.track(stmt));
     expect(coverage.report()).toEqual({ kinds: [], fields: [] });
   });
 });
-
-const equal = (a: unknown, b: unknown): boolean => {
-  try {
-    expect(a).toEqual(b);
-    return true;
-  } catch {
-    return false;
-  }
-};
 
 describe("stringify options", () => {
   const two = postgres.parse("select a, b from t where x = 'it''s'; select 1");
@@ -342,6 +361,19 @@ describe("stringify on hand-built trees", () => {
     expect(stringify({ kind: "call", name: ["xmlelement"], args: [name("a")] })).toBe('"xmlelement"(a)');
     expect(stringify({ kind: "call", name: ["normalize"], args: [name("a"), name("b")] })).toBe('"normalize"(a, b)');
     expect(stringify({ kind: "call", name: ["normalize"], args: [name("a")] })).toBe("normalize(a)");
+  });
+
+  it("quotes a function name PostgreSQL can't take bare, unless it is its keyword form", () => {
+    // PG's col_name keywords: a round trip can't see these, as this parser takes them bare.
+    const [stmt] = postgres.parse(
+      'SELECT "numeric"(x), "int"(1), "timestamp"(x), coalesce(a, b), "coalesce"(DISTINCT a), substring(a, 1), f("out" => 1) FROM "int"(1), t TABLESAMPLE "bit" (1);',
+    );
+    expect(stringify(stmt!)).toBe(
+      'SELECT "numeric"(x), "int"(1), "timestamp"(x), coalesce(a, b), "coalesce"(DISTINCT a), substring(a, 1), f("out" => 1) FROM "int"(1), t TABLESAMPLE "bit" (1);',
+    );
+    expect(stringify({ kind: "call", name: ["pg_catalog", "numeric"], args: [name("x")] })).toBe(
+      "pg_catalog.numeric(x)",
+    );
   });
 
   it("throws NotPrintableError for a statement family not printed yet", () => {
