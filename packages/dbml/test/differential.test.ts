@@ -383,8 +383,8 @@ interface KnownDifference {
 const KNOWN_DIFFERENCES: KnownDifference[] = [
   {
     reason:
-      "More than two parts in a table, sticky note, records or table group member name (`a.b.c`), or more " +
-      "than three in a ref endpoint: `@dbml/core`'s parser reads the extra parts as a nested schema, which " +
+      "More than two parts in a table, enum, sticky note, records or table group member name (`a.b.c`), or " +
+      "more than three in a ref endpoint or a records field's enum value: `@dbml/core`'s parser reads the extra parts as a nested schema, which " +
       "its model then accepts where nothing has to resolve against it and otherwise reports as unknown.",
     ours: "rejects",
     documents: [
@@ -393,6 +393,8 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
       "Table a.b.t {\n  a int\n}\nrecords a.b.t(a) {\n  1\n}\n",
       "Table a.b.c {\n  d int\n}\nTable e {\n  f int\n}\nRef: a.b.c.d > e.f\n",
       "Table t {\n  id int\n}\nTableGroup g {\n  x.y.t\n}\n",
+      "enum a.b.c {\n  x\n}\n",
+      "Table t {\n  id int\n}\nrecords t(id) {\n  s.e.v.w\n}\n",
     ],
     malformed: ["table name with three parts", "ref endpoint with four parts"],
     mutants: ["hr and payroll schema #4"],

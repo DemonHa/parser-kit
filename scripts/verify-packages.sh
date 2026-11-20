@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Packs every package the way the release does, private ones in development
-# included, and checks what a consumer would get. Run after `pnpm build`; CI's
-# "Package" job runs it.
+# Packs every package the way the release does, and checks what a consumer
+# would get. Run after `pnpm build`; CI's "Package" job runs it.
 #
 # Each tarball must resolve catalog: and workspace: specifiers, ship only what
 # consumers need, and import cleanly from ESM, CJS and TypeScript. Only
@@ -73,9 +72,33 @@ verify packages/core parser-kit-core "" build/esm/print/index.js build/cjs/print
 verify packages/sql parser-kit-sql "" build/esm/postgres/index.js build/cjs/postgres/index.js \
   build/esm/postgres/index.d.ts build/cjs/postgres/index.d.ts build/esm/postgres/parser.js \
   build/cjs/postgres/parser.js build/esm/postgres/parser.d.ts build/cjs/postgres/parser.d.ts
-# @parser-kit/dbml is private until its first release, but `pnpm pack` still
-# packs it. Its tarball is held to an allowlist of what consumers need.
+# @parser-kit/dbml's tarball is held to an allowlist of what consumers need.
 verify packages/dbml parser-kit-dbml '^package/(build/|src/|LICENSE$|README\.md$|CHANGELOG\.md$|package\.json$)'
+# @dbml/core and @dbml/parse are test and bench baselines, so they may only be
+# devDependencies, which npm never installs for a consumer: the runtime
+# dependencies are @parser-kit/core alone, and no published file imports them.
+# `$WORK/manifest.json` is still dbml's, the last one `verify` extracted.
+node -e '
+  const m = require(process.argv[1]);
+  const fail = (msg) => { console.error(`::error::@parser-kit/dbml: ${msg}`); process.exit(1); };
+  if (m.private) fail("the packed manifest is private");
+  for (const field of ["dependencies", "peerDependencies", "optionalDependencies", "bundleDependencies", "bundledDependencies"]) {
+    const names = Object.keys(m[field] ?? {});
+    const allowed = field === "dependencies" ? ["@parser-kit/core"] : [];
+    const extra = names.filter((name) => !allowed.includes(name));
+    if (extra.length) fail(`unexpected ${field} ${extra}`);
+  }
+  console.log("Manifest ok: @parser-kit/dbml depends on @parser-kit/core only");
+' "$WORK/manifest.json"
+mkdir -p "$WORK/dbml"
+tar -xzf "$PACK"/parser-kit-dbml-*.tgz -C "$WORK/dbml"
+# grep exits 0 on a match, 1 on none and 2 on an error (a missing directory).
+status=0
+grep -rlE "['\"]@dbml/" "$WORK/dbml/package/build" "$WORK/dbml/package/src" || status=$?
+if [ "$status" -ne 1 ]; then
+  echo "::error::@parser-kit/dbml: a published file imports @dbml/core or @dbml/parse (or grep failed)"
+  exit 1
+fi
 
 
 # Install the tarballs together, so the grammars' core dependency is the core
@@ -147,15 +170,39 @@ console.log(`CJS ok: core ${Object.keys(core).length} exports, sql parses and pr
 JS
 
 cat > dbml-esm.mjs <<'JS'
-import { dbml } from "@parser-kit/dbml";
-if (typeof dbml?.parse !== "function" || typeof dbml.diagnose !== "function") throw new Error("dbml: ESM export missing");
-console.log("ESM ok: dbml exports parse and diagnose");
+import * as core from "@parser-kit/core";
+import * as entry from "@parser-kit/dbml";
+const { dbml, dbmlLexer } = entry;
+if (Object.keys(entry).sort().join() !== "dbml,dbmlLexer") throw new Error(`dbml: unexpected ESM exports ${Object.keys(entry)}`);
+const doc = dbml.parse("Table users {\n  id int [pk]\n}\nRef: posts.user_id > users.id\n");
+if (doc.elements.map((e) => e.type).join() !== "table,ref") throw new Error("dbml: ESM parse failed");
+const { ast, errors } = dbml.diagnose("Table a {\n  id int [pk,]\n}\nTable b {\n  id int\n}\n");
+if (errors.length !== 1 || ast.elements.length !== 2) throw new Error("dbml: ESM diagnose failed");
+if (dbmlLexer.tokenize(core.createInputStream("// c")).next()?.type !== "comment") throw new Error("dbml: ESM lexer failed");
+try {
+  dbml.parse("Table");
+  throw new Error("dbml: ESM parse accepted malformed input");
+} catch (e) {
+  if (!(e instanceof core.ParseError)) throw e;
+}
+console.log("ESM ok: dbml parses, diagnoses and tokenizes");
 JS
 
 cat > dbml-cjs.cjs <<'JS'
-const { dbml } = require("@parser-kit/dbml");
-if (typeof dbml?.parse !== "function" || typeof dbml.diagnose !== "function") throw new Error("dbml: CJS export missing");
-console.log("CJS ok: dbml exports parse and diagnose");
+const core = require("@parser-kit/core");
+const { dbml, dbmlLexer } = require("@parser-kit/dbml");
+const doc = dbml.parse("Table users {\n  id int [pk]\n}\n");
+if (doc.elements[0]?.type !== "table") throw new Error("dbml: CJS parse failed");
+if (dbml.diagnose("Table a {\n  id int [pk,]\n}\n").errors.length !== 1) throw new Error("dbml: CJS diagnose failed");
+if (typeof dbmlLexer?.tokenize !== "function") throw new Error("dbml: CJS lexer missing");
+try {
+  dbml.parse("Table");
+  throw new Error("dbml: CJS parse accepted malformed input");
+} catch (e) {
+  // dbml must share core's ParseError class, not bundle a copy of it.
+  if (!(e instanceof core.ParseError)) throw e;
+}
+console.log("CJS ok: dbml parses and diagnoses");
 JS
 
 node esm.mjs
@@ -206,12 +253,18 @@ TS
 echo "TypeScript ok: @parser-kit/sql/postgres and /postgres/parser types resolve under moduleResolution node"
 
 cat > dbml-consumer.mts <<'TS'
-import { dbml } from "@parser-kit/dbml";
-export const parse: (text: string) => unknown = dbml.parse;
+import type { ParseError } from "@parser-kit/core";
+import { type DbmlDocument, type DbmlTokenType, dbml, type Element, type Setting } from "@parser-kit/dbml";
+const doc: DbmlDocument = dbml.parse("Table t { id int }");
+const elements: Element[] = doc.elements;
+export const settings: Setting[] = elements.flatMap((e) => (e.type === "table" ? e.settings : []));
+export const errors: ParseError[] = dbml.diagnose("x").errors;
+export const token: DbmlTokenType = "ident";
 TS
 cat > dbml-consumer.cts <<'TS'
 import pkg = require("@parser-kit/dbml");
-export const diagnose: (text: string) => unknown = pkg.dbml.diagnose;
+const result: { ast: pkg.DbmlDocument; errors: unknown[] } = pkg.dbml.diagnose("Table t { id int }");
+export const tables: pkg.Table[] = result.ast.elements.filter((e): e is pkg.Table => e.type === "table");
 TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
   dbml-consumer.mts dbml-consumer.cts
@@ -287,3 +340,6 @@ check_size "@parser-kit/sql/postgres/parser" "$PARSER_SIZE" 58368
 check_size "@parser-kit/sql/postgres" "$POSTGRES_SIZE" 86016
 check_size "@parser-kit/sql" "$ROOT_SIZE" 86016
 check_size "the PostgreSQL printer (/postgres less /postgres/parser)" $((POSTGRES_SIZE - PARSER_SIZE)) 27648
+# @parser-kit/dbml's whole entry, @parser-kit/core included (about 13.3 KB at
+# its first release).
+check_size "@parser-kit/dbml" "$(size_of "@parser-kit/dbml")" 16384

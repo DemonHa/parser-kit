@@ -4,14 +4,13 @@ A typed DBML parser built on `@parser-kit/core`. The incumbent, and the de facto
 spec, is [`@dbml/core`](https://www.npmjs.com/package/@dbml/core) 12.x (its
 `dbmlv2` parser). The package entry is a `dbml` object with `parse` and
 `diagnose`, plus the lexer (`dbmlLexer`, `DbmlTokenType`) for highlighters. It
-is in development: `private: true`, not yet published. See
+is published to npm as `@parser-kit/dbml` (first release 0.1.0). See
 `../core/AGENTS.md` for the kit's internals and grammar-authoring gotchas, and
 `../sql` for the package this one mirrors.
 
 ## Layout
 
-The layout below is where code goes as the parser is built; files that don't
-exist yet are the ones still to be written.
+The layout below is where code goes; a new construct follows it.
 
 - `src/` — the published code.
   - `index.ts` — the package entry.
@@ -35,7 +34,7 @@ exist yet are the ones still to be written.
     union in `common.ts` when it has a new `kind`.
 - `test/` — vitest, one file per area (`table.test.ts`, `ref.test.ts`, …) so
   parallel changes add files instead of editing a shared one. `entry.test.ts`
-  pins the public surface. The corpus (`corpus.ts`), the parity harness and its
+  pins the public surface, and `readme.test.ts` runs the README's examples. The corpus (`corpus.ts`), the parity harness and its
   goldens (`parity.*.golden.json`) and the differential test against
   `@dbml/core` live here too.
 - `bench/` — comparisons against `@dbml/core` (its full `Parser.parse`) and
@@ -54,15 +53,15 @@ fixtures reach the tarball.
   values and the parameters of `dbml.parse` / `dbml.diagnose` (and their return
   types once the AST exists); any change to the exports updates it. Don't
   export grammar internals (rules, the raw-name lookup).
-- **No changesets while the package is private.** The release that drops
-  `private: true` adds the package's first changeset.
+- **Add a changeset** (`@parser-kit/dbml`) for every user-visible change: new
+  syntax, a moved AST shape or error message, a new export. The package is
+  pre-1.0, so breaking changes are `minor` (see `../../CONTRIBUTING.md`).
 - **Match `@dbml/core`'s syntax.** Accept what it accepts and reject what it
   rejects, syntactically. Where its docs and its implementation disagree,
   follow the implementation. Semantic checks (unknown tables, duplicates, empty
   tables, partial merging, colour validation) are not parse errors. Every
   intended difference goes in the differential test's allowlist with a
-  reason, and in the PR description so it reaches the README's differences
-  list.
+  reason, and in the README's "Differences from @dbml/core" list.
 - **Keywords are case-insensitive and contextual, never reserved.** `Table`,
   `table` and `TABLE` are the same keyword, and a column, table, enum value or
   alias may still be named `note`, `ref`, `indexes`, `checks`, `records`,
@@ -121,10 +120,11 @@ fixtures reach the tarball.
   version in the workspace catalog, and so is `@dbml/parse` (bench only), kept
   at the version `@dbml/core` depends on. Upgrading them is its own change that
   re-runs the differential test and updates the allowlist.
-- **README.** Until the package is published, only the change that publishes
-  it rewrites `README.md` and the root README's packages row. Other changes put
-  user-facing notes, including new differences from `@dbml/core`, in their PR
-  description instead.
+- **README.** `README.md` is the npm page. A change that adds syntax, moves
+  the AST, changes recovery or adds a difference from `@dbml/core` updates it
+  in the same change. `test/readme.test.ts` reads its code examples out of the
+  README and runs them, and checks its prose claims with equivalent inputs, so
+  keep the two in step.
 - **Before pushing**, run `pnpm lint`, `pnpm types:check`, `pnpm test` and
   `pnpm build` from the repo root, plus `bash scripts/verify-packages.sh` when
   packaging changes.
