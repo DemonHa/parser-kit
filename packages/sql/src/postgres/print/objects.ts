@@ -1,8 +1,8 @@
 // The other schema objects: views, sequences, domains, types, routines,
 // triggers, policies, publications, foreign data and the long tail.
 //
-// Not printed yet: each kind below throws NotPrintableError. Printing one
-// means adding its handler to the first table and taking it out of the list.
+// Not printed yet: each kind in the list throws NotPrintableError. Printing
+// one means adding its handler to the `{}` table and taking it out of the list.
 import { defineFamily } from "./registry";
 
 export const objectsFamily = defineFamily("objects", {}, [

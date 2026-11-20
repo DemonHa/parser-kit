@@ -125,6 +125,19 @@ export const minimalIdent = minimal;
 /** A dotted type name, each part through `minimalIdent`. */
 export const minimalQualified = (parts: readonly string[]): string => parts.map(minimal).join(".");
 
+/**
+ * A dotted function name, PG's `ColId indirection`: the first part is a column
+ * name (no reserved or type_func_name keyword), the rest any word.
+ */
+export const functionQualified = (parts: readonly string[]): string =>
+  parts.map((p, i) => (i === 0 ? minimalName(p) : minimal(p))).join(".");
+/**
+ * A dotted type name, PG's `type_function_name attrs`: the first part is no
+ * reserved or col_name keyword, the rest any word.
+ */
+export const typeQualified = (parts: readonly string[]): string =>
+  parts.map((p, i) => (i === 0 && parts.length > 1 && COL_NAME_KEYWORDS.has(p) ? quoted(p) : minimal(p))).join(".");
+
 // PG's col_name_keyword list (gram.y): words a column may be named, but not
 // a one-part function, a named argument or a TABLESAMPLE method, so those are
 // quoted. (Most are type names or keyword forms this grammar reads by value.)

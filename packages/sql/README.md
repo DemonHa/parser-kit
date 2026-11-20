@@ -114,7 +114,7 @@ The package lives at [`packages/sql`](https://github.com/DemonHa/parser-kit/tree
 | `test/psql-split.ts` | A test helper that splits a dump file into statements the way psql does |
 | `test/corpus.ts` | The statements the benchmark measures and the parity golden pins |
 | `test/parity.test.ts` + `test/parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus the lists in `test/parity-corpus.ts` |
-| `test/stringify.test.ts` + `test/stringify.*.golden.sql` | The printer's round trips over every valid statement of the suites above, and its width-80 output per statement family |
+| `test/stringify.test.ts` + `test/stringify-cases/` + `test/stringify.*.golden.sql` | The printer's round trips over every valid statement of the suites above plus each statement family's own cases, and its width-80 output per family |
 | `test/pg-coverage.ts` + `test/pg-coverage.test.ts` | The PostgreSQL coverage battery: 609 statements with the bucket each one lands in |
 | `test/pg-dump-corpus.ts` + `test/pg-dump-corpus.test.ts` | The pg_dump corpus: whether each statement of the dumps in `test/fixtures/pg-dump/` parses, and whether each file parses whole through `postgres.parseScript` |
 | `bench/postgres.bench.ts` | Throughput over the corpus, per category |

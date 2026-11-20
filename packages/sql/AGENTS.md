@@ -29,7 +29,9 @@ internals and grammar-authoring gotchas.
   `defineFamily` (`registry.ts`): `query.ts` (queries and FROM items),
   `dml.ts`, `tables.ts`, `objects.ts` and `roles.ts`. A family lists the kinds
   it prints and the kinds it doesn't print yet, which throw
-  `NotPrintableError`; printing a kind touches only its family's module.
+  `NotPrintableError`; printing a kind means a handler in its family's module
+  and cases in `test/stringify-cases/<family>.ts`, so families land in
+  parallel without sharing a file.
   `index.ts` joins the families into the statement printer and `stringify`.
   Parentheses come from the grammar's Pratt tables through `precedence`, so a
   group that builds a new node kind needs its printer-only `nodes` / `rhs`

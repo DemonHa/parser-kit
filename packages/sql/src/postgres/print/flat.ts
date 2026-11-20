@@ -40,6 +40,12 @@ export const flat = (doc: Doc): string | null => {
           if (c.hard || depth === 0) return null;
           if (!c.soft) out += " ";
           break;
+        default: {
+          // A command this doesn't know (one core adds later): leave it to `render`.
+          const unknown: never = c;
+          void unknown;
+          return null;
+        }
       }
     }
   }

@@ -2,7 +2,7 @@
 // `SETOF record`, `"char"`.
 import type { Doc } from "@parser-kit/core/print";
 import type { ColType } from "../ast";
-import { isColNameKeyword, kw, minimalQualified, quoted } from "./context";
+import { isColNameKeyword, kw, quoted, typeQualified } from "./context";
 
 // The multi-word spellings the grammar folds into one name part
 // (`["double precision"]`), keyed by their lead word. A part holding one of
@@ -64,7 +64,7 @@ export const typeName = (t: ColType, literal = false): Doc => {
   ) {
     name = `${quoted(t.name[0]!)}${args}`;
   } else {
-    name = `${minimalQualified(t.name)}${args}`;
+    name = `${typeQualified(t.name)}${args}`;
   }
   return `${t.setof ? `${kw("SETOF")} ` : ""}${name}${t.array ? "[]" : ""}`;
 };

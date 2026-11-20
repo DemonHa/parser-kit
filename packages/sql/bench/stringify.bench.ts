@@ -70,9 +70,10 @@ for (const sql of QUERIES) {
   }
 }
 
-// A fixed group name: `bench-baseline.json` keys on it, and the statement count
-// grows as statement families get printers.
-describe("stringify vs sqlify", () => {
+// The count is in the group name, as in `postgres.bench.ts`: the set grows as
+// statement families get printers, and a grown set is a new group to
+// `pnpm bench:compare` rather than a false delta.
+describe(`stringify vs sqlify (${ours.length} statements)`, () => {
   bench("@parser-kit/sql stringify (compact)", () => {
     for (const stmt of ours) stringify(stmt);
   });

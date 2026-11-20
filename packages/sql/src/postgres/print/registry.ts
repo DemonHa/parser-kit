@@ -2,36 +2,36 @@
 // `index.ts` so a family module never imports the module that imports it.
 import type { Doc, Handlers } from "@parser-kit/core/print";
 import type { Stmt } from "../ast";
-import { NotPrintableError } from "./context";
 
 /** Handlers for some of the statement kinds: what a family prints. */
 export type StatementHandlers = Partial<Handlers<Stmt, "kind">>;
 
 /** One statement family: the kinds it prints, and the kinds it will print but doesn't yet. */
-export interface Family<S extends StatementHandlers, P extends readonly Stmt["kind"][]> {
+export interface Family<K extends Stmt["kind"], P extends readonly Stmt["kind"][]> {
   readonly name: string;
-  readonly statements: S;
+  readonly statements: Pick<Handlers<Stmt, "kind">, K>;
   readonly pending: P;
 }
 
 /**
- * Declares a statement family. A kind both printed and listed as pending is a
- * compile error; `index.ts` makes one missing from every family an error too.
- * Printing a kind means moving it from `pending` to `statements`.
+ * Declares a statement family. Each handler's node is typed from its key, a
+ * key that is no statement kind is an error, and so is a kind both printed
+ * and pending. `index.ts` checks the families against each other: every kind
+ * must belong to exactly one. Printing a kind means moving it from `pending`
+ * to `statements`.
  */
-export const defineFamily = <S extends StatementHandlers, const P extends readonly Stmt["kind"][]>(
+export const defineFamily = <const K extends Stmt["kind"], const P extends readonly Exclude<Stmt["kind"], K>[]>(
   name: string,
-  statements: S & { readonly [K in P[number]]?: never },
+  statements: Pick<Handlers<Stmt, "kind">, K>,
   pending: P,
-): Family<S, P> => ({ name, statements, pending });
+): Family<K, P> => ({ name, statements, pending });
 
 /**
  * The statement printer, for a family that prints a statement nested in
- * another (a data-modifying CTE body). `index.ts` installs the real one; until
- * it is loaded, every statement reads as not yet printable.
+ * another (a data-modifying CTE body). `index.ts` installs it when loaded.
  */
 export const statementPrinter: { print: (stmt: Stmt) => Doc } = {
-  print: (stmt) => {
-    throw new NotPrintableError(stmt.kind);
+  print: () => {
+    throw new Error("The statement printer is not installed: import it from print/index");
   },
 };

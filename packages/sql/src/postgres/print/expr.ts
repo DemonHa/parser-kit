@@ -45,12 +45,12 @@ import {
   commaList,
   firstChar,
   firstText,
+  functionQualified,
   functionWord,
   ident,
   isColNameKeyword,
   kw,
   minimalIdent,
-  minimalQualified,
   OPERATOR_CHARS,
   parenList,
   parens,
@@ -83,7 +83,7 @@ const binaryKey = (op: string, opSchema: string[] | undefined): string =>
   opSchema === undefined && NAMED_INFIX.has(op) ? op : "op";
 
 /** The node's entry in the Pratt table, as `precedence` reads it. */
-export const exprKey = (e: Expr): PrecedenceKey => {
+const exprKey = (e: Expr): PrecedenceKey => {
   switch (e.kind) {
     case "binary":
       return binaryKey(e.op, e.opSchema);
@@ -119,17 +119,35 @@ export const exprKey = (e: Expr): PrecedenceKey => {
   }
 };
 
+// The bp a group reads a node's trailing operand at, from its `nodes` record:
+// what a position the grammar parses the same way reads too.
+const tailOf = (key: string): number => {
+  for (const g of expressionTable.infix) {
+    const nodes = (g as { nodes?: unknown }).nodes;
+    if (nodes && !Array.isArray(nodes)) {
+      const rhs = (nodes as Record<string, number | "none">)[key];
+      if (typeof rhs === "number") return rhs;
+    }
+  }
+  throw new Error(`No group reads a "${key}" operand`);
+};
+// Op's operand (`a OPERATOR(+) b`, and the prefix `OPERATOR(-) b`), and the
+// LIKE / BETWEEN tier's (a BETWEEN bound, SUBSTRING … SIMILAR's operands).
+const OP_OPERAND = tailOf("op");
+const LIKE_OPERAND = tailOf("like");
+
 const prec = precedence<Expr, "b">(expressionTable, {
   key: exprKey,
   print: (e): Doc => printExpr(e),
   // `OPERATOR(op) x`: the atom rule reads its operand at Op's bp + 1.
-  atoms: { "unary operator": 13 },
+  atoms: { "unary operator": OP_OPERAND },
   contexts: { b: bExprTable },
 });
 
-// An atom never needs parentheses, and nothing it prints reads the operand
-// context (its own operands go through `expr` and friends, which set one), so
-// it skips `precedence` entirely: most nodes are atoms, and this is the hot path.
+// An atom never needs parentheses from `precedence`, and nothing it prints
+// reads `precedence`'s operand context (its own operands go through `expr` and
+// friends, which set one), so it skips `precedence` entirely: most nodes are
+// atoms, and this is the hot path. (OVERLAPS, an atom here, reads `inB` below.)
 
 /** An expression where the grammar reads a whole one: a call argument, a clause, a list item. */
 export const expr = (e: Expr): Doc =>
@@ -137,7 +155,7 @@ export const expr = (e: Expr): Doc =>
 /** An expression where the grammar reads PG's restricted `b_expr`. */
 export const bExpr = (e: Expr): Doc => within(true, () => prec.operand(e, 0, "b"));
 /** Whether a node is PG's c_expr, which stands anywhere an operand does: an atom, but not OVERLAPS. */
-export const isAtom = (e: Expr): boolean => exprKey(e) === null && e.kind !== "overlaps";
+const isAtom = (e: Expr): boolean => exprKey(e) === null && e.kind !== "overlaps";
 /** An expression where the grammar reads a bare atom (PG's c_expr): anything else is parenthesised. */
 export const atomic = (e: Expr): Doc => (isAtom(e) ? expr(e) : ["(", expr(e), ")"]);
 
@@ -233,7 +251,7 @@ const bareForm = (name: string, c: Call): boolean => {
 };
 const callName = (c: Call): string => {
   const name = c.name[0]!;
-  return c.name.length === 1 && isColNameKeyword(name) && !bareForm(name, c) ? quoted(name) : minimalQualified(c.name);
+  return c.name.length === 1 && isColNameKeyword(name) && !bareForm(name, c) ? quoted(name) : functionQualified(c.name);
 };
 
 const callArgs = (c: Call): Doc => {
@@ -466,7 +484,7 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
   namedArg: (e) => [functionWord(e.name), " => ", expr(e.value)],
   unary: (e) => {
     const operand =
-      e.opSchema === undefined && PREFIX_OPS.has(e.op) ? right(e, e.operand) : prec.operand(e.operand, 13);
+      e.opSchema === undefined && PREFIX_OPS.has(e.op) ? right(e, e.operand) : prec.operand(e.operand, OP_OPERAND);
     if (e.op === "not") return [kw("NOT"), " ", operand];
     const op = PREFIX_OPS.has(e.op) && e.opSchema === undefined ? e.op : operator(e.op, e.opSchema ?? []);
     // `- -1` must not print as `--1`, a comment, nor `@ -1` as the operator `@-`.
@@ -521,7 +539,7 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       " ",
       kw("BETWEEN"),
       e.symmetric !== undefined ? ` ${kw(e.symmetric ? "SYMMETRIC" : "ASYMMETRIC")}` : "",
-      indent([line, within(true, () => prec.operand(e.lo, 11, "b")), " ", kw("AND"), " ", right(e, e.hi)]),
+      indent([line, within(true, () => prec.operand(e.lo, LIKE_OPERAND, "b")), " ", kw("AND"), " ", right(e, e.hi)]),
     ]),
   in: (e) => [left(e, e.expr), not(e.negated), " ", kw("IN"), " ", parenList(e.list.map(expr))],
   inSubquery: (e) => [left(e, e.expr), not(e.negated), " ", kw("IN"), " ", parens(printQuery(e.query))],
@@ -568,11 +586,11 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       // looser value's SIMILAR as SIMILAR TO, and a pattern ending in LIKE or
       // SIMILAR TO would take the ESCAPE.
       parens([
-        within(false, () => prec.operand(e.value, 11, null)),
+        within(false, () => prec.operand(e.value, LIKE_OPERAND, null)),
         " ",
         kw("SIMILAR"),
         " ",
-        within(false, () => prec.operand(e.pattern, 11, null)),
+        within(false, () => prec.operand(e.pattern, LIKE_OPERAND, null)),
         " ",
         kw("ESCAPE"),
         " ",

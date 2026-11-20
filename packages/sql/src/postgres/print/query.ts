@@ -57,7 +57,7 @@ import { typeName } from "./types";
 // --- names and aliases ---
 
 /** ` AS alias (a, b)`, or nothing. AS is always written: a keyword alias needs it. */
-const aliasClause = (alias: string | null | undefined, columns?: string[]): Doc =>
+export const aliasClause = (alias: string | null | undefined, columns?: string[]): Doc =>
   alias === null || alias === undefined
     ? ""
     : columns === undefined
@@ -73,7 +73,7 @@ export const selectItems = (items: readonly SelectItem[]): Doc => commaList(item
 // --- WITH ---
 
 const QUERY_KINDS = new Set(["select", "values", "tableCmd", "setOp"]);
-const isQuery = (s: Preparable): s is Query => QUERY_KINDS.has(s.kind);
+export const isQuery = (s: Preparable): s is Query => QUERY_KINDS.has(s.kind);
 
 const cte = (c: Cte): Doc => [
   // A first CTE named `recursive` would read as the keyword.
@@ -497,10 +497,10 @@ export const printFrom: NodePrinter<FromItem, "kind"> = definePrinter<FromItem>(
 export const queryFamily = defineFamily(
   "query",
   {
-    select: (q: SelectStmt) => printQuery(q),
-    values: (q: Extract<Query, { kind: "values" }>) => printQuery(q),
-    tableCmd: (q: Extract<Query, { kind: "tableCmd" }>) => printQuery(q),
-    setOp: (q: Extract<Query, { kind: "setOp" }>) => printQuery(q),
+    select: (q) => printQuery(q),
+    values: (q) => printQuery(q),
+    tableCmd: (q) => printQuery(q),
+    setOp: (q) => printQuery(q),
   },
   [],
 );
