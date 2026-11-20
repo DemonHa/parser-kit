@@ -82,8 +82,10 @@ import { copyDataError, routineDepth, type SqlTokenType, sqlParseLexer, sqlScrip
 // which its Typename takes wherever a type is written (whether a cast or a
 // column can use one is decided after parsing). `quoted` marks a quoted name
 // that would be a keyword spelling of a built-in type unquoted (see
-// KEYWORD_TYPE_NAMES): `char` is bpchar and `int` is int4, while `"char"` is
-// the one-byte internal type and `"int"` is looked up as written. Any other
+// isQuotedKeywordType): `char` is bpchar and `int` is int4, while `"char"` is
+// the one-byte internal type and `"int"` is looked up as written; likewise
+// `double precision` is float8, while `"double precision"` is one name looked
+// up as written, so only the flag tells their `["double precision"]` apart. Any other
 // name means the same quoted or not, as does every qualified one
 // (`pg_catalog.char` is `"char"`), so it carries no flag.
 export type ColType = {
@@ -1761,7 +1763,7 @@ export type Lock = {
   span: Span;
 };
 // CALL name ( [arg, …] ) — the argument list is always written, possibly empty.
-// Not kind "call", which is the expression node (whose `name` is joined).
+// Not kind "call", which is the expression node.
 // `variadic` is as on that node: present only when the last argument follows
 // VARIADIC.
 export type CallProcedure = { kind: "callProcedure"; name: string[]; args: Expr[]; variadic?: true; span: Span };
@@ -4483,6 +4485,11 @@ const MULTI_WORD_TYPES: ReadonlyMap<string, readonly (readonly string[])[]> = ne
   ["interval", INTERVAL_TAILS],
 ]);
 
+// Every multi-word spelling above as typeRef names it (`"double precision"`).
+const MULTI_WORD_TYPE_NAMES: ReadonlySet<string> = new Set(
+  [...MULTI_WORD_TYPES].flatMap(([lead, tails]) => tails.map((tail) => [lead, ...tail].join(" "))),
+);
+
 // The two types whose precision PG spells *before* the rest of the name. For
 // every other multi-word type the args trail the whole name (`character
 // varying(10)`, `interval day to second(3)`), so reading them early would accept
@@ -4694,7 +4701,7 @@ function typeNameLiteral(
     name: parts,
     args: typmod ?? [],
     array: false,
-    ...(!bare && parts.length === 1 && KEYWORD_TYPE_NAMES.has(parts[0]!) && { quoted: true }),
+    ...(isQuotedKeywordType(bare, parts) && { quoted: true }),
     span: ctx.spanFrom(start),
   };
   ctx.next(); // the string literal
@@ -4772,6 +4779,12 @@ const KEYWORD_TYPE_NAMES: ReadonlySet<string> = new Set([
   "nchar",
 ]);
 
+// Whether a type name read as `parts` is one quoted part that, unquoted, would
+// be a keyword spelling of a built-in type: a KEYWORD_TYPE_NAMES word or a
+// multi-word spelling (`"double precision"`), which ColType's `quoted` marks.
+const isQuotedKeywordType = (bare: boolean, parts: string[]): boolean =>
+  !bare && parts.length === 1 && (KEYWORD_TYPE_NAMES.has(parts[0]!) || MULTI_WORD_TYPE_NAMES.has(parts[0]!));
+
 // The args are hoisted out of wherever PG puts them, so the name is always the
 // words alone: `timestamp(3) with time zone` is
 // `{ name: ["timestamp with time zone"], args: [3] }`.
@@ -4812,7 +4825,7 @@ const typeRef = custom<ColType, SqlTokenType>(
       args: args ?? [],
       array,
       ...(setof && { setof: true }),
-      ...(!bare && parts.length === 1 && KEYWORD_TYPE_NAMES.has(parts[0]!) && { quoted: true }),
+      ...(isQuotedKeywordType(bare, parts) && { quoted: true }),
       span: ctx.spanFrom(start),
     };
   },

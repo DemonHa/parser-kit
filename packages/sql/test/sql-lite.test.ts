@@ -1581,6 +1581,10 @@ describe("SQL-lite expressions", () => {
     // A multi-word keyword spelling is one part.
     expect(exprOf("x::timestamp(3) with time zone").type).toEqual(ct(["timestamp with time zone"], { args: [3] }));
     expect(exprOf("x::double precision").type).toEqual(ct(["double precision"]));
+    // Quoted, the same words are one name looked up as written.
+    expect(exprOf('x::"double precision"').type).toEqual(ct(["double precision"], { quoted: true }));
+    expect(exprOf(`"timestamp with time zone" 'x'`).type).toEqual(ct(["timestamp with time zone"], { quoted: true }));
+    expect(exprOf('x::"my type"').type).toEqual(ct(["my type"]));
     expect(exprOf(`"a.b" 'x'`)).toEqual({ kind: "typedLiteral", type: ct(["a.b"]), value: "x" });
     expect(exprOf("a.b 'x'")).toEqual({ kind: "typedLiteral", type: ct(["a", "b"]), value: "x" });
     const fromCall = (src: string) => (firstStmt(`SELECT * FROM ${src};`) as any).from[0].call;
@@ -6538,6 +6542,8 @@ describe("SQL-lite numeric literals and parameters", () => {
       ["1.5e-3", 0.0015],
       ["007", 7],
       ["1_000.000_1", 1000.0001],
+      ["00", 0],
+      ["1e-400", 0],
     ] as const) {
       expect(colExpr(src), src).toEqual(numRaw(value, src.replaceAll("_", "")));
     }
