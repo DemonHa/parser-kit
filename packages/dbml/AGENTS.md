@@ -38,7 +38,10 @@ exist yet are the ones still to be written.
   pins the public surface. The corpus (`corpus.ts`), the parity harness and its
   goldens (`parity.*.golden.json`) and the differential test against
   `@dbml/core` live here too.
-- `bench/` — comparisons against `@dbml/core`.
+- `bench/` — comparisons against `@dbml/core` (its full `Parser.parse`) and
+  `@dbml/parse` (its lex + parse stage alone); `incumbent.ts` says what each
+  one measures, `generate.ts` builds the large schemas. `bench-baseline.json`
+  at the repo root keys on their file paths and group names.
 
 Only `build/`, `src/` and the changelog are published (`files` in
 `package.json`), plus the files npm always adds; CI's Package job
@@ -115,8 +118,9 @@ fixtures reach the tarball.
   (a bare `-u` is swallowed by pnpm), rebase on the latest `main` first, and call
   the diff out in the PR. Biome ignores `*.golden.json`.
 - **`@dbml/core` is only ever a test and bench dependency**, pinned to an exact
-  version in the workspace catalog. Upgrading it is its own change that re-runs
-  the differential test and updates the allowlist.
+  version in the workspace catalog, and so is `@dbml/parse` (bench only), kept
+  at the version `@dbml/core` depends on. Upgrading them is its own change that
+  re-runs the differential test and updates the allowlist.
 - **README.** Until the package is published, only the change that publishes
   it rewrites `README.md` and the root README's packages row. Other changes put
   user-facing notes, including new differences from `@dbml/core`, in their PR

@@ -65,6 +65,7 @@
   },
   "devDependencies": {
     "@dbml/core": "catalog:",
+    "@dbml/parse": "catalog:",
     "tsc-alias": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
