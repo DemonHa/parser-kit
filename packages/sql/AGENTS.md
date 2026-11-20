@@ -22,11 +22,26 @@ internals and grammar-authoring gotchas.
   types; the `@parser-kit/sql/postgres` subpath export). The root `index.ts`
   exposes each dialect's AST types as a namespace (`Postgres.Stmt`) so that
   dialects' same-named types don't collide.
+- `src/postgres/print/` — the printer, AST back to SQL (internal: not on the
+  `postgres` object or any entry yet). `context.ts` holds the options and the
+  lexical rules (keywords, name quoting, strings), `expr.ts` every expression,
+  `types.ts` type names, `query.ts` queries and FROM items, and `index.ts`
+  joins one module per statement family into the statement printer and
+  `stringify`. A statement family still without a module is listed in
+  `index.ts`'s NOT_YET_PRINTABLE and throws `NotPrintableError`; adding one is
+  a new module plus one line there (see the comment at the top of `index.ts`).
+  Parentheses come from the grammar's Pratt tables through `precedence`, so a
+  group that builds a new node kind needs its printer-only `nodes` / `rhs`
+  annotation too.
 - `test/` — unit tests (`postgres.test.ts`), the entry-surface pin
   (`entry.test.ts`), the parity harness and its goldens, the PostgreSQL coverage
   battery (`pg-coverage.ts`) and the pg_dump corpus (`pg-dump-corpus.ts`,
   `fixtures/pg-dump/`, pagila vendored under the PostgreSQL License) and
   `psql-split.ts`, the psql-style statement splitter the corpus test uses.
+  `stringify.test.ts` round-trips every valid statement of those suites through
+  the printer (`stringify.golden.sql` pins its width-80 output and
+  `stringify.coverage.golden.json` the statements not yet printable), and
+  `parity-corpus.ts` holds the parity lists both harnesses read.
 - `bench/` — the node-sql-parser comparisons. `bench-baseline.json` at the repo
   root keys on their file paths and group names.
 
@@ -49,7 +64,8 @@ fixtures reach the tarball.
   that doesn't use the construct stay byte-identical (see the README's AST
   conventions).
 - **Never regenerate a golden to make a change pass.** `test/parity.*.golden.json`
-  pin every corpus AST (spans included) and every `diagnose()` message. When
+  pin every corpus AST (spans included) and every `diagnose()` message, and
+  `test/stringify.*` the printer's output and coverage. When
   output is meant to move, regenerate with `pnpm test -- -u` from the repo root
   and call the diff out.
 - **Keep the README's lists in step with the battery.** A change that moves a
