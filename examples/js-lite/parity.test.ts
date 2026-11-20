@@ -4,7 +4,7 @@ import { jsLite } from "./grammar";
 
 // --- byte-exact parity harness ---
 //
-// The counterpart to `examples/sql-lite/parity.test.ts`. It serialises the full
+// The counterpart to `packages/sql/test/parity.test.ts`. It serialises the full
 // AST — spans included, nothing stripped — for every source below, plus the
 // errors `diagnose()` collects for a fixed list of malformed inputs, and
 // compares the result byte-for-byte against a committed golden. The example
@@ -17,7 +17,7 @@ import { jsLite } from "./grammar";
 // under test. Regenerate them with `pnpm test -- -u` — never to make a refactor
 // pass.
 //
-// js-lite keeps its corpus inline because, unlike sql-lite's, nothing else
+// js-lite keeps its corpus inline because, unlike `@parser-kit/sql`'s, nothing else
 // consumes it.
 
 // Every construct the suite covers, one source per line: declarations,
@@ -77,7 +77,7 @@ const CORPUS = [
 // records whatever recovery actually produces, `[]` included. Annotated per row
 // rather than as a prose list, so adding one can't leave the descriptions off
 // by one. js-lite sets no `errorReporting`, so `preferFarthest` is off here;
-// sql-lite's harness is the one that covers it.
+// `@parser-kit/sql`'s harness is the one that covers it.
 const MALFORMED = [
   // A missing initialiser.
   "const x = ;\nconst y = 2;",

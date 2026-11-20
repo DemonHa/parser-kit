@@ -10,8 +10,8 @@ user-facing guide.
 ## Orientation
 
 Start with `README.md` (concepts + API) and then read `../../examples/js-lite/grammar.ts`
-and `../../examples/sql-lite/grammar.ts` top to bottom — the examples are the fastest
-way to learn the kit and are its genericity/integration tests.
+and `../sql/src/grammar.ts` (the published `@parser-kit/sql`) top to bottom — the two
+grammars are the fastest way to learn the kit and are its genericity/integration tests.
 
 ## Public API
 
@@ -83,22 +83,25 @@ mid-migration onto the rest.
 
 ## Tests
 
-Vitest, co-located as `*.test.ts` per module, plus the two `examples/*/`
-suites (354 tests total). One `pnpm test` at the repo root runs them all
+Vitest, co-located as `*.test.ts` per module, plus the `packages/sql/test/`
+and `examples/js-lite/` suites. One `pnpm test` at the repo root runs them all
 (`pnpm types:check` / `pnpm lint` / `pnpm build` likewise). When you add a
 feature:
 
 - Add unit tests at the level it lives (lexer / combinator / pratt / rule /
   grammar) **and** exercise it end-to-end in an example grammar if it's
-  user-facing — the examples are the genericity guard.
+  user-facing — the two grammars are the genericity guard. `@parser-kit/sql` is
+  a published consumer of core, so a core change that moves its output is a
+  user-visible change in both packages.
 - **Keep every feature opt-in.** The kit's tests must stay green, and so must
   the **93 byte-exact dbml goldens** in the downstream
   [database.io](https://github.com/DemonHa/database.io) repo — they are the
   sharpest check that observable parse/error output did not shift. Never
   regenerate a golden to make a change pass.
 - **The parity harness is the in-repo version of that check.**
-  `examples/*/parity.test.ts` serialise the full AST — spans included, nothing
-  stripped — for every statement in each example's corpus, plus the messages
+  `packages/sql/test/parity.test.ts` and `examples/js-lite/parity.test.ts`
+  serialise the full AST — spans included, nothing
+  stripped — for every statement in each grammar's corpus, plus the messages
   `diagnose()` collects for a fixed malformed-input list, and compare the result
   byte-for-byte against committed `parity.*.golden.json` files. A refactor
   that's meant to preserve behaviour (a performance rewrite, an internal data
@@ -107,7 +110,8 @@ feature:
   without running anything) is a claim that observable output moved on purpose,
   and needs the same scrutiny and its own changeset line. Biome is configured
   not to format them, so `pnpm lint:fix` can't quietly rewrite the baseline.
-- The `build` (`tsconfig.build.json`) compiles `src/` only; tests and
-  `examples/` are excluded from it but are type-checked by `types:check`. The
+- The `build` (`tsconfig.build.json`) compiles `src/` only; tests are excluded
+  from it but are type-checked by `types:check`, as are the grammars in `../sql`
+  and `examples/`. The
   published tarball ships `build/` plus `src/` (minus tests) so the emitted
   declaration maps resolve to real sources in editors. Don't commit `build/`.

@@ -12,7 +12,7 @@ npm install @parser-kit/core   # or: pnpm add / yarn add / bun add
 
 Ships ESM and CommonJS builds with bundled type declarations. Node >= 18, zero runtime dependencies.
 
-The kit knows nothing about any particular language. Two bundled examples parse real-shaped grammars with the same engine: [`examples/js-lite/`](../../examples/js-lite/) (a JavaScript subset) and [`examples/sql-lite/`](../../examples/sql-lite/) (a PostgreSQL-flavoured DDL subset).
+The kit knows nothing about any particular language. Two grammars in the repo parse real languages with the same engine: [`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite) (a JavaScript subset) and [`@parser-kit/sql`](https://www.npmjs.com/package/@parser-kit/sql) (PostgreSQL 17, published as its own package).
 
 ```ts
 import { bindTokens, defineGrammar, defineLexer, field, type Infer, readers, seq, skip } from "@parser-kit/core";
@@ -229,12 +229,12 @@ Every grammar exposes:
 
 **Strict list closes** — `defineGrammar({ ..., strictDelimited: true })` makes a `delimited()` list that reaches end of input before its close token fail with `Expected <close> but found end of input`. By default the list ends there as if closed, so `(a, b` at the end of the input parses as a complete list. A grammar that requires a terminator after every construct never notices, because the terminator check fails first. A grammar whose last statement needs no terminator wants the flag. It is off by default, and with it off nothing changes.
 
-## The examples
+## The example grammars
 
-Two runnable grammars double as the kit's genericity/integration tests and as the fastest way to learn it — read their `grammar.ts` top to bottom.
+Two real grammars double as the kit's genericity/integration tests and as the fastest way to learn it — read their `grammar.ts` top to bottom.
 
-- **[`examples/js-lite/`](../../examples/js-lite/)** — a JavaScript subset (`const`/`let`, `function`, `if`/`else`, `while`, `return`, blocks, expression statements, full expression precedence, arrays, arrow functions). Exercises what DBML doesn't: root-rule dispatch, newlines as whitespace, the whole `pratt()` table, load-bearing `attempt()` backtracking, and the template-literal *mode*.
-- **[`examples/sql-lite/`](../../examples/sql-lite/)** — a PostgreSQL-flavoured DDL subset (`CREATE`/`ALTER`/`DROP TABLE`, `CREATE INDEX`/`TYPE`, `COMMENT ON`) with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, and pratt expressions (cast `::`, `||`, non-associative comparisons, keyword operators `AND`/`OR`/`IS NULL`/`[NOT] LIKE`/`BETWEEN`/`IN`). The best reference for a folding lexer and `word()`/`phrase()` keyword matching.
+- **[`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite)** — a JavaScript subset (`const`/`let`, `function`, `if`/`else`, `while`, `return`, blocks, expression statements, full expression precedence, arrays, arrow functions). Exercises what DBML doesn't: root-rule dispatch, newlines as whitespace, the whole `pratt()` table, load-bearing `attempt()` backtracking, and the template-literal *mode*.
+- **[`packages/sql/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql)** — the PostgreSQL 17 grammar published as [`@parser-kit/sql`](https://www.npmjs.com/package/@parser-kit/sql): DDL, DML, queries and psql scripts, with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, a full Pratt operator table with keyword operators, hand-written `custom()` rules and `diagnose()` recovery. The best reference for a folding lexer, keyword tiers and `word()`/`phrase()` keyword matching.
 
 ## Design notes & current limits
 
@@ -250,7 +250,7 @@ This package lives in the [DemonHa/parser-kit](https://github.com/DemonHa/parser
 
 ```sh
 pnpm install
-pnpm test          # core unit tests + both example grammars
+pnpm test          # core unit tests, @parser-kit/sql and js-lite
 pnpm types:check
 pnpm lint
 pnpm build         # tsc → packages/core/build/{esm,cjs}
@@ -260,7 +260,7 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the change workflow.
 
 ### Benchmarks
 
-[`examples/sql-lite/sql-lite.bench.ts`](../../examples/sql-lite/sql-lite.bench.ts) pits the sql-lite grammar against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from the sql-lite tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles.
+The benchmarks live with the SQL grammar, in [`packages/sql/bench/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql/bench). [`sql-lite.bench.ts`](https://github.com/DemonHa/parser-kit/blob/main/packages/sql/bench/sql-lite.bench.ts) pits `@parser-kit/sql` against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on a corpus lifted from its tests. Throughput is only compared on statements both parsers accept; a coverage line reports how many of the corpus each handles.
 
 ```sh
 pnpm bench          # run once, print the table
@@ -268,4 +268,4 @@ pnpm bench:save     # write bench-baseline.json (the committed baseline)
 pnpm bench:compare  # diff the current run against bench-baseline.json
 ```
 
-`bench-baseline.json` is committed so `bench:compare` shows per-benchmark deltas (`⇑`/`⇓`) as the grammar grows. Re-run `bench:save` to refresh the baseline after an intentional change. Absolute numbers drift with machine load — trust the sql-lite-vs-node ratio and the compare deltas over raw `hz`.
+`bench-baseline.json` is committed so `bench:compare` shows per-benchmark deltas (`⇑`/`⇓`) as the grammar grows. Re-run `bench:save` to refresh the baseline after an intentional change. Absolute numbers drift with machine load — trust the @parser-kit/sql-vs-node-sql-parser ratio and the compare deltas over raw `hz`.
