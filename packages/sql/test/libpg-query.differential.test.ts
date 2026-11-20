@@ -77,6 +77,8 @@ const IGNORE_NULLS =
   "IGNORE / RESPECT NULLS on a window function (the `nullTreatment` node) is not in PostgreSQL 17's grammar; this grammar parses it.";
 const RELOPTIONS =
   "CREATE TABLE's WITH (…) takes the general option shape COPY's options use, so `x -1`, `force_quote *` and `force_null (a, 'b')` parse there; PostgreSQL's reloptions take only `name [= value]`.";
+const QUALIFIED_OPTIONS =
+  "COPY's and utility statements' (…) option lists take the general option shape, so a qualified name (`toast.x`) and a number in a value list (`list ('a', 2)`) parse; PostgreSQL's take neither.";
 
 // Each "ours" entry is in the README's "Accepted, but PostgreSQL rejects" list.
 const PARSER_DIFFERENCES: ParserDifference[] = [
@@ -124,6 +126,18 @@ const PARSER_DIFFERENCES: ParserDifference[] = [
     reason:
       "PostgreSQL's lexer takes any characters in B'…' and checks the digits only when the value is read; this lexer rejects a digit other than 0 or 1 while lexing (a MALFORMED row).",
   },
+  { sql: "CLUSTER (x.verbose)", acceptedBy: "ours", reason: QUALIFIED_OPTIONS },
+  { sql: "COPY binary t FROM STDIN (toast.header)", acceptedBy: "ours", reason: QUALIFIED_OPTIONS },
+  {
+    sql: "COPY t TO STDOUT (format csv, \"Odd\" 'x', toast.x 1, list ('a', 2, -3, true), w true, n \"true\", s 'it''s')",
+    acceptedBy: "ours",
+    reason: QUALIFIED_OPTIONS,
+  },
+  {
+    sql: "COPY binary FROM STDIN",
+    acceptedBy: "ours",
+    reason: "`COPY binary FROM stdin` copies a table named `binary`; BINARY is a type_func_name keyword in PostgreSQL.",
+  },
   // Battery rows recorded as rejected here: statements not supported yet.
   { sql: "ALTER SYSTEM SET work_mem = '64MB';", acceptedBy: "postgres", reason: NOT_YET_SUPPORTED },
   {
@@ -156,6 +170,12 @@ const PARSER_DIFFERENCES: ParserDifference[] = [
 type PrinterDifference = { sql: string; paths: string[]; reason: string };
 
 const TARGETS = "$.0.SelectStmt.targetList";
+const DO_PATHS = [0, 1].flatMap((i) => [
+  `$.0.DoStmt.args.${i}.DefElem.defname`,
+  `$.0.DoStmt.args.${i}.DefElem.arg.String.sval`,
+]);
+const DO_ORDER =
+  "Our tree keeps DO's language and body, not their order, and the printer writes `DO LANGUAGE l 'body'`. PostgreSQL's tree lists them in source order; the order means nothing.";
 
 const PRINTER_DIFFERENCES: PrinterDifference[] = [
   // Our tree loses the difference, and PostgreSQL resolves both to the same thing.
@@ -190,6 +210,22 @@ const PRINTER_DIFFERENCES: PrinterDifference[] = [
     ],
     reason:
       "A type's array sizes and dimension count aren't in our tree (`array: true`), so `int[3]` and `text[][]` print as `int[]` and `text[]`. PostgreSQL ignores both, so the meaning is the same.",
+  },
+  {
+    sql: "COPY t FROM STDIN DELIMITERS '|' WITH (header)",
+    paths: ["$.0.CopyStmt.options.1.DefElem.arg"],
+    reason:
+      "A legacy COPY keeps its options in one list whose `header` has no value, whether written `(header)` or as the bare word, and the printer writes every option as a bare word it can (`DELIMITER '|' HEADER`). PostgreSQL's tree has no argument for `(header)` and `true` for HEADER, which mean the same.",
+  },
+  {
+    sql: "DO 'SELECT 1' LANGUAGE \"My Lang\"",
+    paths: DO_PATHS,
+    reason: DO_ORDER,
+  },
+  {
+    sql: "DO $$ SELECT 1 $$ LANGUAGE sql;",
+    paths: DO_PATHS,
+    reason: DO_ORDER,
   },
   // Printer known limits: real meaning changes our tree can't express.
   {

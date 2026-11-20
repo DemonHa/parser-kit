@@ -390,6 +390,7 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **`CREATE OR REPLACE MATERIALIZED VIEW`.**
 - **Publication and subscription `WITH (…)` lists** take the general option shape, so `ns.name` keys and parenthesised values parse. PostgreSQL's `definition` has neither.
 - **Storage parameter lists** (`CREATE TABLE … WITH (…)`) take the general option shape too, so `x -1`, `force_quote *` and `force_null (a, 'b')` parse. PostgreSQL's reloptions take only `name [= value]`.
+- **`COPY` and utility statement option lists** (`COPY … (…)`, `CLUSTER (…)`) take a qualified option name (`toast.x 1`) and numbers in a parenthesised value list (`list ('a', 2)`). PostgreSQL's take neither.
 - **PostgreSQL 18's `GENERATED ALWAYS AS (…) VIRTUAL`** columns parse (pagila's schema dump has one), though PostgreSQL 17 requires `STORED`. The PostgreSQL 18 spelling with neither keyword is rejected.
 
 Some errors PostgreSQL raises during analysis rather than parsing are also accepted:
