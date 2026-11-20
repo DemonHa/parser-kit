@@ -74,7 +74,7 @@ it("reports byte-identical diagnostics for the corpus and for malformed input", 
   const valid = CORPUS.map(({ name, dbml: source }) => {
     const result = capture(() => dbml.diagnose(source));
     if (threw(result)) return { name, ...result };
-    expect(JSON.stringify(result.ast), name).toBe(JSON.stringify(dbml.parse(source)));
+    expect(JSON.stringify(result.ast), name).toBe(JSON.stringify(capture(() => dbml.parse(source))));
     return { name, errors: result.errors.map(describeError) };
   });
 

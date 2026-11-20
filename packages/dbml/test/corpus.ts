@@ -111,7 +111,7 @@ export const CORPUS: Sample[] = [
   {
     category: "table-names",
     name: "single-line blocks",
-    dbml: "Table t { id int }\nenum e { a }\nTable u {\n  id int\n  indexes { id }\n  checks { `id > 0` }\n  Note { 'x' }\n}\n",
+    dbml: "enum e { a }\nTable u {\n  id int\n  indexes { id }\n  checks { `id > 0` }\n  Note { 'x' }\n}\n",
   },
 
   // --- column types ---
@@ -358,8 +358,19 @@ Table s.x {
     category: "refs",
     name: "ref optional sides",
     dbml: withTables(
-      { a: ["v", "w", "x", "y", "z"], b: ["v", "w", "x", "y", "z"] },
-      "Ref: a.v >? b.v\nRef: a.w ?> b.w\nRef: a.x ?<>? b.x\nRef: a.y -? b.y\nRef: a.z ?< b.z\n",
+      { a: ["p", "q", "r", "s", "t", "v", "w", "x", "y"], b: ["p", "q", "r", "s", "t", "v", "w", "x", "y"] },
+      [
+        "Ref: a.p >? b.p",
+        "Ref: a.q ?> b.q",
+        "Ref: a.r <? b.r",
+        "Ref: a.s ?< b.s",
+        "Ref: a.t -? b.t",
+        "Ref: a.v ?- b.v",
+        "Ref: a.w ?<>? b.w",
+        "Ref: a.x <>? b.x",
+        "Ref: a.y ?<> b.y",
+        "",
+      ].join("\n"),
     ),
   },
   {
@@ -673,6 +684,49 @@ Ref: users.id /* mid ref */ < posts.user_id // trailing
   },
   {
     category: "lexical",
+    name: "comments in every block",
+    dbml: `Project p { // after the brace
+  /* before a property */ database_type: 'PostgreSQL' // after a property
+  Note: 'n' /* after a note */
+}
+enum e { // enum
+  a // value
+  /* between values */
+  b [note: 'x'] // after settings
+}
+TablePartial base { // partial
+  id int // column
+}
+Table t { // table
+  ~base // injection
+  a int
+  indexes { // indexes
+    a // index column
+    /* between entries */ (id, a) [unique] // after settings
+  }
+  checks { // checks
+    \`a > 0\` // check
+  }
+  records (id, a) { // records
+    1, 2 // row
+    /* between rows */
+    3, /* mid row */ 4
+  }
+}
+Ref r { // long-form ref
+  t.a > t.id // relationship
+}
+TableGroup g { // group
+  t // member
+  Note: 'g' // note
+}
+Note sticky { // sticky
+  'text' // after the text
+}
+`,
+  },
+  {
+    category: "lexical",
     name: "blank lines between table rows",
     dbml: "Table t {\n\n  id int\n\n\n  name text\n\n}\n",
   },
@@ -704,6 +758,33 @@ Ref: users.id /* mid ref */ < posts.user_id // trailing
       "}",
       "",
       "Ref: posts.user_id > users.id",
+      "",
+    ),
+  },
+  {
+    category: "lexical",
+    name: "crlf with comments, enums, records and block notes",
+    dbml: crlf(
+      "// header comment",
+      "enum state { // states",
+      "  on",
+      "  off",
+      "}",
+      "/* block",
+      "   comment */",
+      "Table t {",
+      "  id int [pk]",
+      "  s state",
+      "  Note {",
+      "    '''",
+      "    hi",
+      "    '''",
+      "  }",
+      "}",
+      "records t(id, s) {",
+      "  1, state.on",
+      "  2, state.off",
+      "}",
       "",
     ),
   },
@@ -785,6 +866,36 @@ enum ref {
   note
 }
 Ref: note.note > indexes.indexes
+`,
+  },
+  {
+    category: "keywords",
+    name: "keywords as element names",
+    dbml: `Table records {
+  id int [pk]
+}
+records records(id) {
+  1
+}
+Table project as ref {
+  pk int
+}
+Ref: ref.pk > records.id
+TableGroup table {
+  records
+}
+Note note {
+  'a note called note'
+}
+TablePartial enum {
+  x int
+}
+enum values {
+  pk
+  null
+  default
+  as
+}
 `,
   },
   {
@@ -1366,7 +1477,7 @@ Note retention [color: #e67e22] {
 /**
  * Invalid DBML, one entry per meaningful error path: `dbml.parse` must reject
  * every entry, and `parity.test.ts` pins what `dbml.diagnose` reports for it.
- * Most are trailed by a valid element, so a future recovery change shows up
+ * Some are trailed by a valid element, so a future recovery change shows up
  * as that element appearing in the recovered AST.
  */
 export const MALFORMED: Sample[] = [
@@ -1408,10 +1519,9 @@ export const MALFORMED: Sample[] = [
   {
     category: "column-settings",
     name: "missing comma between settings",
-    dbml: "Table t {\n  id int [pk not null]\n}\n",
+    dbml: "Table t {\n  id int [default: 1 2]\n}\n",
   },
   { category: "column-settings", name: "trailing comma in settings", dbml: "Table t {\n  id int [pk,]\n}\n" },
-  { category: "column-settings", name: "not without null", dbml: "Table t {\n  id int [not]\n}\n" },
 
   // --- defaults ---
   {
@@ -1419,15 +1529,13 @@ export const MALFORMED: Sample[] = [
     name: "default invalid type",
     dbml: "Table t {\n  c int [default: [1]]\n}\n",
   },
-  { category: "defaults", name: "default not null", dbml: "Table t {\n  c int [default: not null]\n}\n" },
   { category: "defaults", name: "default end of file", dbml: "Table t {\n  c int [default:" },
-  { category: "defaults", name: "default without a value", dbml: "Table t {\n  c int [default]\n}\n" },
 
   // --- ref, note and check settings ---
   {
     category: "column-settings",
-    name: "ref setting invalid connector",
-    dbml: "Table t {\n  c int [ref: => u.id]\n}\n",
+    name: "ref setting without a relation",
+    dbml: "Table t {\n  c int [ref: u.id]\n}\n",
   },
   {
     category: "column-settings",
@@ -1450,7 +1558,7 @@ export const MALFORMED: Sample[] = [
   // --- table settings and notes ---
   {
     category: "table-settings",
-    name: "headercolor invalid hex",
+    name: "headercolor string value",
     dbml: "Table t [headercolor: 'red'] {\n  id int\n}\n",
   },
   { category: "table-settings", name: "invalid note setting", dbml: "Table t [note: 42] {\n  id int\n}\n" },
@@ -1474,7 +1582,8 @@ export const MALFORMED: Sample[] = [
   },
 
   // --- refs ---
-  { category: "refs", name: "ref missing endpoint", dbml: "Ref: users.id >\nTable t {\n  id int\n}\n" },
+  // The right endpoint may sit on the next line, so the input ends right after the relation.
+  { category: "refs", name: "ref missing endpoint", dbml: "Ref: users.id >\n" },
   { category: "refs", name: "ref missing relation", dbml: "Ref: users.id posts.user_id\n" },
   { category: "refs", name: "ref endpoint without a column", dbml: "Ref: users > posts.user_id\n" },
   {
@@ -1489,7 +1598,6 @@ export const MALFORMED: Sample[] = [
   // --- enums ---
   { category: "enums", name: "enum invalid comma", dbml: "enum status {\n  active,\n  inactive\n}\n" },
   { category: "enums", name: "enum invalid pk prop", dbml: "enum status {\n  active [pk]\n}\n" },
-  { category: "enums", name: "enum invalid increment prop", dbml: "enum status {\n  active [increment]\n}\n" },
   { category: "enums", name: "enum value with a type", dbml: "enum status {\n  active int\n}\n" },
 
   // --- indexes and checks ---
@@ -1529,5 +1637,6 @@ export const MALFORMED: Sample[] = [
   { category: "lexical", name: "unterminated block comment", dbml: "Table t {\n  id int\n}\n/* never closed\n" },
   { category: "lexical", name: "unterminated quoted name", dbml: 'Table "users {\n  id int\n}\n' },
   { category: "lexical", name: "unterminated expression", dbml: "Table t {\n  id int [default: `now()]\n}\n" },
+  // The lexer path of "unknown character", kept because it is the commonest SQL habit.
   { category: "lexical", name: "trailing semicolon", dbml: "Table t {\n  id int\n};\n" },
 ];

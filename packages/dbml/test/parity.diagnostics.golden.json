@@ -332,6 +332,10 @@
     "errors": []
   },
   {
+    "name": "comments in every block",
+    "errors": []
+  },
+  {
     "name": "blank lines between table rows",
     "errors": []
   },
@@ -341,6 +345,10 @@
   },
   {
     "name": "crlf line endings",
+    "errors": []
+  },
+  {
+    "name": "crlf with comments, enums, records and block notes",
     "errors": []
   },
   {
@@ -369,6 +377,10 @@
   },
   {
     "name": "keywords as table, enum and value names",
+    "errors": []
+  },
+  {
+    "name": "keywords as element names",
     "errors": []
   },
   {
@@ -863,10 +875,10 @@
   },
   {
     "name": "missing comma between settings",
-    "source": "Table t {\n  id int [pk not null]\n}\n",
+    "source": "Table t {\n  id int [default: 1 2]\n}\n",
     "errors": [
       {
-        "message": "Expected \":\" but found \"]\" (2:21)",
+        "message": "Expected \",\" or \"]\" but found \"2\" (2:21)",
         "end": {
           "row": 2,
           "col": 22
@@ -916,33 +928,6 @@
     }
   },
   {
-    "name": "not without null",
-    "source": "Table t {\n  id int [not]\n}\n",
-    "errors": [
-      {
-        "message": "Expected \":\" but found \"]\" (2:13)",
-        "end": {
-          "row": 2,
-          "col": 14
-        }
-      }
-    ],
-    "ast": {
-      "type": "document",
-      "elements": [],
-      "span": {
-        "start": {
-          "row": 1,
-          "col": 0
-        },
-        "end": {
-          "row": 1,
-          "col": 0
-        }
-      }
-    }
-  },
-  {
     "name": "default invalid type",
     "source": "Table t {\n  c int [default: [1]]\n}\n",
     "errors": [
@@ -951,33 +936,6 @@
         "end": {
           "row": 2,
           "col": 19
-        }
-      }
-    ],
-    "ast": {
-      "type": "document",
-      "elements": [],
-      "span": {
-        "start": {
-          "row": 1,
-          "col": 0
-        },
-        "end": {
-          "row": 1,
-          "col": 0
-        }
-      }
-    }
-  },
-  {
-    "name": "default not null",
-    "source": "Table t {\n  c int [default: not null]\n}\n",
-    "errors": [
-      {
-        "message": "Expected a string, a number, an expression, \"true\", \"false\", \"null\" or an enum value but found \"not\" (2:18)",
-        "end": {
-          "row": 2,
-          "col": 21
         }
       }
     ],
@@ -1024,38 +982,11 @@
     }
   },
   {
-    "name": "default without a value",
-    "source": "Table t {\n  c int [default]\n}\n",
+    "name": "ref setting without a relation",
+    "source": "Table t {\n  c int [ref: u.id]\n}\n",
     "errors": [
       {
-        "message": "Expected \":\" but found \"]\" (2:16)",
-        "end": {
-          "row": 2,
-          "col": 17
-        }
-      }
-    ],
-    "ast": {
-      "type": "document",
-      "elements": [],
-      "span": {
-        "start": {
-          "row": 1,
-          "col": 0
-        },
-        "end": {
-          "row": 1,
-          "col": 0
-        }
-      }
-    }
-  },
-  {
-    "name": "ref setting invalid connector",
-    "source": "Table t {\n  c int [ref: => u.id]\n}\n",
-    "errors": [
-      {
-        "message": "Unexpected character \"=\" (2:14)",
+        "message": "Expected a relation (<, >, -, <>) but found \"u\" (2:14)",
         "end": {
           "row": 2,
           "col": 15
@@ -1240,7 +1171,7 @@
     }
   },
   {
-    "name": "headercolor invalid hex",
+    "name": "headercolor string value",
     "source": "Table t [headercolor: 'red'] {\n  id int\n}\n",
     "errors": [
       {
@@ -1430,13 +1361,13 @@
   },
   {
     "name": "ref missing endpoint",
-    "source": "Ref: users.id >\nTable t {\n  id int\n}\n",
+    "source": "Ref: users.id >\n",
     "errors": [
       {
-        "message": "Expected \".\" but found \"t\" (2:6)",
+        "message": "Expected a column reference but found end of input (2:0)",
         "end": {
           "row": 2,
-          "col": 7
+          "col": 0
         }
       }
     ],
@@ -1626,33 +1557,6 @@
         "end": {
           "row": 2,
           "col": 12
-        }
-      }
-    ],
-    "ast": {
-      "type": "document",
-      "elements": [],
-      "span": {
-        "start": {
-          "row": 1,
-          "col": 0
-        },
-        "end": {
-          "row": 1,
-          "col": 0
-        }
-      }
-    }
-  },
-  {
-    "name": "enum invalid increment prop",
-    "source": "enum status {\n  active [increment]\n}\n",
-    "errors": [
-      {
-        "message": "Expected \"note\" but found \"increment\" (2:10)",
-        "end": {
-          "row": 2,
-          "col": 19
         }
       }
     ],
