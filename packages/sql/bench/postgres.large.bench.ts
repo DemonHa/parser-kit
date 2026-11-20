@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
-import { postgres } from "../src/index";
+import { postgres } from "../src/postgres/index";
 import { splitPsqlScript } from "../test/psql-split";
 
 // Large-file throughput: how do @parser-kit/sql and node-sql-parser compare when fed a

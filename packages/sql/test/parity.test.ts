@@ -1,6 +1,6 @@
 import type { ParseError } from "@parser-kit/core";
 import { expect, it } from "vitest";
-import { postgres } from "../src/index";
+import { postgres } from "../src/postgres/index";
 import { CORPUS } from "./corpus";
 
 // --- byte-exact parity harness ---

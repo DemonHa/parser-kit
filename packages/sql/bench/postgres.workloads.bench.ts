@@ -1,6 +1,6 @@
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
-import { postgres } from "../src/index";
+import { postgres } from "../src/postgres/index";
 
 // Real-world workloads: @parser-kit/sql vs node-sql-parser on the shapes of SQL an
 // application actually feeds a parser, rather than the one-construct-per-row

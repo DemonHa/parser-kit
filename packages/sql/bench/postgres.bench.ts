@@ -1,6 +1,6 @@
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
-import { postgres } from "../src/index";
+import { postgres } from "../src/postgres/index";
 import { CORPUS } from "../test/corpus";
 
 // Benchmark the @parser-kit/sql PostgreSQL dialect (`postgres.parse`) against the popular `node-sql-parser`

@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { type Copy, postgres, type ScriptItem } from "../src/index";
+import { type Copy, postgres, type ScriptItem } from "../src/postgres/index";
 import { type DumpOutcome, type DumpRow, PG_DUMP_EXPECTATIONS } from "./pg-dump-corpus";
 import { splitPsqlScript } from "./psql-split";
 

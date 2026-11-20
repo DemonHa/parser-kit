@@ -58,7 +58,7 @@
   "typesVersions": {
     "*": {
       "postgres": [
-        "./build/cjs/postgres/index.d.ts"
+        "./build/esm/postgres/index.d.ts"
       ]
     }
   },

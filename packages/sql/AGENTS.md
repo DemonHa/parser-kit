@@ -16,9 +16,12 @@ internals and grammar-authoring gotchas.
   (`@parser-kit/sql`) and re-exports every dialect.
 - `src/postgres/` — the PostgreSQL dialect: `lexer.ts` (tokens, folding,
   strings, psql script lexers), `grammar.ts` (AST types, reserved words, the
-  Pratt table, one rule per statement, the two root grammars) and `index.ts`
-  (the `postgres` object and its public types; the `@parser-kit/sql/postgres`
-  subpath export).
+  Pratt table, one rule per statement, the two root grammars), `ast.ts` (the
+  explicit type-only list of public AST types; `entry.test.ts` keeps it in step
+  with `grammar.ts`) and `index.ts` (the `postgres` object and its public
+  types; the `@parser-kit/sql/postgres` subpath export). The root `index.ts`
+  exposes each dialect's AST types as a namespace (`Postgres.Stmt`) so that
+  dialects' same-named types don't collide.
 - `test/` — unit tests (`postgres.test.ts`), the entry-surface pin
   (`entry.test.ts`), the parity harness and its goldens, the PostgreSQL coverage
   battery (`pg-coverage.ts`) and the pg_dump corpus (`pg-dump-corpus.ts`,

@@ -102,9 +102,10 @@ node cjs.cjs
 # The declarations, AST types included, must resolve for a TypeScript consumer
 # from both an ES module and a CommonJS one, through the root and the subpath.
 cat > consumer.mts <<'TS'
-import { type ScriptItem, type Stmt, postgres } from "@parser-kit/sql";
+import { type Postgres, postgres } from "@parser-kit/sql";
 import * as pg from "@parser-kit/sql/postgres";
-const stmts: Stmt[] = postgres.parse("SELECT 1");
+type ScriptItem = pg.ScriptItem;
+const stmts: Postgres.Stmt[] = postgres.parse("SELECT 1");
 const items: ScriptItem[] = pg.postgres.parseScript("SELECT 1");
 const tokens: pg.PostgresTokenType[] = ["ident"];
 export const all: ScriptItem[] = [...stmts, ...items, ...pg.postgres.diagnose("x").ast];
@@ -113,7 +114,7 @@ TS
 cat > consumer.cts <<'TS'
 import sql = require("@parser-kit/sql");
 import pg = require("@parser-kit/sql/postgres");
-const stmts: sql.Stmt[] = sql.postgres.parse("SELECT 1");
+const stmts: sql.Postgres.Stmt[] = sql.postgres.parse("SELECT 1");
 export const items: pg.ScriptItem[] = [...stmts, ...pg.postgres.diagnoseScript("x").ast];
 TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \

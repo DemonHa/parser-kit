@@ -1,6 +1,6 @@
 import { createInputStream, ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
-import { postgres, type Stmt } from "../src/index";
+import { postgres, type Stmt } from "../src/postgres/index";
 // The parse lexers are grammar plumbing, not public API: tested from source.
 import { sqlParseLexer, sqlScriptParseLexer } from "../src/postgres/lexer";
 

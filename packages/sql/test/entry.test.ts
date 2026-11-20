@@ -1,16 +1,9 @@
+import { readFileSync } from "node:fs";
 import { createInputStream, type Lexer, ParseError } from "@parser-kit/core";
 import { describe, expect, expectTypeOf, it } from "vitest";
-import type {
-  Expr,
-  PostgresDiagnosis,
-  PostgresDialect,
-  PostgresTokenType,
-  PsqlMeta,
-  Query,
-  ScriptItem,
-  Stmt,
-} from "../src/index";
+import type * as RootTypes from "../src/index";
 import * as entry from "../src/index";
+import type * as PostgresTypes from "../src/postgres/index";
 import * as postgresEntry from "../src/postgres/index";
 
 // The package's public surface: `src/index.ts` is what `@parser-kit/sql`
@@ -25,7 +18,7 @@ it("exports one object per dialect and nothing else", () => {
 });
 
 describe("postgres", () => {
-  const { postgres } = entry;
+  const { postgres } = postgresEntry;
 
   it("has the dialect methods and lexers, and is frozen", () => {
     expect(Object.keys(postgres).sort()).toEqual([
@@ -68,7 +61,7 @@ describe("postgres", () => {
   });
 
   it("tokenizes with comments kept, and psql lines in scriptLexer only", () => {
-    const types = (lexer: Lexer<PostgresTokenType>, text: string) => {
+    const types = (lexer: Lexer<PostgresTypes.PostgresTokenType>, text: string) => {
       const stream = lexer.tokenize(createInputStream(text));
       const out: string[] = [];
       for (let token = stream.next(); token !== null; token = stream.next()) out.push(token.type);
@@ -80,17 +73,48 @@ describe("postgres", () => {
   });
 });
 
+// `src/postgres/ast.ts` lists the AST types explicitly, so the grammar's values
+// stay out of the public types. Every type `grammar.ts` exports must be on it.
+it("re-exports every AST type the grammar declares", () => {
+  const exportedTypes = (file: string) =>
+    [...readFileSync(new URL(file, import.meta.url), "utf8").matchAll(/^export type (\w+)/gm)].map((m) => m[1]);
+  const listed = (file: string) => {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    const block = /export type \{([^}]*)\} from "\.\/grammar"/.exec(source)?.[1] ?? "";
+    return block
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+  };
+  expect(listed("../src/postgres/ast.ts").sort()).toEqual(exportedTypes("../src/postgres/grammar.ts").sort());
+});
+
 it("types the results with the AST types", () => {
-  expectTypeOf(entry.postgres).toEqualTypeOf<PostgresDialect>();
-  expectTypeOf(entry.postgres.parse).returns.toEqualTypeOf<Stmt[]>();
-  expectTypeOf(entry.postgres.diagnose).returns.toEqualTypeOf<PostgresDiagnosis<Stmt[]>>();
-  expectTypeOf(entry.postgres.diagnose).returns.toEqualTypeOf<{ ast: Stmt[]; errors: ParseError[] }>();
-  expectTypeOf(entry.postgres.parseScript).returns.toEqualTypeOf<ScriptItem[]>();
-  expectTypeOf(entry.postgres.diagnoseScript).returns.toEqualTypeOf<{ ast: ScriptItem[]; errors: ParseError[] }>();
-  expectTypeOf(entry.postgres.lexer).toEqualTypeOf<Lexer<PostgresTokenType>>();
-  expectTypeOf<PsqlMeta>().toMatchTypeOf<ScriptItem>();
-  expectTypeOf<Extract<Stmt, { kind: "select" }>>().toMatchTypeOf<Query>();
-  expectTypeOf<Extract<Expr, { kind: "number" }>["value"]>().toEqualTypeOf<number>();
-  expectTypeOf<"ident">().toMatchTypeOf<PostgresTokenType>();
-  expectTypeOf<postgresEntry.Stmt>().toEqualTypeOf<Stmt>();
+  type Stmt = PostgresTypes.Stmt;
+  type ScriptItem = PostgresTypes.ScriptItem;
+  const { postgres } = postgresEntry;
+  expectTypeOf(postgres).toEqualTypeOf<PostgresTypes.PostgresDialect>();
+  expectTypeOf(postgres.parse).returns.toEqualTypeOf<Stmt[]>();
+  expectTypeOf(postgres.diagnose).returns.toEqualTypeOf<PostgresTypes.Diagnosis<Stmt[]>>();
+  expectTypeOf(postgres.diagnose).returns.toEqualTypeOf<{ ast: Stmt[]; errors: ParseError[] }>();
+  expectTypeOf(postgres.parseScript).returns.toEqualTypeOf<ScriptItem[]>();
+  expectTypeOf(postgres.diagnoseScript).returns.toEqualTypeOf<{ ast: ScriptItem[]; errors: ParseError[] }>();
+  expectTypeOf(postgres.lexer).toEqualTypeOf<Lexer<PostgresTypes.PostgresTokenType>>();
+  expectTypeOf<PostgresTypes.PsqlMeta>().toMatchTypeOf<ScriptItem>();
+  expectTypeOf<Extract<Stmt, { kind: "select" }>>().toMatchTypeOf<PostgresTypes.Query>();
+  expectTypeOf<Extract<PostgresTypes.Expr, { kind: "number" }>["value"]>().toEqualTypeOf<number>();
+  expectTypeOf<"ident">().toMatchTypeOf<PostgresTypes.PostgresTokenType>();
+});
+
+it("namespaces the AST types at the root and keeps the grammars private", () => {
+  expectTypeOf(entry.postgres).toEqualTypeOf<RootTypes.PostgresDialect>();
+  expectTypeOf<RootTypes.Postgres.Stmt>().toEqualTypeOf<PostgresTypes.Stmt>();
+  expectTypeOf<RootTypes.Diagnosis<number>>().toEqualTypeOf<PostgresTypes.Diagnosis<number>>();
+  // A second dialect's `Stmt` would collide with an unqualified one at the root.
+  // @ts-expect-error -- the root has no unqualified AST types
+  expectTypeOf<RootTypes.Stmt>();
+  // @ts-expect-error -- the root grammars are not public, not even as types
+  expectTypeOf<typeof PostgresTypes.postgresGrammar>();
+  // @ts-expect-error -- the lexer plumbing is not public
+  expectTypeOf<typeof PostgresTypes.routineDepth>();
 });

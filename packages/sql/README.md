@@ -31,17 +31,19 @@ Each dialect is one object. PostgreSQL's is `postgres`:
 | `postgres.diagnoseScript(text)` | the same, recovering at each `;` and meta-command line | `{ ast: ScriptItem[], errors: ParseError[] }` |
 | `postgres.lexer` / `postgres.scriptLexer` | tokens, comments included, for highlighters | a `Lexer<PostgresTokenType>` from `@parser-kit/core` |
 
-Import it from the package root, or from the dialect's own subpath, which keeps a bundle to that one dialect once there are several:
+`Diagnosis<T>` is `{ ast: T, errors: ParseError[] }`, the same for every dialect.
+
+Import it from the dialect's own subpath, which also exports the AST types unqualified and keeps a bundle to that one dialect once there are several, or from the package root:
 
 ```ts
-import { postgres } from "@parser-kit/sql";
-// or: import { postgres } from "@parser-kit/sql/postgres";
+import { postgres, type Stmt } from "@parser-kit/sql/postgres";
+// or: import { postgres, type Postgres } from "@parser-kit/sql"; // Postgres.Stmt
 
 const ast = postgres.parse("SELECT id, count(DISTINCT tag) FROM posts WHERE created_at > now() - interval '7 days' GROUP BY id");
 // → Stmt[]: one node per statement, statements and expressions carrying a { start, end } span
 ```
 
-The root is a list of statements. `;` separates them, and the last one may leave it out. Empty statements (`;;`, a leading `;`, input that is only comments) produce no node, and `SELECT 1 SELECT 2` is still an error. Unquoted identifiers fold ASCII letters to lower case, as PostgreSQL does, and quoted ones keep their case. Keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is, and they are not kept in the AST. The node types are exported from both entry points (`Stmt`, `Query`, `Expr`, `ScriptItem`, …), as are `PostgresDialect`, `PostgresDiagnosis` and the token type `PostgresTokenType`. The methods don't use `this`, so `const { parse } = postgres` and `sources.map(postgres.parse)` work.
+The root is a list of statements. `;` separates them, and the last one may leave it out. Empty statements (`;;`, a leading `;`, input that is only comments) produce no node, and `SELECT 1 SELECT 2` is still an error. Unquoted identifiers fold ASCII letters to lower case, as PostgreSQL does, and quoted ones keep their case. Keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is, and they are not kept in the AST. The node types (`Stmt`, `Query`, `Expr`, `ScriptItem`, …) are exported unqualified from `@parser-kit/sql/postgres`, and from the root as the `Postgres` namespace (`Postgres.Stmt`), since every dialect will have its own `Stmt`. `PostgresDialect`, `PostgresTokenType` (the token type) and `Diagnosis` come from both. The methods don't use `this`, so `const { parse } = postgres` and `sources.map(postgres.parse)` work.
 
 `parse` throws a `ParseError` (exported by `@parser-kit/core`) at the first problem:
 
@@ -94,10 +96,12 @@ The package lives at [`packages/sql`](https://github.com/DemonHa/parser-kit/tree
 
 | File | What it is |
 |---|---|
-| `src/postgres/lexer.ts` | Tokens: identifier folding (ASCII only, non-ASCII letters allowed), quoted and `U&"…"` identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` / `N'…'` strings with every escape PostgreSQL decodes, PostgreSQL numbers (`1e5`, `.5`, `5.`, `0xff`, `0o17`, `0b101`, `1_000`, with PostgreSQL 15+'s rejection of `123abc`), `$1` parameters, comments, and the operator reader. `sqlLexer` (`postgres.lexer`) emits `comment` tokens. `sqlParseLexer`, which the grammar uses, drops them. `sqlScriptLexer` (`postgres.scriptLexer`) / `sqlScriptParseLexer` add psql meta-command lines and COPY data blocks |
+| `src/postgres/lexer.ts` | Tokens: identifier folding (ASCII only, non-ASCII letters allowed), quoted and `U&"…"` identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` / `N'…'` strings with every escape PostgreSQL decodes, PostgreSQL numbers (`1e5`, `.5`, `5.`, `0xff`, `0o17`, `0b101`, `1_000`, with PostgreSQL 15+'s rejection of `123abc`), `$1` parameters, comments, and the operator reader. `sqlLexer` (public as `postgres.lexer`) emits `comment` tokens. The internal `sqlParseLexer`, which the grammar uses, drops them. `sqlScriptLexer` (public as `postgres.scriptLexer`) and the internal `sqlScriptParseLexer` add psql meta-command lines and COPY data blocks |
 | `src/postgres/grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, one rule per statement, and the two root grammars (SQL and psql scripts) |
+| `src/postgres/ast.ts` | The public AST types: an explicit, type-only list of `grammar.ts`'s exported types |
 | `src/postgres/index.ts` | The `postgres` dialect object and its public types: the `@parser-kit/sql/postgres` entry |
-| `src/index.ts` | The package root, `@parser-kit/sql`: re-exports every dialect |
+| `src/dialect.ts` | Types every dialect shares (`Diagnosis`) |
+| `src/index.ts` | The package root, `@parser-kit/sql`: every dialect object, with each dialect's AST types as a namespace (`Postgres`) |
 | `test/postgres.test.ts` | Unit tests, one `describe` per feature |
 | `test/entry.test.ts` | Pins both entries' exports and the `postgres` object's shape |
 | `test/psql-split.ts` | A test helper that splits a dump file into statements the way psql does |
@@ -444,7 +448,7 @@ These breaks landed while the grammar was the unpublished `examples/sql-lite` ex
 - `anyAll.op` can be `like`, `ilike`, `not like` or `not ilike`. `unary`, `binary` and `anyAll` can carry `opSchema`.
 - The script parser (now `postgres.parseScript`) returns `ScriptItem[]`, not `Stmt[]`.
 
-**Entry points.** The example's `sqlLite` and `sqlLiteScript` grammars are now the `postgres` dialect object: `sqlLite.parse` / `.diagnose` are `postgres.parse` / `.diagnose`, and `sqlLiteScript.parse` / `.diagnose` are `postgres.parseScript` / `.diagnoseScript`. The grammars' `parseValue` is not exposed. `sqlLexer` and `sqlScriptLexer` are `postgres.lexer` and `postgres.scriptLexer`, and `SqlTokenType` is `PostgresTokenType`. `sqlParseLexer`, `sqlScriptParseLexer`, `copyDataError` and `routineDepth` are no longer exported.
+**Entry points.** The example's `sqlLite` and `sqlLiteScript` grammars are now the `postgres` dialect object: `sqlLite.parse` / `.diagnose` are `postgres.parse` / `.diagnose`, and `sqlLiteScript.parse` / `.diagnose` are `postgres.parseScript` / `.diagnoseScript`. The grammars' `parseValue` is not exposed. `sqlLexer` and `sqlScriptLexer` are `postgres.lexer` and `postgres.scriptLexer`, and `SqlTokenType` is `PostgresTokenType`. The AST types come unqualified from `@parser-kit/sql/postgres`, or as `Postgres.*` from the root. `sqlParseLexer`, `sqlScriptParseLexer`, `copyDataError` and `routineDepth` are no longer exported.
 
 ## Benchmarks
 
@@ -500,7 +504,7 @@ pnpm bench:compare                                                       # diff 
 pnpm bench:save                                                          # re-record bench-baseline.json
 ```
 
-The committed `bench-baseline.json` covers every bench file: the per-construct corpus, the large files, the pagila dump and the workloads. It was re-recorded on the same kind of machine when the bench files were renamed for the `postgres` API (the ratios matched the tables above within run-to-run noise), so `bench:compare` shows a delta for every group. Benchmarks don't run in CI.
+The committed `bench-baseline.json` covers every bench file: the per-construct corpus, the large files, the pagila dump and the workloads. It was recorded in the same run as the tables above (its keys were renamed, not re-measured, when the bench files took the `postgres` name), so `bench:compare` shows a delta for every group. Benchmarks don't run in CI.
 
 ## Contributing
 
