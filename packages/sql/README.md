@@ -500,7 +500,7 @@ pnpm bench:compare                                                       # diff 
 pnpm bench:save                                                          # re-record bench-baseline.json
 ```
 
-The committed `bench-baseline.json` covers every bench file: the per-construct corpus, the large files, the pagila dump and the workloads. It was recorded in the same run as the tables above, so `bench:compare` shows a delta for every group. Benchmarks don't run in CI.
+The committed `bench-baseline.json` covers every bench file: the per-construct corpus, the large files, the pagila dump and the workloads. It was re-recorded on the same kind of machine when the bench files were renamed for the `postgres` API (the ratios matched the tables above within run-to-run noise), so `bench:compare` shows a delta for every group. Benchmarks don't run in CI.
 
 ## Contributing
 
