@@ -26,7 +26,8 @@ export interface StringifyOptions {
   identifierQuote?: "minimal" | "always";
   /**
    * The `;` after statements, when printing statements: after every one
-   * (`"always"`, default), only between them (`"between"`), or none.
+   * (`"always"`, default), only between them (`"between"`), or none (`"never"`;
+   * several statements printed so no longer parse back as one text).
    */
   semicolons?: "always" | "between" | "never";
   /**

@@ -101,7 +101,7 @@ The output is canonical. Keyword case, quoting, spacing, parentheses and keyword
 | `indent` | `2` | One level of indentation when the output breaks: a number of spaces or a string (`"\t"`). |
 | `keywordCase` | `"upper"` | `"upper"` or `"lower"`. Names are never re-cased. |
 | `identifierQuote` | `"minimal"` | `"minimal"` quotes a name only when it must be (not a lower-case word, or a reserved one). `"always"` quotes every table, column and alias name; function and type names stay minimal, since quoting one can change it (`int` is `int4`, `"int"` is looked up as written). |
-| `semicolons` | `"always"` | When printing statements: `;` after every one, only `"between"` them, or `"never"`. |
+| `semicolons` | `"always"` | When printing statements: `;` after every one, only `"between"` them, or `"never"` (several statements then don't parse back as one text). |
 | `strings` | `"standard"` | `"standard"` writes every string as `'…'` (`'` doubled), which is how a server with `standard_conforming_strings = on`, the default since PostgreSQL 9.1, reads it. `"escape"` writes one holding a backslash or a control character as `E'…'`, which every server reads the same way. |
 
 The options type is `StringifyOptions`, exported from `@parser-kit/sql/postgres`, as are `StringifyInput` (what `stringify` takes) and `NotPrintableError`.
@@ -146,7 +146,7 @@ psql counts every bare `begin` in a `CREATE FUNCTION` / `CREATE PROCEDURE` as op
 
 ### What is guaranteed
 
-For every tree `postgres.parse` or `postgres.parseScript` returns, printing it and parsing the result gives the same tree back, spans aside, at any width and with any options. Printing is also stable: printing the reparsed tree gives the same text. The tests check both over every statement the package's test corpora hold, about 2,300 of them including two pg_dump files, at widths `Infinity`, 80, 40 and 1 and with every non-default option.
+For every tree `postgres.parse` or `postgres.parseScript` returns, printing it and parsing the result gives the same tree back, spans aside, at any width and with any options (with `semicolons: "never"`, one statement at a time). Printing is also stable: printing the reparsed tree gives the same text. The tests check both over every statement the package's test corpora hold, about 2,300 of them including two pg_dump files, at widths `Infinity`, 80, 40 and 1 and with every non-default option.
 
 The same tree is not the same meaning if both spellings parse to one tree, so the output is also checked against PostgreSQL 17's own parser ([libpg_query](https://github.com/pganalyze/libpg_query)): for those statements, PostgreSQL reads the printed SQL to the same parse tree as the original, apart from a few listed differences, which come from the limits below.
 
