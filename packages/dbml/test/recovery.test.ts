@@ -480,6 +480,45 @@ describe("Cascading errors", () => {
     expect(outline(ref.elements)).toEqual(["ref a > b", "table c: f"]);
   });
 
+  it("finds the } of a multi-line block note written in '…'", () => {
+    const { elements, errors } = diagnose(
+      "Table users {\n  id int\n  Note {\n    'Stores users.\n    Deleted rows are kept.'\n  }\n  name text\n}\nTable b {\n  q\n}\n",
+    );
+    expect(errors).toEqual([
+      { msg: "Unterminated string", start: at(4, 4) },
+      { msg: "Unterminated string", start: at(5, 26) },
+      { msg: "Expected a column type but found a new line", start: at(10, 3) },
+    ]);
+    expect(outline(elements)).toEqual(["table users: id name", "table b: "]);
+    for (const text of [
+      "Note n {\n  'unclosed\n}\nTable b { f int }\n",
+      "Project p {\n  Note {\n    'x\n  }\n}\nTable b { f int }\n",
+    ]) {
+      const { elements: others, errors: theirs } = diagnose(text);
+      expect(theirs).toHaveLength(1);
+      expect(outline(others).at(-1)).toBe("table b: f");
+    }
+  });
+
+  it("still reports a missing } after a lexer error that took no } with it", () => {
+    for (const [line, error] of [
+      ["id int $", { msg: 'Unexpected character "$"', start: at(2, 9) }],
+      ["id int [note: 'x]", { msg: "Unterminated string", start: at(2, 16) }],
+    ] as const) {
+      const { errors } = diagnose(`Table a {\n  ${line}\n  name text\nTable b {\n  x int\n}\n`);
+      expect(errors).toEqual([
+        error,
+        { msg: 'Expected "pk", "unique", "[", a new line or "}" but found "{"', start: at(4, 8) },
+        { msg: 'Expected "}" but found end of input', start: at(7, 0) },
+      ]);
+    }
+    const ref = diagnose("Ref r {\n  a.b > c.d [note: 'x]\n  e.f > g.h\n}\n");
+    expect(ref.errors).toEqual([
+      { msg: "Unterminated string", start: at(2, 19) },
+      { msg: 'Expected "}" but found "e"', start: at(3, 2) },
+    ]);
+  });
+
   it("ends a body whose } a string left open outside a list swallowed", () => {
     const { elements, errors } = diagnose("Table a { Note: 'x }\nTable b { f int }\n");
     expect(errors).toEqual([{ msg: "Unterminated string", start: at(1, 16) }]);
@@ -487,10 +526,12 @@ describe("Cascading errors", () => {
   });
 
   it("reads the rows of a records block in a table whose { such a string swallowed", () => {
-    for (const header of ['records (id, "x) {', "records [note: 'x] {"]) {
+    for (const [header, error] of [
+      ['records (id, "x) {', { msg: "Unterminated quoted identifier", start: at(3, 15) }],
+      ["records [note: 'x] {", { msg: "Unterminated string", start: at(3, 17) }],
+    ] as const) {
       const { elements, errors } = diagnose(`Table t {\n  id int\n  ${header}\n    1\n  }\n  e int\n}\n`);
-      expect(errors).toHaveLength(1);
-      expect(errors[0]!.msg).toMatch(/^Unterminated /);
+      expect(errors).toEqual([error]);
       expect(outline(elements)).toEqual(["table t: id records e"]);
     }
   });

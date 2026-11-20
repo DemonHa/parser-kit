@@ -29,6 +29,8 @@ interface RecoveryState {
   exhausted: boolean;
   /** Where the last recorded lexer error starts. */
   lexer: Position | null;
+  /** Where the last recorded lexer error that swallowed the rest of its line (`Unterminated …`) starts. */
+  swallowed: Position | null;
 }
 
 const states = new WeakMap<Ctx, RecoveryState>();
@@ -36,7 +38,7 @@ const states = new WeakMap<Ctx, RecoveryState>();
 const stateOf = (ctx: Ctx): RecoveryState => {
   let state = states.get(ctx);
   if (state === undefined) {
-    state = { reported: new WeakSet(), last: null, exhausted: false, lexer: null };
+    state = { reported: new WeakSet(), last: null, exhausted: false, lexer: null, swallowed: null };
     states.set(ctx, state);
   }
   return state;
@@ -79,6 +81,7 @@ export const report = (ctx: Ctx, error: unknown): boolean => {
   state.reported.add(error);
   state.last = error.start;
   if (error.fromLexer) state.lexer = error.start;
+  if (error.fromLexer && error.msg.startsWith("Unterminated ")) state.swallowed = error.start;
   return true;
 };
 
@@ -111,35 +114,39 @@ export const registerElementStart = (test: ElementStart): void => {
   startsElement = test;
 };
 
-// A lexer error recorded since `open` (a construct's `{`): an unterminated
-// string or the like, which may have swallowed the construct's `}`.
-const lexerErrorSince = (ctx: Ctx, open: Position): Position | null => {
-  const lexer = states.get(ctx)?.lexer ?? null;
-  return lexer !== null && notBefore(lexer, open) ? lexer : null;
+// Where a lexer error that swallowed the rest of its line (an unterminated
+// string or the like) starts, if one was recorded since `open` (a construct's
+// `{`): it may have taken the construct's `}` with it.
+const swallowedSince = (ctx: Ctx, open: Position): Position | null => {
+  const swallowed = states.get(ctx)?.swallowed ?? null;
+  return swallowed !== null && notBefore(swallowed, open) ? swallowed : null;
 };
 
 /**
  * True when the `}` of a construct opened at `open` is likely gone: a lexer
- * error since then ran to its line's end (an unterminated string swallows
- * the rest of its line), and the cursor is on a later line. The construct
- * then ends where it stands, with no error of its own.
+ * error since then swallowed the rest of its line, nothing was read after it
+ * (no item started at or after it: `itemStart` is where the last one did),
+ * and the cursor is at the end of the input or on a later line that starts an
+ * element. The construct then ends where it stands, with no error of its own.
  */
-export const closeSwallowed = (ctx: Ctx, open: Position): boolean => {
-  const lexer = lexerErrorSince(ctx, open);
-  if (lexer === null) return false;
+export const closeSwallowed = (ctx: Ctx, open: Position, itemStart: Position | null = null): boolean => {
+  const swallowed = swallowedSince(ctx, open);
+  if (swallowed === null || (itemStart !== null && notBefore(itemStart, swallowed))) return false;
   const token = ctx.peek();
-  return token === null || token.position.start.row > lexer.row;
+  return token === null || (token.position.start.row > swallowed.row && startsElement(ctx, token));
 };
 
 /**
- * True when a body opened at `open` has to end at this line: its `}` is likely
- * gone (`afterRestoredBreak`: a string left open in a `[ … ]` took it; or see
- * `closeSwallowed`), and the line starts an element.
+ * True when a body opened at `open` has to end before this line, which starts
+ * an element: see `closeSwallowed`, or (`openSwallowed`, see
+ * `readHeaderSettings`) the header's `{` went the same way and no item has been
+ * read yet.
  */
-export const bodyCutShort = (ctx: Ctx, afterRestoredBreak: boolean, open: Position): boolean => {
+export const bodyCutShort = (ctx: Ctx, open: Position, itemStart: Position | null, openSwallowed: boolean): boolean => {
   const token = ctx.peek();
-  if (token === null || !(afterRestoredBreak || closeSwallowed(ctx, open))) return false;
-  return startsElement(ctx, token);
+  if (token === null) return false;
+  if (openSwallowed && itemStart === null && startsElement(ctx, token)) return true;
+  return closeSwallowed(ctx, open, itemStart);
 };
 
 /**
@@ -181,13 +188,27 @@ export const skipSetting = (ctx: Ctx, close: "]" | ")" = "]"): "," | "]" | ")" |
 /**
  * Skip to just past the `}` closing a `{ … }` whose `{` (at `open`) is
  * already consumed, stepping over nested braces, or to the end of the input.
- * After a lexer error inside it, which may have swallowed that `}` with the
- * rest of its line, the skip stops at the line's end instead (not consumed).
+ * At the end of a line where a lexer error inside it swallowed the rest, and
+ * so possibly that `}`, the skip stops instead (the line break not consumed).
+ * With `ownLine` (a block whose `{` ended its line, so its `}` likely has a
+ * line of its own) it goes on to a line that opens with `}` and consumes that,
+ * but stops before a line that starts an element.
  */
-export const skipPastClose = (ctx: Ctx, open: Position): void => {
+export const skipPastClose = (ctx: Ctx, open: Position, ownLine = false): void => {
   let depth = 0;
+  let lineStart = false;
   for (let token = peekReporting(ctx); token !== null; token = peekReporting(ctx)) {
-    if (depth === 0 && isPunc(token, "\n") && lexerErrorSince(ctx, open) !== null) return;
+    if (depth === 0 && lineStart && ownLine && swallowedSince(ctx, open) !== null) {
+      if (isPunc(token, "}")) {
+        ctx.next();
+        return;
+      }
+      if (startsElement(ctx, token)) return;
+    }
+    if (depth === 0 && isPunc(token, "\n") && !ownLine && swallowedSince(ctx, open)?.row === token.position.start.row) {
+      return;
+    }
+    lineStart = isPunc(token, "\n");
     ctx.next();
     if (isPunc(token, "{")) depth++;
     else if (isPunc(token, "}") && depth-- === 0) return;

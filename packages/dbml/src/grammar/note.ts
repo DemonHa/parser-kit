@@ -7,6 +7,7 @@ import {
   expectSpace,
   fail,
   type Ident,
+  isNewline,
   isPunc,
   isWord,
   lookAhead,
@@ -40,7 +41,11 @@ export interface Note {
  */
 const readNoteBody = (ctx: Ctx, open: Position): StringValue => {
   let value: StringValue | null = null;
+  // `Note {⏎ '…'⏎ }`: the `}` likely has a line of its own, even when a string
+  // left open (a multi-line note in `'…'` rather than `'''…'''`) swallowed the rest.
+  let ownLine = false;
   try {
+    ownLine = isNewline(ctx.peek());
     skipNewlines(ctx);
     value = readNoteString(ctx);
     skipNewlines(ctx);
@@ -48,7 +53,7 @@ const readNoteBody = (ctx: Ctx, open: Position): StringValue => {
     expectPunc(ctx, "}");
   } catch (error) {
     if (!report(ctx, error)) throw error;
-    skipPastClose(ctx, open);
+    skipPastClose(ctx, open, ownLine);
     if (value === null) throw error;
   }
   return value;

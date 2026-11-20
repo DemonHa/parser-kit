@@ -574,19 +574,18 @@ export const readBody = <T>(ctx: Ctx, item: (ctx: Ctx) => T, openSwallowed = fal
   const open = ctx.position();
   if (!openSwallowed) expectPunc(ctx, "{");
   const items: T[] = [];
-  // A swallowed `{` came with a restored break, which the header read past.
-  let restored = openSwallowed;
+  // Where the last item started.
+  let itemStart: Position | null = null;
   for (;;) {
     try {
-      restored ||= isRestoredBreak(ctx.peek());
       skipNewlines(ctx);
       if (isPunc(ctx.peek(), "}")) {
         ctx.next();
         return items;
       }
       if (ctx.eof()) fail(ctx, '"}"');
-      if (bodyCutShort(ctx, restored, open)) return items;
-      restored = false;
+      if (bodyCutShort(ctx, open, itemStart, openSwallowed)) return items;
+      itemStart = ctx.position();
       items.push(item(ctx));
       if (!atLineEnd(ctx)) fail(ctx, 'a new line or "}"');
     } catch (error) {
