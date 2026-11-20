@@ -5730,7 +5730,7 @@
   },
   {
     "name": "bare pk and unique after the type",
-    "source": "Table t {\n  id int pk\n  code text unique\n}\n",
+    "source": "Table t {\n  id int pk\n  code text unique\n  ref_id int pk unique [note: 'both']\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -5929,6 +5929,130 @@
                   "col": 18
                 }
               }
+            },
+            {
+              "type": "column",
+              "name": {
+                "value": "ref_id",
+                "span": {
+                  "start": {
+                    "row": 4,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 4,
+                    "col": 8
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 4,
+                        "col": 9
+                      },
+                      "end": {
+                        "row": 4,
+                        "col": 12
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 4,
+                      "col": 9
+                    },
+                    "end": {
+                      "row": 4,
+                      "col": 12
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 4,
+                    "col": 9
+                  },
+                  "end": {
+                    "row": 4,
+                    "col": 12
+                  }
+                }
+              },
+              "settings": [
+                {
+                  "kind": "pk",
+                  "spelling": "pk",
+                  "bare": true,
+                  "span": {
+                    "start": {
+                      "row": 4,
+                      "col": 13
+                    },
+                    "end": {
+                      "row": 4,
+                      "col": 15
+                    }
+                  }
+                },
+                {
+                  "kind": "unique",
+                  "bare": true,
+                  "span": {
+                    "start": {
+                      "row": 4,
+                      "col": 16
+                    },
+                    "end": {
+                      "row": 4,
+                      "col": 22
+                    }
+                  }
+                },
+                {
+                  "kind": "note",
+                  "value": {
+                    "kind": "string",
+                    "value": "both",
+                    "span": {
+                      "start": {
+                        "row": 4,
+                        "col": 30
+                      },
+                      "end": {
+                        "row": 4,
+                        "col": 36
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 4,
+                      "col": 24
+                    },
+                    "end": {
+                      "row": 4,
+                      "col": 36
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 4,
+                  "col": 2
+                },
+                "end": {
+                  "row": 4,
+                  "col": 37
+                }
+              }
             }
           ],
           "span": {
@@ -5937,7 +6061,7 @@
               "col": 0
             },
             "end": {
-              "row": 4,
+              "row": 5,
               "col": 1
             }
           }
@@ -5949,7 +6073,7 @@
           "col": 0
         },
         "end": {
-          "row": 4,
+          "row": 5,
           "col": 1
         }
       }

@@ -172,7 +172,7 @@ Table users {
   {
     category: "column-settings",
     name: "bare pk and unique after the type",
-    dbml: "Table t {\n  id int pk\n  code text unique\n}\n",
+    dbml: "Table t {\n  id int pk\n  code text unique\n  ref_id int pk unique [note: 'both']\n}\n",
   },
   {
     category: "column-settings",
