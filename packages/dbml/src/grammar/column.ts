@@ -88,7 +88,8 @@ const readDataType = (ctx: Ctx): DataType => {
     ctx.next();
   }
   // `[]` or `[3]` touching the type is an array suffix; `int []` is an empty
-  // settings list. As in `@dbml/core`, so is a `[` opening a later line right
+  // settings list, and so is a `[` after a glued block comment, which the
+  // parse stream has dropped (`@dbml/core` reads a suffix there). As in `@dbml/core`, so is a `[` opening a later line right
   // after the type (`int⏎[]`).
   const arraySizes: (NumberValue | null)[] = [];
   for (;;) {

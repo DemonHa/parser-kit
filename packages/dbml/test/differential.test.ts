@@ -368,6 +368,12 @@ interface KnownDifference {
    */
   ours: "rejects" | "accepts" | "differs";
   documents: string[];
+  /**
+   * For `differs`: the type of the document's first column as each parser
+   * reads it (`[ours, core]`), one pair per document, so the entry checks
+   * the difference itself rather than any difference.
+   */
+  readings?: [string, string][];
   /** `MALFORMED` entries that show it: `@dbml/core`'s parser takes them. */
   malformed?: string[];
   /** Mutants (see `mutants` below) that show it, by id. */
@@ -423,8 +429,8 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
   {
     reason:
       "The parse stream drops comments and `\\r` before the grammar sees them, so a comment counts as a " +
-      "space between glued tokens (`id/**/int`), a `\\r` as a space before a header's settings, and a comment " +
-      "or `\\r\\n` ends the line before an index's later-line `[`.",
+      "space between glued tokens (`id/**/int`; `text/* c */[pk]` is a type and a settings list), a `\\r` as a " +
+      "space before a header's settings, and a comment or `\\r\\n` ends the line before an index's later-line `[`.",
     ours: "accepts",
     documents: [
       "Table t {\n  id/**/int\n}\n",
@@ -432,14 +438,37 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
       "Table t {\n  id int\n  name int\n  indexes {\n    id/**/name\n  }\n}\n",
       "Table t {\n  id int\n  indexes {\n    (id)// c\n    [unique]\n  }\n}\n",
       "Table t {\n  v text/* c */[pk]\n}\n",
+      "Table t {\n  id int\n  indexes {\n    (id)/* c */[unique]\n  }\n}\n",
     ],
   },
   {
     reason:
-      "The same: a block comment between a column type and a glued `[` (`text/* c */[]`) makes the `[` a " +
-      "settings list here, where `@dbml/core` reads an array suffix (`text[]`).",
+      "The same: a block comment between a column type or an index column and a glued `[` makes the `[` a " +
+      "settings list here, where `@dbml/core` reads an array suffix or a sort order (`text/* c */[3]`, " +
+      "`id/* c */[desc]`).",
+    ours: "rejects",
+    documents: [
+      "Table t {\n  v text/* c */[3]\n}\n",
+      "Table t {\n  id int\n  indexes {\n    id/* c */[desc]\n  }\n}\n",
+    ],
+  },
+  {
+    reason:
+      "The same, where both parsers accept: `text/* c */[]` is a type and an empty settings list here, and the " +
+      "array type `text[]` in `@dbml/core`.",
     ours: "differs",
-    documents: ["Table t {\n  v text/* c */[]\n}\n", "Table t {\n  v text[]/* c */[]\n}\n"],
+    documents: [
+      "Table t {\n  v text/* c */[]\n}\n",
+      "Table t {\n  v text[]/* c */[]\n}\n",
+      "Table t {\n  v int(1)/* c */[]\n}\n",
+      "Table t {\n  v text/* a\n  b */[]\n}\n",
+    ],
+    readings: [
+      ["text", "text[]"],
+      ["text[]", "text[][]"],
+      ["int(1)", "int(1)[]"],
+      ["text", "text[]"],
+    ],
   },
   {
     reason:
@@ -452,8 +481,6 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
       "Table t {\r\n  tags text\r\n  []\r\n}\r\n",
       "Table t {\n  tags text// c\n  []\n}\n",
       "Table t {\n  v int/* c */\n  [1]\n}\n",
-      "Table t {\n  v text/* c */[3]\n}\n",
-      "Table t {\n  id int\n  indexes {\n    id/* c */[desc]\n  }\n}\n",
     ],
   },
   {
@@ -573,12 +600,22 @@ describe("differential: MALFORMED is rejected by both parsers", () => {
 
 describe("differential: known differences still hold", () => {
   const cases = KNOWN_DIFFERENCES.flatMap((difference) =>
-    difference.documents.map((source) => [JSON.stringify(source), difference, source] as const),
+    difference.documents.map((source, index) => [JSON.stringify(source), difference, source, index] as const),
   );
 
-  it.each(cases)("%s", (_, difference: KnownDifference, source: string) => {
+  it("pins a reading per document of each `differs` entry", () => {
+    const unpinned = KNOWN_DIFFERENCES.filter(
+      (difference) => difference.ours === "differs" && difference.readings?.length !== difference.documents.length,
+    );
+    expect(unpinned).toEqual([]);
+  });
+
+  it.each(cases)("%s", (_, difference: KnownDifference, source: string, index: number) => {
     if (difference.ours === "differs") {
-      expect(canonical(projectDocument(dbml.parse(source)))).not.toEqual(canonical(coreProjection(source)));
+      const firstType = (doc: ProjectedDocument) => doc.tables[0]?.columns[0]?.type.name;
+      expect([firstType(projectDocument(dbml.parse(source))), firstType(coreProjection(source))]).toEqual(
+        difference.readings?.[index],
+      );
       return;
     }
     expect(accepts(source)).toBe(difference.ours === "accepts");
