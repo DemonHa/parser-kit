@@ -65,7 +65,7 @@ const tableFrom = (name: string[], alias: string | null = null) => ({ kind: "tab
 
 // --- lexer ---
 
-describe("SQL-lite lexer", () => {
+describe("PostgreSQL lexer", () => {
   it("folds unquoted identifiers and preserves quoted ones", () => {
     expect(lex('Select FROM "Users"')).toEqual([
       { type: "ident", value: "select" },
@@ -122,7 +122,7 @@ describe("SQL-lite lexer", () => {
 
 // --- comments inside statements ---
 
-describe("SQL-lite comments inside statements", () => {
+describe("PostgreSQL comments inside statements", () => {
   // Each input must parse to exactly the tree of the same text with its
   // comments removed: the grammar never sees them.
   const sameAs = (withComments: string, without: string) => expect(parse(withComments)).toEqual(parse(without));
@@ -238,7 +238,7 @@ describe("SQL-lite comments inside statements", () => {
 
 // --- statement separators ---
 
-describe("SQL-lite statement separators", () => {
+describe("PostgreSQL statement separators", () => {
   const one = sel({ columns: [col(num(1))] });
   const two = sel({ columns: [col(num(2))] });
 
@@ -356,7 +356,7 @@ describe("SQL-lite statement separators", () => {
 
 // --- statements ---
 
-describe("SQL-lite statements", () => {
+describe("PostgreSQL statements", () => {
   it("parses CREATE TABLE with column and table constraints", () => {
     const stmt = firstStmt(
       "CREATE TABLE users (\n" +
@@ -473,7 +473,7 @@ describe("SQL-lite statements", () => {
 
 // --- ALTER TABLE (peekAhead / phrase dispatch) ---
 
-describe("SQL-lite ALTER TABLE", () => {
+describe("PostgreSQL ALTER TABLE", () => {
   const action = (text: string) => {
     const { actions } = firstStmt(text) as any;
     expect(actions).toHaveLength(1);
@@ -524,7 +524,7 @@ describe("SQL-lite ALTER TABLE", () => {
 
 // --- Phase 6: richer ALTER TABLE actions ---
 
-describe("SQL-lite ALTER TABLE (Phase 6 actions)", () => {
+describe("PostgreSQL ALTER TABLE (Phase 6 actions)", () => {
   const action = (text: string) => {
     const { actions } = firstStmt(text) as any;
     expect(actions).toHaveLength(1);
@@ -609,7 +609,7 @@ describe("SQL-lite ALTER TABLE (Phase 6 actions)", () => {
 
 // --- ALTER TABLE action lists and IF [NOT] EXISTS ---
 
-describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
+describe("PostgreSQL ALTER TABLE action lists and IF [NOT] EXISTS", () => {
   const alter = (text: string) => firstStmt(text) as any;
   const addColumn = (name: string, ifNotExists = false) => ({
     kind: "addColumn",
@@ -726,7 +726,7 @@ describe("SQL-lite ALTER TABLE action lists and IF [NOT] EXISTS", () => {
 
 // --- ONLY on ALTER TABLE and CREATE INDEX ---
 
-describe("SQL-lite ONLY on ALTER TABLE and CREATE INDEX", () => {
+describe("PostgreSQL ONLY on ALTER TABLE and CREATE INDEX", () => {
   const addA = {
     kind: "addColumn",
     ifNotExists: false,
@@ -865,7 +865,7 @@ describe("SQL-lite ONLY on ALTER TABLE and CREATE INDEX", () => {
 
 // --- Phase 6: DROP family & TRUNCATE ---
 
-describe("SQL-lite DROP family & TRUNCATE", () => {
+describe("PostgreSQL DROP family & TRUNCATE", () => {
   it("drops non-table objects with CASCADE / RESTRICT", () => {
     expect(firstStmt("DROP VIEW v;")).toEqual({
       kind: "drop",
@@ -920,7 +920,7 @@ describe("SQL-lite DROP family & TRUNCATE", () => {
 
 // --- DROP: the remaining object types ---
 
-describe("SQL-lite DROP object types", () => {
+describe("PostgreSQL DROP object types", () => {
   const drop = (text: string) => firstStmt(text) as Extract<Stmt, { kind: "drop" }>;
   const arg = (type: string, extra: Record<string, unknown> = {}) => ({
     mode: null,
@@ -1126,7 +1126,7 @@ describe("SQL-lite DROP object types", () => {
 
 // --- Phase 7: more CREATE objects ---
 
-describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
+describe("PostgreSQL CREATE VIEW / MATERIALIZED VIEW", () => {
   it("parses a plain view whose body reuses the query rule", () => {
     expect(firstStmt("CREATE VIEW active AS SELECT id FROM users WHERE active;")).toEqual({
       kind: "createView",
@@ -1172,7 +1172,7 @@ describe("SQL-lite CREATE VIEW / MATERIALIZED VIEW", () => {
   });
 });
 
-describe("SQL-lite CREATE TABLE AS", () => {
+describe("PostgreSQL CREATE TABLE AS", () => {
   it("parses CREATE TABLE AS SELECT", () => {
     expect(firstStmt("CREATE TABLE snap AS SELECT id, name FROM users;")).toEqual({
       kind: "createTableAs",
@@ -1202,7 +1202,7 @@ describe("SQL-lite CREATE TABLE AS", () => {
   });
 });
 
-describe("SQL-lite CREATE TYPE composite / range", () => {
+describe("PostgreSQL CREATE TYPE composite / range", () => {
   it("parses a composite type", () => {
     expect(firstStmt("CREATE TYPE point AS (x float8, y float8);")).toEqual({
       kind: "createType",
@@ -1260,7 +1260,7 @@ describe("SQL-lite CREATE TYPE composite / range", () => {
   });
 });
 
-describe("SQL-lite CREATE SEQUENCE", () => {
+describe("PostgreSQL CREATE SEQUENCE", () => {
   it("parses a sequence with a full option list", () => {
     const stmt = firstStmt(
       "CREATE SEQUENCE IF NOT EXISTS s AS bigint INCREMENT BY 2 MINVALUE 1 NO MAXVALUE START WITH 10 CACHE 5 CYCLE OWNED BY t.id;",
@@ -1288,7 +1288,7 @@ describe("SQL-lite CREATE SEQUENCE", () => {
   });
 });
 
-describe("SQL-lite CREATE DOMAIN", () => {
+describe("PostgreSQL CREATE DOMAIN", () => {
   it("parses a domain with DEFAULT and a named CHECK", () => {
     const stmt = firstStmt(
       "CREATE DOMAIN us_postal AS text NOT NULL DEFAULT '00000' CONSTRAINT fmt CHECK (VALUE ~ '^[0-9]{5}$');",
@@ -1315,7 +1315,7 @@ describe("SQL-lite CREATE DOMAIN", () => {
 // A ColType literal (the shape typeRef yields once spans are stripped).
 const ct = (name: string, over: Record<string, unknown> = {}) => ({ name, args: [], array: false, ...over });
 
-describe("SQL-lite CREATE FUNCTION", () => {
+describe("PostgreSQL CREATE FUNCTION", () => {
   it("parses OR REPLACE, arg defaults, RETURNS and an opaque dollar body", () => {
     const stmt = firstStmt(
       "CREATE OR REPLACE FUNCTION add(a integer, b integer DEFAULT 0) RETURNS integer LANGUAGE sql IMMUTABLE STRICT AS $$SELECT a + b$$;",
@@ -1396,7 +1396,7 @@ describe("SQL-lite CREATE FUNCTION", () => {
   });
 });
 
-describe("SQL-lite CREATE AGGREGATE", () => {
+describe("PostgreSQL CREATE AGGREGATE", () => {
   it("parses the modern signature + definition-list form", () => {
     const stmt = firstStmt("CREATE AGGREGATE sum_agg(numeric) (SFUNC = numeric_add, STYPE = numeric, INITCOND = '0');");
     expect(stmt).toEqual({
@@ -1429,7 +1429,7 @@ describe("SQL-lite CREATE AGGREGATE", () => {
   });
 });
 
-describe("SQL-lite CREATE TRIGGER", () => {
+describe("PostgreSQL CREATE TRIGGER", () => {
   it("parses timing, OR-joined events, UPDATE OF cols, WHEN and EXECUTE FUNCTION", () => {
     const stmt = firstStmt(
       "CREATE TRIGGER audit AFTER INSERT OR UPDATE OF a, b ON accounts FOR EACH ROW WHEN (new.active) EXECUTE FUNCTION log_change(1, 'x');",
@@ -1476,7 +1476,7 @@ describe("SQL-lite CREATE TRIGGER", () => {
 
 // --- expressions ---
 
-describe("SQL-lite expressions", () => {
+describe("PostgreSQL expressions", () => {
   it("applies arithmetic precedence and concatenation", () => {
     expect(exprOf("1 + 2 * 3")).toEqual(bin("+", num(1), bin("*", num(2), num(3))));
     expect(exprOf("(1 + 2) * 3")).toEqual(bin("*", bin("+", num(1), num(2)), num(3)));
@@ -1549,7 +1549,7 @@ describe("SQL-lite expressions", () => {
 
 // --- expression operators (Phase 1) ---
 
-describe("SQL-lite expression operators", () => {
+describe("PostgreSQL expression operators", () => {
   it("lexes JSON / regex / full-text operators as single op tokens", () => {
     const toks = lex("~* !~* #- ->> #>> ?| ?& <@ @@ -> #>");
     expect(toks.every((t) => t.type === "op")).toBe(true);
@@ -1650,7 +1650,7 @@ describe("SQL-lite expression operators", () => {
 
 // --- arithmetic, bitwise and jsonpath operators ---
 
-describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
+describe("PostgreSQL arithmetic, bitwise and jsonpath operators", () => {
   const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
   const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(type) });
 
@@ -1786,7 +1786,7 @@ describe("SQL-lite arithmetic, bitwise and jsonpath operators", () => {
 // PG 14+'s opt_routine_body: `RETURN expr` or `BEGIN ATOMIC stmt; … END` in
 // place of `AS 'definition'`, on CREATE FUNCTION and CREATE PROCEDURE. The body
 // is SQL, so it is parsed, and it reads its own `;`s and END.
-describe("SQL-lite SQL-standard routine bodies", () => {
+describe("PostgreSQL SQL-standard routine bodies", () => {
   const bad = (src: string) => () => postgres.parse(src);
   const ret = (expr: unknown) => ({ kind: "return", expr });
   const atomic = (...statements: unknown[]) => ({ kind: "atomic", statements });
@@ -2058,7 +2058,7 @@ describe("SQL-lite SQL-standard routine bodies", () => {
 
 // PostgreSQL's gram.y orders these, loosest first: `^` < AT < COLLATE < unary
 // sign < `[ ]` < `::`, all left-associative except the right-associative sign.
-describe("SQL-lite precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts and casts", () => {
+describe("PostgreSQL precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts and casts", () => {
   const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
   const cast = (expr: unknown, type: string) => ({ kind: "cast", expr, type: ct(type) });
   const at = (expr: unknown, zone: unknown) => ({ kind: "atTimeZone", expr, zone });
@@ -2121,7 +2121,7 @@ describe("SQL-lite precedence of ^, AT TIME ZONE, COLLATE, the sign, subscripts 
 
 // PG's scanner reads any run of operator characters as one operator, and its
 // grammar gives every operator outside the named tiers one precedence, `Op`.
-describe("SQL-lite generic operators", () => {
+describe("PostgreSQL generic operators", () => {
   const un = (op: string, operand: unknown) => ({ kind: "unary", op, operand });
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
 
@@ -2313,7 +2313,7 @@ describe("SQL-lite generic operators", () => {
 });
 
 // `a_expr subquery_Op sub_type (…)`: ANY / SOME / ALL after any operator.
-describe("SQL-lite quantified operators", () => {
+describe("PostgreSQL quantified operators", () => {
   const anyAll = (op: string, quantifier: string, left: unknown, right: unknown, extra = {}) => ({
     kind: "anyAll",
     op,
@@ -2396,7 +2396,7 @@ describe("SQL-lite quantified operators", () => {
 });
 
 // PG's postfix ISNULL / NOTNULL, spellings of IS [NOT] NULL.
-describe("SQL-lite ISNULL and NOTNULL", () => {
+describe("PostgreSQL ISNULL and NOTNULL", () => {
   const isNull = (expr: unknown, negated = false) => ({ kind: "is", expr, negated });
 
   it("parses both in WHERE and in the select list", () => {
@@ -2444,7 +2444,7 @@ describe("SQL-lite ISNULL and NOTNULL", () => {
 
 // --- row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON ---
 
-describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", () => {
+describe("PostgreSQL row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   // The same column without stripSpans, for the span assertions.
   const rawCol = (src: string) => (postgres.parse(`SELECT ${src} FROM t;`)[0] as any).columns[0].expr;
@@ -2661,7 +2661,7 @@ describe("SQL-lite row constructors, OVERLAPS, BETWEEN SYMMETRIC and IS JSON", (
 
 // --- expression special forms (Phase 2) ---
 
-describe("SQL-lite expression special forms", () => {
+describe("PostgreSQL expression special forms", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
 
   it("lexes positional / named parameters as a dedicated token, distinct from dollar strings", () => {
@@ -2826,7 +2826,7 @@ describe("SQL-lite expression special forms", () => {
 
 // --- window functions (Phase 3) ---
 
-describe("SQL-lite window functions", () => {
+describe("PostgreSQL window functions", () => {
   const winExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
   const order = (expr: unknown, dir: string | null = null, nulls: string | null = null) => ({ expr, dir, nulls });
@@ -2963,7 +2963,7 @@ describe("SQL-lite window functions", () => {
 
 // --- aggregate call modifiers ---
 
-describe("SQL-lite aggregate call modifiers", () => {
+describe("PostgreSQL aggregate call modifiers", () => {
   const aggExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const call = (fnName: string, args: unknown[] = [], mods: Record<string, unknown> = {}) => ({
     kind: "call",
@@ -3076,7 +3076,7 @@ describe("SQL-lite aggregate call modifiers", () => {
 
 // --- remaining SELECT clauses (Phase 4) ---
 
-describe("SQL-lite FROM items: LATERAL, table functions, TABLESAMPLE", () => {
+describe("PostgreSQL FROM items: LATERAL, table functions, TABLESAMPLE", () => {
   const from = (src: string) => (firstStmt(src) as any).from;
   const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
 
@@ -3131,7 +3131,7 @@ describe("SQL-lite FROM items: LATERAL, table functions, TABLESAMPLE", () => {
 
 // --- FROM-item column-alias lists and ONLY ---
 
-describe("SQL-lite FROM-item column-alias lists and ONLY", () => {
+describe("PostgreSQL FROM-item column-alias lists and ONLY", () => {
   const from = (src: string) => (firstStmt(src) as any).from;
   const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
 
@@ -3309,7 +3309,7 @@ describe("SQL-lite FROM-item column-alias lists and ONLY", () => {
   });
 });
 
-describe("SQL-lite VALUES query", () => {
+describe("PostgreSQL VALUES query", () => {
   it("parses a standalone VALUES statement", () => {
     expect(firstStmt("VALUES (1, 2), (3, 4);")).toEqual({
       kind: "values",
@@ -3347,7 +3347,7 @@ describe("SQL-lite VALUES query", () => {
   });
 });
 
-describe("SQL-lite FETCH / OFFSET row words", () => {
+describe("PostgreSQL FETCH / OFFSET row words", () => {
   it("maps FETCH FIRST … ROWS ONLY onto limit", () => {
     expect(firstStmt("SELECT 1 FETCH FIRST 10 ROWS ONLY;")).toMatchObject({ limit: num(10), offset: null });
     // OFFSET … ROWS then FETCH NEXT … ROWS WITH TIES, standard-SQL spelling.
@@ -3379,14 +3379,14 @@ describe("SQL-lite FETCH / OFFSET row words", () => {
   // PG gives the constant no location; the span is the ROW / ROWS word, the
   // real token standing where the count would be written.
   it("spans an implicit FETCH count over its ROW or ROWS word", () => {
-    const [stmt] = sqlLite.parse("SELECT 1 FETCH FIRST ROW ONLY;") as Record<string, any>[];
+    const [stmt] = postgres.parse("SELECT 1 FETCH FIRST ROW ONLY;") as Record<string, any>[];
     expect(stmt!.limit).toEqual({
       kind: "number",
       value: 1,
       implicit: true,
       span: { start: { row: 1, col: 21 }, end: { row: 1, col: 24 } },
     });
-    const [ties] = sqlLite.parse("SELECT 1 ORDER BY 1\nFETCH NEXT  rows WITH TIES") as Record<string, any>[];
+    const [ties] = postgres.parse("SELECT 1 ORDER BY 1\nFETCH NEXT  rows WITH TIES") as Record<string, any>[];
     expect(ties!.limit.span).toEqual({ start: { row: 2, col: 12 }, end: { row: 2, col: 16 } });
   });
 
@@ -3395,7 +3395,7 @@ describe("SQL-lite FETCH / OFFSET row words", () => {
   });
 });
 
-describe("SQL-lite FOR UPDATE / SHARE locking", () => {
+describe("PostgreSQL FOR UPDATE / SHARE locking", () => {
   it("parses a single locking clause with OF and a wait policy", () => {
     expect((firstStmt("SELECT * FROM t FOR UPDATE OF t, u NOWAIT;") as any).locking).toEqual([
       { strength: "update", of: [["t"], ["u"]], wait: "nowait" },
@@ -3415,7 +3415,7 @@ describe("SQL-lite FOR UPDATE / SHARE locking", () => {
 
 // --- set-operation precedence and query-level tails ---
 
-describe("SQL-lite set-operation precedence and query-level tails", () => {
+describe("PostgreSQL set-operation precedence and query-level tails", () => {
   const one = sel({ columns: [col(num(1))] });
   const two = sel({ columns: [col(num(2))] });
   const three = sel({ columns: [col(num(3))] });
@@ -3682,7 +3682,7 @@ describe("SQL-lite set-operation precedence and query-level tails", () => {
   });
 });
 
-describe("SQL-lite GROUP BY ROLLUP / CUBE / GROUPING SETS", () => {
+describe("PostgreSQL GROUP BY ROLLUP / CUBE / GROUPING SETS", () => {
   const groupBy = (src: string) => (firstStmt(`SELECT a FROM t GROUP BY ${src};`) as any).groupBy;
 
   it("parses ROLLUP and CUBE, keeping plain exprs as bare expressions", () => {
@@ -3709,7 +3709,7 @@ describe("SQL-lite GROUP BY ROLLUP / CUBE / GROUPING SETS", () => {
 
 // --- SELECT INTO & GROUP BY modifiers ---
 
-describe("SQL-lite SELECT INTO and GROUP BY modifiers", () => {
+describe("PostgreSQL SELECT INTO and GROUP BY modifiers", () => {
   const stmt = (src: string) => firstStmt(src) as any;
   const groupBy = (src: string) => stmt(`SELECT a FROM t GROUP BY ${src};`).groupBy;
   const into = (src: string) => stmt(src).into;
@@ -3839,7 +3839,7 @@ describe("SQL-lite SELECT INTO and GROUP BY modifiers", () => {
 
 // --- ORDER BY USING & window frame EXCLUDE ---
 
-describe("SQL-lite ORDER BY USING and window frame EXCLUDE", () => {
+describe("PostgreSQL ORDER BY USING and window frame EXCLUDE", () => {
   const stmt = (src: string) => firstStmt(src) as any;
   const orderBy = (src: string) => stmt(`SELECT a FROM t ORDER BY ${src};`).orderBy;
   const frame = (src: string) => stmt(`SELECT sum(x) OVER (${src}) FROM t;`).columns[0].expr.frame;
@@ -3954,7 +3954,7 @@ describe("SQL-lite ORDER BY USING and window frame EXCLUDE", () => {
 
 // --- robustness ---
 
-describe("SQL-lite robustness", () => {
+describe("PostgreSQL robustness", () => {
   it("diagnose() recovers to the next comma inside a bad column, keeping siblings and later statements", () => {
     const { ast, errors } = postgres.diagnose("CREATE TABLE t (id int, 42 bad, ok text);\nDROP TABLE t;");
     expect(errors.length).toBeGreaterThanOrEqual(1);
@@ -4010,7 +4010,7 @@ describe("SQL-lite robustness", () => {
 
 // --- lexer errors inside backtracking ---
 
-describe("SQL-lite lexer errors inside backtracking", () => {
+describe("PostgreSQL lexer errors inside backtracking", () => {
   // The INSERT column list is tried with backtracking. The lexer consumes
   // `X'G1` before croaking, so a rollback used to resurface as a parser error
   // on the `)` that followed. The grammar opts into lexer error propagation.
@@ -4029,7 +4029,7 @@ describe("SQL-lite lexer errors inside backtracking", () => {
 
 // --- SELECT ---
 
-describe("SQL-lite SELECT", () => {
+describe("PostgreSQL SELECT", () => {
   it("parses SELECT * FROM with a table alias", () => {
     expect(firstStmt("SELECT * FROM users u;")).toEqual(
       sel({ columns: [col(star())], from: [tableFrom(["users"], "u")] }),
@@ -4099,7 +4099,7 @@ describe("SQL-lite SELECT", () => {
 
 // --- TABLE name, empty select lists, WITH … VALUES and parenthesised query starts ---
 
-describe("SQL-lite TABLE name", () => {
+describe("PostgreSQL TABLE name", () => {
   const tableCmd = (name: string[], over: Record<string, unknown> = {}) => ({ kind: "tableCmd", name, ...over });
   const one = sel({ columns: [col(num(1))] });
 
@@ -4211,7 +4211,7 @@ describe("SQL-lite TABLE name", () => {
   });
 });
 
-describe("SQL-lite empty select list", () => {
+describe("PostgreSQL empty select list", () => {
   it("parses SELECT with no target list, as a statement and before each clause", () => {
     expect(firstStmt("SELECT;")).toEqual(sel({ columns: [] }));
     expect(firstStmt("SELECT ALL FROM t;")).toEqual(sel({ columns: [], from: [tableFrom(["t"])] }));
@@ -4265,7 +4265,7 @@ describe("SQL-lite empty select list", () => {
   });
 });
 
-describe("SQL-lite WITH … VALUES", () => {
+describe("PostgreSQL WITH … VALUES", () => {
   const one = sel({ columns: [col(num(1))] });
   const values = (rows: unknown[][], over: Record<string, unknown> = {}) => ({
     kind: "values",
@@ -4358,7 +4358,7 @@ describe("SQL-lite WITH … VALUES", () => {
   });
 });
 
-describe("SQL-lite parenthesised VALUES and set operations as subqueries", () => {
+describe("PostgreSQL parenthesised VALUES and set operations as subqueries", () => {
   const values = (...rows: unknown[][]) => ({ kind: "values", rows, orderBy: null, limit: null, offset: null });
   const one = sel({ columns: [col(num(1))] });
   const two = sel({ columns: [col(num(2))] });
@@ -4448,7 +4448,7 @@ describe("SQL-lite parenthesised VALUES and set operations as subqueries", () =>
 
 // --- joins & subqueries ---
 
-describe("SQL-lite joins & subqueries", () => {
+describe("PostgreSQL joins & subqueries", () => {
   const from = (src: string) => (firstStmt(src) as any).from;
 
   it("parses INNER JOIN ... ON", () => {
@@ -4527,7 +4527,7 @@ describe("SQL-lite joins & subqueries", () => {
 
 // --- CASE ---
 
-describe("SQL-lite CASE", () => {
+describe("PostgreSQL CASE", () => {
   const caseOf = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
 
   it("parses a searched CASE with ELSE", () => {
@@ -4554,7 +4554,7 @@ describe("SQL-lite CASE", () => {
 
 // --- set-ops & CTEs ---
 
-describe("SQL-lite set-ops & CTEs", () => {
+describe("PostgreSQL set-ops & CTEs", () => {
   it("parses left-associative UNION / EXCEPT ALL", () => {
     expect(firstStmt("SELECT a FROM t UNION SELECT a FROM u EXCEPT ALL SELECT a FROM v;")).toEqual({
       kind: "setOp",
@@ -4590,7 +4590,7 @@ describe("SQL-lite set-ops & CTEs", () => {
 
 // --- data-modifying CTEs (WITH before DML, DML CTE bodies) ---
 
-describe("SQL-lite data-modifying CTEs", () => {
+describe("PostgreSQL data-modifying CTEs", () => {
   it("attaches a WITH prefix to INSERT / UPDATE / DELETE", () => {
     expect(firstStmt("WITH c AS (SELECT 1 AS x) INSERT INTO t SELECT * FROM c;")).toMatchObject({
       kind: "insert",
@@ -4670,7 +4670,7 @@ describe("SQL-lite data-modifying CTEs", () => {
 
 // --- CTE materialization, SEARCH and CYCLE ---
 
-describe("SQL-lite CTE materialization, SEARCH and CYCLE", () => {
+describe("PostgreSQL CTE materialization, SEARCH and CYCLE", () => {
   const ctes = (src: string) => (firstStmt(src) as any).with_;
   // The CTE node for `WITH RECURSIVE t AS (SELECT 1) <tail> SELECT 1;`.
   const tailed = (tail: string) => ctes(`WITH RECURSIVE t AS (SELECT 1) ${tail} SELECT 1;`)[0];
@@ -4834,7 +4834,7 @@ describe("SQL-lite CTE materialization, SEARCH and CYCLE", () => {
 
 // --- INSERT / UPDATE / DELETE ---
 
-describe("SQL-lite INSERT / UPDATE / DELETE", () => {
+describe("PostgreSQL INSERT / UPDATE / DELETE", () => {
   it("parses INSERT ... VALUES with a column list and RETURNING *", () => {
     expect(firstStmt("INSERT INTO t (a, b) VALUES (1, 2), (3, 4) RETURNING *;")).toEqual({
       kind: "insert",
@@ -4908,7 +4908,7 @@ describe("SQL-lite INSERT / UPDATE / DELETE", () => {
 
 // --- DML robustness ---
 
-describe("SQL-lite DML robustness", () => {
+describe("PostgreSQL DML robustness", () => {
   it("throws a descriptive error on a FROM with no table", () => {
     expect(() => postgres.parse("SELECT * FROM;")).toThrow(ParseError);
   });
@@ -4924,7 +4924,7 @@ describe("SQL-lite DML robustness", () => {
 
 // --- Phase 9: GRANT / REVOKE ---
 
-describe("SQL-lite GRANT / REVOKE", () => {
+describe("PostgreSQL GRANT / REVOKE", () => {
   it("parses an object grant with a column-scoped privilege and WITH GRANT OPTION", () => {
     expect(firstStmt("GRANT SELECT, UPDATE (a, b) ON TABLE t1, t2 TO alice, bob WITH GRANT OPTION;")).toEqual({
       kind: "grant",
@@ -4986,7 +4986,7 @@ describe("SQL-lite GRANT / REVOKE", () => {
 
 // --- GRANT / REVOKE: object kinds, role grant options, GRANTED BY ---
 
-describe("SQL-lite GRANT / REVOKE object kinds and options", () => {
+describe("PostgreSQL GRANT / REVOKE object kinds and options", () => {
   const type = (n: string) => ({ name: n, args: [], array: false });
   const arg = (typeName: string, argName: string | null = null, mode: string | null = null) => ({
     mode,
@@ -5308,7 +5308,7 @@ describe("SQL-lite GRANT / REVOKE object kinds and options", () => {
 
 // --- ALTER DEFAULT PRIVILEGES ---
 
-describe("SQL-lite ALTER DEFAULT PRIVILEGES", () => {
+describe("PostgreSQL ALTER DEFAULT PRIVILEGES", () => {
   it("parses FOR ROLE / IN SCHEMA options and a GRANT", () => {
     expect(
       firstStmt("ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA app GRANT SELECT ON TABLES TO app_reader;"),
@@ -5406,7 +5406,7 @@ describe("SQL-lite ALTER DEFAULT PRIVILEGES", () => {
 
 // --- DROP OWNED / REASSIGN OWNED / CREATE GROUP ---
 
-describe("SQL-lite DROP OWNED", () => {
+describe("PostgreSQL DROP OWNED", () => {
   it("parses DROP OWNED BY with an optional behavior", () => {
     expect(firstStmt("DROP OWNED BY old_role, CURRENT_USER CASCADE;")).toEqual({
       kind: "dropOwned",
@@ -5419,7 +5419,7 @@ describe("SQL-lite DROP OWNED", () => {
   });
 });
 
-describe("SQL-lite REASSIGN OWNED", () => {
+describe("PostgreSQL REASSIGN OWNED", () => {
   it("parses REASSIGN OWNED BY … TO", () => {
     expect(firstStmt("REASSIGN OWNED BY a, SESSION_USER TO CURRENT_ROLE;")).toEqual({
       kind: "reassignOwned",
@@ -5431,7 +5431,7 @@ describe("SQL-lite REASSIGN OWNED", () => {
   });
 });
 
-describe("SQL-lite CREATE GROUP", () => {
+describe("PostgreSQL CREATE GROUP", () => {
   it("parses CREATE GROUP with the role options", () => {
     expect(firstStmt("CREATE GROUP devs;")).toEqual({
       kind: "createRole",
@@ -5455,7 +5455,7 @@ describe("SQL-lite CREATE GROUP", () => {
   });
 });
 
-describe("SQL-lite privilege words", () => {
+describe("PostgreSQL privilege words", () => {
   it("keeps the privilege words unreserved as names and aliases", () => {
     const words = [
       ...["owned", "reassign", "privileges", "admin", "inherit", "granted", "parameter", "wrapper"],
@@ -5501,7 +5501,7 @@ describe("SQL-lite privilege words", () => {
 
 // --- Phase 9: transaction control ---
 
-describe("SQL-lite transaction control", () => {
+describe("PostgreSQL transaction control", () => {
   const bad = (src: string) => () => postgres.parse(src);
 
   it("parses BEGIN (with optional WORK) and its lack of modes", () => {
@@ -5594,7 +5594,7 @@ describe("SQL-lite transaction control", () => {
 
 // --- Phase 9: SET / SHOW / RESET ---
 
-describe("SQL-lite SET / SHOW / RESET", () => {
+describe("PostgreSQL SET / SHOW / RESET", () => {
   it("parses a generic SET with a value list and TO separator", () => {
     expect(firstStmt("SET search_path TO my_schema, public;")).toEqual({
       kind: "set",
@@ -5634,7 +5634,7 @@ describe("SQL-lite SET / SHOW / RESET", () => {
 
 // --- SET values, as PostgreSQL's var_value ---
 
-describe("SQL-lite SET values", () => {
+describe("PostgreSQL SET values", () => {
   const values = (src: string) => (firstStmt(`SET x = ${src};`) as any).values;
 
   it("parses the pg_dump header settings, ON included", () => {
@@ -5705,7 +5705,7 @@ describe("SQL-lite SET values", () => {
 
 // --- The special SET forms ---
 
-describe("SQL-lite SET special forms", () => {
+describe("PostgreSQL SET special forms", () => {
   it("parses SET TRANSACTION and SET SESSION CHARACTERISTICS", () => {
     expect(firstStmt("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY NOT DEFERRABLE;")).toEqual({
       kind: "setTransaction",
@@ -5810,7 +5810,7 @@ describe("SQL-lite SET special forms", () => {
 
 // --- Multi-word SHOW / RESET targets ---
 
-describe("SQL-lite SHOW / RESET targets", () => {
+describe("PostgreSQL SHOW / RESET targets", () => {
   it("parses TIME ZONE, TRANSACTION ISOLATION LEVEL and SESSION AUTHORIZATION", () => {
     expect(firstStmt("SHOW TRANSACTION ISOLATION LEVEL;")).toEqual({
       kind: "show",
@@ -5851,7 +5851,7 @@ describe("SQL-lite SHOW / RESET targets", () => {
 
 // --- Phase 9: DO / DEALLOCATE ---
 
-describe("SQL-lite DO / DEALLOCATE", () => {
+describe("PostgreSQL DO / DEALLOCATE", () => {
   it("parses a DO block with an opaque dollar-quoted body (LANGUAGE either side)", () => {
     expect(firstStmt("DO LANGUAGE plpgsql $$ BEGIN NULL; END $$;")).toEqual({
       kind: "do",
@@ -5873,7 +5873,7 @@ describe("SQL-lite DO / DEALLOCATE", () => {
 
 // --- LISTEN / NOTIFY / UNLISTEN, LOAD and DISCARD ---
 
-describe("SQL-lite LISTEN, NOTIFY, UNLISTEN, LOAD and DISCARD", () => {
+describe("PostgreSQL LISTEN, NOTIFY, UNLISTEN, LOAD and DISCARD", () => {
   const bad = (src: string) => () => postgres.parse(src);
 
   it("parses LISTEN, NOTIFY with and without a payload, and UNLISTEN", () => {
@@ -5931,7 +5931,7 @@ describe("SQL-lite LISTEN, NOTIFY, UNLISTEN, LOAD and DISCARD", () => {
 
 // --- Phase 10: bit-string, hex-string and unicode-escape literals ---
 
-describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
+describe("PostgreSQL bit-string, hex-string and unicode-escape literals", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const columns = (src: string) => (firstStmt(src) as any).columns;
   const bits = (value: string, hex = false) => ({ kind: "bitString", value, hex });
@@ -6077,7 +6077,7 @@ describe("SQL-lite bit-string, hex-string and unicode-escape literals", () => {
 // full escape set, constants separated by a newline continue one another, and
 // `U&"…"` is a quoted identifier.
 
-describe("SQL-lite quoted literals", () => {
+describe("PostgreSQL quoted literals", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const strTok = (value: string) => ({ type: "string", value });
   const fails = (src: string) => () => postgres.parse(src);
@@ -6275,7 +6275,7 @@ describe("SQL-lite quoted literals", () => {
 // (PG 15+), and the `:=` token. A number whose value a JS number can't hold
 // keeps its text in `raw`.
 
-describe("SQL-lite numeric literals and parameters", () => {
+describe("PostgreSQL numeric literals and parameters", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const options = (list: string) => (firstStmt(`CREATE TABLE t (id int) WITH (${list});`) as any).options;
 
@@ -6462,7 +6462,7 @@ describe("SQL-lite numeric literals and parameters", () => {
 // PG's scanner takes every character from U+0080 up as an identifier character
 // and folds only ASCII letters; `N'…'` is a `bpchar`-typed string constant.
 
-describe("SQL-lite non-ASCII identifiers and national strings", () => {
+describe("PostgreSQL non-ASCII identifiers and national strings", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const bpchar = (value: string) => ({
     kind: "typedLiteral",
@@ -6615,7 +6615,7 @@ describe("SQL-lite non-ASCII identifiers and national strings", () => {
 // the CREATE VIEW block — and stay there, one copy each, so that adding an
 // action or a replaceable target is still a one-line test edit.
 
-describe("SQL-lite keyword dispatch maps", () => {
+describe("PostgreSQL keyword dispatch maps", () => {
   const rawFirst = (text: string) => postgres.parse(text)[0] as Record<string, any>;
   const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
 
@@ -6699,7 +6699,7 @@ describe("SQL-lite keyword dispatch maps", () => {
 
 // --- multi-word type names ---
 
-describe("SQL-lite multi-word type names", () => {
+describe("PostgreSQL multi-word type names", () => {
   const colType = (type: string) => (firstStmt(`CREATE TABLE t (c ${type});`) as any).items[0].dataType;
   const castType = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr.type;
   const fnArgs = (signature: string) =>
@@ -6881,7 +6881,7 @@ describe("SQL-lite multi-word type names", () => {
 
 // --- niladic keyword functions, typed datetime literals and OVERLAY ---
 
-describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLAY", () => {
+describe("PostgreSQL niladic keyword functions, typed datetime literals and OVERLAY", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const svf = (name: string, over: Record<string, unknown> = {}) => ({ kind: "sqlValueFunction", name, ...over });
   const typed = (type: unknown, value: string) => ({ kind: "typedLiteral", type, value });
@@ -7105,7 +7105,7 @@ describe("SQL-lite niladic keyword functions, typed datetime literals and OVERLA
 
 // --- typed literals for any type, ARRAY type spelling and interval precision ---
 
-describe("SQL-lite typed literals, ARRAY type spelling and interval precision", () => {
+describe("PostgreSQL typed literals, ARRAY type spelling and interval precision", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const colType = (type: string) => (firstStmt(`CREATE TABLE t (c ${type});`) as any).items[0].dataType;
   const castType = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr.type;
@@ -7369,7 +7369,7 @@ describe("SQL-lite typed literals, ARRAY type spelling and interval precision", 
 
 // --- CREATE TABLE storage options, LIKE and INHERITS ---
 
-describe("SQL-lite CREATE TABLE storage options, LIKE and INHERITS", () => {
+describe("PostgreSQL CREATE TABLE storage options, LIKE and INHERITS", () => {
   const stmt = (src: string) => firstStmt(src) as any;
   const items = (body: string) => stmt(`CREATE TABLE t (${body});`).items;
   const options = (list: string) => stmt(`CREATE TABLE t (id int) WITH (${list});`).options;
@@ -7586,7 +7586,7 @@ describe("SQL-lite CREATE TABLE storage options, LIKE and INHERITS", () => {
 
 // --- declarative partitioning ---
 
-describe("SQL-lite declarative partitioning", () => {
+describe("PostgreSQL declarative partitioning", () => {
   const stmt = (src: string) => firstStmt(src) as any;
   const spec = (keys: string, strategy = "RANGE") =>
     stmt(`CREATE TABLE m (a int) PARTITION BY ${strategy} (${keys});`).partitionBy;
@@ -7857,7 +7857,7 @@ describe("SQL-lite declarative partitioning", () => {
 
 // --- foreign-key actions, MATCH and DEFERRABLE constraints ---
 
-describe("SQL-lite foreign-key actions, MATCH and DEFERRABLE constraints", () => {
+describe("PostgreSQL foreign-key actions, MATCH and DEFERRABLE constraints", () => {
   const colConstraints = (src: string) =>
     (firstStmt(`CREATE TABLE t (c int ${src});`) as any).items[0].constraints as Record<string, unknown>[];
   const tableItem = (src: string) => (firstStmt(`CREATE TABLE t (c int, ${src});`) as any).items[1];
@@ -8137,7 +8137,7 @@ const tableItemOf = (src: string) => (firstStmt(`CREATE TABLE t (c int, ${src});
 const failsToParse = (sql: string) => () => postgres.parse(sql);
 const cGt0 = bin(">", name("c"), num(0));
 
-describe("SQL-lite named column constraints", () => {
+describe("PostgreSQL named column constraints", () => {
   it("names every column constraint but COLLATE", () => {
     expect(constraintsOf("CONSTRAINT nn NOT NULL CONSTRAINT n NULL CONSTRAINT d DEFAULT 0")).toEqual([
       { kind: "notNull", name: "nn" },
@@ -8196,7 +8196,7 @@ describe("SQL-lite named column constraints", () => {
 
 // --- NOT VALID and NO INHERIT ---
 
-describe("SQL-lite NOT VALID and NO INHERIT constraint attributes", () => {
+describe("PostgreSQL NOT VALID and NO INHERIT constraint attributes", () => {
   it("reads NOT VALID and NO INHERIT on a table-level CHECK", () => {
     expect(tableItemOf("CHECK (c > 0) NOT VALID")).toEqual({ kind: "check", name: null, expr: cGt0, notValid: true });
     expect(tableItemOf("CONSTRAINT ck CHECK (c > 0) NO INHERIT")).toEqual({
@@ -8327,7 +8327,7 @@ describe("SQL-lite NOT VALID and NO INHERIT constraint attributes", () => {
 
 // --- PRIMARY KEY / UNIQUE / EXCLUDE index parameters ---
 
-describe("SQL-lite constraint index parameters and NULLS [NOT] DISTINCT", () => {
+describe("PostgreSQL constraint index parameters and NULLS [NOT] DISTINCT", () => {
   it("reads NULLS [NOT] DISTINCT and the index parameters on table-level UNIQUE and PRIMARY KEY", () => {
     expect(tableItemOf("UNIQUE NULLS NOT DISTINCT (c)")).toEqual({
       kind: "unique",
@@ -8449,7 +8449,7 @@ describe("SQL-lite constraint index parameters and NULLS [NOT] DISTINCT", () => 
 
 // --- ON DELETE SET NULL / SET DEFAULT (cols) ---
 
-describe("SQL-lite ON DELETE SET NULL / SET DEFAULT column lists", () => {
+describe("PostgreSQL ON DELETE SET NULL / SET DEFAULT column lists", () => {
   it("reads a column list on ON DELETE SET NULL / SET DEFAULT", () => {
     expect(tableItemOf("FOREIGN KEY (c, d) REFERENCES p ON DELETE SET NULL (d) ON UPDATE CASCADE")).toEqual({
       kind: "foreignKey",
@@ -8491,7 +8491,7 @@ describe("SQL-lite ON DELETE SET NULL / SET DEFAULT column lists", () => {
 
 // --- CREATE INDEX NULLS [NOT] DISTINCT and TABLESPACE ---
 
-describe("SQL-lite CREATE INDEX NULLS [NOT] DISTINCT and TABLESPACE", () => {
+describe("PostgreSQL CREATE INDEX NULLS [NOT] DISTINCT and TABLESPACE", () => {
   it("reads NULLS [NOT] DISTINCT and TABLESPACE in PG's clause order", () => {
     expect(firstStmt("CREATE UNIQUE INDEX i ON t (a) INCLUDE (b) NULLS NOT DISTINCT TABLESPACE ts;")).toEqual({
       kind: "createIndex",
@@ -8527,7 +8527,7 @@ describe("SQL-lite CREATE INDEX NULLS [NOT] DISTINCT and TABLESPACE", () => {
 
 // --- GENERATED ... VIRTUAL ---
 
-describe("SQL-lite GENERATED ALWAYS AS (expr) VIRTUAL", () => {
+describe("PostgreSQL GENERATED ALWAYS AS (expr) VIRTUAL", () => {
   it("reads VIRTUAL alongside STORED", () => {
     expect(constraintsOf("GENERATED ALWAYS AS (c + 1) VIRTUAL NOT NULL")).toEqual([
       { kind: "generated", expr: bin("+", name("c"), num(1)), virtual: true },
@@ -8557,7 +8557,7 @@ describe("SQL-lite GENERATED ALWAYS AS (expr) VIRTUAL", () => {
 
 // --- index column options and storage parameters ---
 
-describe("SQL-lite index column options and storage parameters", () => {
+describe("PostgreSQL index column options and storage parameters", () => {
   const index = (tail: string) => firstStmt(`CREATE INDEX i ON t ${tail};`) as any;
   const columns = (list: string) => index(`(${list})`).columns;
   const lower = (arg: unknown) => ({ kind: "call", name: "lower", args: [arg] });
@@ -8630,7 +8630,7 @@ describe("SQL-lite index column options and storage parameters", () => {
 
 // --- EXCLUDE table constraints ---
 
-describe("SQL-lite EXCLUDE table constraints", () => {
+describe("PostgreSQL EXCLUDE table constraints", () => {
   const items = (src: string) => (firstStmt(`CREATE TABLE t (${src});`) as any).items as Record<string, unknown>[];
   const addAction = (src: string) => (firstStmt(`ALTER TABLE t ADD ${src};`) as any).actions[0];
 
@@ -8778,7 +8778,7 @@ describe("SQL-lite EXCLUDE table constraints", () => {
 
 // --- parenthesised joins, ROWS FROM and WITH ORDINALITY ---
 
-describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
+describe("PostgreSQL parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
   const from = (src: string) => (firstStmt(src) as any).from;
   const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
   const bool = (value: boolean) => ({ kind: "bool", value });
@@ -8970,7 +8970,7 @@ describe("SQL-lite parenthesised joins, ROWS FROM and WITH ORDINALITY", () => {
 
 // --- NATURAL joins, join qualifiers and FROM-item extras ---
 
-describe("SQL-lite NATURAL joins, join qualifiers and FROM-item extras", () => {
+describe("PostgreSQL NATURAL joins, join qualifiers and FROM-item extras", () => {
   const from = (src: string) => (firstStmt(src) as any).from;
   const call = (fnName: string, args: unknown[] = []) => ({ kind: "call", name: fnName, args });
   const bool = (value: boolean) => ({ kind: "bool", value });
@@ -9194,7 +9194,7 @@ describe("SQL-lite NATURAL joins, join qualifiers and FROM-item extras", () => {
 
 // --- ALTER SCHEMA, DOMAIN, TYPE and INDEX ---
 
-describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
+describe("PostgreSQL ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
   const alter = (text: string) => firstStmt(text) as any;
   const action = (text: string) => alter(text).action;
   const fails = (text: string) => () => postgres.parse(text);
@@ -9350,7 +9350,7 @@ describe("SQL-lite ALTER SCHEMA, DOMAIN, TYPE and INDEX", () => {
 
 // --- ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE ---
 
-describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
+describe("PostgreSQL ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
   const alter = (text: string) => firstStmt(text) as any;
   const action = (text: string) => alter(text).action;
   const fails = (text: string) => () => postgres.parse(text);
@@ -9572,7 +9572,7 @@ describe("SQL-lite ALTER FUNCTION, AGGREGATE, VIEW and SEQUENCE", () => {
 
 // --- object references: COMMENT ON, SECURITY LABEL, ALTER EXTENSION, generic ALTER ---
 
-describe("SQL-lite object references", () => {
+describe("PostgreSQL object references", () => {
   const ty = (typeName: string) => ({ name: typeName, args: [], array: false });
   const arg = (typeName: string, mode: string | null = null) => ({
     mode,
@@ -9769,7 +9769,7 @@ describe("SQL-lite object references", () => {
 
 // --- policies, publications and subscriptions ---
 
-describe("SQL-lite policies, publications and subscriptions", () => {
+describe("PostgreSQL policies, publications and subscriptions", () => {
   const bad = (src: string) => () => postgres.parse(src);
   const opt = (optionName: string, value: unknown) => ({ name: optionName, value });
 
@@ -10174,7 +10174,7 @@ describe("SQL-lite policies, publications and subscriptions", () => {
 
 // --- INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT ---
 
-describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT", () => {
+describe("PostgreSQL INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDING and ON CONSTRAINT", () => {
   const insert = (src: string) => firstStmt(`INSERT INTO ${src};`) as any;
   const rows = (src: string) => insert(src).source.rows;
   const conflict = (src: string) => insert(`t VALUES (1) ON CONFLICT ${src}`).onConflict;
@@ -10325,7 +10325,7 @@ describe("SQL-lite INSERT DEFAULT VALUES, DEFAULT row items, AS alias, OVERRIDIN
 
 // --- PREPARE and EXECUTE ---
 
-describe("SQL-lite PREPARE and EXECUTE", () => {
+describe("PostgreSQL PREPARE and EXECUTE", () => {
   const param = (n: string) => ({ kind: "param", name: n });
   const bodyOf = (src: string) => firstStmt(`PREPARE p AS ${src};`).query;
   const bad = (src: string) => () => postgres.parse(src);
@@ -10415,7 +10415,7 @@ describe("SQL-lite PREPARE and EXECUTE", () => {
 
 // --- column and domain DEFAULT as a b-expression ---
 
-describe("SQL-lite column and domain DEFAULT as a b-expression", () => {
+describe("PostgreSQL column and domain DEFAULT as a b-expression", () => {
   const colConstraints = (type: string, src: string) =>
     (firstStmt(`CREATE TABLE t (c ${type} ${src});`) as any).items[0].constraints as Record<string, unknown>[];
   const domainConstraints = (src: string) =>
@@ -10544,7 +10544,7 @@ describe("SQL-lite column and domain DEFAULT as a b-expression", () => {
 
 // --- generated identity and stored columns and column collation ---
 
-describe("SQL-lite generated identity and stored columns and column collation", () => {
+describe("PostgreSQL generated identity and stored columns and column collation", () => {
   const colConstraints = (src: string) =>
     (firstStmt(`CREATE TABLE t (c int ${src});`) as any).items[0].constraints as Record<string, unknown>[];
   const bad = (src: string) => () => postgres.parse(`CREATE TABLE t (c int ${src});`);
@@ -10664,7 +10664,7 @@ describe("SQL-lite generated identity and stored columns and column collation", 
 
 // --- CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE ---
 
-describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
+describe("PostgreSQL CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
   const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
   const bool = (value: boolean) => ({ kind: "bool", value });
   const bad = (src: string) => () => postgres.parse(src);
@@ -10881,7 +10881,7 @@ describe("SQL-lite CREATE DATABASE, SCHEMA, EXTENSION and TABLESPACE", () => {
 
 // --- EXPLAIN, ANALYZE and VACUUM ---
 
-describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
+describe("PostgreSQL EXPLAIN, ANALYZE and VACUUM", () => {
   const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
   const word = (w: string) => ({ kind: "name", parts: [w] });
   const bool = (value: boolean) => ({ kind: "bool", value });
@@ -11015,7 +11015,7 @@ describe("SQL-lite EXPLAIN, ANALYZE and VACUUM", () => {
 
 // --- CHECKPOINT, CLUSTER and REINDEX ---
 
-describe("SQL-lite CHECKPOINT, CLUSTER and REINDEX", () => {
+describe("PostgreSQL CHECKPOINT, CLUSTER and REINDEX", () => {
   const verbose = { name: "verbose", value: null };
   const bad = (src: string) => () => postgres.parse(src);
 
@@ -11132,7 +11132,7 @@ describe("SQL-lite CHECKPOINT, CLUSTER and REINDEX", () => {
 
 // --- cursors: DECLARE, FETCH, MOVE and CLOSE ---
 
-describe("SQL-lite cursors", () => {
+describe("PostgreSQL cursors", () => {
   const declare = (over: Record<string, unknown>) => ({
     kind: "declare",
     name: "c",
@@ -11294,7 +11294,7 @@ describe("SQL-lite cursors", () => {
 
 // --- TEMPORARY, UNLOGGED and scoped CREATE TABLE ---
 
-describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
+describe("PostgreSQL TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
   const rawFirst = (text: string) => postgres.parse(text)[0] as Record<string, any>;
   const modifiersOf = (src: string) => firstStmt(src).modifiers;
   const bad = (src: string) => () => postgres.parse(src);
@@ -11375,7 +11375,7 @@ describe("SQL-lite TEMPORARY, UNLOGGED and scoped CREATE TABLE", () => {
 
 // --- CREATE ROLE, USER and PROCEDURE ---
 
-describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
+describe("PostgreSQL CREATE ROLE, USER and PROCEDURE", () => {
   const flag = (flagName: string, value = true) => ({ kind: "flag", name: flagName, value });
   const bad = (src: string) => () => postgres.parse(src);
 
@@ -11537,7 +11537,7 @@ describe("SQL-lite CREATE ROLE, USER and PROCEDURE", () => {
 
 // --- ALTER ROLE, USER, DATABASE and TABLESPACE ---
 
-describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
+describe("PostgreSQL ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
   const flag = (flagName: string, value = true) => ({ kind: "flag", name: flagName, value });
   const bad = (src: string) => () => postgres.parse(src);
   const role = (over: Record<string, unknown>) => ({ kind: "alterRole", user: false, name: "r", ...over });
@@ -11859,7 +11859,7 @@ describe("SQL-lite ALTER ROLE, USER, DATABASE and TABLESPACE", () => {
 
 // --- LOCK and CALL ---
 
-describe("SQL-lite LOCK and CALL", () => {
+describe("PostgreSQL LOCK and CALL", () => {
   const target = (parts: string[], only = false) => ({ name: parts, only });
   const modeOf = (mode: string) => firstStmt(`LOCK t IN ${mode} MODE;`).mode;
   const bad = (src: string) => () => postgres.parse(src);
@@ -11940,7 +11940,7 @@ describe("SQL-lite LOCK and CALL", () => {
 
 // --- view options and REFRESH MATERIALIZED VIEW ---
 
-describe("SQL-lite view options and REFRESH MATERIALIZED VIEW", () => {
+describe("PostgreSQL view options and REFRESH MATERIALIZED VIEW", () => {
   const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
   const bad = (src: string) => () => postgres.parse(src);
 
@@ -12071,7 +12071,7 @@ describe("SQL-lite view options and REFRESH MATERIALIZED VIEW", () => {
 
 // --- COPY ---
 
-describe("SQL-lite COPY", () => {
+describe("PostgreSQL COPY", () => {
   const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
   const word = (w: string) => ({ kind: "name", parts: [w] });
   const copy = (over: Record<string, unknown>) => ({
@@ -12194,7 +12194,7 @@ describe("SQL-lite COPY", () => {
 
 // --- COPY: PG's pre-9.0 options ---
 
-describe("SQL-lite COPY legacy options", () => {
+describe("PostgreSQL COPY legacy options", () => {
   const opt = (optName: string, value: unknown = null) => ({ name: optName, value });
   const word = (w: string) => ({ kind: "name", parts: [w] });
   const list = (...names: string[]) => ({ kind: "optionList", items: names.map(word) });
@@ -12383,7 +12383,7 @@ describe("SQL-lite COPY legacy options", () => {
 
 // --- the remaining ALTER TABLE actions ---
 
-describe("SQL-lite remaining ALTER TABLE actions", () => {
+describe("PostgreSQL remaining ALTER TABLE actions", () => {
   const alter = (text: string) => firstStmt(text) as any;
   const action = (src: string) => {
     const { actions } = alter(`ALTER TABLE t ${src};`);
@@ -12579,7 +12579,7 @@ describe("SQL-lite remaining ALTER TABLE actions", () => {
 
 // --- ALTER TABLE column actions: identity, type, storage and statistics ---
 
-describe("SQL-lite ALTER TABLE column actions", () => {
+describe("PostgreSQL ALTER TABLE column actions", () => {
   const alter = (text: string) => firstStmt(text) as any;
   const action = (src: string) => {
     const { actions } = alter(`ALTER TABLE t ${src};`);
@@ -12807,7 +12807,7 @@ describe("SQL-lite ALTER TABLE column actions", () => {
 
 // --- ALTER TABLE table-level actions: RLS, rules, inheritance, persistence ---
 
-describe("SQL-lite ALTER TABLE table-level actions", () => {
+describe("PostgreSQL ALTER TABLE table-level actions", () => {
   const alter = (text: string) => firstStmt(text) as any;
   const action = (src: string) => {
     const { actions } = alter(`ALTER TABLE t ${src};`);
@@ -12939,7 +12939,7 @@ describe("SQL-lite ALTER TABLE table-level actions", () => {
 
 // --- ALTER INDEX / MATERIALIZED VIEW additions and ALL IN TABLESPACE ---
 
-describe("SQL-lite ALTER INDEX ATTACH PARTITION, ALL IN TABLESPACE and matview SET TABLESPACE", () => {
+describe("PostgreSQL ALTER INDEX ATTACH PARTITION, ALL IN TABLESPACE and matview SET TABLESPACE", () => {
   const stmt = (text: string) => firstStmt(text) as any;
   const fails = (text: string) => () => postgres.parse(text);
 
@@ -13038,9 +13038,9 @@ describe("SQL-lite ALTER INDEX ATTACH PARTITION, ALL IN TABLESPACE and matview S
 
 // --- multi-column UPDATE assignments ---
 
-describe("SQL-lite ALTER MATERIALIZED VIEW table actions and ALTER SEQUENCE SET LOGGED", () => {
+describe("PostgreSQL ALTER MATERIALIZED VIEW table actions and ALTER SEQUENCE SET LOGGED", () => {
   const stmt = (text: string) => firstStmt(text) as any;
-  const fails = (text: string) => () => sqlLite.parse(text);
+  const fails = (text: string) => () => postgres.parse(text);
   const mv = (actions: unknown[]) => ({
     kind: "alterView",
     materialized: true,
@@ -13166,7 +13166,7 @@ describe("SQL-lite ALTER MATERIALIZED VIEW table actions and ALTER SEQUENCE SET 
   });
 });
 
-describe("SQL-lite multi-column UPDATE assignments", () => {
+describe("PostgreSQL multi-column UPDATE assignments", () => {
   const setOf = (src: string) => firstStmt(`UPDATE t SET ${src};`).set;
   const conflictSetOf = (src: string) =>
     firstStmt(`INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET ${src};`).onConflict.action.set;
@@ -13253,7 +13253,7 @@ describe("SQL-lite multi-column UPDATE assignments", () => {
 
 // --- ONLY targets, WHERE CURRENT OF and SET col = DEFAULT ---
 
-describe("SQL-lite ONLY targets, WHERE CURRENT OF and SET col = DEFAULT", () => {
+describe("PostgreSQL ONLY targets, WHERE CURRENT OF and SET col = DEFAULT", () => {
   const update = (over: Record<string, unknown>) => ({
     kind: "update",
     table: ["t"],
@@ -13411,7 +13411,7 @@ describe("SQL-lite ONLY targets, WHERE CURRENT OF and SET col = DEFAULT", () => 
 
 // --- assignment indirection and ON CONFLICT inference ---
 
-describe("SQL-lite assignment indirection and ON CONFLICT inference", () => {
+describe("PostgreSQL assignment indirection and ON CONFLICT inference", () => {
   const sub = (index: unknown, upper?: unknown) => ({
     kind: "subscript",
     index,
@@ -13602,7 +13602,7 @@ describe("SQL-lite assignment indirection and ON CONFLICT inference", () => {
 
 // --- MERGE ---
 
-describe("SQL-lite MERGE", () => {
+describe("PostgreSQL MERGE", () => {
   const merge = (over: Record<string, unknown>) => ({
     kind: "merge",
     table: ["t"],
@@ -13830,7 +13830,7 @@ describe("SQL-lite MERGE", () => {
 
 // --- composite and array access, and call-argument forms ---
 
-describe("SQL-lite composite and array access, and call-argument forms", () => {
+describe("PostgreSQL composite and array access, and call-argument forms", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const fieldOf = (expr: unknown, field: string | null) => ({ kind: "fieldSelect", expr, field });
   const sub = (base: unknown, index: unknown) => ({ kind: "subscript", base, index });
@@ -14008,7 +14008,7 @@ describe("SQL-lite composite and array access, and call-argument forms", () => {
 
 // --- special predicates and calls, and non-empty lists ---
 
-describe("SQL-lite special predicates and calls", () => {
+describe("PostgreSQL special predicates and calls", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const bad = (src: string) => () => postgres.parse(src);
   const x = name("x");
@@ -14185,7 +14185,7 @@ describe("SQL-lite special predicates and calls", () => {
   });
 });
 
-describe("SQL-lite rejects empty parenthesised lists", () => {
+describe("PostgreSQL rejects empty parenthesised lists", () => {
   const bad = (src: string) => () => postgres.parse(src);
   const emptyList = /but found "\)"/;
 
@@ -14236,7 +14236,7 @@ describe("SQL-lite rejects empty parenthesised lists", () => {
 
 // --- long-tail objects: definition lists, casts, collations, operators, … ---
 
-describe("SQL-lite long-tail objects with definition lists", () => {
+describe("PostgreSQL long-tail objects with definition lists", () => {
   const ty = (typeName: string, array = false) => ({ name: typeName, args: [], array });
   const arg = (typeName: string) => ({ mode: null, name: null, type: ty(typeName), defaultValue: null });
   const typeArg = (typeName: string) => ({ kind: "type", type: ty(typeName) });
@@ -14723,7 +14723,7 @@ const plainColumn = (colName: string, typeName: string, extra: Record<string, un
 const selectOne = sel({ columns: [col(num(1))] });
 const parseFails = (src: string) => () => postgres.parse(src);
 
-describe("SQL-lite typed tables (OF type)", () => {
+describe("PostgreSQL typed tables (OF type)", () => {
   it("parses a typed table, its column options and its trailing clauses", () => {
     expect(firstStmt("CREATE TABLE t OF typ;")).toEqual({
       kind: "createTable",
@@ -14781,7 +14781,7 @@ describe("SQL-lite typed tables (OF type)", () => {
   });
 });
 
-describe("SQL-lite USING method and WITHOUT OIDS table clauses", () => {
+describe("PostgreSQL USING method and WITHOUT OIDS table clauses", () => {
   it("parses them among a table's storage clauses, in PG's order", () => {
     expect(
       firstStmt("CREATE TABLE t (a int) INHERITS (p) USING heap WITHOUT OIDS ON COMMIT PRESERVE ROWS TABLESPACE ts;"),
@@ -14829,7 +14829,7 @@ describe("SQL-lite USING method and WITHOUT OIDS table clauses", () => {
   });
 });
 
-describe("SQL-lite CREATE TABLE AS TABLE and AS EXECUTE", () => {
+describe("PostgreSQL CREATE TABLE AS TABLE and AS EXECUTE", () => {
   it("parses both, with their storage clauses and WITH [NO] DATA", () => {
     expect(firstStmt("CREATE TABLE x (a, b) USING heap WITHOUT OIDS TABLESPACE ts AS TABLE t WITH NO DATA;")).toEqual({
       kind: "createTableAs",
@@ -14892,7 +14892,7 @@ describe("SQL-lite CREATE TABLE AS TABLE and AS EXECUTE", () => {
   });
 });
 
-describe("SQL-lite column STORAGE and COMPRESSION", () => {
+describe("PostgreSQL column STORAGE and COMPRESSION", () => {
   it("parses both ahead of a column's constraints", () => {
     expect(
       firstStmt(
@@ -14960,7 +14960,7 @@ describe("SQL-lite column STORAGE and COMPRESSION", () => {
   });
 });
 
-describe("SQL-lite CREATE CONSTRAINT TRIGGER", () => {
+describe("PostgreSQL CREATE CONSTRAINT TRIGGER", () => {
   it("parses FROM and the deferral attributes", () => {
     expect(
       firstStmt(
@@ -15044,7 +15044,7 @@ describe("SQL-lite CREATE CONSTRAINT TRIGGER", () => {
   });
 });
 
-describe("SQL-lite duplicate trigger events", () => {
+describe("PostgreSQL duplicate trigger events", () => {
   it("rejects an event written twice, UPDATE OF included, as PG's grammar does", () => {
     expect(
       parseFails("CREATE CONSTRAINT TRIGGER c AFTER INSERT OR INSERT ON t FOR EACH ROW EXECUTE PROCEDURE f();"),
@@ -15055,7 +15055,7 @@ describe("SQL-lite duplicate trigger events", () => {
   });
 });
 
-describe("SQL-lite lead words of the prefixed, recursive and constraint CREATE forms", () => {
+describe("PostgreSQL lead words of the prefixed, recursive and constraint CREATE forms", () => {
   it("names them where they may stand, and takes them as schema elements", () => {
     // The lead words neither CREATE map holds are named where they may stand.
     expect(parseFails("CREATE OR REPLACE frobnicate v;")).toThrow(
@@ -15079,7 +15079,7 @@ describe("SQL-lite lead words of the prefixed, recursive and constraint CREATE f
   });
 });
 
-describe("SQL-lite trigger REFERENCING transition tables", () => {
+describe("PostgreSQL trigger REFERENCING transition tables", () => {
   it("parses OLD and NEW TABLE, AS optional, in either order", () => {
     expect(
       firstStmt(
@@ -15137,7 +15137,7 @@ describe("SQL-lite trigger REFERENCING transition tables", () => {
   });
 });
 
-describe("SQL-lite TEMP and RECURSIVE views", () => {
+describe("PostgreSQL TEMP and RECURSIVE views", () => {
   const view = (over: Record<string, unknown>) => ({
     kind: "createView",
     materialized: false,
@@ -15209,7 +15209,7 @@ describe("SQL-lite TEMP and RECURSIVE views", () => {
   });
 });
 
-describe("SQL-lite UNLOGGED materialized views and their storage clauses", () => {
+describe("PostgreSQL UNLOGGED materialized views and their storage clauses", () => {
   it("parses UNLOGGED, USING, WITH and TABLESPACE, and AS TABLE", () => {
     expect(
       firstStmt(
@@ -15292,7 +15292,7 @@ describe("SQL-lite UNLOGGED materialized views and their storage clauses", () =>
 
 // --- psql scripts: postgres.parseScript ---
 
-describe("SQL-lite psql scripts", () => {
+describe("PostgreSQL psql scripts", () => {
   const script = (text: string) => stripSpans(postgres.parseScript(text)) as Record<string, any>[];
   const bad = (src: string) => () => postgres.parseScript(src);
   const meta = (command: string, args = "") => ({ kind: "psqlMeta", command, args });
@@ -15531,7 +15531,7 @@ describe("SQL-lite psql scripts", () => {
 
 // --- foreign data: wrappers, servers, user mappings, foreign tables ---
 
-describe("SQL-lite foreign data", () => {
+describe("PostgreSQL foreign data", () => {
   const fails = (text: string) => () => postgres.parse(text);
   const ty = (typeName: string, args: number[] = []) => ({
     name: typeName,
@@ -16028,7 +16028,7 @@ describe("SQL-lite foreign data", () => {
 
 // --- XML functions ---
 
-describe("SQL-lite XML functions", () => {
+describe("PostgreSQL XML functions", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const fromItem = (src: string) => (firstStmt(`SELECT * FROM ${src};`) as any).from[0];
   const bad = (src: string) => () => postgres.parse(src);
@@ -16404,7 +16404,7 @@ describe("SQL-lite XML functions", () => {
 
 // --- SQL/JSON clause syntax ---
 
-describe("SQL-lite SQL/JSON functions", () => {
+describe("PostgreSQL SQL/JSON functions", () => {
   const colExpr = (src: string) => (firstStmt(`SELECT ${src} FROM t;`) as any).columns[0].expr;
   const bad = (src: string) => () => postgres.parse(src);
   const x = name("x");
