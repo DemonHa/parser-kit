@@ -9,6 +9,7 @@ import {
   fail,
   type Ident,
   isName,
+  isNewline,
   isPunc,
   isWord,
   noteSetting,
@@ -201,6 +202,8 @@ export const refElement = defineElement("ref", "Ref", (ctx, start): Ref => {
   if (!isPunc(ctx.peek(), "{")) fail(ctx, name === null ? 'a name, ":" or "{"' : '":" or "{"');
   const open = ctx.position();
   ctx.next();
+  // `Ref {⏎ … ⏎}`: the `}` likely has a line of its own (see `skipPastClose`).
+  const ownLine = isNewline(ctx.peek());
   let line: ReturnType<typeof readRefLine>["line"] | null = null;
   const ref = (read: NonNullable<typeof line>): Ref => ({
     type: "ref",
@@ -223,7 +226,7 @@ export const refElement = defineElement("ref", "Ref", (ctx, start): Ref => {
     // Under `diagnose`, resume after the body's `}`, keeping the relationship
     // if it was read.
     if (!report(ctx, error)) throw error;
-    skipPastClose(ctx, open);
+    skipPastClose(ctx, open, ownLine);
     if (line === null) throw error;
   }
   return ref(line);

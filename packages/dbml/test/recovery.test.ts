@@ -519,6 +519,24 @@ describe("Cascading errors", () => {
     ]);
   });
 
+  it("resumes after a long-form Ref's own } when a string swallowed the rest of its line", () => {
+    const { elements, errors } = diagnose("Ref r {\n  a.b > c.d e [note: 'x]\n}\nTable t {\n  q\n}\n");
+    expect(errors).toEqual([
+      { msg: 'Expected "[", a new line or "}" but found "e"', start: at(2, 12) },
+      { msg: "Unterminated string", start: at(2, 21) },
+      { msg: "Expected a column type but found a new line", start: at(5, 3) },
+    ]);
+    expect(outline(elements)).toEqual(["ref a > c", "table t: "]);
+  });
+
+  it("reads a header's { as swallowed only when its own list left a string open", () => {
+    const { errors } = diagnose("Ref: a.b > c.d [note: 'x\nTable t\n  id int\n}\n");
+    expect(errors).toEqual([
+      { msg: "Unterminated string", start: at(1, 22) },
+      { msg: 'Expected "as" or "{" but found "id"', start: at(3, 2) },
+    ]);
+  });
+
   it("ends a body whose } a string left open outside a list swallowed", () => {
     const { elements, errors } = diagnose("Table a { Note: 'x }\nTable b { f int }\n");
     expect(errors).toEqual([{ msg: "Unterminated string", start: at(1, 16) }]);

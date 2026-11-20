@@ -555,7 +555,9 @@ export const readHeaderSettings = (
   const settingsAllowed = !hasSettings && (spacedBreak || !isNewline(ctx.peek()));
   const restored = isRestoredBreak(ctx.peek());
   skipNewlines(ctx);
-  const openSwallowed = restored && !isPunc(ctx.peek(), "{");
+  // Only this header's own list can have taken its `{`; a restored break may
+  // also come from a list left open in an earlier element.
+  const openSwallowed = hasSettings && restored && !isPunc(ctx.peek(), "{");
   return { settings, hasSettings, settingsAllowed, openSwallowed };
 };
 
