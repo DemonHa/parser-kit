@@ -47,18 +47,24 @@ import {
   commonAlterAction,
   functionArg,
   genericOptions,
+  type OptionStyle,
   objectRef,
   objectRefName,
   operandTypes,
   operatorName,
   optionLabel,
+  optionValue,
   parameterSet,
   relationOptions,
-  relationOptionValue,
   roleSpec,
   signature,
 } from "./shared";
 import { typeName } from "./types";
+
+// The option lists the family prints (WITH / SET / RESET of storage
+// parameters, publication and subscription options) take PG's def_elem: a
+// reserved word may stand bare as a name or a word value, and `=` is written.
+const STORAGE: OptionStyle = { eq: true, keywords: false, reservedNames: true, reservedValues: true };
 
 // --- layout ---
 
@@ -86,7 +92,7 @@ const ifExists = (on: boolean | undefined): Doc => (on === true ? kw("IF EXISTS"
 const names = (list: readonly string[]): Doc => commaList(list.map(ident));
 
 const withOptions = (options: readonly RelationOption[] | undefined): Doc =>
-  options === undefined ? "" : [kw("WITH"), " ", relationOptions(options)];
+  options === undefined ? "" : [kw("WITH"), " ", relationOptions(options, STORAGE)];
 
 // A name read as a plain name (no reserved word bare): an aggregate's or a
 // range type's option. Upper case when it can be bare.
@@ -258,9 +264,9 @@ const alterViewAction = (a: AlterViewAction): Doc => {
     case "setCompression":
       return alterColumn(a.column, [kw("SET COMPRESSION"), " ", a.method === null ? kw("DEFAULT") : ident(a.method)]);
     case "setColumnOptions":
-      return alterColumn(a.column, [kw("SET"), " ", relationOptions(a.options)]);
+      return alterColumn(a.column, [kw("SET"), " ", relationOptions(a.options, STORAGE)]);
     case "resetColumnOptions":
-      return alterColumn(a.column, [kw("RESET"), " ", relationOptions(a.options)]);
+      return alterColumn(a.column, [kw("RESET"), " ", relationOptions(a.options, STORAGE)]);
     case "clusterOn":
       return [kw("CLUSTER ON"), " ", ident(a.index)];
     case "setWithoutCluster":
@@ -274,9 +280,9 @@ const alterViewAction = (a: AlterViewAction): Doc => {
         a.mode === "usingIndex" ? [kw("USING INDEX"), " ", ident(a.index!)] : kw(a.mode.toUpperCase()),
       ];
     case "setOptions":
-      return [kw("SET"), " ", relationOptions(a.options)];
+      return [kw("SET"), " ", relationOptions(a.options, STORAGE)];
     case "resetOptions":
-      return [kw("RESET"), " ", relationOptions(a.options)];
+      return [kw("RESET"), " ", relationOptions(a.options, STORAGE)];
     case "setTablespace":
       return [kw("SET TABLESPACE"), " ", ident(a.tablespace)];
   }
@@ -377,7 +383,7 @@ const publicationObjects = (objects: readonly PublicationObject[]): Doc => comma
 
 const alterPublicationAction = (a: AlterPublicationAction): Doc =>
   a.kind === "setOptions"
-    ? [kw("SET"), " ", relationOptions(a.options)]
+    ? [kw("SET"), " ", relationOptions(a.options, STORAGE)]
     : [kw(a.kind.toUpperCase()), " ", publicationObjects(a.objects)];
 
 const alterSubscriptionAction = (a: AlterSubscriptionAction): Doc => {
@@ -398,9 +404,9 @@ const alterSubscriptionAction = (a: AlterSubscriptionAction): Doc => {
     case "disable":
       return kw(a.kind.toUpperCase());
     case "setOptions":
-      return [kw("SET"), " ", relationOptions(a.options)];
+      return [kw("SET"), " ", relationOptions(a.options, STORAGE)];
     case "skip":
-      return [kw("SKIP"), " ", relationOptions(a.options)];
+      return [kw("SKIP"), " ", relationOptions(a.options, STORAGE)];
   }
 };
 
@@ -707,7 +713,7 @@ export const objectsFamily = defineFamily(
     alterTablespace: (n) =>
       stmt(
         [kw("ALTER TABLESPACE"), " ", ident(n.name)],
-        [kw(n.action.kind === "setOptions" ? "SET" : "RESET"), " ", relationOptions(n.action.options)],
+        [kw(n.action.kind === "setOptions" ? "SET" : "RESET"), " ", relationOptions(n.action.options, STORAGE)],
       ),
     createForeignDataWrapper: (n) =>
       stmt(
@@ -862,12 +868,12 @@ export const objectsFamily = defineFamily(
 const DATABASE_ACTION_WORDS: ReadonlySet<string> = new Set(["rename", "set", "reset", "refresh"]);
 function databaseOption(o: RelationOption): Doc {
   if (o.name === "connection limit" && o.namespace === undefined && o.value !== null) {
-    return [kw("CONNECTION LIMIT"), " = ", relationOptionValue(o.value)];
+    return [kw("CONNECTION LIMIT"), " = ", optionValue(o.value, STORAGE)];
   }
   const name = (w: string): string => (DATABASE_ACTION_WORDS.has(w) ? quoted(w) : ident(w));
   return [
     o.namespace !== undefined ? `${name(o.namespace)}.` : "",
     name(o.name),
-    o.value !== null ? [" = ", relationOptionValue(o.value)] : "",
+    o.value !== null ? [" = ", optionValue(o.value, STORAGE)] : "",
   ];
 }
