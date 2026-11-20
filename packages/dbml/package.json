@@ -1,6 +1,6 @@
 {
   "name": "@parser-kit/dbml",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "A typed DBML parser built on @parser-kit/core: Table, Ref, Enum, Project and the rest of the DBML language to a span-annotated AST, with error recovery.",
   "keywords": [
     "dbml",
