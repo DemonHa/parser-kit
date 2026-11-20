@@ -586,10 +586,10 @@ describe("libpg_query differential", () => {
     expect(PRINTER_DIFFERENCES.map(({ sql }) => sql).filter((sql) => !compared.has(sql))).toEqual([]);
   });
 
-  it("formats SQL, comments and all, that PostgreSQL parses to the same trees", () => {
-    const allowed = new Map(PRINTER_DIFFERENCES.map((entry) => [entry.sql, entry.paths]));
-    const failures: string[] = [];
-    let formatted = 0;
+  // Each source's PostgreSQL trees, as written and with a comment before every
+  // token; one test per layout below, so each stays inside the default timeout.
+  const formatInputs = () => {
+    const inputs: { sql: string; text: string; expected: unknown[] }[] = [];
     for (const sql of [...SOURCES, ...COMMENT_CASES]) {
       let expected: unknown[];
       try {
@@ -602,21 +602,28 @@ describe("libpg_query differential", () => {
       } catch {
         continue; // rejected by either parser: checked above
       }
-      for (const text of [sql, withComments(sql)]) {
-        if (text === null) continue;
-        formatted++;
-        for (const options of OPTIONS) {
-          const out = postgres.format(text, options);
-          const problem = printedProblem(expected, out, allowed.get(sql));
-          if (problem !== undefined)
-            failures.push(`${text}\n  ${optionsLabel(options)}\n    formatted: ${out}\n    ${problem}`);
-        }
-      }
+      for (const text of [sql, withComments(sql)]) if (text !== null) inputs.push({ sql, text, expected });
     }
-    report(`format: ${formatted} sources formatted`);
-    expect(formatted).toBeGreaterThan(2000);
-    expect(failures).toEqual([]);
-  });
+    return inputs;
+  };
+  let inputs: ReturnType<typeof formatInputs> | undefined;
+
+  for (const options of OPTIONS) {
+    it(`formats SQL, comments and all, that PostgreSQL parses to the same trees, with ${optionsLabel(options)}`, () => {
+      inputs ??= formatInputs();
+      const allowed = new Map(PRINTER_DIFFERENCES.map((entry) => [entry.sql, entry.paths]));
+      const failures: string[] = [];
+      for (const { sql, text, expected } of inputs) {
+        const out = postgres.format(text, options);
+        const problem = printedProblem(expected, out, allowed.get(sql));
+        if (problem !== undefined)
+          failures.push(`${text}\n  ${optionsLabel(options)}\n    formatted: ${out}\n    ${problem}`);
+      }
+      if (options === OPTIONS[0]) report(`format: ${inputs.length} sources formatted`);
+      expect(inputs.length).toBeGreaterThan(2000);
+      expect(failures).toEqual([]);
+    });
+  }
 
   it("lists each source once", () => {
     for (const list of [PARSER_DIFFERENCES, PRINTER_DIFFERENCES]) {

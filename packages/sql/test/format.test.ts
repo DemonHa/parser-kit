@@ -80,34 +80,39 @@ describe("postgres.format", () => {
     for (const text of [...COMMENT_CASES, ...DUMPS]) expect(parses(text)).toBe(true);
   });
 
-  it("keeps the script and every comment, and is idempotent, over the corpus and the comment cases", () => {
-    const failures: string[] = [];
-    for (const text of [...SOURCES, ...COMMENT_CASES, ...DUMPS]) {
-      for (const options of LAYOUTS) {
+  // One test per layout, so each stays well inside the default timeout.
+  for (const options of LAYOUTS) {
+    it(`keeps the script and every comment, and is idempotent, over the corpus and the comment cases with ${JSON.stringify(options)}`, () => {
+      const failures: string[] = [];
+      for (const text of [...SOURCES, ...COMMENT_CASES, ...DUMPS]) {
         const found = problem(text, options);
         if (found !== undefined) failures.push(found);
       }
-    }
-    expect(failures).toEqual([]);
+      expect(failures).toEqual([]);
+    });
+  }
+
+  // Sources that hold COPY rows lex the rows as SQL in `withComments`; those are left out.
+  const COMMENTED = [...SOURCES, ...COMMENT_CASES, ...DUMPS.map((dump) => dump.slice(0, 20_000))].flatMap((source) => {
+    const text = withComments(source);
+    return text !== null && parses(text) && parses(source) ? [{ source, text }] : [];
   });
 
-  it("does the same with a comment before every token", () => {
-    const failures: string[] = [];
-    let checked = 0;
-    for (const source of [...SOURCES, ...COMMENT_CASES, ...DUMPS.map((dump) => dump.slice(0, 20_000))]) {
-      const text = withComments(source);
-      // Sources that hold COPY rows lex the rows as SQL here; skip those.
-      if (text === null || !parses(text) || !parses(source)) continue;
-      expect(tree(text)).toStrictEqual(tree(source));
-      checked++;
-      for (const options of [LAYOUTS[0]!, LAYOUTS[3]!]) {
+  it("parses a source with a comment before every token to the same script", () => {
+    expect(COMMENTED.length).toBeGreaterThan(800);
+    for (const { source, text } of COMMENTED) expect(tree(text)).toStrictEqual(tree(source));
+  });
+
+  for (const options of [LAYOUTS[0]!, LAYOUTS[3]!]) {
+    it(`does the same with a comment before every token with ${JSON.stringify(options)}`, () => {
+      const failures: string[] = [];
+      for (const { text } of COMMENTED) {
         const found = problem(text, options);
         if (found !== undefined) failures.push(found);
       }
-    }
-    expect(checked).toBeGreaterThan(800);
-    expect(failures).toEqual([]);
-  });
+      expect(failures).toEqual([]);
+    });
+  }
 
   it("puts leading comments on their own lines, trailing ones after the ;, and keeps one blank line", () => {
     expect(postgres.format("-- leading\nselect 1; -- trailing\n\n\n/* next */ select 2 /* x */;\n-- end")).toBe(
