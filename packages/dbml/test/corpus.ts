@@ -286,7 +286,11 @@ Table s.x {
   },
 
   // --- table notes ---
-  { category: "notes", name: "table note quoted string", dbml: 'Table t {\n  id int\n  Note: "stores things"\n}\n' },
+  {
+    category: "notes",
+    name: "table note double-quoted string",
+    dbml: 'Table t {\n  id int\n  Note: "stores things"\n}\n',
+  },
   { category: "notes", name: "table note string", dbml: "Table t {\n  id int\n  Note: 'stores things'\n}\n" },
   {
     category: "notes",
@@ -477,7 +481,10 @@ Ref: a.z > b.z [delete: no action, owner: 'ops']
   indexes {
     id [pk]
     country [unique]
-    (id, country) [unique, note: 'one per country']
+    (id, country) [unique, note: '''
+      one per country,
+        kept as written
+    ''']
   }
 }
 `,
@@ -586,6 +593,12 @@ Ref: a.z > b.z [delete: no action, owner: 'ops']
     dbml: "Note docs.readme {\n  'Lives in the docs schema'\n}\n",
   },
 
+  {
+    category: "sticky-notes",
+    name: "sticky note with color none",
+    dbml: "Note n [color: none] {\n  'no colour'\n}\n",
+  },
+
   // --- partials ---
   {
     category: "partials",
@@ -670,6 +683,12 @@ records users(id, name, score, active, status, joined) {
     dbml: "Table t {\n  a int\n  b int\n}\nrecords t(a, b) {\n  1\n  , 2\n  3, 4\n}\n",
   },
 
+  {
+    category: "records",
+    name: "records with an empty column list and in-table settings",
+    dbml: "Table t {\n  a int\n  records (a) [example] {\n    1\n  }\n}\nTable u {\n  a int\n}\nrecords u() {\n}\n",
+  },
+
   // --- comments, layout, lexical ---
   {
     category: "lexical",
@@ -734,6 +753,41 @@ TableGroup g { // group
 Note sticky { // sticky
   'text' // after the text
 }
+`,
+  },
+  {
+    category: "lexical",
+    name: "headers and refs across lines",
+    dbml: `Table users
+  as U [note: 'x']
+{
+  id int
+}
+
+Enum
+  e
+  as E
+  {
+  a
+}
+
+Table posts {
+  a int
+  b int
+  c int
+  d int
+}
+
+Ref: posts.a
+  > U.id
+Ref: posts.b >
+  U.id
+Ref {
+  posts.c >
+  U.id
+}
+Ref
+  r: posts.d > U.id
 `,
   },
   {
@@ -817,7 +871,7 @@ enum 状態 {
   {
     category: "lexical",
     name: "digit-led names and number forms",
-    dbml: "Table t {\n  2fa_code varchar\n  a float [default: 1e5]\n  b float [default: 0.000]\n  c int [default: 007]\n}\n",
+    dbml: "Table t {\n  2fa_code varchar\n  a float [default: 1e5]\n  b float [default: 0.000]\n  c int [default: 007]\n  d float [default: - 1.5]\n  e bigint [default: 12345678901234567890]\n  f int [default: +1]\n}\n",
   },
   {
     category: "lexical",
@@ -865,6 +919,9 @@ TABLE items {
 REF: items.order_id > orders."order id" [DELETE: CASCADE, UPDATE: NO ACTION]
 TABLEGROUP g {
   orders
+}
+ENUM e {
+  a
 }
 TABLEPARTIAL p {
   x int
@@ -1671,6 +1728,10 @@ export const MALFORMED: Sample[] = [
   { category: "sticky-notes", name: "sticky note without text", dbml: "Note n {\n}\n" },
   { category: "partials", name: "injection without a name", dbml: "Table t {\n  ~\n}\n" },
   { category: "partials", name: "records inside a table partial", dbml: "TablePartial p {\n  records { 1 }\n}\n" },
+
+  // A partial's header takes no custom settings, unlike a table's.
+  { category: "partials", name: "table partial custom setting", dbml: "TablePartial p [owner: 'x'] {\n  a int\n}\n" },
+  { category: "sticky-notes", name: "sticky note color string", dbml: "Note n [color: 'red'] {\n  'x'\n}\n" },
 
   // --- records ---
   { category: "records", name: "records unclosed column list", dbml: "records t(a, b {\n  1, 2\n}\n" },

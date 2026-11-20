@@ -168,7 +168,7 @@
     "errors": []
   },
   {
-    "name": "table note quoted string",
+    "name": "table note double-quoted string",
     "errors": []
   },
   {
@@ -308,6 +308,10 @@
     "errors": []
   },
   {
+    "name": "sticky note with color none",
+    "errors": []
+  },
+  {
     "name": "table partial with injection",
     "errors": []
   },
@@ -328,11 +332,19 @@
     "errors": []
   },
   {
+    "name": "records with an empty column list and in-table settings",
+    "errors": []
+  },
+  {
     "name": "comments everywhere",
     "errors": []
   },
   {
     "name": "comments in every block",
+    "errors": []
+  },
+  {
+    "name": "headers and refs across lines",
     "errors": []
   },
   {
@@ -1777,6 +1789,60 @@
         "end": {
           "row": 2,
           "col": 9
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "table partial custom setting",
+    "source": "TablePartial p [owner: 'x'] {\n  a int\n}\n",
+    "errors": [
+      {
+        "message": "Expected \"note\" or \"headercolor\" but found \"owner\" (1:16)",
+        "end": {
+          "row": 1,
+          "col": 21
+        }
+      }
+    ],
+    "ast": {
+      "type": "document",
+      "elements": [],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 1,
+          "col": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "sticky note color string",
+    "source": "Note n [color: 'red'] {\n  'x'\n}\n",
+    "errors": [
+      {
+        "message": "Expected a color or \"none\" but found a string (1:15)",
+        "end": {
+          "row": 1,
+          "col": 20
         }
       }
     ],

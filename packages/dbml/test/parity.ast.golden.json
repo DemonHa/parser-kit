@@ -11826,7 +11826,7 @@
     }
   },
   {
-    "name": "table note quoted string",
+    "name": "table note double-quoted string",
     "source": "Table t {\n  id int\n  Note: \"stores things\"\n}\n",
     "ast": {
       "type": "document",
@@ -23537,7 +23537,7 @@
   },
   {
     "name": "indexes with settings",
-    "source": "Table bookings {\n  id int\n  country varchar\n\n  indexes {\n    id [pk]\n    country [unique]\n    (id, country) [unique, note: 'one per country']\n  }\n}\n",
+    "source": "Table bookings {\n  id int\n  country varchar\n\n  indexes {\n    id [pk]\n    country [unique]\n    (id, country) [unique, note: '''\n      one per country,\n        kept as written\n    ''']\n  }\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -23912,15 +23912,16 @@
                       "kind": "note",
                       "value": {
                         "kind": "string",
-                        "value": "one per country",
+                        "value": "\n      one per country,\n        kept as written\n    ",
+                        "multiline": true,
                         "span": {
                           "start": {
                             "row": 8,
                             "col": 33
                           },
                           "end": {
-                            "row": 8,
-                            "col": 50
+                            "row": 11,
+                            "col": 7
                           }
                         }
                       },
@@ -23930,8 +23931,8 @@
                           "col": 27
                         },
                         "end": {
-                          "row": 8,
-                          "col": 50
+                          "row": 11,
+                          "col": 7
                         }
                       }
                     }
@@ -23942,8 +23943,8 @@
                       "col": 4
                     },
                     "end": {
-                      "row": 8,
-                      "col": 51
+                      "row": 11,
+                      "col": 8
                     }
                   }
                 }
@@ -23954,7 +23955,7 @@
                   "col": 2
                 },
                 "end": {
-                  "row": 9,
+                  "row": 12,
                   "col": 3
                 }
               }
@@ -23966,7 +23967,7 @@
               "col": 0
             },
             "end": {
-              "row": 10,
+              "row": 13,
               "col": 1
             }
           }
@@ -23978,7 +23979,7 @@
           "col": 0
         },
         "end": {
-          "row": 10,
+          "row": 13,
           "col": 1
         }
       }
@@ -26978,6 +26979,132 @@
               "end": {
                 "row": 2,
                 "col": 28
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 3,
+              "col": 1
+            }
+          }
+        }
+      ],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 3,
+          "col": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "sticky note with color none",
+    "source": "Note n [color: none] {\n  'no colour'\n}\n",
+    "ast": {
+      "type": "document",
+      "elements": [
+        {
+          "type": "stickyNote",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "n",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 5
+                },
+                "end": {
+                  "row": 1,
+                  "col": 6
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 5
+              },
+              "end": {
+                "row": 1,
+                "col": 6
+              }
+            }
+          },
+          "settings": [
+            {
+              "kind": "property",
+              "key": {
+                "value": "color",
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 8
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 13
+                  }
+                }
+              },
+              "value": {
+                "kind": "identifier",
+                "value": {
+                  "value": "none",
+                  "span": {
+                    "start": {
+                      "row": 1,
+                      "col": 15
+                    },
+                    "end": {
+                      "row": 1,
+                      "col": 19
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "row": 1,
+                    "col": 15
+                  },
+                  "end": {
+                    "row": 1,
+                    "col": 19
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 8
+                },
+                "end": {
+                  "row": 1,
+                  "col": 19
+                }
+              }
+            }
+          ],
+          "value": {
+            "kind": "string",
+            "value": "no colour",
+            "span": {
+              "start": {
+                "row": 2,
+                "col": 2
+              },
+              "end": {
+                "row": 2,
+                "col": 13
               }
             }
           },
@@ -30197,6 +30324,361 @@
     }
   },
   {
+    "name": "records with an empty column list and in-table settings",
+    "source": "Table t {\n  a int\n  records (a) [example] {\n    1\n  }\n}\nTable u {\n  a int\n}\nrecords u() {\n}\n",
+    "ast": {
+      "type": "document",
+      "elements": [
+        {
+          "type": "table",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "t",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 6
+                },
+                "end": {
+                  "row": 1,
+                  "col": 7
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 6
+              },
+              "end": {
+                "row": 1,
+                "col": 7
+              }
+            }
+          },
+          "alias": null,
+          "settings": [],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "a",
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 2,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 2,
+                        "col": 7
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 2,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 2,
+                      "col": 7
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 7
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 2
+                },
+                "end": {
+                  "row": 2,
+                  "col": 7
+                }
+              }
+            },
+            {
+              "type": "records",
+              "table": null,
+              "columns": [
+                {
+                  "value": "a",
+                  "span": {
+                    "start": {
+                      "row": 3,
+                      "col": 11
+                    },
+                    "end": {
+                      "row": 3,
+                      "col": 12
+                    }
+                  }
+                }
+              ],
+              "settings": [
+                {
+                  "kind": "example",
+                  "span": {
+                    "start": {
+                      "row": 3,
+                      "col": 15
+                    },
+                    "end": {
+                      "row": 3,
+                      "col": 22
+                    }
+                  }
+                }
+              ],
+              "rows": [
+                {
+                  "fields": [
+                    {
+                      "kind": "number",
+                      "value": 1,
+                      "span": {
+                        "start": {
+                          "row": 4,
+                          "col": 4
+                        },
+                        "end": {
+                          "row": 4,
+                          "col": 5
+                        }
+                      }
+                    }
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 4,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 4,
+                      "col": 5
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 3,
+                  "col": 2
+                },
+                "end": {
+                  "row": 5,
+                  "col": 3
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 6,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "table",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "u",
+              "span": {
+                "start": {
+                  "row": 7,
+                  "col": 6
+                },
+                "end": {
+                  "row": 7,
+                  "col": 7
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 7,
+                "col": 6
+              },
+              "end": {
+                "row": 7,
+                "col": 7
+              }
+            }
+          },
+          "alias": null,
+          "settings": [],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "a",
+                "span": {
+                  "start": {
+                    "row": 8,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 8,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 8,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 8,
+                        "col": 7
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 8,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 8,
+                      "col": 7
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 8,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 8,
+                    "col": 7
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 8,
+                  "col": 2
+                },
+                "end": {
+                  "row": 8,
+                  "col": 7
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 7,
+              "col": 0
+            },
+            "end": {
+              "row": 9,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "records",
+          "table": {
+            "schema": null,
+            "name": {
+              "value": "u",
+              "span": {
+                "start": {
+                  "row": 10,
+                  "col": 8
+                },
+                "end": {
+                  "row": 10,
+                  "col": 9
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 10,
+                "col": 8
+              },
+              "end": {
+                "row": 10,
+                "col": 9
+              }
+            }
+          },
+          "columns": [],
+          "settings": [],
+          "rows": [],
+          "span": {
+            "start": {
+              "row": 10,
+              "col": 0
+            },
+            "end": {
+              "row": 11,
+              "col": 1
+            }
+          }
+        }
+      ],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 11,
+          "col": 1
+        }
+      }
+    }
+  },
+  {
     "name": "comments everywhere",
     "source": "// leading comment\n/* block\n   comment */\nTable /* inline */ users // trailing\n{\n  // comment line in a body\n  id int /* after type */ [pk] // after settings\n  /* between columns */\n  name varchar [\n    // inside a settings list\n    not null\n  ]\n}\nTable posts {\n  user_id int\n}\nRef: users.id /* mid ref */ < posts.user_id // trailing\n",
     "ast": {
@@ -31747,6 +32229,1126 @@
         "end": {
           "row": 38,
           "col": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "headers and refs across lines",
+    "source": "Table users\n  as U [note: 'x']\n{\n  id int\n}\n\nEnum\n  e\n  as E\n  {\n  a\n}\n\nTable posts {\n  a int\n  b int\n  c int\n  d int\n}\n\nRef: posts.a\n  > U.id\nRef: posts.b >\n  U.id\nRef {\n  posts.c >\n  U.id\n}\nRef\n  r: posts.d > U.id\n",
+    "ast": {
+      "type": "document",
+      "elements": [
+        {
+          "type": "table",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "users",
+              "span": {
+                "start": {
+                  "row": 1,
+                  "col": 6
+                },
+                "end": {
+                  "row": 1,
+                  "col": 11
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 6
+              },
+              "end": {
+                "row": 1,
+                "col": 11
+              }
+            }
+          },
+          "alias": {
+            "value": "U",
+            "span": {
+              "start": {
+                "row": 2,
+                "col": 5
+              },
+              "end": {
+                "row": 2,
+                "col": 6
+              }
+            }
+          },
+          "settings": [
+            {
+              "kind": "note",
+              "value": {
+                "kind": "string",
+                "value": "x",
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 14
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 17
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 8
+                },
+                "end": {
+                  "row": 2,
+                  "col": 17
+                }
+              }
+            }
+          ],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "id",
+                "span": {
+                  "start": {
+                    "row": 4,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 4,
+                    "col": 4
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 4,
+                        "col": 5
+                      },
+                      "end": {
+                        "row": 4,
+                        "col": 8
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 4,
+                      "col": 5
+                    },
+                    "end": {
+                      "row": 4,
+                      "col": 8
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 4,
+                    "col": 5
+                  },
+                  "end": {
+                    "row": 4,
+                    "col": 8
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 4,
+                  "col": 2
+                },
+                "end": {
+                  "row": 4,
+                  "col": 8
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 5,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "enum",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "e",
+              "span": {
+                "start": {
+                  "row": 8,
+                  "col": 2
+                },
+                "end": {
+                  "row": 8,
+                  "col": 3
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 8,
+                "col": 2
+              },
+              "end": {
+                "row": 8,
+                "col": 3
+              }
+            }
+          },
+          "alias": {
+            "value": "E",
+            "span": {
+              "start": {
+                "row": 9,
+                "col": 5
+              },
+              "end": {
+                "row": 9,
+                "col": 6
+              }
+            }
+          },
+          "values": [
+            {
+              "name": {
+                "value": "a",
+                "span": {
+                  "start": {
+                    "row": 11,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 11,
+                    "col": 3
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 11,
+                  "col": 2
+                },
+                "end": {
+                  "row": 11,
+                  "col": 3
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 7,
+              "col": 0
+            },
+            "end": {
+              "row": 12,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "table",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "posts",
+              "span": {
+                "start": {
+                  "row": 14,
+                  "col": 6
+                },
+                "end": {
+                  "row": 14,
+                  "col": 11
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 14,
+                "col": 6
+              },
+              "end": {
+                "row": 14,
+                "col": 11
+              }
+            }
+          },
+          "alias": null,
+          "settings": [],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "a",
+                "span": {
+                  "start": {
+                    "row": 15,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 15,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 15,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 15,
+                        "col": 7
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 15,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 15,
+                      "col": 7
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 15,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 15,
+                    "col": 7
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 15,
+                  "col": 2
+                },
+                "end": {
+                  "row": 15,
+                  "col": 7
+                }
+              }
+            },
+            {
+              "type": "column",
+              "name": {
+                "value": "b",
+                "span": {
+                  "start": {
+                    "row": 16,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 16,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 16,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 16,
+                        "col": 7
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 16,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 16,
+                      "col": 7
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 16,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 16,
+                    "col": 7
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 16,
+                  "col": 2
+                },
+                "end": {
+                  "row": 16,
+                  "col": 7
+                }
+              }
+            },
+            {
+              "type": "column",
+              "name": {
+                "value": "c",
+                "span": {
+                  "start": {
+                    "row": 17,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 17,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 17,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 17,
+                        "col": 7
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 17,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 17,
+                      "col": 7
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 17,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 17,
+                    "col": 7
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 17,
+                  "col": 2
+                },
+                "end": {
+                  "row": 17,
+                  "col": 7
+                }
+              }
+            },
+            {
+              "type": "column",
+              "name": {
+                "value": "d",
+                "span": {
+                  "start": {
+                    "row": 18,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 18,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 18,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 18,
+                        "col": 7
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 18,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 18,
+                      "col": 7
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 18,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 18,
+                    "col": 7
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 18,
+                  "col": 2
+                },
+                "end": {
+                  "row": 18,
+                  "col": 7
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 14,
+              "col": 0
+            },
+            "end": {
+              "row": 19,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "ref",
+          "name": null,
+          "form": "short",
+          "left": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "posts",
+                "span": {
+                  "start": {
+                    "row": 21,
+                    "col": 5
+                  },
+                  "end": {
+                    "row": 21,
+                    "col": 10
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 21,
+                  "col": 5
+                },
+                "end": {
+                  "row": 21,
+                  "col": 10
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "a",
+                "span": {
+                  "start": {
+                    "row": 21,
+                    "col": 11
+                  },
+                  "end": {
+                    "row": 21,
+                    "col": 12
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 21,
+                "col": 5
+              },
+              "end": {
+                "row": 21,
+                "col": 12
+              }
+            }
+          },
+          "relation": {
+            "op": ">",
+            "span": {
+              "start": {
+                "row": 22,
+                "col": 2
+              },
+              "end": {
+                "row": 22,
+                "col": 3
+              }
+            }
+          },
+          "right": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "U",
+                "span": {
+                  "start": {
+                    "row": 22,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 22,
+                    "col": 5
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 22,
+                  "col": 4
+                },
+                "end": {
+                  "row": 22,
+                  "col": 5
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "id",
+                "span": {
+                  "start": {
+                    "row": 22,
+                    "col": 6
+                  },
+                  "end": {
+                    "row": 22,
+                    "col": 8
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 22,
+                "col": 4
+              },
+              "end": {
+                "row": 22,
+                "col": 8
+              }
+            }
+          },
+          "settings": [],
+          "span": {
+            "start": {
+              "row": 21,
+              "col": 0
+            },
+            "end": {
+              "row": 22,
+              "col": 8
+            }
+          }
+        },
+        {
+          "type": "ref",
+          "name": null,
+          "form": "short",
+          "left": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "posts",
+                "span": {
+                  "start": {
+                    "row": 23,
+                    "col": 5
+                  },
+                  "end": {
+                    "row": 23,
+                    "col": 10
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 23,
+                  "col": 5
+                },
+                "end": {
+                  "row": 23,
+                  "col": 10
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "b",
+                "span": {
+                  "start": {
+                    "row": 23,
+                    "col": 11
+                  },
+                  "end": {
+                    "row": 23,
+                    "col": 12
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 23,
+                "col": 5
+              },
+              "end": {
+                "row": 23,
+                "col": 12
+              }
+            }
+          },
+          "relation": {
+            "op": ">",
+            "span": {
+              "start": {
+                "row": 23,
+                "col": 13
+              },
+              "end": {
+                "row": 23,
+                "col": 14
+              }
+            }
+          },
+          "right": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "U",
+                "span": {
+                  "start": {
+                    "row": 24,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 24,
+                    "col": 3
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 24,
+                  "col": 2
+                },
+                "end": {
+                  "row": 24,
+                  "col": 3
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "id",
+                "span": {
+                  "start": {
+                    "row": 24,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 24,
+                    "col": 6
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 24,
+                "col": 2
+              },
+              "end": {
+                "row": 24,
+                "col": 6
+              }
+            }
+          },
+          "settings": [],
+          "span": {
+            "start": {
+              "row": 23,
+              "col": 0
+            },
+            "end": {
+              "row": 24,
+              "col": 6
+            }
+          }
+        },
+        {
+          "type": "ref",
+          "name": null,
+          "form": "long",
+          "left": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "posts",
+                "span": {
+                  "start": {
+                    "row": 26,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 26,
+                    "col": 7
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 26,
+                  "col": 2
+                },
+                "end": {
+                  "row": 26,
+                  "col": 7
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "c",
+                "span": {
+                  "start": {
+                    "row": 26,
+                    "col": 8
+                  },
+                  "end": {
+                    "row": 26,
+                    "col": 9
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 26,
+                "col": 2
+              },
+              "end": {
+                "row": 26,
+                "col": 9
+              }
+            }
+          },
+          "relation": {
+            "op": ">",
+            "span": {
+              "start": {
+                "row": 26,
+                "col": 10
+              },
+              "end": {
+                "row": 26,
+                "col": 11
+              }
+            }
+          },
+          "right": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "U",
+                "span": {
+                  "start": {
+                    "row": 27,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 27,
+                    "col": 3
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 27,
+                  "col": 2
+                },
+                "end": {
+                  "row": 27,
+                  "col": 3
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "id",
+                "span": {
+                  "start": {
+                    "row": 27,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 27,
+                    "col": 6
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 27,
+                "col": 2
+              },
+              "end": {
+                "row": 27,
+                "col": 6
+              }
+            }
+          },
+          "settings": [],
+          "span": {
+            "start": {
+              "row": 25,
+              "col": 0
+            },
+            "end": {
+              "row": 28,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "ref",
+          "name": {
+            "value": "r",
+            "span": {
+              "start": {
+                "row": 30,
+                "col": 2
+              },
+              "end": {
+                "row": 30,
+                "col": 3
+              }
+            }
+          },
+          "form": "short",
+          "left": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "posts",
+                "span": {
+                  "start": {
+                    "row": 30,
+                    "col": 5
+                  },
+                  "end": {
+                    "row": 30,
+                    "col": 10
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 30,
+                  "col": 5
+                },
+                "end": {
+                  "row": 30,
+                  "col": 10
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "d",
+                "span": {
+                  "start": {
+                    "row": 30,
+                    "col": 11
+                  },
+                  "end": {
+                    "row": 30,
+                    "col": 12
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 30,
+                "col": 5
+              },
+              "end": {
+                "row": 30,
+                "col": 12
+              }
+            }
+          },
+          "relation": {
+            "op": ">",
+            "span": {
+              "start": {
+                "row": 30,
+                "col": 13
+              },
+              "end": {
+                "row": 30,
+                "col": 14
+              }
+            }
+          },
+          "right": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "U",
+                "span": {
+                  "start": {
+                    "row": 30,
+                    "col": 15
+                  },
+                  "end": {
+                    "row": 30,
+                    "col": 16
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 30,
+                  "col": 15
+                },
+                "end": {
+                  "row": 30,
+                  "col": 16
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "id",
+                "span": {
+                  "start": {
+                    "row": 30,
+                    "col": 17
+                  },
+                  "end": {
+                    "row": 30,
+                    "col": 19
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 30,
+                "col": 15
+              },
+              "end": {
+                "row": 30,
+                "col": 19
+              }
+            }
+          },
+          "settings": [],
+          "span": {
+            "start": {
+              "row": 29,
+              "col": 0
+            },
+            "end": {
+              "row": 30,
+              "col": 19
+            }
+          }
+        }
+      ],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 30,
+          "col": 19
         }
       }
     }
@@ -33839,7 +35441,7 @@
   },
   {
     "name": "digit-led names and number forms",
-    "source": "Table t {\n  2fa_code varchar\n  a float [default: 1e5]\n  b float [default: 0.000]\n  c int [default: 007]\n}\n",
+    "source": "Table t {\n  2fa_code varchar\n  a float [default: 1e5]\n  b float [default: 0.000]\n  c int [default: 007]\n  d float [default: - 1.5]\n  e bigint [default: 12345678901234567890]\n  f int [default: +1]\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -34228,6 +35830,294 @@
                   "col": 22
                 }
               }
+            },
+            {
+              "type": "column",
+              "name": {
+                "value": "d",
+                "span": {
+                  "start": {
+                    "row": 6,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 6,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "float",
+                    "span": {
+                      "start": {
+                        "row": 6,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 6,
+                        "col": 9
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 6,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 6,
+                      "col": 9
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 6,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 6,
+                    "col": 9
+                  }
+                }
+              },
+              "settings": [
+                {
+                  "kind": "default",
+                  "value": {
+                    "kind": "number",
+                    "value": -1.5,
+                    "raw": "-1.5",
+                    "span": {
+                      "start": {
+                        "row": 6,
+                        "col": 20
+                      },
+                      "end": {
+                        "row": 6,
+                        "col": 25
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 6,
+                      "col": 11
+                    },
+                    "end": {
+                      "row": 6,
+                      "col": 25
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 6,
+                  "col": 2
+                },
+                "end": {
+                  "row": 6,
+                  "col": 26
+                }
+              }
+            },
+            {
+              "type": "column",
+              "name": {
+                "value": "e",
+                "span": {
+                  "start": {
+                    "row": 7,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 7,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "bigint",
+                    "span": {
+                      "start": {
+                        "row": 7,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 7,
+                        "col": 10
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 7,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 7,
+                      "col": 10
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 7,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 7,
+                    "col": 10
+                  }
+                }
+              },
+              "settings": [
+                {
+                  "kind": "default",
+                  "value": {
+                    "kind": "number",
+                    "value": 12345678901234567000,
+                    "raw": "12345678901234567890",
+                    "span": {
+                      "start": {
+                        "row": 7,
+                        "col": 21
+                      },
+                      "end": {
+                        "row": 7,
+                        "col": 41
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 7,
+                      "col": 12
+                    },
+                    "end": {
+                      "row": 7,
+                      "col": 41
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 7,
+                  "col": 2
+                },
+                "end": {
+                  "row": 7,
+                  "col": 42
+                }
+              }
+            },
+            {
+              "type": "column",
+              "name": {
+                "value": "f",
+                "span": {
+                  "start": {
+                    "row": 8,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 8,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 8,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 8,
+                        "col": 7
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 8,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 8,
+                      "col": 7
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 8,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 8,
+                    "col": 7
+                  }
+                }
+              },
+              "settings": [
+                {
+                  "kind": "default",
+                  "value": {
+                    "kind": "number",
+                    "value": 1,
+                    "raw": "+1",
+                    "span": {
+                      "start": {
+                        "row": 8,
+                        "col": 18
+                      },
+                      "end": {
+                        "row": 8,
+                        "col": 20
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 8,
+                      "col": 9
+                    },
+                    "end": {
+                      "row": 8,
+                      "col": 20
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 8,
+                  "col": 2
+                },
+                "end": {
+                  "row": 8,
+                  "col": 21
+                }
+              }
             }
           ],
           "span": {
@@ -34236,7 +36126,7 @@
               "col": 0
             },
             "end": {
-              "row": 6,
+              "row": 9,
               "col": 1
             }
           }
@@ -34248,7 +36138,7 @@
           "col": 0
         },
         "end": {
-          "row": 6,
+          "row": 9,
           "col": 1
         }
       }
@@ -34907,7 +36797,7 @@
   },
   {
     "name": "keywords and settings in any case",
-    "source": "PROJECT p {\n  NOTE: 'upper-case project note'\n}\nTABLE orders [HEADERCOLOR: #fff] {\n  \"order id\" int [PK]\n  Status varchar [NOT NULL, DEFAULT: 'new']\n  INDEXES {\n    \"order id\" [NAME: 'i', TYPE: hash, UNIQUE]\n    (\"order id\", `1`)\n  }\n  CHECKS {\n    `\"order id\" > 0`\n  }\n}\nTABLE items {\n  order_id int\n}\nREF: items.order_id > orders.\"order id\" [DELETE: CASCADE, UPDATE: NO ACTION]\nTABLEGROUP g {\n  orders\n}\nTABLEPARTIAL p {\n  x int\n}\nNOTE sticky {\n  'shouting'\n}\nRECORDS items(order_id) {\n  1\n}\n",
+    "source": "PROJECT p {\n  NOTE: 'upper-case project note'\n}\nTABLE orders [HEADERCOLOR: #fff] {\n  \"order id\" int [PK]\n  Status varchar [NOT NULL, DEFAULT: 'new']\n  INDEXES {\n    \"order id\" [NAME: 'i', TYPE: hash, UNIQUE]\n    (\"order id\", `1`)\n  }\n  CHECKS {\n    `\"order id\" > 0`\n  }\n}\nTABLE items {\n  order_id int\n}\nREF: items.order_id > orders.\"order id\" [DELETE: CASCADE, UPDATE: NO ACTION]\nTABLEGROUP g {\n  orders\n}\nENUM e {\n  a\n}\nTABLEPARTIAL p {\n  x int\n}\nNOTE sticky {\n  'shouting'\n}\nRECORDS items(order_id) {\n  1\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -35871,26 +37761,38 @@
           }
         },
         {
-          "type": "tablePartial",
+          "type": "enum",
           "name": {
-            "value": "p",
+            "schema": null,
+            "name": {
+              "value": "e",
+              "span": {
+                "start": {
+                  "row": 22,
+                  "col": 5
+                },
+                "end": {
+                  "row": 22,
+                  "col": 6
+                }
+              }
+            },
             "span": {
               "start": {
                 "row": 22,
-                "col": 13
+                "col": 5
               },
               "end": {
                 "row": 22,
-                "col": 14
+                "col": 6
               }
             }
           },
-          "settings": [],
-          "items": [
+          "alias": null,
+          "values": [
             {
-              "type": "column",
               "name": {
-                "value": "x",
+                "value": "a",
                 "span": {
                   "start": {
                     "row": 23,
@@ -35902,46 +37804,6 @@
                   }
                 }
               },
-              "dataType": {
-                "name": {
-                  "schema": null,
-                  "name": {
-                    "value": "int",
-                    "span": {
-                      "start": {
-                        "row": 23,
-                        "col": 4
-                      },
-                      "end": {
-                        "row": 23,
-                        "col": 7
-                      }
-                    }
-                  },
-                  "span": {
-                    "start": {
-                      "row": 23,
-                      "col": 4
-                    },
-                    "end": {
-                      "row": 23,
-                      "col": 7
-                    }
-                  }
-                },
-                "args": null,
-                "arraySizes": [],
-                "span": {
-                  "start": {
-                    "row": 23,
-                    "col": 4
-                  },
-                  "end": {
-                    "row": 23,
-                    "col": 7
-                  }
-                }
-              },
               "settings": [],
               "span": {
                 "start": {
@@ -35950,7 +37812,7 @@
                 },
                 "end": {
                   "row": 23,
-                  "col": 7
+                  "col": 3
                 }
               }
             }
@@ -35967,48 +37829,90 @@
           }
         },
         {
-          "type": "stickyNote",
+          "type": "tablePartial",
           "name": {
-            "schema": null,
-            "name": {
-              "value": "sticky",
-              "span": {
-                "start": {
-                  "row": 25,
-                  "col": 5
-                },
-                "end": {
-                  "row": 25,
-                  "col": 11
-                }
-              }
-            },
+            "value": "p",
             "span": {
               "start": {
                 "row": 25,
-                "col": 5
+                "col": 13
               },
               "end": {
                 "row": 25,
-                "col": 11
+                "col": 14
               }
             }
           },
           "settings": [],
-          "value": {
-            "kind": "string",
-            "value": "shouting",
-            "span": {
-              "start": {
-                "row": 26,
-                "col": 2
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "x",
+                "span": {
+                  "start": {
+                    "row": 26,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 26,
+                    "col": 3
+                  }
+                }
               },
-              "end": {
-                "row": 26,
-                "col": 12
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 26,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 26,
+                        "col": 7
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 26,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 26,
+                      "col": 7
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 26,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 26,
+                    "col": 7
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 26,
+                  "col": 2
+                },
+                "end": {
+                  "row": 26,
+                  "col": 7
+                }
               }
             }
-          },
+          ],
           "span": {
             "start": {
               "row": 25,
@@ -36021,6 +37925,60 @@
           }
         },
         {
+          "type": "stickyNote",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "sticky",
+              "span": {
+                "start": {
+                  "row": 28,
+                  "col": 5
+                },
+                "end": {
+                  "row": 28,
+                  "col": 11
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 28,
+                "col": 5
+              },
+              "end": {
+                "row": 28,
+                "col": 11
+              }
+            }
+          },
+          "settings": [],
+          "value": {
+            "kind": "string",
+            "value": "shouting",
+            "span": {
+              "start": {
+                "row": 29,
+                "col": 2
+              },
+              "end": {
+                "row": 29,
+                "col": 12
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 28,
+              "col": 0
+            },
+            "end": {
+              "row": 30,
+              "col": 1
+            }
+          }
+        },
+        {
           "type": "records",
           "table": {
             "schema": null,
@@ -36028,22 +37986,22 @@
               "value": "items",
               "span": {
                 "start": {
-                  "row": 28,
+                  "row": 31,
                   "col": 8
                 },
                 "end": {
-                  "row": 28,
+                  "row": 31,
                   "col": 13
                 }
               }
             },
             "span": {
               "start": {
-                "row": 28,
+                "row": 31,
                 "col": 8
               },
               "end": {
-                "row": 28,
+                "row": 31,
                 "col": 13
               }
             }
@@ -36053,11 +38011,11 @@
               "value": "order_id",
               "span": {
                 "start": {
-                  "row": 28,
+                  "row": 31,
                   "col": 14
                 },
                 "end": {
-                  "row": 28,
+                  "row": 31,
                   "col": 22
                 }
               }
@@ -36072,11 +38030,11 @@
                   "value": 1,
                   "span": {
                     "start": {
-                      "row": 29,
+                      "row": 32,
                       "col": 2
                     },
                     "end": {
-                      "row": 29,
+                      "row": 32,
                       "col": 3
                     }
                   }
@@ -36084,11 +38042,11 @@
               ],
               "span": {
                 "start": {
-                  "row": 29,
+                  "row": 32,
                   "col": 2
                 },
                 "end": {
-                  "row": 29,
+                  "row": 32,
                   "col": 3
                 }
               }
@@ -36096,11 +38054,11 @@
           ],
           "span": {
             "start": {
-              "row": 28,
+              "row": 31,
               "col": 0
             },
             "end": {
-              "row": 30,
+              "row": 33,
               "col": 1
             }
           }
@@ -36112,7 +38070,7 @@
           "col": 0
         },
         "end": {
-          "row": 30,
+          "row": 33,
           "col": 1
         }
       }

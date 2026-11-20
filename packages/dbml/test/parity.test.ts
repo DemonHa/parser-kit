@@ -1,4 +1,4 @@
-import type { ParseError } from "@parser-kit/core";
+import { ParseError } from "@parser-kit/core";
 import { expect, it } from "vitest";
 import { dbml } from "../src/index";
 import { CORPUS, MALFORMED } from "./corpus";
@@ -98,9 +98,23 @@ it("reports byte-identical diagnostics for the corpus and for malformed input", 
   expect(malformed.filter((entry) => !threw(entry) && entry.errors.length === 0).map((entry) => entry.name)).toEqual(
     [],
   );
-  expect(MALFORMED.filter(({ dbml: source }) => !threw(capture(() => dbml.parse(source)))).map((s) => s.name)).toEqual(
-    [],
-  );
+  // `parse` must reject each one with the error `diagnose` reports first, not
+  // with a crash that merely happens to throw.
+  const parseError = (source: string) => {
+    try {
+      dbml.parse(source);
+    } catch (error) {
+      return error;
+    }
+    return undefined;
+  };
+  expect(
+    MALFORMED.filter(({ dbml: source }) => {
+      const error = parseError(source);
+      const first = capture(() => dbml.diagnose(source).errors[0]);
+      return !(error instanceof ParseError) || threw(first) || error.message !== first?.message;
+    }).map((sample) => sample.name),
+  ).toEqual([]);
 
   await expect(serialise([...valid, ...malformed])).toMatchFileSnapshot("./parity.diagnostics.golden.json");
 });
