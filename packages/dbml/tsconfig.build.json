@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "declaration": true,
+    "declarationMap": true,
+    // The root tsconfig maps `@parser-kit/core` to core's source so tests and
+    // types:check need no build. The build must not follow it — that would pull
+    // core's sources into this package's output — so resolve the dependency
+    // through node_modules to core's built declarations instead.
+    "paths": {}
+  },
+  "include": ["src"]
+}

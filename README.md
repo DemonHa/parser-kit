@@ -50,20 +50,21 @@ grammar.parse("answer 42");    // → ParseError: Expected ":" but found "42"
 | Package | Description |
 |---|---|
 | [`@parser-kit/core`](packages/core) | The toolkit: lexer, combinators, Pratt engine, grammars |
-| [`@parser-kit/sql`](packages/sql) | A typed SQL parser built on the kit. Its first dialect is PostgreSQL 17: DDL, DML, queries and whole psql / pg_dump scripts. Benchmarked against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser); its [README](packages/sql/README.md) has the PostgreSQL coverage survey and the benchmark results |
+| [`@parser-kit/sql`](packages/sql) | A typed SQL parser built on the kit. Its first dialect is PostgreSQL 17 (`postgres.parse(sql)`, also importable from `@parser-kit/sql/postgres`): DDL, DML, queries and whole psql / pg_dump scripts. Benchmarked against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser); its [README](packages/sql/README.md) has the PostgreSQL coverage survey and the benchmark results |
+| [`@parser-kit/dbml`](packages/dbml) | **In development, not yet published.** A typed [DBML](https://dbml.dbdiagram.io/docs/) parser built on the kit |
 
 ## Example grammars
 
 Two real grammars double as the kit's genericity and integration tests — and the fastest way to learn it. Read their `grammar.ts` top to bottom.
 
 - **[`examples/js-lite/`](examples/js-lite/)** — a JavaScript subset: `const`/`let`, functions, control flow, full expression precedence, arrow functions, template literals. Exercises root-rule dispatch, backtracking, and lexer modes. Not published.
-- **[`packages/sql/`](packages/sql/)** — the PostgreSQL grammar behind `@parser-kit/sql`: DDL, DML (`MERGE`, `COPY`, upserts), `SELECT` with CTEs and window functions, access control and utility statements, folded identifiers, dollar-quoted strings, keyword operators. The largest grammar in the repo, and the one to read for keyword tiers, Pratt operator tables, hand-written `custom` rules, backtracking and error recovery on a real language.
+- **[`packages/sql/`](packages/sql/)** — the PostgreSQL grammar behind `@parser-kit/sql` (in `src/postgres/`): DDL, DML (`MERGE`, `COPY`, upserts), `SELECT` with CTEs and window functions, access control and utility statements, folded identifiers, dollar-quoted strings, keyword operators. The largest grammar in the repo, and the one to read for keyword tiers, Pratt operator tables, hand-written `custom` rules, backtracking and error recovery on a real language.
 
 ## Development
 
 ```sh
 pnpm install
-pnpm test          # core unit tests, @parser-kit/sql and js-lite
+pnpm test          # core unit tests, @parser-kit/sql, @parser-kit/dbml and js-lite
 pnpm types:check
 pnpm lint
 pnpm build
