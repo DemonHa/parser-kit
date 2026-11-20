@@ -110,7 +110,10 @@ export type Expr =
   // 2^53 up is, so `1.5e300` has one too), or a value that overflowed to
   // ±Infinity (which JSON would write as `null`). PG keeps every digit of
   // both (as `bigint` or `numeric`); `raw` lets a caller do the same.
-  | { kind: "number"; value: number; raw?: string; span: Span }
+  // `implicit` marks a count the source leaves out and PG reads as a constant:
+  // the 1 of a count-less `FETCH FIRST ROW ONLY`. Its span is the ROW or ROWS
+  // word that stands where the count would be written.
+  | { kind: "number"; value: number; raw?: string; implicit?: true; span: Span }
   | { kind: "string"; value: string; span: Span }
   | { kind: "bool"; value: boolean; span: Span }
   | { kind: "null"; span: Span }
@@ -243,12 +246,14 @@ export type Expr =
   // `TRIM([LEADING|TRAILING|BOTH] [characters] FROM source)`.
   | { kind: "trim"; side: "leading" | "trailing" | "both" | null; characters: Expr | null; source: Expr; span: Span }
   // --- SQL/JSON (see JSON_CALLS) ---
-  // Each optional clause key is present only when its clause is written; a
-  // call with none of them stays an ordinary `call` node. `onNull` is the
+  // A bare SQL/JSON name always makes its node, written with clauses or not
+  // (`json_array(1, 2)`, `JSON_OBJECT()`), bar JSON_OBJECT's legacy form, an
+  // ordinary `call` (`json_object('{a,1}')`). Each optional clause key is
+  // present only when its clause is written. `onNull` is the
   // `{NULL | ABSENT} ON NULL` clause, `uniqueKeys` the `{WITH | WITHOUT} UNIQUE
   // [KEYS]` one (true for WITH).
   // `JSON_OBJECT(key VALUE value, …)` (or `key : value`), and the empty
-  // `JSON_OBJECT(RETURNING type)`.
+  // `JSON_OBJECT([RETURNING type])`.
   | {
       kind: "jsonObject";
       entries: JsonKeyValue[];
@@ -257,7 +262,7 @@ export type Expr =
       returning?: JsonReturning;
       span: Span;
     }
-  // `JSON_ARRAY(value, …)`, and the empty `JSON_ARRAY(RETURNING type)`.
+  // `JSON_ARRAY(value, …)`, and the empty `JSON_ARRAY([RETURNING type])`.
   | { kind: "jsonArray"; elements: JsonValueExpr[]; onNull?: JsonOnNull; returning?: JsonReturning; span: Span }
   // `JSON_ARRAY(SELECT …)`: an array of the query's single column.
   | { kind: "jsonArrayQuery"; query: Query; format?: JsonFormat; returning?: JsonReturning; span: Span }
@@ -290,8 +295,10 @@ export type Expr =
     } & JsonPathCall)
   | ({ kind: "jsonExists" } & JsonPathCall)
   // `JSON(value [FORMAT JSON] [{WITH | WITHOUT} UNIQUE [KEYS]])`, which parses
-  // text as JSON. `JSON_SCALAR(x)` takes no clause, so it is always a call.
+  // text as JSON.
   | { kind: "jsonParse"; value: JsonValueExpr; uniqueKeys?: boolean; span: Span }
+  // `JSON_SCALAR(value)`, which makes a JSON scalar of an SQL value.
+  | { kind: "jsonScalar"; value: Expr; span: Span }
   // `JSON_SERIALIZE(value [FORMAT JSON] [RETURNING type])`.
   | { kind: "jsonSerialize"; value: JsonValueExpr; returning?: JsonReturning; span: Span }
   // `x COLLATE collation` — `collation` is the (possibly qualified) collation name.
@@ -818,18 +825,40 @@ export type AlterFunctionAction =
   | AlterSetSchema
   | { kind: "options"; options: FunctionOption[] };
 export type AlterAggregateAction = AlterRenameTo | AlterOwnerTo | AlterSetSchema;
-// The column actions are ALTER TABLE's shapes, the option lists ALTER INDEX's;
-// only a materialized view takes setTablespace.
+// The column and table-level actions are ALTER TABLE's shapes, the option
+// lists ALTER INDEX's. A plain view takes renameColumn, setDefault,
+// dropDefault and the option lists; a materialized view takes no column
+// default, but takes setTablespace and the storage actions PG allows it as a
+// table: the column's statistics target, storage, compression and options,
+// CLUSTER ON, SET WITHOUT CLUSTER, SET ACCESS METHOD and REPLICA IDENTITY.
 export type AlterViewAction =
   | AlterRenameTo
   | AlterOwnerTo
   | AlterSetSchema
-  | Extract<AlterAction, { kind: "renameColumn" | "setDefault" | "dropDefault" }>
+  | Extract<
+      AlterAction,
+      {
+        kind:
+          | "renameColumn"
+          | "setDefault"
+          | "dropDefault"
+          | "setStatistics"
+          | "setStorage"
+          | "setCompression"
+          | "setColumnOptions"
+          | "resetColumnOptions"
+          | "clusterOn"
+          | "setWithoutCluster"
+          | "setAccessMethod"
+          | "replicaIdentity";
+      }
+    >
   | Extract<AlterIndexAction, { kind: "setOptions" | "resetOptions" | "setTablespace" }>;
 export type AlterSequenceAction =
   | AlterRenameTo
   | AlterOwnerTo
   | AlterSetSchema
+  | Extract<AlterAction, { kind: "setLogged" | "setUnlogged" }>
   | { kind: "options"; options: SequenceOption[] };
 
 // --- Phase 7: more CREATE objects ---
@@ -838,13 +867,16 @@ export type AlterSequenceAction =
 // discriminated by `form`. The enum form keeps its original `values` payload;
 // `base` is the `( definition )` of a base type, and `shell` the bare `CREATE
 // TYPE name` that reserves a name for one.
+// One `name type` column of RETURNS TABLE (PG's table_func_column), which
+// takes no COLLATE. A composite type's attributes are ColumnDefinitions, `name
+// type [COLLATE collation]` (PG's TableFuncElement).
 export type CompositeAttr = { name: string; type: ColType };
 // A `name = value` option in a `RANGE` type body (`SUBTYPE = float8`, …). `value`
 // is the raw (possibly qualified) name / type on the right of the `=`.
 export type RangeOption = { name: string; value: string };
 export type CreateType =
   | { kind: "createType"; form: "enum"; name: string[]; values: string[]; span: Span }
-  | { kind: "createType"; form: "composite"; name: string[]; attributes: CompositeAttr[]; span: Span }
+  | { kind: "createType"; form: "composite"; name: string[]; attributes: ColumnDefinition[]; span: Span }
   | { kind: "createType"; form: "range"; name: string[]; options: RangeOption[]; span: Span }
   | { kind: "createType"; form: "base"; name: string[]; definition: DefinitionElem[]; span: Span }
   | { kind: "createType"; form: "shell"; name: string[]; span: Span };
@@ -2032,10 +2064,11 @@ export type Stmt =
   // [CASCADE|RESTRICT]`. `objectType` is the folded keyword (`"materialized
   // view"` for the two-word one); `behavior` is the trailing CASCADE/RESTRICT
   // (null when absent, and always null where PG takes none: DATABASE, ROLE,
-  // USER, TABLESPACE). CONCURRENTLY is only accepted on the original six object kinds.
+  // USER, GROUP, TABLESPACE). CONCURRENTLY is only accepted on the original six object kinds.
   // The remaining keys belong to one object kind each and are omitted elsewhere:
-  // - `signatures` (FUNCTION / PROCEDURE / AGGREGATE): one entry per name, null
-  //   where a function or procedure name carries no argument list;
+  // - `signatures` (FUNCTION / PROCEDURE / ROUTINE / AGGREGATE): one entry per
+  //   name, null where a function, procedure or routine name carries no
+  //   argument list;
   // - `table` (TRIGGER, POLICY): the `ON table` the object belongs to;
   // - `force` (DATABASE): present, as true, only when `(FORCE)` is written;
   // - `operands` (OPERATOR): one `(left, right)` pair per name, null where NONE
@@ -2854,10 +2887,9 @@ const functionArg: Rule<Expr, SqlTokenType> = lazy(() =>
 // VARIADIC alone: PG's grammar reads the other three there too, but its
 // analysis rejects DISTINCT and ORDER BY outside an aggregate, and this
 // grammar has never read them there (nor the no-op ALL). `takeOver` sees the
-// call after each argument is read, and again after an aggregate's ORDER BY,
-// and may take the rest of it over from there, returning its node as `taken`
-// (OVERLAY's PLACING form, see columnRef, and the SQL/JSON clauses, see
-// JSON_CALLS), or decline with null.
+// call after each argument is read, and may take the rest of it over from
+// there, returning its node as `taken` (OVERLAY's PLACING form, see
+// columnRef), or decline with null.
 type CallArgs = {
   args: Expr[];
   quantifier: "distinct" | "all" | null;
@@ -2868,10 +2900,10 @@ type CallArgs = {
   // argument starts on is checked, which it peeks anyway.
   integerArgs: boolean;
 };
-function parseCallArgs<T = Expr>(
+function parseCallArgs(
   ctx: ParseContext<SqlTokenType>,
-  opts: { aggregate: boolean; takeOver?: (call: CallArgs) => T | null },
-): CallArgs & { taken?: T } {
+  opts: { aggregate: boolean; takeOver?: (call: CallArgs) => Expr | null },
+): CallArgs & { taken?: Expr } {
   const quantifier = opts.aggregate
     ? ((ctx.eat("ident", ["distinct", "all"])?.value ?? null) as CallArgs["quantifier"])
     : null;
@@ -2897,10 +2929,7 @@ function parseCallArgs<T = Expr>(
     readArg();
     taken = opts.takeOver?.(call) ?? null;
   }
-  if (taken === null && opts.aggregate && ctx.is("ident", "order")) {
-    call.orderBy = ctx.parse(orderByClause);
-    taken = opts.takeOver?.(call) ?? null;
-  }
+  if (taken === null && opts.aggregate && ctx.is("ident", "order")) call.orderBy = ctx.parse(orderByClause);
   return taken === null ? call : { ...call, taken };
 }
 // Whether the arguments read so far are ordinary operands: no DISTINCT or ALL,
@@ -3438,17 +3467,18 @@ const SPECIAL_CALLS: Record<string, (ctx: ParseContext<SqlTokenType>, start: Pos
 };
 
 // --- SQL/JSON ---
-// PG 16/17's SQL/JSON functions take keyword clauses inside their argument
-// list. Their names are unreserved here (PG's are column-name keywords), and
-// PG still reads some of their plain spellings as ordinary functions (the
-// legacy `json_object('{a,1}')`), so no handler claims a call up front. Each
-// is offered the call straight after its `(` (`call` null) and again after
-// every argument (parseCallArgs' takeOver), and takes it over only when the
-// token there opens one of its clauses; otherwise it declines with null. No
-// clause word is an operator, so none can have continued an argument, and
-// each was a syntax error there before these forms were read: taking over
-// changes nothing that parsed before, and a call that never shows a clause
-// stays the plain call it always was (`json_array(1, 2)`, `json(x)`).
+// PG 16/17's SQL/JSON functions, gram.y's json_* productions. Every name is
+// one of PG's col_name_keywords, which it never takes as a bare function name,
+// so a bare `json_array(` (and the rest) always opens the keyword form here, as
+// there, with exactly the arguments and clauses gram.y gives it: `json_array(1,
+// 2)` is a jsonArray node, and `json_arrayagg(DISTINCT a)` or `json_array(a =>
+// 1)` is a syntax error. The one plain call left is JSON_OBJECT's legacy form,
+// gram.y's `JSON_OBJECT '(' func_arg_list ')'`, which PG builds as a FuncCall
+// (`json_object('{a,1}')`, `json_object(keys, values)`). Quoted or qualified,
+// each name is an ordinary function, as in PG. As col_name_keywords the names
+// stay usable as column, table and alias names, so none is reserved, and the
+// clause words (`value`, `format`, `returning`, `absent`, `passing`, …) are
+// matched by value inside the parentheses alone.
 
 // `FORMAT JSON [ENCODING name]`, when the cursor is on FORMAT. PG's grammar
 // action takes only the three UTF encodings, in any case.
@@ -3631,121 +3661,110 @@ function parseJsonQuotes(ctx: ParseContext<SqlTokenType>): "keep" | "omit" | nul
   return lead.value as "keep" | "omit";
 }
 
-// A handler in JSON_CALLS: offered the call after its `(` (`call` null) and
-// after each argument, it returns the node of the clause form it takes over,
-// or null to leave the call alone.
-type JsonCallHandler = (ctx: ParseContext<SqlTokenType>, start: Position, call: CallArgs | null) => Expr | null;
+// A handler in JSON_CALLS, entered just past the `(` of a bare SQL/JSON name
+// and consuming through its `)`. `windowed` says whether an aggregate may take
+// FILTER and OVER after it: in an expression it may (PG's func_expr), but not
+// as a FROM item (func_expr_windowless).
+type JsonCallHandler = (ctx: ParseContext<SqlTokenType>, start: Position, windowed: boolean) => Expr;
 
-// JSON_OBJECT(key VALUE value, … [clauses]) or JSON_OBJECT(RETURNING type).
-// Only a VALUE or `:` after the first key makes it the constructor:
-// `json_object(keys, values)` is PG's legacy function.
-const takeJsonObject: JsonCallHandler = (ctx, start, call) => {
-  const entries: JsonKeyValue[] = [];
-  if (call === null) {
-    if (!ctx.is("ident", "returning")) return null;
-  } else {
-    if (!isSinglePlainArg(call) || !atJsonKeySeparator(ctx)) return null;
-    entries.push(finishJsonKeyValue(ctx, call.args[0]!));
-    while (ctx.eat("punc", ",") !== null) entries.push(finishJsonKeyValue(ctx, ctx.parse(expression)));
+// `JSON_OBJECT([RETURNING type])`, with no entries.
+function emptyJsonConstructor(ctx: ParseContext<SqlTokenType>): { returning?: JsonReturning } {
+  const returning = parseJsonReturning(ctx);
+  expectClose(ctx);
+  return returning === null ? {} : { returning };
+}
+
+// JSON_OBJECT(key VALUE value, … [clauses]), JSON_OBJECT([RETURNING type]), or
+// the legacy `json_object(arg, …)` call. Only a VALUE or `:` after the first
+// argument makes the constructor, as in gram.y, where the two lists part at
+// that token; the legacy list is PG's func_arg_list, which takes named
+// arguments but no `*`, VARIADIC, DISTINCT or ORDER BY.
+const parseJsonObject: JsonCallHandler = (ctx, start) => {
+  if (ctx.is("punc", ")") || ctx.is("ident", "returning")) {
+    return { kind: "jsonObject", entries: [], ...emptyJsonConstructor(ctx), span: ctx.spanFrom(start) };
   }
-  return { kind: "jsonObject", entries, ...parseJsonConstructorTail(ctx, true), span: ctx.spanFrom(start) };
+  const first = parseCallArg(ctx, expression);
+  if (first.kind !== "namedArg" && atJsonKeySeparator(ctx)) {
+    const entries = [finishJsonKeyValue(ctx, first)];
+    while (ctx.eat("punc", ",") !== null) entries.push(finishJsonKeyValue(ctx, ctx.parse(expression)));
+    return { kind: "jsonObject", entries, ...parseJsonConstructorTail(ctx, true), span: ctx.spanFrom(start) };
+  }
+  const args = [first];
+  while (ctx.eat("punc", ",") !== null) args.push(parseCallArg(ctx, expression));
+  expectClose(ctx);
+  return { kind: "call", name: "json_object", args, span: ctx.spanFrom(start) };
 };
 
-// JSON_ARRAY(value [FORMAT JSON], … [clauses]), JSON_ARRAY(RETURNING type) and
-// JSON_ARRAY(query [FORMAT JSON] [RETURNING type]) (see startsFormatJson). The
-// query is PG's select_no_parens, and only one that opens on a query word is
-// read as one here: `JSON_ARRAY((SELECT 1))` is a one-element array of a
-// scalar subquery, as in PG, but so is the `(SELECT 1)` of
-// `JSON_ARRAY((SELECT 1) UNION …)`, which PG reads as a query and this grammar
-// rejects.
-const JSON_ARRAY_CLAUSE_WORDS = ["format", "null", "absent", "returning"];
-const takeJsonArray: JsonCallHandler = (ctx, start, call) => {
-  if (call === null) {
-    const lead = ctx.peek();
-    if (lead?.type === "ident" && QUERY_WORDS.has(lead.value)) {
-      const q = ctx.parse(query);
-      const format = parseJsonFormat(ctx);
-      const returning = parseJsonReturning(ctx);
-      expectClose(ctx);
-      return {
-        kind: "jsonArrayQuery",
-        query: q,
-        ...(format !== null && { format }),
-        ...(returning !== null && { returning }),
-        span: ctx.spanFrom(start),
-      };
-    }
-    if (!ctx.is("ident", "returning")) return null;
-    return { kind: "jsonArray", elements: [], ...parseJsonConstructorTail(ctx, false), span: ctx.spanFrom(start) };
+// JSON_ARRAY(value [FORMAT JSON], … [clauses]), JSON_ARRAY([RETURNING type])
+// and JSON_ARRAY(query [FORMAT JSON] [RETURNING type]). The query is PG's
+// select_no_parens, and only one that opens on a query word is read as one
+// here: `JSON_ARRAY((SELECT 1))` is a one-element array of a scalar subquery,
+// as in PG, but so is the `(SELECT 1)` of `JSON_ARRAY((SELECT 1) UNION …)`,
+// which PG reads as a query and this grammar rejects.
+const parseJsonArray: JsonCallHandler = (ctx, start) => {
+  if (ctx.is("punc", ")") || ctx.is("ident", "returning")) {
+    return { kind: "jsonArray", elements: [], ...emptyJsonConstructor(ctx), span: ctx.spanFrom(start) };
   }
-  // The clause check first: the plain-arguments one walks every argument so far.
-  if (call.orderBy.length > 0 || !ctx.is("ident", JSON_ARRAY_CLAUSE_WORDS) || !isPlainCallArgs(call)) return null;
-  // Every argument but the last ended on a comma, so only the last can carry a FORMAT.
-  const elements = call.args.map(
-    (expr, i): JsonValueExpr => (i === call.args.length - 1 ? finishJsonValue(ctx, expr) : { expr }),
-  );
+  const lead = ctx.peek();
+  if (lead?.type === "ident" && QUERY_WORDS.has(lead.value)) {
+    const q = ctx.parse(query);
+    const format = parseJsonFormat(ctx);
+    const returning = parseJsonReturning(ctx);
+    expectClose(ctx);
+    return {
+      kind: "jsonArrayQuery",
+      query: q,
+      ...(format !== null && { format }),
+      ...(returning !== null && { returning }),
+      span: ctx.spanFrom(start),
+    };
+  }
+  const elements = [parseJsonValue(ctx)];
   while (ctx.eat("punc", ",") !== null) elements.push(parseJsonValue(ctx));
   return { kind: "jsonArray", elements, ...parseJsonConstructorTail(ctx, false), span: ctx.spanFrom(start) };
 };
 
-// JSON_OBJECTAGG(key VALUE value [clauses]) [FILTER …] [OVER …].
-const takeJsonObjectAgg: JsonCallHandler = (ctx, start, call) => {
-  if (!isSinglePlainArg(call) || !atJsonKeySeparator(ctx)) return null;
-  const { key, value } = finishJsonKeyValue(ctx, call.args[0]!);
-  const tail = parseJsonConstructorTail(ctx, true);
-  return applyFilterAndOver(ctx, { kind: "jsonObjectAgg", key, value, ...tail, span: ctx.spanFrom(start) }, start);
+// JSON_OBJECTAGG(key VALUE value [clauses]) [FILTER …] [OVER …]: exactly one
+// entry.
+const parseJsonObjectAgg: JsonCallHandler = (ctx, start, windowed) => {
+  const { key, value } = finishJsonKeyValue(ctx, ctx.parse(expression));
+  const node: Expr = {
+    kind: "jsonObjectAgg",
+    key,
+    value,
+    ...parseJsonConstructorTail(ctx, true),
+    span: ctx.spanFrom(start),
+  };
+  return windowed ? applyFilterAndOver(ctx, node, start) : node;
 };
 
-// JSON_ARRAYAGG(value [FORMAT JSON] [ORDER BY …] [clauses]) [FILTER …] [OVER …].
-// An ORDER BY with no FORMAT before it is the plain call's, read by
-// parseCallArgs, which offers the call again once it is: only a clause after
-// it makes this form, and `json_arrayagg(x ORDER BY y)` stays the call it was.
-const JSON_AGG_TAIL_WORDS = ["null", "absent", "returning"];
-const takeJsonArrayAgg: JsonCallHandler = (ctx, start, call) => {
-  if (call === null || call.args.length !== 1 || !isPlainCallArgs(call)) return null;
-  const ordered = call.orderBy.length > 0;
-  if (!ctx.is("ident", ordered ? JSON_AGG_TAIL_WORDS : JSON_ARRAY_CLAUSE_WORDS)) return null;
-  const value = finishJsonValue(ctx, call.args[0]!);
-  const orderBy = !ordered && ctx.is("ident", "order") ? ctx.parse(orderByClause) : call.orderBy;
-  const tail = parseJsonConstructorTail(ctx, false);
+// JSON_ARRAYAGG(value [FORMAT JSON] [ORDER BY …] [clauses]) [FILTER …] [OVER …]:
+// exactly one value, and no DISTINCT.
+const parseJsonArrayAgg: JsonCallHandler = (ctx, start, windowed) => {
+  const value = parseJsonValue(ctx);
+  const orderBy = ctx.is("ident", "order") ? ctx.parse(orderByClause) : [];
   const node: Expr = {
     kind: "jsonArrayAgg",
     value,
     ...(orderBy.length > 0 && { orderBy }),
-    ...tail,
+    ...parseJsonConstructorTail(ctx, false),
     span: ctx.spanFrom(start),
   };
-  return applyFilterAndOver(ctx, node, start);
+  return windowed ? applyFilterAndOver(ctx, node, start) : node;
 };
 
 // JSON_VALUE / JSON_QUERY / JSON_EXISTS(context [FORMAT JSON], path [PASSING …]
-// …). A FORMAT after the context item, or one of the function's clause words
-// after the path, makes the clause form; `json_exists(doc, '$.a')` stays a call.
-// The clauses come in PG's order: PASSING, RETURNING, the wrapper, the quotes,
-// then ON EMPTY and ON ERROR — of which JSON_EXISTS takes only PASSING and ON
-// ERROR, and JSON_VALUE no wrapper or quotes.
+// …): always a context item and a path. The clauses come in PG's order:
+// PASSING, RETURNING, the wrapper, the quotes, then ON EMPTY and ON ERROR — of
+// which JSON_EXISTS takes only PASSING and ON ERROR, and JSON_VALUE no wrapper
+// or quotes.
 type JsonPathKind = "jsonValue" | "jsonQuery" | "jsonExists";
-const JSON_PATH_CALL_WORDS: Record<JsonPathKind, readonly string[]> = {
-  jsonValue: ["passing", "returning", ...JSON_BEHAVIOR_WORDS],
-  jsonQuery: ["passing", "returning", "with", "without", "keep", "omit", ...JSON_BEHAVIOR_WORDS],
-  jsonExists: ["passing", ...JSON_BEHAVIOR_WORDS],
-};
-const takeJsonPathCall =
+const parseJsonPathCall =
   (kind: JsonPathKind): JsonCallHandler =>
-  (ctx, start, call) => {
-    if (call === null || call.args.length > 2 || call.orderBy.length > 0 || !isPlainCallArgs(call)) return null;
-    let context: JsonValueExpr;
-    let path: Expr;
-    if (call.args.length === 1 && ctx.is("ident", "format")) {
-      context = finishJsonValue(ctx, call.args[0]!);
-      ctx.parse(punc(","));
-      path = ctx.parse(expression);
-    } else if (call.args.length === 2 && ctx.is("ident", JSON_PATH_CALL_WORDS[kind])) {
-      context = { expr: call.args[0]! };
-      path = call.args[1]!;
-    } else {
-      return null;
-    }
+  (ctx, start) => {
+    const context = parseJsonValue(ctx);
+    ctx.parse(punc(","));
+    const path = ctx.parse(expression);
     const passing = parseJsonPassing(ctx);
     const shared = { context, path, ...(passing !== null && { passing }) };
     if (kind === "jsonExists") {
@@ -3775,37 +3794,48 @@ const takeJsonPathCall =
   };
 
 // JSON(value [FORMAT JSON] [{WITH | WITHOUT} UNIQUE [KEYS]]).
-const takeJsonParse: JsonCallHandler = (ctx, start, call) => {
-  if (!isSinglePlainArg(call) || !ctx.is("ident", ["format", "with", "without"])) return null;
-  const value = finishJsonValue(ctx, call.args[0]!);
+const parseJsonParse: JsonCallHandler = (ctx, start) => {
+  const value = parseJsonValue(ctx);
   const uniqueKeys = parseJsonUniqueKeys(ctx);
   expectClose(ctx);
   return { kind: "jsonParse", value, ...(uniqueKeys !== null && { uniqueKeys }), span: ctx.spanFrom(start) };
 };
 
+// JSON_SCALAR(value): one expression, with no FORMAT and no clause.
+const parseJsonScalar: JsonCallHandler = (ctx, start) => {
+  const value = ctx.parse(expression);
+  expectClose(ctx);
+  return { kind: "jsonScalar", value, span: ctx.spanFrom(start) };
+};
+
 // JSON_SERIALIZE(value [FORMAT JSON] [RETURNING type]).
-const takeJsonSerialize: JsonCallHandler = (ctx, start, call) => {
-  if (!isSinglePlainArg(call) || !ctx.is("ident", ["format", "returning"])) return null;
-  const value = finishJsonValue(ctx, call.args[0]!);
+const parseJsonSerialize: JsonCallHandler = (ctx, start) => {
+  const value = parseJsonValue(ctx);
   const returning = parseJsonReturning(ctx);
   expectClose(ctx);
   return { kind: "jsonSerialize", value, ...(returning !== null && { returning }), span: ctx.spanFrom(start) };
 };
 
-// The SQL/JSON functions columnRef's call branch offers a bare, single-part
-// callee to. JSON_SCALAR takes no clause and stays an ordinary call, and
-// JSON_TABLE is a FROM item (see parseJsonTableCall).
+// The SQL/JSON functions, keyed by their bare names. JSON_TABLE has no call
+// form: PG takes it only as a FROM item of its own (see parseJsonTableCall), so
+// anywhere else, ROWS FROM included, its bare name is an error.
 const JSON_CALLS: Record<string, JsonCallHandler> = {
-  json: takeJsonParse,
-  json_object: takeJsonObject,
-  json_array: takeJsonArray,
-  json_objectagg: takeJsonObjectAgg,
-  json_arrayagg: takeJsonArrayAgg,
-  json_value: takeJsonPathCall("jsonValue"),
-  json_query: takeJsonPathCall("jsonQuery"),
-  json_exists: takeJsonPathCall("jsonExists"),
-  json_serialize: takeJsonSerialize,
+  json: parseJsonParse,
+  json_object: parseJsonObject,
+  json_array: parseJsonArray,
+  json_objectagg: parseJsonObjectAgg,
+  json_arrayagg: parseJsonArrayAgg,
+  json_value: parseJsonPathCall("jsonValue"),
+  json_query: parseJsonPathCall("jsonQuery"),
+  json_exists: parseJsonPathCall("jsonExists"),
+  json_scalar: parseJsonScalar,
+  json_serialize: parseJsonSerialize,
+  json_table: (ctx, start) => ctx.croak("JSON_TABLE is allowed only as a FROM item of its own", start, ctx.lastEnd()),
 };
+
+// The SQL/JSON function a bare, single-part callee names, or null.
+const jsonCall = (bare: boolean, parts: readonly string[]): JsonCallHandler | null =>
+  bare && parts.length === 1 && Object.hasOwn(JSON_CALLS, parts[0]!) ? JSON_CALLS[parts[0]!]! : null;
 
 // --- JSON_TABLE ---
 
@@ -3870,57 +3900,30 @@ function parseJsonTableColumn(ctx: ParseContext<SqlTokenType>): JsonTableColumn 
 
 // JSON_TABLE(context [FORMAT JSON], path [AS name] [PASSING …] COLUMNS (…)
 // [behavior ON ERROR]) in FROM, entered just past the `(` of a bare
-// `json_table`. As with the JSON_CALLS, only a clause — a FORMAT after the
-// context item, or AS, PASSING or COLUMNS after the path — makes it the table
-// form, and without one this is the plain table-function call it always was,
-// built as parseFromCallArgs builds it. `start` is where the call's span
-// starts (see there), `nameStart` where the table's does.
-function parseJsonTableCall(
-  ctx: ParseContext<SqlTokenType>,
-  start: Position,
-  nameStart: Position,
-): { table: JsonTable } | { call: Expr } {
-  const { args, variadic, taken } = parseCallArgs<JsonTable>(ctx, {
-    aggregate: false,
-    takeOver: (call) => {
-      if (call.args.length > 2 || !isPlainCallArgs(call)) return null;
-      let context: JsonValueExpr;
-      let path: Expr;
-      if (call.args.length === 1 && ctx.is("ident", "format")) {
-        context = finishJsonValue(ctx, call.args[0]!);
-        ctx.parse(punc(","));
-        path = ctx.parse(expression);
-      } else if (call.args.length === 2 && ctx.is("ident", ["as", "passing", "columns"])) {
-        context = { expr: call.args[0]! };
-        path = call.args[1]!;
-      } else {
-        return null;
-      }
-      // PG's grammar action takes a string constant alone.
-      if (path.kind !== "string") {
-        ctx.croak("Expected a string constant as the JSON_TABLE path", path.span.start, path.span.end);
-      }
-      const pathName = ctx.eat("ident", "as") !== null ? ctx.parse(nameWord) : null;
-      const passing = parseJsonPassing(ctx);
-      ctx.parse(kw("columns"));
-      const columns = parseJsonTableColumns(ctx);
-      const { onError } = parseJsonBehaviors(ctx, false);
-      expectClose(ctx);
-      return {
-        context,
-        path: path.value,
-        ...(pathName !== null && { pathName }),
-        ...(passing !== null && { passing }),
-        columns,
-        ...(onError !== undefined && { onError }),
-        span: ctx.spanFrom(nameStart),
-      };
-    },
-  });
-  if (taken !== undefined) return { table: taken };
+// `json_table`. As with the other SQL/JSON names, a bare one always opens this
+// form. `nameStart` is where the table's span starts.
+function parseJsonTableCall(ctx: ParseContext<SqlTokenType>, nameStart: Position): JsonTable {
+  const context = parseJsonValue(ctx);
+  ctx.parse(punc(","));
+  const path = ctx.parse(expression);
+  // PG's grammar action takes a string constant alone.
+  if (path.kind !== "string") {
+    ctx.croak("Expected a string constant as the JSON_TABLE path", path.span.start, path.span.end);
+  }
+  const pathName = ctx.eat("ident", "as") !== null ? ctx.parse(nameWord) : null;
+  const passing = parseJsonPassing(ctx);
+  ctx.parse(kw("columns"));
+  const columns = parseJsonTableColumns(ctx);
+  const { onError } = parseJsonBehaviors(ctx, false);
   expectClose(ctx);
   return {
-    call: { kind: "call", name: "json_table", args, ...(variadic && { variadic: true }), span: ctx.spanFrom(start) },
+    context,
+    path: path.value,
+    ...(pathName !== null && { pathName }),
+    ...(passing !== null && { passing }),
+    columns,
+    ...(onError !== undefined && { onError }),
+    span: ctx.spanFrom(nameStart),
   };
 }
 
@@ -4140,14 +4143,9 @@ const columnRef = custom<Expr, SqlTokenType>(
           ? SPECIAL_CALLS[parts[0]!]
           : undefined;
       if (special !== undefined) return special(ctx, start);
-      // A SQL/JSON function takes the call over once one of its clauses shows
-      // up, either straight after the `(` or after an argument; with none, it
-      // stays the plain call below (`json_object('{a,1}')`, `json(x)`). The
-      // keyword forms belong to the bare names alone, as NORMALIZE's does.
-      const json =
-        bareLead && parts.length === 1 && Object.hasOwn(JSON_CALLS, parts[0]!) ? JSON_CALLS[parts[0]!]! : null;
-      const opened = json?.(ctx, start, null) ?? null;
-      if (opened !== null) return opened;
+      // A bare SQL/JSON name owns its call too (see JSON_CALLS).
+      const json = jsonCall(bareLead, parts);
+      if (json !== null) return json(ctx, start, true);
       // OVERLAY's keyword form is told apart from its comma form only by a
       // PLACING after the first argument, so unlike the SPECIAL_CALLS it cannot
       // claim the call up front: the comma form stays on this path and so
@@ -4166,7 +4164,7 @@ const columnRef = custom<Expr, SqlTokenType>(
           : undefined;
       const { args, quantifier, variadic, orderBy, integerArgs, taken } = parseCallArgs(ctx, {
         aggregate: true,
-        takeOver: overlay ?? (json === null ? undefined : (call: CallArgs) => json(ctx, start, call)),
+        takeOver: overlay,
       });
       if (taken !== undefined) return taken;
       if (!ctx.is("punc", ")")) ctx.croak(`Expected ")" but found ${describeFound(ctx.peek())}`);
@@ -6487,6 +6485,7 @@ const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "jsonQuery",
   "jsonExists",
   "jsonParse",
+  "jsonScalar",
   "jsonSerialize",
 ]);
 
@@ -6940,11 +6939,22 @@ const enumValues = delimited(
   token("string").map((n) => n.value),
   { interleaved: true },
 );
-// One `field type` attribute of a composite type.
+// One `name type` column of RETURNS TABLE (see CompositeAttr).
 const compositeAttr = seq(field("name", nameWord), field("type", typeRef)).map(
   ({ name, type }): CompositeAttr => ({ name, type }),
 );
 const compositeAttrs = delimited(P("("), P(")"), P(","), compositeAttr, { interleaved: true });
+// A composite type's `( [name type [COLLATE collation], …] )`, PG's
+// OptTableFuncElementList: the column definition list a FROM function's alias
+// takes (columnDefinition, declared further down, hence the lazy()), except
+// that it may be empty.
+const compositeTypeAttrs = delimited(
+  P("("),
+  P(")"),
+  P(","),
+  lazy(() => columnDefinition),
+  { interleaved: true },
+);
 
 // `( name = value, … )` — the option list of a RANGE type. Entered on the `(`;
 // each value is a (possibly qualified) name / type on the right of the `=`.
@@ -6980,12 +6990,12 @@ const createTypeRest = custom<Stmt, SqlTokenType>(
     if (ctx.eat("ident", "range") !== null) {
       return { kind: "createType", form: "range", name, options: parseRangeOptions(ctx), span: ctx.spanFrom(start) };
     }
-    // `AS ( field type, … )` — a composite type.
+    // `AS ( field type [COLLATE collation], … )` — a composite type.
     return {
       kind: "createType",
       form: "composite",
       name,
-      attributes: ctx.parse(compositeAttrs),
+      attributes: ctx.parse(compositeTypeAttrs),
       span: ctx.spanFrom(start),
     };
   },
@@ -8642,6 +8652,44 @@ function parseCompressionMethod(ctx: ParseContext<SqlTokenType>): string {
   return ctx.eat("ident", "default") !== null ? "default" : ctx.parse(nameWord);
 }
 
+// `STATISTICS {n | DEFAULT}`, `STORAGE mode` or `COMPRESSION method` after an
+// ALTER COLUMN's SET, or null when the cursor is on none of the three. ALTER
+// TABLE and ALTER MATERIALIZED VIEW share them.
+type ColumnStorageSet = Extract<AlterAction, { kind: "setStatistics" | "setStorage" | "setCompression" }>;
+function parseColumnStorageSet(ctx: ParseContext<SqlTokenType>, column: string): ColumnStorageSet | null {
+  if (ctx.eat("ident", "statistics") !== null) {
+    const value = ctx.eat("ident", "default") !== null ? null : parseSignedInt(ctx);
+    return { kind: "setStatistics", column, value };
+  }
+  if (ctx.eat("ident", "storage") !== null) {
+    const mode = parseStorageMode(ctx);
+    return { kind: "setStorage", column, storage: mode === "default" ? null : mode };
+  }
+  if (ctx.eat("ident", "compression") !== null) {
+    const method = parseCompressionMethod(ctx);
+    return { kind: "setCompression", column, method: method === "default" ? null : method };
+  }
+  return null;
+}
+
+// `REPLICA IDENTITY {DEFAULT | FULL | NOTHING | USING INDEX name}` and
+// `CLUSTER ON index`, ALTER TABLE's and ALTER MATERIALIZED VIEW's.
+function parseReplicaIdentity(ctx: ParseContext<SqlTokenType>): Extract<AlterAction, { kind: "replicaIdentity" }> {
+  ctx.parse(kwseq("replica", "identity"));
+  if (ctx.eat("ident", "full") !== null) return { kind: "replicaIdentity", mode: "full", index: null };
+  if (ctx.eat("ident", "nothing") !== null) return { kind: "replicaIdentity", mode: "nothing", index: null };
+  if (ctx.is("ident", "using")) {
+    ctx.parse(kwseq("using", "index"));
+    return { kind: "replicaIdentity", mode: "usingIndex", index: ctx.parse(nameWord) };
+  }
+  ctx.parse(kw("default"));
+  return { kind: "replicaIdentity", mode: "default", index: null };
+}
+function parseClusterOn(ctx: ParseContext<SqlTokenType>): Extract<AlterAction, { kind: "clusterOn" }> {
+  ctx.parse(kwseq("cluster", "on"));
+  return { kind: "clusterOn", index: ctx.parse(nameWord) };
+}
+
 // What follows `ALTER [COLUMN] name`, keyed by its lead word and handed the
 // column. Each handler consumes its own lead word.
 const ALTER_COLUMN_ACTIONS: DispatchMap<AlterAction, [string]> = {
@@ -8673,18 +8721,8 @@ const ALTER_COLUMN_ACTIONS: DispatchMap<AlterAction, [string]> = {
         ctx.parse(kwseq("expression", "as"));
         return { kind: "setExpression", column, expr: ctx.parse(parenExpr) };
       }
-      if (ctx.eat("ident", "statistics") !== null) {
-        const value = ctx.eat("ident", "default") !== null ? null : parseSignedInt(ctx);
-        return { kind: "setStatistics", column, value };
-      }
-      if (ctx.eat("ident", "storage") !== null) {
-        const mode = parseStorageMode(ctx);
-        return { kind: "setStorage", column, storage: mode === "default" ? null : mode };
-      }
-      if (ctx.eat("ident", "compression") !== null) {
-        const method = parseCompressionMethod(ctx);
-        return { kind: "setCompression", column, method: method === "default" ? null : method };
-      }
+      const storage = parseColumnStorageSet(ctx, column);
+      if (storage !== null) return storage;
       const words = ["(", "default", "not", "data", "expression", "statistics", "storage", "compression", "generated"];
       const expected = `${words.map((w) => `"${w}"`).join(", ")} or a sequence option`;
       return ctx.croak(`Expected ${expected} but found ${describeFound(ctx.peek())}`);
@@ -8816,20 +8854,7 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
     },
   },
   owner: { parse: parseOwnerTo },
-  // `REPLICA IDENTITY {DEFAULT | FULL | NOTHING | USING INDEX name}`.
-  replica: {
-    parse: (ctx) => {
-      ctx.parse(kwseq("replica", "identity"));
-      if (ctx.eat("ident", "full") !== null) return { kind: "replicaIdentity", mode: "full", index: null };
-      if (ctx.eat("ident", "nothing") !== null) return { kind: "replicaIdentity", mode: "nothing", index: null };
-      if (ctx.is("ident", "using")) {
-        ctx.parse(kwseq("using", "index"));
-        return { kind: "replicaIdentity", mode: "usingIndex", index: ctx.parse(nameWord) };
-      }
-      ctx.parse(kw("default"));
-      return { kind: "replicaIdentity", mode: "default", index: null };
-    },
-  },
+  replica: { parse: parseReplicaIdentity },
   // `SET {SCHEMA name | TABLESPACE name | (option, …) | WITHOUT {CLUSTER |
   // OIDS} | LOGGED | UNLOGGED | ACCESS METHOD {name | DEFAULT}}`. The word
   // after SET is a fixed slot, never a name.
@@ -8933,12 +8958,7 @@ const ALTER_ACTIONS: DispatchMap<AlterAction> = {
       return { kind: "notOf" };
     },
   },
-  cluster: {
-    parse: (ctx) => {
-      ctx.parse(kwseq("cluster", "on"));
-      return { kind: "clusterOn", index: ctx.parse(nameWord) };
-    },
-  },
+  cluster: { parse: parseClusterOn },
   // `ATTACH PARTITION name {FOR VALUES … | DEFAULT}`, CREATE TABLE … PARTITION
   // OF's bound.
   attach: {
@@ -9298,20 +9318,51 @@ const AGGREGATE_ACTIONS: DispatchMap<AlterAggregateAction> = {
 };
 
 // `SET {(option, …) | SCHEMA name}`, and for a materialized view `SET
-// TABLESPACE name` too.
+// {TABLESPACE name | WITHOUT CLUSTER | ACCESS METHOD {name | DEFAULT}}` too,
+// read as ALTER TABLE reads them.
 function parseViewSet(ctx: ParseContext<SqlTokenType>, materialized: boolean): AlterViewAction {
+  if (materialized && isWordAhead(ctx, 1, "without")) {
+    ctx.parse(kwseq("set", "without", "cluster"));
+    return { kind: "setWithoutCluster" };
+  }
+  if (materialized && isWordAhead(ctx, 1, "access")) {
+    ctx.parse(kwseq("set", "access", "method"));
+    return { kind: "setAccessMethod", method: ctx.eat("ident", "default") !== null ? null : ctx.parse(nameWord) };
+  }
   ctx.next(); // SET
   if (ctx.is("punc", "(")) return { kind: "setOptions", options: ctx.parse(relationOptions) };
   if (materialized && ctx.is("ident", "tablespace")) return parseSetTablespace(ctx);
   if (!ctx.is("ident", "schema")) {
-    const words = materialized ? ["(", "schema", "tablespace"] : ["(", "schema"];
+    const words = materialized ? ["(", "schema", "tablespace", "without", "access"] : ["(", "schema"];
     ctx.croak(`Expected ${quoteList(words)} but found ${describeFound(ctx.peek())}`);
   }
   return parseSetSchema(ctx);
 }
 
-// After RENAME, TO is tried before a column name, as ALTER TABLE's RENAME does.
-const MATERIALIZED_VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
+// A materialized view's `ALTER [COLUMN] name` actions: those of ALTER TABLE's
+// that PG allows on one, `SET STATISTICS | STORAGE | COMPRESSION …` and `SET |
+// RESET (option, …)`. A materialized view has no column default to set or drop.
+function parseMatviewAlterColumn(ctx: ParseContext<SqlTokenType>): AlterViewAction {
+  ctx.next(); // ALTER
+  ctx.eat("ident", "column"); // optional COLUMN
+  const column = ctx.parse(nameWord);
+  if (ctx.is("ident", "reset")) {
+    const { options } = parseResetOptions(ctx);
+    return { kind: "resetColumnOptions", column, options };
+  }
+  if (ctx.eat("ident", "set") === null) {
+    ctx.croak(`Expected ${quoteList(["set", "reset"])} but found ${describeFound(ctx.peek())}`);
+  }
+  if (ctx.is("punc", "(")) return { kind: "setColumnOptions", column, options: ctx.parse(relationOptions) };
+  const storage = parseColumnStorageSet(ctx, column);
+  if (storage !== null) return storage;
+  const words = ["(", "statistics", "storage", "compression"];
+  return ctx.croak(`Expected ${quoteList(words)} but found ${describeFound(ctx.peek())}`);
+}
+
+// What ALTER VIEW and ALTER MATERIALIZED VIEW share. After RENAME, TO is tried
+// before a column name, as ALTER TABLE's RENAME does.
+const SHARED_VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
   rename: {
     parse: (ctx) => {
       ctx.next(); // RENAME
@@ -9323,14 +9374,20 @@ const MATERIALIZED_VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
     },
   },
   owner: { parse: parseOwnerTo },
-  set: { parse: (ctx) => parseViewSet(ctx, true) },
+  set: { parse: (ctx) => parseViewSet(ctx, false) },
   reset: { parse: parseResetOptions },
 };
-// A materialized view has no column defaults to set or drop, and only it has
-// storage to move to another tablespace.
+// A materialized view has storage, so it takes the table actions that act on
+// that (PG's tablecmds.c allows each on ATT_MATVIEW), but no column defaults.
+const MATERIALIZED_VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
+  ...SHARED_VIEW_ACTIONS,
+  set: { parse: (ctx) => parseViewSet(ctx, true) },
+  alter: { parse: parseMatviewAlterColumn },
+  cluster: { parse: parseClusterOn },
+  replica: { parse: parseReplicaIdentity },
+};
 const VIEW_ACTIONS: DispatchMap<AlterViewAction> = {
-  ...MATERIALIZED_VIEW_ACTIONS,
-  set: { parse: (ctx) => parseViewSet(ctx, false) },
+  ...SHARED_VIEW_ACTIONS,
   alter: {
     parse: (ctx) => {
       ctx.next(); // ALTER
@@ -9377,10 +9434,22 @@ const SEQUENCE_OPTIONS = [
   "no",
   "owned",
 ];
+// SET leads SET SCHEMA, and SET LOGGED | UNLOGGED, which PG allows on a
+// sequence as on a table.
 const SEQUENCE_ACTIONS: DispatchMap<AlterSequenceAction> = {
   rename: { parse: parseRenameTo },
   owner: { parse: parseOwnerTo },
-  set: { parse: parseSetSchemaAction },
+  set: {
+    parse: (ctx) => {
+      ctx.next(); // SET
+      if (ctx.eat("ident", "logged") !== null) return { kind: "setLogged" };
+      if (ctx.eat("ident", "unlogged") !== null) return { kind: "setUnlogged" };
+      if (!ctx.is("ident", "schema")) {
+        ctx.croak(`Expected ${quoteList(["schema", "logged", "unlogged"])} but found ${describeFound(ctx.peek())}`);
+      }
+      return parseSetSchema(ctx);
+    },
+  },
 };
 for (const word of SEQUENCE_OPTIONS) SEQUENCE_ACTIONS[word] = { parse: parseAlterSequenceOptions };
 
@@ -11050,7 +11119,7 @@ const listDrop = (
   },
 });
 
-// `DROP {FUNCTION|PROCEDURE|AGGREGATE} [IF EXISTS] name [(args)][, …]
+// `DROP {FUNCTION|PROCEDURE|ROUTINE|AGGREGATE} [IF EXISTS] name [(args)][, …]
 // [CASCADE|RESTRICT]`; `signatures` runs parallel to `names`.
 const routineDrop = (objectType: string, ref: Rule<RoutineRef, SqlTokenType>): DropEntry => ({
   parse: (ctx, start) => {
@@ -11099,6 +11168,7 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
   function: routineDrop("function", routineRef),
   procedure: routineDrop("procedure", routineRef),
   aggregate: routineDrop("aggregate", aggregateRef),
+  routine: routineDrop("routine", routineRef),
   trigger: onTableDrop("trigger"),
   domain: listDrop("domain", qualName),
   extension: listDrop("extension", unqualName),
@@ -11128,6 +11198,8 @@ const DROP_TARGETS: DispatchMap<Stmt, [Position]> = {
     },
   },
   role: listDrop("role", unqualName, { behavior: false }),
+  // `DROP GROUP`, PG's older spelling of DROP ROLE, kept apart in objectType.
+  group: listDrop("group", unqualName, { behavior: false }),
   // USER MAPPING when MAPPING is followed by FOR or IF; otherwise users, the
   // first of whom may be called `mapping`.
   user: {
@@ -12373,7 +12445,7 @@ const lockingClause = custom<LockingClause[], SqlTokenType>(
 // follows. Each clause keeps its span, so a merge conflict can point at it.
 type QueryTail = {
   orderBy: { items: OrderItem[]; span: Span } | null;
-  // `value` is null for `LIMIT ALL` and a count-less FETCH.
+  // `value` is null for `LIMIT ALL`.
   limit: { value: Expr | null; withTies: boolean; span: Span } | null;
   offset: { value: Expr; span: Span } | null;
   locking: LockingClause[] | null;
@@ -12381,8 +12453,11 @@ type QueryTail = {
 
 // `LIMIT { n | ALL }` or the SQL-standard `FETCH { FIRST | NEXT } [count]
 // { ROW | ROWS } { ONLY | WITH TIES }`, positioned on its lead word. The FETCH
-// count is optional (`FETCH FIRST ROW ONLY` ≡ 1); when omitted, the next token
-// is the ROW/ROWS word, so a count is read only before one.
+// count is optional; when omitted, the next token is the ROW/ROWS word, so a
+// count is read only before one. A left-out count is 1, as PG's makeIntConst(1)
+// makes it: a number node marked `implicit`, spanning the ROW/ROWS word. PG
+// gives that constant no location; the word is the real token nearest the
+// count's place, and keeps the clause's inner spans inside its own.
 // `first`/`next`/`row`/`rows`/`only`/`ties` stay unreserved.
 function parseLimitClause(ctx: ParseContext<SqlTokenType>): NonNullable<QueryTail["limit"]> {
   const start = ctx.position();
@@ -12394,10 +12469,12 @@ function parseLimitClause(ctx: ParseContext<SqlTokenType>): NonNullable<QueryTai
   if (ctx.eat("ident", ["first", "next"]) === null) {
     ctx.croak(`Expected "first" or "next" but found ${describeFound(ctx.peek())}`);
   }
-  const value = ctx.is("ident", ["row", "rows"]) ? null : ctx.parse(expression);
+  const countStart = ctx.position();
+  let value: Expr | null = ctx.is("ident", ["row", "rows"]) ? null : ctx.parse(expression);
   if (ctx.eat("ident", ["row", "rows"]) === null) {
     ctx.croak(`Expected "row" or "rows" but found ${describeFound(ctx.peek())}`);
   }
+  value ??= { kind: "number", value: 1, implicit: true, span: ctx.spanFrom(countStart) };
   let withTies = false;
   if (ctx.is("ident", "with")) {
     ctx.parse(kwseq("with", "ties"));
@@ -12444,8 +12521,8 @@ function parseQueryTail(ctx: ParseContext<SqlTokenType>): QueryTail | null {
   return tail;
 }
 
-// Queries whose LIMIT was written, `LIMIT ALL` and a count-less FETCH included
-// — the AST alone can't tell those from no LIMIT, but PG's duplicate check can.
+// Queries whose LIMIT was written, `LIMIT ALL` included — the AST alone
+// can't tell those from no LIMIT, but PG's duplicate check can.
 const writtenLimit = new WeakSet<Query>();
 
 // Merge a query-level tail into the query it follows, as PG's
@@ -12587,8 +12664,10 @@ function parseAliasClause(ctx: ParseContext<SqlTokenType>): { alias: string | nu
   return { alias, columns };
 }
 
-// One `name type [COLLATE collation]` entry of a column definition list. Not
-// the composite type's `compositeAttr`, which takes no COLLATE here.
+// One `name type [COLLATE collation]` entry of a column definition list, PG's
+// TableFuncElement, which a composite type's attributes are too (see
+// compositeTypeAttrs). Not RETURNS TABLE's `compositeAttr`, which takes no
+// COLLATE.
 const columnDefinition = custom<ColumnDefinition, SqlTokenType>(
   (ctx) => {
     const name = ctx.parse(nameWord);
@@ -12667,13 +12746,20 @@ function parseFromCall(ctx: ParseContext<SqlTokenType>): Expr {
 // The argument list of a FROM call whose name is read. The call's span runs
 // from `start`, which tableRef passes so a plain item's span keeps covering a
 // leading LATERAL. `bare` says the name was one unquoted word, which makes an
-// XML function name the keyword form (see XML_CALLS), as in an expression —
-// XMLTABLE included, which is no table function inside ROWS FROM.
+// XML or SQL/JSON function name the keyword form (see XML_CALLS and
+// JSON_CALLS), as in an expression — XMLTABLE and JSON_TABLE included, which
+// are no table functions inside ROWS FROM. PG's func_table takes no FILTER or
+// OVER, so a SQL/JSON aggregate takes neither here.
 function parseFromCallArgs(ctx: ParseContext<SqlTokenType>, nameParts: string[], bare: boolean, start: Position): Expr {
   const xml = bare && nameParts.length === 1 && Object.hasOwn(XML_CALLS, nameParts[0]!);
   if (xml && ctx.is("punc", "(")) {
     ctx.next(); // "("
     return XML_CALLS[nameParts[0]!]!(ctx, start);
+  }
+  const json = jsonCall(bare, nameParts);
+  if (json !== null && ctx.is("punc", "(")) {
+    ctx.next(); // "("
+    return json(ctx, start, false);
   }
   const { args, variadic } = parseCallArgList(ctx);
   return {
@@ -12885,25 +12971,20 @@ const tableRef = custom<FromItem, SqlTokenType>(
     const bare = ctx.peek()?.type === "ident";
     const nameParts = ctx.parse(qualName);
     if (ctx.is("punc", "(")) {
-      let call: Expr;
       if (bare && nameParts.length === 1 && nameParts[0] === "json_table") {
         ctx.next(); // "("
-        const json = parseJsonTableCall(ctx, start, nameStart);
-        if ("table" in json) {
-          // PG's opt_alias_clause: no WITH ORDINALITY or column definitions.
-          const { alias, columns } = parseAliasClause(ctx);
-          return {
-            kind: "jsonTable",
-            table: json.table,
-            alias,
-            ...(columns !== null && { columns }),
-            ...(lateral && { lateral: true }),
-          };
-        }
-        call = json.call;
-      } else {
-        call = parseFromCallArgs(ctx, nameParts, bare, start);
+        const table = parseJsonTableCall(ctx, nameStart);
+        // PG's opt_alias_clause: no WITH ORDINALITY or column definitions.
+        const { alias, columns } = parseAliasClause(ctx);
+        return {
+          kind: "jsonTable",
+          table,
+          alias,
+          ...(columns !== null && { columns }),
+          ...(lateral && { lateral: true }),
+        };
       }
+      const call = parseFromCallArgs(ctx, nameParts, bare, start);
       const ordinality = eatOrdinality(ctx);
       const { alias, columns, columnDefinitions } = parseFuncAliasClause(ctx);
       return {

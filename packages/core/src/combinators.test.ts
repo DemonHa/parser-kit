@@ -16,7 +16,7 @@ import {
 import { ParseError } from "./error";
 import { defineGrammar } from "./grammar";
 import { defineLexer, readers } from "./lexer";
-import type { Rule } from "./rule";
+import type { Printer, Rule } from "./rule";
 import { stripSpans } from "./strip-spans";
 
 const toyLexer = defineLexer({
@@ -89,6 +89,26 @@ describe("map()", () => {
     const result = parseWith(rule, "42");
     expect(result.parsed).toBe(42);
     expect(result.span).toEqual({ start: { row: 1, col: 0 }, end: { row: 1, col: 2 } });
+  });
+});
+
+// The print/inverse hooks are deprecated but still part of the 0.x API: they
+// must keep type-checking and keep being stored, and parsing must ignore them.
+describe("deprecated printing hooks", () => {
+  it("map(fn, inverse) still stores inverse on the new rule", () => {
+    const inverse = (_value: number): never => {
+      throw new Error("parsing must never call inverse");
+    };
+    const rule = token("num").map((node) => Number(node.value), inverse);
+    expect(rule.inverse).toBe(inverse);
+    expect(parseWith(rule, "7")).toBe(7);
+  });
+
+  it("custom(…, { print }) still stores print on the rule", () => {
+    const print = (value: string, out: Printer) => out.write(value);
+    const rule = custom<string, ToyTT>((ctx) => ctx.next()?.value ?? "", { expected: "anything", first: [], print });
+    expect(rule.print).toBe(print);
+    expect(parseWith(rule, "x")).toBe("x");
   });
 });
 
