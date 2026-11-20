@@ -102,8 +102,8 @@ const trimTrailing = (out: string[]): void => {
  * Spaces and tabs before each line break the doc makes, and at the very end,
  * are dropped (prettier does the same), so a group ending in `line` before a
  * hard line leaves no trailing space. An `ifBreak` outside every group prints
- * its broken branch. The walk
- * is iterative, so document depth is limited by memory, not the call stack.
+ * its broken branch. The walk is iterative, so document depth is limited by
+ * memory, not the call stack.
  */
 export const render = (doc: Doc, options?: RenderOptions): string => {
   const width = options?.width ?? 80;
