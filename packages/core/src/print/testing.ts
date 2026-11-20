@@ -68,19 +68,34 @@ export const fieldCoverage = (options: CoverageOptions): FieldCoverage => {
         if (field !== key && !ignore.has(field)) seen.add(`${name}.${field}`);
       }
     }
-    const proxy = new Proxy(target, {
-      get(t, prop, receiver) {
-        const value = Reflect.get(t, prop, receiver);
-        if (typeof prop !== "string" || !Object.hasOwn(t, prop)) return value;
+    // The proxy wraps an empty stand-in and forwards reads to the real node.
+    // A proxy over the node itself would have to hand back a frozen
+    // property's value unwrapped (a proxy invariant), leaving the subtree under
+    // a frozen tree untracked.
+    const array = Array.isArray(target);
+    const shadow: object = array
+      ? new Array((target as unknown[]).length)
+      : Object.create(Object.getPrototypeOf(target));
+    const proxy = new Proxy(shadow, {
+      get(_, prop) {
+        const value = Reflect.get(target, prop);
+        if (typeof prop !== "string" || !Object.hasOwn(target, prop)) return value;
         let inner = name;
-        if (!Array.isArray(t)) {
+        if (!array) {
           if (prop === key) printed.add(name);
           else read.add(`${name}.${prop}`);
           inner = `${name}.${prop}`;
         }
-        // A frozen property must read back as itself (a proxy invariant).
-        const own = Object.getOwnPropertyDescriptor(t, prop)!;
-        return isTracked(value) && (own.configurable || own.writable) ? view(value, inner) : value;
+        return isTracked(value) ? view(value, inner) : value;
+      },
+      has: (_, prop) => Reflect.has(target, prop),
+      ownKeys: () => Reflect.ownKeys(target),
+      getOwnPropertyDescriptor(_, prop) {
+        const own = Reflect.getOwnPropertyDescriptor(target, prop);
+        // An array's `length` is the stand-in's own non-configurable property.
+        if (own === undefined || (array && prop === "length"))
+          return own && Reflect.getOwnPropertyDescriptor(shadow, prop);
+        return { ...own, configurable: true };
       },
     });
     views.set(target, proxy);

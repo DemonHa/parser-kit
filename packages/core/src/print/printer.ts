@@ -17,7 +17,7 @@ type Variant<T, K extends keyof T, V> = T extends unknown ? (V extends T[K] ? T 
  * uses its overrides all the way down.
  */
 export type Handlers<T, K extends keyof T> = {
-  readonly [V in T[K] & PropertyKey]: (node: Variant<T, K, V>, print: NodePrinter<T, K>) => Doc;
+  readonly [V in T[K] & PropertyKey]: (node: Variant<T, K, V>, print: (node: T) => Doc) => Doc;
 };
 
 /** A printer for union `T`: call it with a node. */
@@ -44,11 +44,12 @@ export type Printable<T> = T extends (...args: never[]) => unknown
       : T;
 
 const build = <T, K extends keyof T>(key: K, handlers: Handlers<T, K>): NodePrinter<T, K> => {
-  const table = handlers as unknown as Record<PropertyKey, ((node: T, print: NodePrinter<T, K>) => Doc) | undefined>;
+  const table = handlers as unknown as Record<PropertyKey, (node: T, print: (node: T) => Doc) => Doc>;
   const print = ((node: T): Doc => {
     const tag = node[key] as PropertyKey;
-    const handler = table[tag];
-    if (handler === undefined) throw new TypeError(`No printer for ${String(key)} "${String(tag)}"`);
+    // Own keys only: a tag such as "toString" must not find Object.prototype's.
+    const handler = Object.hasOwn(table, tag) ? table[tag] : undefined;
+    if (typeof handler !== "function") throw new TypeError(`No printer for ${String(key)} "${String(tag)}"`);
     return handler(node, print);
   }) as NodePrinter<T, K>;
   return Object.assign(print, { key, handlers });

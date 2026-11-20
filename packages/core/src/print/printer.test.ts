@@ -70,6 +70,9 @@ describe("definePrinter", () => {
   it("throws on a node whose kind it has no handler for", () => {
     const bad = { kind: "nope" } as unknown as Printable<Expr>;
     expect(() => printExpr(bad)).toThrow('No printer for kind "nope"');
+    // Not even one Object.prototype happens to have.
+    const proto = { kind: "toString" } as unknown as Printable<Expr>;
+    expect(() => printExpr(proto)).toThrow('No printer for kind "toString"');
   });
 
   it("requires a handler for every variant and narrows each node", () => {
@@ -113,6 +116,22 @@ describe("extendPrinter", () => {
     expect(str(base(tree))).toBe("(x, -y)");
     // `pair` and `neg` come from the base, and recurse through the dialect.
     expect(str(dialect(tree))).toBe("('x', -'y')");
+  });
+
+  it("spreads into a printer for a wider union", () => {
+    type Wide = Node | { kind: "list"; items: Wide[] };
+    const wide = definePrinter<Wide>()("kind", {
+      ...base.handlers,
+      list: (n, print) => ["[", n.items.map(print).flatMap((d, i) => (i ? [", ", d] : [d])), "]"],
+    });
+    const tree: Wide = {
+      kind: "list",
+      items: [
+        { kind: "lit", v: "a" },
+        { kind: "neg", operand: { kind: "lit", v: "b" } },
+      ],
+    };
+    expect(str(wide(tree))).toBe("[a, -b]");
   });
 
   it("leaves the base untouched and exposes its handlers for spreading", () => {

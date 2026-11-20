@@ -91,6 +91,29 @@ describe("fieldCoverage", () => {
     expect(coverage.track("text")).toBe("text");
   });
 
+  it("tracks deep inside frozen trees", () => {
+    const coverage = fieldCoverage({ key: "kind" });
+    const col: Column = Object.freeze({ name: "id", type: "int", settings: Object.freeze([]) as unknown as Setting[] });
+    const deep = Object.freeze({
+      kind: "table" as const,
+      name: "t",
+      note: "n",
+      columns: Object.freeze([col]) as unknown as Column[],
+    });
+    render(lossy(coverage.track(deep)));
+    expect(coverage.report().fields).toEqual(["table.note"]);
+  });
+
+  it("tracks prototype-less nodes and a node reached twice", () => {
+    const coverage = fieldCoverage({ key: "kind" });
+    const shared = Object.assign(Object.create(null) as object, { kind: "pk" as const }) as Setting;
+    const column: Column = { name: "id", type: "int", settings: [shared, shared] };
+    const tracked = coverage.track({ kind: "table" as const, name: "t", columns: [column] });
+    expect(tracked.columns[0]!.settings[0]).toBe(tracked.columns[0]!.settings[1]);
+    expect(render(lossy(tracked))).toBe("Table t { id int [pk, pk] }");
+    expect(coverage.report()).toEqual({ kinds: [], fields: [] });
+  });
+
   it("reads frozen trees without breaking proxy invariants", () => {
     const coverage = fieldCoverage({ key: "kind" });
     const frozen = Object.freeze({

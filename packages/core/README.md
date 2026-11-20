@@ -291,7 +291,7 @@ const printFrom = definePrinter<Printable<FromItem>>()("kind", {
 
 - **One printer per union.** Discriminant values repeat across unions (an expression and a FROM item can both be `kind: "subquery"`), so each union gets its own printer and the printers call each other. Records with no discriminant are plain functions. Like recursive rules, printers that call each other need one type annotation (`NodePrinter<T, K>`) to break the inference cycle.
 - **Recursion goes through `print`.** Each handler gets the printer it runs in as its second argument. Recurse through it rather than the printer's name, so a printer built by `extendPrinter` applies its overrides all the way down.
-- **`extendPrinter(base, overrides)`** reuses every handler of `base` and replaces some, e.g. a dialect that prints a few nodes differently. To print a wider union, spread `base.handlers` into a new `definePrinter` call and add the new variants.
+- **`extendPrinter(base, overrides)`** reuses every handler of `base` and replaces some, e.g. a dialect that prints a few nodes differently. To print a wider union, spread `base.handlers` into a new `definePrinter` call for it and add the new variants; the reused handlers recurse through the wider printer.
 - **`Printable<T>`** is `T` with every `span` optional, all the way down, so the printer accepts hand-built trees as well as parsed ones. Printers should never read spans.
 - A node whose discriminant has no handler at run time (a hand-built tree with a typo) throws a `TypeError`.
 
@@ -346,7 +346,7 @@ const str = quoting({ quote: "'", escape: "backslash" }); // no `start`: always 
 str("it's");                                // 'it\'s'
 ```
 
-Rules: `quote` and `close` (default: the same), `escape` (`"double"`, the default, doubles the closing quote; `"backslash"` escapes it and backslashes; or a function), `start` / `part` (regexes for one character; without `start` nothing is bare), `reserved` (words, or a predicate, as the lexer reads them after folding) and `fold` (`"lower"` / `"upper"`: a word folding would change must be quoted). Modes: `"minimal"` (default) quotes only when needed, `"always"` quotes everything, `"preserve-if-valid"` keeps a "was quoted" hint and leaves a word bare only when that is valid.
+Rules: `quote` and `close` (default: the same), `escape` (`"double"`, the default, doubles the closing quote; `"backslash"` escapes it and backslashes, and nothing else, so pass a function to escape newlines or control characters; both need a one-character `close`), `start` / `part` (regexes for one character; without `start` nothing is bare), `reserved` (a `Set` or array of words, or a predicate, as the lexer reads them after folding) and `fold` (`"lower"` / `"upper"`: a word folding would change must be quoted). Modes: `"minimal"` (default) quotes only when needed, `"always"` quotes everything, `"preserve-if-valid"` keeps a "was quoted" hint and leaves a word bare only when that is valid.
 
 ### Finding dropped fields: `@parser-kit/core/print/testing`
 
@@ -361,7 +361,9 @@ expect(coverage.report()).toEqual({ kinds: [], fields: [] });
 // e.g. { kinds: ["window"], fields: ["table.note"] }
 ```
 
-Fields are reported as `variant.field`; a record without a discriminant is named by where it sits (`select.items.alias`). Only fields present on some tracked node count, and `span` is ignored by default (`ignore` replaces that list). A variant is printed once its discriminant is read; list every variant in `kinds` to also catch ones the corpus never reached.
+Fields are reported as `variant.field`; a record without a discriminant is named by where it sits (`select.items.alias`). Only fields of nodes the printer reached count: a subtree it never enters shows up as its parent's unread field. `span` is ignored by default (`ignore` replaces that list). A variant is printed once its discriminant is read; list every variant in `kinds` to also catch ones the corpus never reached.
+
+Limits: only plain objects, arrays and prototype-less objects are tracked (class instances, `Map`s and `Date`s pass through unrecorded). Spreading a node, `Object.values` / `Object.entries` and `JSON.stringify` read every field, so a printer that copies nodes wholesale gets a clean report. The tracked view is not `===` the original tree, so look-ups keyed by the parsed nodes (a `WeakMap` of comments, say) miss on it.
 
 ## The example grammars
 

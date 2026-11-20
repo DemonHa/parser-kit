@@ -14,7 +14,9 @@ export interface QuotingRules {
   /**
    * How text inside the quotes is escaped: `"double"` (default) doubles the
    * closing quote, SQL-style; `"backslash"` puts a backslash before it and
-   * before every backslash; or a function of the raw text.
+   * before every backslash (nothing else: pass a function to escape newlines
+   * or control characters); or a function of the raw text. The two built-in
+   * styles need a one-character closing quote.
    */
   escape?: "double" | "backslash" | ((text: string) => string);
   /**
@@ -25,7 +27,7 @@ export interface QuotingRules {
   /** Matches one character that may continue a bare word. Default: `start`. */
   part?: RegExp;
   /** Words that must be quoted even though they are lexically bare, as the lexer reads them (after folding). */
-  reserved?: Iterable<string> | ((word: string) => boolean);
+  reserved?: ReadonlySet<string> | readonly string[] | ((word: string) => boolean);
   /**
    * How the lexer folds bare words. A word that folding would change can only
    * be written quoted: under `"lower"`, `MyCol` must print as `"MyCol"`.
@@ -36,7 +38,7 @@ export interface QuotingRules {
 /** Prints `value` as a bare word or quoted. `hint` is whether the source quoted it, used by `preserve-if-valid`. */
 export type Quote = (value: string, mode?: QuoteMode, hint?: boolean) => string;
 
-const charTest = (re: RegExp) => new RegExp(`^${re.source}$`, re.flags.replace(/[gy]/g, ""));
+const charTest = (re: RegExp) => new RegExp(`^(?:${re.source})$`, re.flags.replace(/[gy]/g, ""));
 
 /**
  * Builds a quoting function from a grammar's lexical rules.
@@ -53,6 +55,9 @@ export const quoting = (rules: QuotingRules): Quote => {
   const open = rules.quote;
   const close = rules.close ?? open;
   const esc = rules.escape ?? "double";
+  if (typeof esc !== "function" && close.length !== 1) {
+    throw new TypeError(`quoting: the "${esc}" escape needs a one-character closing quote; pass an escape function`);
+  }
   const encode =
     typeof esc === "function"
       ? esc

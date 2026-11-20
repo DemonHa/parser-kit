@@ -53,6 +53,19 @@ describe("quoting", () => {
     expect(js("it's \\o/")).toBe("'it\\'s \\\\o/'");
   });
 
+  it("anchors start and part rules as a whole, alternations included", () => {
+    const q = quoting({ quote: '"', start: /_|[a-z]*/ });
+    expect(q("1")).toBe('"1"');
+    expect(q("_")).toBe("_");
+  });
+
+  it("needs an escape function for a multi-character closing quote", () => {
+    expect(() => quoting({ quote: "[[", close: "]]" })).toThrow(/one-character closing quote/);
+    expect(() => quoting({ quote: "'''", escape: "backslash" })).toThrow(/one-character closing quote/);
+    const triple = quoting({ quote: "'''", escape: (s) => s.replace(/'/g, "\\'") });
+    expect(triple("a'")).toBe("'''a\\''''");
+  });
+
   it("quotes every value when no start rule is given, as for string literals", () => {
     const str = quoting({ quote: "'" });
     expect(str("abc")).toBe("'abc'");
