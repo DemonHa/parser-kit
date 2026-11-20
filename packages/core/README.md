@@ -48,6 +48,7 @@ grammar.parse("answer 42");         // → ParseError: Expected ":" but found "4
 - [Combinators](#combinators) — `seq`, `oneOf`, `optional`, `delimited`, …
 - [Expressions: `pratt`](#expressions-pratt) — precedence climbing
 - [Grammars: `defineExpression` / `defineGrammar`](#grammars-defineexpression--definegrammar)
+- [Printing: `@parser-kit/core/print`](#printing-parser-kitcoreprint) — a document IR and width-aware renderer
 - [The example grammars](#the-example-grammars) — how to learn the kit by reading
 - [Design notes & current limits](#design-notes--current-limits)
 
@@ -228,6 +229,42 @@ Every grammar exposes:
 **Lexer error propagation** — `defineGrammar({ ..., errorReporting: { propagateLexerErrors: true } })` stops backtracking from swallowing lexer errors. Lexing is lazy, so a bad character can be hit while an `attempt()` branch (or any `ctx.tryParse`) is running. By default that error rolls the branch back like any other failure. But the lexer has already consumed the offending characters, so the next branch trips over whatever follows them and reports a misleading parser error, or even parses cleanly with the characters silently dropped. With the flag on, errors thrown by the token stream are stamped `fromLexer: true` and pass through `tryParse` (nested ones included) and `describe()` relabelling unchanged. `parse` throws them, and in `diagnose` they reach recovery like any other error. The cursor stays where the lexer stopped instead of rolling back. Lexer errors carry no `consumed` stamp, so `preferFarthest` never replaces one with a croak from an abandoned branch. The flag is off by default, and with it off errors are neither tagged nor rethrown.
 
 **Strict list closes** — `defineGrammar({ ..., strictDelimited: true })` makes a `delimited()` list that reaches end of input before its close token fail with `Expected <close> but found end of input`. By default the list ends there as if closed, so `(a, b` at the end of the input parses as a complete list. A grammar that requires a terminator after every construct never notices, because the terminator check fails first. A grammar whose last statement needs no terminator wants the flag. It is off by default, and with it off nothing changes.
+
+## Printing: `@parser-kit/core/print`
+
+An opt-in entry point for the other direction, AST → text. It holds a Wadler/Leijen-style document IR (the model prettier uses) and a renderer that lays a document out for a line width. You write the printer by hand, one function per node, and build docs instead of strings. The entry is about 1.2 KB minified and gzipped, and nothing in the parsing API imports it, so parse-only bundles don't grow.
+
+```ts
+import { doc, render } from "@parser-kit/core/print";
+const { group, indent, line, softline, join, block, list } = doc;
+
+const call = (name: string, args: doc.Doc[]) =>
+  group([name, "(", indent([softline, join([",", line], args)]), softline, ")"]);
+
+render(call("f", ["alpha", "beta"]), { width: 80 });   // "f(alpha, beta)"
+render(call("f", ["alpha", "beta"]), { width: 10 });   // "f(\n  alpha,\n  beta\n)"
+
+// Fixed shapes: an indented body, and a settings list that vanishes when empty.
+const column = ["id int", list(" [", ["pk", "increment"], "]", { empty: "omit" })];
+render(block("Table users", [column]), { indent: "\t" });
+// "Table users {\n\tid int [pk, increment]\n}"
+```
+
+A `Doc` is a string, an array of docs (concatenation), or a command:
+
+| Builder | Meaning |
+| --- | --- |
+| `group(doc, { shouldBreak? })` | Lay `doc` out flat if it fits in the rest of the line, else break every line directly inside it. Nested groups decide for themselves, outermost first. |
+| `indent(doc)` | One more indentation level for the line breaks inside `doc`. |
+| `line` / `softline` | A space / nothing when the enclosing group is flat, a newline when it is broken. |
+| `hardline` | Always a newline. Every group around it breaks. |
+| `nbsp` | A space that never breaks, for places where a newline would change meaning. |
+| `ifBreak(broken, flat?)` | Pick a doc by the enclosing group's mode (trailing commas, optional parentheses). |
+| `join(sep, docs)` | `docs` with `sep` between them. |
+| `block(header, items, { open?, close? })` | `header {`, one indented item per line, `}`. Prints `header {}` when empty. |
+| `list(open, items, close, { separator?, empty? })` | `[a, b]` flat, one item per line broken. `empty: "omit"` prints nothing for an empty list. |
+
+`render(doc, { width = 80, indent = 2 })` returns the text. `indent` is a number of spaces or a string such as `"\t"`. **`width: Infinity`** lays every group out flat and skips width measurement altogether, which is the fast path for one-line output. Only hard lines, groups built with `shouldBreak`, and lines outside every group still break. As in prettier, a `line` that is not inside any group always breaks, so wrap a doc in `group()` to get it on one line. Text width is its `.length`, and a `"\n"` inside a string is written as is, with no indentation after it. Rendering is iterative, so a deeply nested doc can't overflow the stack.
 
 ## The example grammars
 

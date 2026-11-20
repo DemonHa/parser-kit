@@ -52,6 +52,12 @@ verify() {
 verify packages/core parser-kit-core
 verify packages/sql parser-kit-sql
 
+# core's opt-in ./print entry ships in both formats, with declarations.
+tar -tzf "$PACK"/parser-kit-core-*.tgz | sort > "$WORK/core-entries.txt"
+for required in build/esm/print/index.js build/cjs/print/index.js build/esm/print/index.d.ts build/cjs/print/index.d.ts; do
+  grep -qx "package/$required" "$WORK/core-entries.txt" || { echo "::error::packages/core: missing $required"; exit 1; }
+done
+
 # Install both tarballs together, so @parser-kit/sql's core dependency is the
 # core packed here rather than the registry copy.
 SMOKE="$WORK/smoke"
@@ -62,8 +68,10 @@ npm install --no-audit --no-fund "$PACK"/*.tgz >/dev/null
 
 cat > esm.mjs <<'JS'
 import * as core from "@parser-kit/core";
+import { doc, render } from "@parser-kit/core/print";
 import { sqlLite, sqlLiteScript } from "@parser-kit/sql";
 if (!core.defineGrammar) throw new Error("core: ESM export missing");
+if (render(doc.group(["a", doc.line, "b"]), { width: 1 }) !== "a\nb") throw new Error("core/print: ESM render failed");
 const [stmt] = sqlLite.parse("SELECT 1 AS one");
 if (stmt?.kind !== "select") throw new Error("sql: ESM parse failed");
 if (sqlLiteScript.parse("\\connect db\nSELECT 1;\n").length !== 2) throw new Error("sql: ESM script parse failed");
@@ -72,8 +80,10 @@ JS
 
 cat > cjs.cjs <<'JS'
 const core = require("@parser-kit/core");
+const { doc, render } = require("@parser-kit/core/print");
 const { sqlLite } = require("@parser-kit/sql");
 if (!core.defineGrammar) throw new Error("core: CJS export missing");
+if (render(doc.group(["a", doc.line, "b"]), { width: 1 }) !== "a\nb") throw new Error("core/print: CJS render failed");
 const [stmt] = sqlLite.parse("SELECT 1 AS one");
 if (stmt?.kind !== "select") throw new Error("sql: CJS parse failed");
 try {
@@ -92,15 +102,33 @@ node cjs.cjs
 # The declarations, AST types included, must resolve for a TypeScript consumer
 # from both an ES module and a CommonJS one.
 cat > consumer.mts <<'TS'
+import { type Doc, group, line, render } from "@parser-kit/core/print";
 import { type ScriptItem, type Stmt, sqlLite } from "@parser-kit/sql";
 const stmts: Stmt[] = sqlLite.parse("SELECT 1");
 export const items: ScriptItem[] = stmts;
+const d: Doc = group(["a", line, "b"]);
+export const text: string = render(d, { width: 80, indent: "\t" });
 TS
 cat > consumer.cts <<'TS'
 import sql = require("@parser-kit/sql");
+import print = require("@parser-kit/core/print");
 const stmts: sql.Stmt[] = sql.sqlLite.parse("SELECT 1");
 export const items: sql.ScriptItem[] = stmts;
+const d: print.Doc = print.doc.group(["a", print.doc.line, "b"]);
+export const text: string = print.render(d, { width: Number.POSITIVE_INFINITY });
 TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
   consumer.mts consumer.cts
-echo "TypeScript ok: @parser-kit/sql types resolve from ESM and CJS (nodenext)"
+echo "TypeScript ok: @parser-kit/sql and @parser-kit/core/print types resolve from ESM and CJS (nodenext)"
+
+# Size budget for the print entry, measured the way a consumer's bundler sees
+# it: bundled from the installed tarball, minified, gzipped.
+PRINT_BUDGET=3072
+npm install --no-audit --no-fund --no-save esbuild@0.28.2 >/dev/null
+echo 'export * from "@parser-kit/core/print";' > print-entry.mjs
+PRINT_SIZE=$(npx --no-install esbuild print-entry.mjs --bundle --minify --format=esm --log-level=error | gzip -9 | wc -c)
+if [ "$PRINT_SIZE" -gt "$PRINT_BUDGET" ]; then
+  echo "::error::@parser-kit/core/print is $PRINT_SIZE bytes min+gz, over the $PRINT_BUDGET byte budget"
+  exit 1
+fi
+echo "Size ok: @parser-kit/core/print is $PRINT_SIZE bytes min+gz (budget $PRINT_BUDGET)"
