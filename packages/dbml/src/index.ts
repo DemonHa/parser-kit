@@ -7,11 +7,10 @@ function notImplemented(method: string): never {
 }
 
 /** The DBML parser. `parse` throws at the first error; `diagnose` collects every error. */
-export const dbml = {
-  parse(_text: string): never {
-    return notImplemented("parse");
-  },
-  diagnose(_text: string): never {
-    return notImplemented("diagnose");
-  },
+export const dbml: {
+  parse(text: string): never;
+  diagnose(text: string): never;
+} = {
+  parse: () => notImplemented("parse"),
+  diagnose: () => notImplemented("diagnose"),
 };

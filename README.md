@@ -64,7 +64,7 @@ Two real grammars double as the kit's genericity and integration tests — and t
 
 ```sh
 pnpm install
-pnpm test          # core unit tests, @parser-kit/sql and js-lite
+pnpm test          # core unit tests, @parser-kit/sql, @parser-kit/dbml and js-lite
 pnpm types:check
 pnpm lint
 pnpm build

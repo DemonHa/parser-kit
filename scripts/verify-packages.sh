@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Packs every published package the way the release does and checks what a
-# consumer would get. Run after `pnpm build`; CI's "Package" job runs it.
+# Packs every package the way the release does, private ones in development
+# included, and checks what a consumer would get. Run after `pnpm build`; CI's
+# "Package" job runs it.
 #
 # Each tarball must resolve catalog: and workspace: specifiers, ship only what
 # consumers need, and import cleanly from ESM, CJS and TypeScript. Only
@@ -14,9 +15,9 @@ trap 'rm -rf "$WORK"' EXIT
 PACK="$WORK/pack"
 mkdir -p "$PACK"
 
-# verify <package dir> <tarball name prefix>
+# verify <package dir> <tarball name prefix> [allowlist regex]
 verify() {
-  local dir=$1 prefix=$2 tgz
+  local dir=$1 prefix=$2 allowed=${3:-} tgz
   (cd "$ROOT/$dir" && pnpm pack --pack-destination "$PACK" >/dev/null)
   tgz=$(ls "$PACK/$prefix"-*.tgz)
   echo "== $dir: $(basename "$tgz")"
@@ -47,18 +48,25 @@ verify() {
     grep -E "$leaked" "$WORK/entries.txt"
     exit 1
   fi
+  # With an allowlist, every entry must match it. `grep -v` exits 1 when every
+  # line matches, 0 when it printed a stray entry and 2 on error.
+  if [ -n "$allowed" ]; then
+    local status=0
+    grep -vE "$allowed" "$WORK/entries.txt" > "$WORK/unexpected.txt" || status=$?
+    if [ "$status" -ne 1 ]; then
+      echo "::error::$dir: files outside the allowlist in the tarball"
+      cat "$WORK/unexpected.txt"
+      exit 1
+    fi
+  fi
 }
 
 verify packages/core parser-kit-core
 verify packages/sql parser-kit-sql
-verify packages/dbml parser-kit-dbml
-
 # @parser-kit/dbml is private until its first release, but `pnpm pack` still
-# packs it. Hold its tarball to exactly what consumers need.
-if grep -vE '^package/(build/|src/|LICENSE$|README\.md$|package\.json$)' "$WORK/entries.txt"; then
-  echo "::error::packages/dbml: unexpected files in the tarball (listed above)"
-  exit 1
-fi
+# packs it. Its tarball is held to an allowlist of what consumers need.
+verify packages/dbml parser-kit-dbml '^package/(build/|src/|LICENSE$|README\.md$|CHANGELOG\.md$|package\.json$)'
+
 
 # Install the tarballs together, so the grammars' core dependency is the core
 # packed here rather than the registry copy.

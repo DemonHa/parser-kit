@@ -9,6 +9,9 @@ spec, is [`@dbml/core`](https://www.npmjs.com/package/@dbml/core) 12.x (its
 
 ## Layout
 
+The layout below is where code goes as the parser is built; files that don't
+exist yet are the ones still to be written.
+
 - `src/` — the published code.
   - `index.ts` — the package entry.
   - `lexer.ts` — the lexer, the parse-stream wrapper (comments dropped,
@@ -36,7 +39,7 @@ fixtures reach the tarball.
 ## Rules
 
 - **The public API is `src/index.ts`.** `test/entry.test.ts` pins its exported
-  values and the types `dbml.parse` / `dbml.diagnose` return; any change to the
+  values and the signatures of `dbml.parse` / `dbml.diagnose`; any change to the
   exports updates it. Don't export grammar internals (rules, the raw-name
   lookup).
 - **No changesets while the package is private.** The release that drops
@@ -82,7 +85,7 @@ fixtures reach the tarball.
   output is meant to move, regenerate with `pnpm test -- -u` from the repo root
   (a bare `-u` is swallowed by pnpm), rebase on the latest `main` first, and call
   the diff out in the PR. Biome ignores `*.golden.json`.
-- **`@dbml/core` is a test and bench dependency only**, pinned to an exact
+- **`@dbml/core` is only ever a test and bench dependency**, pinned to an exact
   version in the workspace catalog. Upgrading it is its own change that re-runs
   the differential test and updates the allowlist and the README.
 - **README.** Only the change that publishes the package rewrites `README.md`
