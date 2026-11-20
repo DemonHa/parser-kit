@@ -1,5 +1,5 @@
-// Roles, privileges, comments and the DROP family: CREATE / ALTER ROLE (USER,
-// GROUP), GRANT / REVOKE on objects and roles, ALTER DEFAULT PRIVILEGES, DROP
+// Roles, privileges, comments and the DROP family: CREATE ROLE / USER / GROUP,
+// ALTER ROLE / USER, GRANT / REVOKE on objects and roles, ALTER DEFAULT PRIVILEGES, DROP
 // OWNED / REASSIGN OWNED, COMMENT ON, SECURITY LABEL and DROP.
 import { type Doc, group, indent, join, line } from "@parser-kit/core/print";
 import type { DefaultPrivilegesAction, GrantObject, Privilege, RoleGrantOption, RoleOption, Stmt } from "../ast";
@@ -36,7 +36,7 @@ const roleOption = (o: RoleOption): Doc => {
     case "flag":
       return kw(`${o.value ? "" : "NO"}${o.name.toUpperCase()}`);
     case "connectionLimit":
-      return `${kw("CONNECTION LIMIT")} ${o.limit}`;
+      return `${kw("CONNECTION LIMIT")} ${numberText(o.limit)}`;
     case "password":
       return `${o.encrypted ? `${kw("ENCRYPTED")} ` : ""}${kw("PASSWORD")} ${o.password === null ? kw("NULL") : str(o.password)}`;
     case "validUntil":
@@ -55,8 +55,9 @@ const withRoleOptions = (head: Doc[], options: readonly RoleOption[]): Doc =>
 
 // --- privileges ---
 
-// The privilege keywords the grammar matches by value (some are reserved). Any
-// other privilege, or a role in a role grant, is a name.
+// The privilege keywords the grammar matches by value (some are reserved), and
+// written as keywords: a role named one in a role grant reads back the same.
+// Any other privilege or role is a name.
 const PRIVILEGE_WORDS: ReadonlySet<string> = new Set([
   "select",
   "insert",
@@ -89,7 +90,8 @@ const privileges = (privs: Privilege[] | "all", allColumns: string[] | undefined
     ? [kw("ALL PRIVILEGES"), allColumns !== undefined ? [" ", parenList(allColumns.map(ident))] : ""]
     : commaList(privs.map(privilege));
 
-// `ALL {TABLES | …} IN SCHEMA`'s plural, by the kind's singular.
+// The plural of `ALL {TABLES | …} IN SCHEMA` and of ALTER DEFAULT PRIVILEGES'
+// `ON {TABLES | …}`, by the kind's singular.
 const PLURALS: Record<string, string> = {
   table: "TABLES",
   sequence: "SEQUENCES",

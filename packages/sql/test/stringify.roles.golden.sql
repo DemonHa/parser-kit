@@ -193,6 +193,18 @@ ALTER ROLE r SET NAMES DEFAULT;
 -- ALTER ROLE r SET NAMES DEFAULT
 ALTER ROLE r SET NAMES DEFAULT;
 
+-- CREATE ROLE r CONNECTION LIMIT -0
+CREATE ROLE r WITH CONNECTION LIMIT -0;
+
+-- ALTER ROLE r WITH CONNECTION LIMIT -0
+ALTER ROLE r WITH CONNECTION LIMIT -0;
+
+-- ALTER ROLE r SET x TO "system_user", "current_catalog", "current_schema"
+ALTER ROLE r SET x TO "system_user", "current_catalog", "current_schema";
+
+-- ALTER ROLE r SET ROLE "system_user"
+ALTER ROLE r SET role TO "system_user";
+
 -- ALTER ROLE r RESET ALL
 ALTER ROLE r RESET ALL;
 

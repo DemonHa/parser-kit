@@ -60,9 +60,10 @@ export const routineWithArgs = (name: readonly string[], sig: DropSignature): Do
 
 /**
  * A type or domain named as DROP, COMMENT ON and SECURITY LABEL name one: PG's
- * Typename, written as a type name is (a bare `int` is int4, a quoted `"int"`
- * a type called that). A name holding a space came from a quoted name, which
- * stays quoted.
+ * Typename, written as a type name is: `int` bare (int4), a col_name keyword
+ * that names no type (`"between"`) quoted. The tree doesn't record quoting, so
+ * a source `"int"` prints as `int` too. A name holding a space came from a
+ * quoted name, which stays quoted.
  */
 export const typeObjectName = (name: readonly string[]): Doc =>
   name.length === 1 && /\s/.test(name[0]!)
@@ -135,9 +136,9 @@ const oneValue = (values: ConfigValues): Expr | null =>
 const isString = (v: Expr | null): v is Extract<Expr, { kind: "string" }> => v?.kind === "string";
 const isNumber = (v: Expr | null): boolean =>
   v?.kind === "number" || (v?.kind === "unary" && (v.op === "-" || v.op === "+") && v.operand.kind === "number");
-// A word value, written quoted: TIME ZONE and SESSION AUTHORIZATION take an
-// IDENT there, which no PG keyword is unless quoted (`"local"` is a zone,
-// LOCAL the default).
+// A word value, written quoted: TIME ZONE takes an IDENT there, which no PG
+// keyword is unless quoted (`"local"` is a zone, LOCAL the default); SESSION
+// AUTHORIZATION, which takes any non-reserved word, reads it the same way.
 const word = (v: Expr | null): string | null =>
   v?.kind === "name" && v.parts.length === 1 ? quoted(v.parts[0]!) : null;
 
@@ -206,8 +207,11 @@ const SPECIAL_RESETS: Record<string, string> = {
   "session authorization": "SESSION AUTHORIZATION",
 };
 
+// A word value is a name, quoted when it must be: `expr` would write the
+// words PG reads as functions (`system_user`) bare, which no value may be.
+const configValue = (v: Expr): Doc => (v.kind === "name" && v.parts.length === 1 ? ident(v.parts[0]!) : expr(v));
 const configValues = (values: ConfigValues): Doc =>
-  values === "default" ? kw("DEFAULT") : commaList(values.map(expr));
+  values === "default" ? kw("DEFAULT") : commaList(values.map(configValue));
 
 /**
  * The SET / RESET of parameter defaults ALTER ROLE and ALTER DATABASE take
