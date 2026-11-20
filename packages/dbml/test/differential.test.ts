@@ -361,12 +361,12 @@ interface KnownDifference {
   /** Why the parsers disagree, for the README's differences list. */
   reason: string;
   /**
-   * What this package does with each document. `@dbml/core` does the
-   * opposite: when this package rejects, `@dbml/core`'s parser takes the
-   * document (its validator may still object); when this package accepts,
-   * `@dbml/core` rejects it (see `coreVerdict`).
+   * What this package does with each document. `rejects`: `@dbml/core`'s
+   * parser takes it (its validator may still object). `accepts`:
+   * `@dbml/core` rejects it (see `coreVerdict`). `differs`: both accept it,
+   * but read it differently, so the projections don't match.
    */
-  ours: "rejects" | "accepts";
+  ours: "rejects" | "accepts" | "differs";
   documents: string[];
   /** `MALFORMED` entries that show it: `@dbml/core`'s parser takes them. */
   malformed?: string[];
@@ -431,7 +431,15 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
       "Table a\r\n[note: 'x'] {\r\n  id int\r\n}\r\n",
       "Table t {\n  id int\n  name int\n  indexes {\n    id/**/name\n  }\n}\n",
       "Table t {\n  id int\n  indexes {\n    (id)// c\n    [unique]\n  }\n}\n",
+      "Table t {\n  v text/* c */[pk]\n}\n",
     ],
+  },
+  {
+    reason:
+      "The same: a block comment between a column type and a glued `[` (`text/* c */[]`) makes the `[` a " +
+      "settings list here, where `@dbml/core` reads an array suffix (`text[]`).",
+    ours: "differs",
+    documents: ["Table t {\n  v text/* c */[]\n}\n", "Table t {\n  v text[]/* c */[]\n}\n"],
   },
   {
     reason:
@@ -443,6 +451,9 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
       "Table t {\r\n  id int\r\n  indexes {\r\n    id\r\n    [desc]\r\n  }\r\n}\r\n",
       "Table t {\r\n  tags text\r\n  []\r\n}\r\n",
       "Table t {\n  tags text// c\n  []\n}\n",
+      "Table t {\n  v int/* c */\n  [1]\n}\n",
+      "Table t {\n  v text/* c */[3]\n}\n",
+      "Table t {\n  id int\n  indexes {\n    id/* c */[desc]\n  }\n}\n",
     ],
   },
   {
@@ -566,6 +577,10 @@ describe("differential: known differences still hold", () => {
   );
 
   it.each(cases)("%s", (_, difference: KnownDifference, source: string) => {
+    if (difference.ours === "differs") {
+      expect(canonical(projectDocument(dbml.parse(source)))).not.toEqual(canonical(coreProjection(source)));
+      return;
+    }
     expect(accepts(source)).toBe(difference.ours === "accepts");
     expect(coreParses(source)).toBe(difference.ours === "rejects");
   });
@@ -581,6 +596,12 @@ describe("differential: corpus mutants get the same verdict from both parsers", 
     expect(all.length).toBeGreaterThan(500);
   });
 
+  it("lists each mutant once, under a difference in verdict", () => {
+    const listed = KNOWN_DIFFERENCES.flatMap((difference) => difference.mutants ?? []);
+    expect(listed.filter((id, index) => listed.indexOf(id) !== index)).toEqual([]);
+    expect(KNOWN_DIFFERENCES.filter((difference) => difference.mutants && difference.ours === "differs")).toEqual([]);
+  });
+
   it("lists only existing mutants in the known differences", () => {
     const ids = new Set(mutants({ withPartials: true }).map(({ id }) => id));
     expect([...allowed.keys()].filter((id) => !ids.has(id))).toEqual([]);
@@ -588,8 +609,14 @@ describe("differential: corpus mutants get the same verdict from both parsers", 
 
   it("agrees on every mutant outside the known differences", () => {
     const disagreements = all.flatMap(({ id, source }) => {
-      const ours = accepts(source);
-      const core = coreVerdict(source);
+      let ours: boolean;
+      let core: ReturnType<typeof coreVerdict>;
+      try {
+        ours = accepts(source);
+        core = coreVerdict(source);
+      } catch (error) {
+        throw new Error(`mutant ${JSON.stringify(id)} crashed: ${JSON.stringify(source)}`, { cause: error });
+      }
       const agree = ours === (core !== "rejects");
       // An allowlisted mutant must still disagree, the way its entry says.
       const expected = allowed.get(id);

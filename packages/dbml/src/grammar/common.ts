@@ -216,8 +216,8 @@ export const touches = (end: Position, token: Tok | null): boolean =>
  * `[`: `@dbml/core` then binds that `[` to the token before the break (a
  * column type's array suffix, an index column's sort order). Two cases differ
  * from `@dbml/core`, which also binds across a `\r` (CRLF) or a comment glued
- * to the token (`id// c`): the parse stream has dropped both, so their break
- * no longer touches the token.
+ * to the token (`id// c`, or a block comment): the parse stream has dropped
+ * both, so their break no longer touches the token.
  */
 export const bracketOnLaterLine = (ctx: Ctx): boolean =>
   isNewline(ctx.peek()) && touches(ctx.lastEnd(), ctx.peek()) && isPunc(peekPastNewlines(ctx), "[");
