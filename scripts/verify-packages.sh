@@ -51,9 +51,17 @@ verify() {
 
 verify packages/core parser-kit-core
 verify packages/sql parser-kit-sql
+verify packages/dbml parser-kit-dbml
 
-# Install both tarballs together, so @parser-kit/sql's core dependency is the
-# core packed here rather than the registry copy.
+# @parser-kit/dbml is private until its first release, but `pnpm pack` still
+# packs it. Hold its tarball to exactly what consumers need.
+if grep -vE '^package/(build/|src/|LICENSE$|README\.md$|package\.json$)' "$WORK/entries.txt"; then
+  echo "::error::packages/dbml: unexpected files in the tarball (listed above)"
+  exit 1
+fi
+
+# Install the tarballs together, so the grammars' core dependency is the core
+# packed here rather than the registry copy.
 SMOKE="$WORK/smoke"
 mkdir -p "$SMOKE"
 cd "$SMOKE"
@@ -86,8 +94,22 @@ try {
 console.log(`CJS ok: core ${Object.keys(core).length} exports, sql parses`);
 JS
 
+cat > dbml-esm.mjs <<'JS'
+import { dbml } from "@parser-kit/dbml";
+if (typeof dbml?.parse !== "function" || typeof dbml.diagnose !== "function") throw new Error("dbml: ESM export missing");
+console.log("ESM ok: dbml exports parse and diagnose");
+JS
+
+cat > dbml-cjs.cjs <<'JS'
+const { dbml } = require("@parser-kit/dbml");
+if (typeof dbml?.parse !== "function" || typeof dbml.diagnose !== "function") throw new Error("dbml: CJS export missing");
+console.log("CJS ok: dbml exports parse and diagnose");
+JS
+
 node esm.mjs
 node cjs.cjs
+node dbml-esm.mjs
+node dbml-cjs.cjs
 
 # The declarations, AST types included, must resolve for a TypeScript consumer
 # from both an ES module and a CommonJS one.
@@ -104,3 +126,15 @@ TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
   consumer.mts consumer.cts
 echo "TypeScript ok: @parser-kit/sql types resolve from ESM and CJS (nodenext)"
+
+cat > dbml-consumer.mts <<'TS'
+import { dbml } from "@parser-kit/dbml";
+export const parse: (text: string) => unknown = dbml.parse;
+TS
+cat > dbml-consumer.cts <<'TS'
+import pkg = require("@parser-kit/dbml");
+export const diagnose: (text: string) => unknown = pkg.dbml.diagnose;
+TS
+"$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
+  dbml-consumer.mts dbml-consumer.cts
+echo "TypeScript ok: @parser-kit/dbml types resolve from ESM and CJS (nodenext)"

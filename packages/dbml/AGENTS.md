@@ -1,0 +1,93 @@
+# AGENTS.md — @parser-kit/dbml
+
+A typed DBML parser built on `@parser-kit/core`. The incumbent, and the de facto
+spec, is [`@dbml/core`](https://www.npmjs.com/package/@dbml/core) 12.x (its
+`dbmlv2` parser). The package entry is a single `dbml` object with `parse` and
+`diagnose`. It is in development: `private: true`, not yet published. See
+`../core/AGENTS.md` for the kit's internals and grammar-authoring gotchas, and
+`../sql` for the package this one mirrors.
+
+## Layout
+
+- `src/` — the published code.
+  - `index.ts` — the package entry.
+  - `lexer.ts` — the lexer, the parse-stream wrapper (comments dropped,
+    identifiers case-folded) and the raw-name lookup.
+  - `grammar/` — one module per construct (`table.ts`, `ref.ts`, `enum.ts`,
+    `project.ts`, `note.ts`, `indexes.ts`, `group.ts`, `partial.ts`,
+    `records.ts`), the shared rules in `common.ts` (names, strings, values,
+    the settings framework), and two registries: `root.ts` (top-level
+    elements, the top-level loop and its recovery) and `table-items.ts` (what
+    may appear in a table body). Each module defines its AST types next to its
+    rules; `src/ast.ts` only re-exports them. A new construct is a new module
+    plus one line in a registry.
+- `test/` — vitest, one file per area (`table.test.ts`, `ref.test.ts`, …) so
+  parallel changes add files instead of editing a shared one. `entry.test.ts`
+  pins the public surface. The corpus (`corpus.ts`), the parity harness and its
+  goldens (`parity.*.golden.json`) and the differential test against
+  `@dbml/core` live here too.
+- `bench/` — comparisons against `@dbml/core`.
+
+Only `build/`, `src/` and the changelog are published (`files` in
+`package.json`), plus the files npm always adds; CI's Package job
+(`../../scripts/verify-packages.sh`) fails if tests, benches, goldens or
+fixtures reach the tarball.
+
+## Rules
+
+- **The public API is `src/index.ts`.** `test/entry.test.ts` pins its exported
+  values and the types `dbml.parse` / `dbml.diagnose` return; any change to the
+  exports updates it. Don't export grammar internals (rules, the raw-name
+  lookup).
+- **No changesets while the package is private.** The release that drops
+  `private: true` adds the package's first changeset.
+- **Match `@dbml/core`'s syntax.** Accept what it accepts and reject what it
+  rejects, syntactically. Where its docs and its implementation disagree,
+  follow the implementation. Semantic checks (unknown tables, duplicates, empty
+  tables, partial merging, colour validation) are not parse errors. Every
+  intended difference goes in the README's differences list and the
+  differential test's allowlist, with a reason.
+- **Keywords are case-insensitive and contextual, never reserved.** `Table`,
+  `table` and `TABLE` are the same keyword, and a column, table, enum value or
+  alias may still be named `note`, `ref`, `indexes`, `checks`, `records`,
+  `table`, `enum`, `project`, `pk`, `null`, `default` or `as`. Every keyword gets
+  a "keeps *word* usable as a name" test. Decide between a keyword and a name
+  with token lookahead in a `custom()` rule, not with `attempt()`.
+- **Newlines are tokens.** DBML is line-oriented, but newlines inside `[ … ]`
+  and `( … )` are whitespace. Treat `\r` as whitespace so CRLF files parse.
+- **AST shape.** Elements and items are discriminated by `type`, values and
+  settings by `kind`. Every node carries a `span`; string and identifier spans
+  include their quotes. Identifiers keep their raw case and a `quoted?: true`
+  flag. Settings are an ordered list in source order, duplicates kept. Fields
+  that existed when a node was introduced are always present (`null` or `[]`
+  when absent); fields added later are optional and left out when absent, so
+  existing trees stay byte-identical. Flags are `?: true`.
+- **Numbers keep their source text unless it is a plain integer.** A number is
+  `{ kind: "number", value, raw? }`. `raw` is the literal as written, sign
+  included, and is present whenever that text is not exactly what
+  `String(value)` gives back for an integer: any `.`, exponent, trailing zeros,
+  leading zeros or a value outside the safe-integer range. `42` and `-7` have no
+  `raw`; `1.50`, `1e5`, `-0.0` and `007` do. This matches `@parser-kit/sql`.
+- **Strings are decoded.** `'…'` is single-line and processes escapes; `'''…'''`
+  is dedented the way `@dbml/core` does it and carries `multiline: true`.
+  Backtick expressions are kept raw.
+- **Error messages** use the core style, `Expected X but found Y`, with readable
+  displays (`"Table"`, `a column type`, …). Error tests match `ParseError.msg`
+  exactly, plus `start`.
+- **Unit tests** compare `stripSpans(ast)` with `toEqual`, and assert spans on at
+  least one multi-line document per construct. A change that adds a construct
+  also adds realistic multi-line documents to `test/corpus.ts`.
+- **Never regenerate a golden to make a change pass.** `test/parity.*.golden.json`
+  pin every corpus AST (spans included) and every `diagnose()` message. When
+  output is meant to move, regenerate with `pnpm test -- -u` from the repo root
+  (a bare `-u` is swallowed by pnpm), rebase on the latest `main` first, and call
+  the diff out in the PR. Biome ignores `*.golden.json`.
+- **`@dbml/core` is a test and bench dependency only**, pinned to an exact
+  version in the workspace catalog. Upgrading it is its own change that re-runs
+  the differential test and updates the allowlist and the README.
+- **README.** Only the change that publishes the package rewrites `README.md`
+  and the root README's packages row; feature changes put user-facing notes in
+  their PR description instead.
+- **Before pushing**, run `pnpm lint`, `pnpm types:check`, `pnpm test` and
+  `pnpm build` from the repo root, plus `bash scripts/verify-packages.sh` when
+  packaging changes.

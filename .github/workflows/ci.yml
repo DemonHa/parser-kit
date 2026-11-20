@@ -60,8 +60,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
-      # Packs core and sql the way the release does, checks each tarball's
-      # manifest and contents, and installs both into a scratch project to
+      # Packs core, sql and dbml the way the release does, checks each tarball's
+      # manifest and contents, and installs them into a scratch project to
       # import them from ESM, CJS and TypeScript. See the script for details.
       - name: Pack and verify the tarballs
         run: bash scripts/verify-packages.sh
