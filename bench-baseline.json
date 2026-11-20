@@ -1,14 +1,14 @@
 {
   "files": [
     {
-      "filepath": "packages/sql/bench/sql-lite.bench.ts",
+      "filepath": "packages/sql/bench/postgres.bench.ts",
       "groups": [
         {
-          "fullName": "packages/sql/bench/sql-lite.bench.ts > whole shared corpus (28 statements)",
+          "fullName": "packages/sql/bench/postgres.bench.ts > whole shared corpus (28 statements)",
           "benchmarks": [
             {
-              "id": "-464723716_0_0",
-              "name": "sql-lite",
+              "id": "-2013543344_0_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 2.878169072505415,
               "samples": [],
@@ -32,7 +32,7 @@
               "median": 0.7419185000000539
             },
             {
-              "id": "-464723716_0_1",
+              "id": "-2013543344_0_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 3.7460895837655586,
@@ -59,11 +59,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.bench.ts > select (5 statements)",
+          "fullName": "packages/sql/bench/postgres.bench.ts > select (5 statements)",
           "benchmarks": [
             {
-              "id": "-464723716_1_0",
-              "name": "sql-lite",
+              "id": "-2013543344_1_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 1.0459080848990976,
               "samples": [],
@@ -87,7 +87,7 @@
               "median": 0.07080199999973047
             },
             {
-              "id": "-464723716_1_1",
+              "id": "-2013543344_1_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 1.8850407491137449,
@@ -114,11 +114,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.bench.ts > select-adv (4 statements)",
+          "fullName": "packages/sql/bench/postgres.bench.ts > select-adv (4 statements)",
           "benchmarks": [
             {
-              "id": "-464723716_2_0",
-              "name": "sql-lite",
+              "id": "-2013543344_2_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 0.9829329806339924,
               "samples": [],
@@ -142,7 +142,7 @@
               "median": 0.08914300000014919
             },
             {
-              "id": "-464723716_2_1",
+              "id": "-2013543344_2_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 1.5837335865243753,
@@ -169,11 +169,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.bench.ts > cte (2 statements)",
+          "fullName": "packages/sql/bench/postgres.bench.ts > cte (2 statements)",
           "benchmarks": [
             {
-              "id": "-464723716_3_0",
-              "name": "sql-lite",
+              "id": "-2013543344_3_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 0.9237723631791275,
               "samples": [],
@@ -197,7 +197,7 @@
               "median": 0.03856600000017352
             },
             {
-              "id": "-464723716_3_1",
+              "id": "-2013543344_3_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 0.97908816841949,
@@ -224,11 +224,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.bench.ts > dml (4 statements)",
+          "fullName": "packages/sql/bench/postgres.bench.ts > dml (4 statements)",
           "benchmarks": [
             {
-              "id": "-464723716_4_0",
-              "name": "sql-lite",
+              "id": "-2013543344_4_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 0.8991554929300045,
               "samples": [],
@@ -252,7 +252,7 @@
               "median": 0.08062000000063563
             },
             {
-              "id": "-464723716_4_1",
+              "id": "-2013543344_4_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 1.4517075528821355,
@@ -279,11 +279,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.bench.ts > ddl (6 statements)",
+          "fullName": "packages/sql/bench/postgres.bench.ts > ddl (6 statements)",
           "benchmarks": [
             {
-              "id": "-464723716_5_0",
-              "name": "sql-lite",
+              "id": "-2013543344_5_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 1.0477457386961972,
               "samples": [],
@@ -307,7 +307,7 @@
               "median": 0.10690100000010716
             },
             {
-              "id": "-464723716_5_1",
+              "id": "-2013543344_5_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 1.3959710782203822,
@@ -334,11 +334,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.bench.ts > expr (7 statements)",
+          "fullName": "packages/sql/bench/postgres.bench.ts > expr (7 statements)",
           "benchmarks": [
             {
-              "id": "-464723716_6_0",
-              "name": "sql-lite",
+              "id": "-2013543344_6_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 0.9015631218082316,
               "samples": [],
@@ -362,7 +362,7 @@
               "median": 0.11163100000067061
             },
             {
-              "id": "-464723716_6_1",
+              "id": "-2013543344_6_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 1.8602512408116274,
@@ -389,11 +389,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.bench.ts > sql-lite only: PG syntax node-sql-parser rejects",
+          "fullName": "packages/sql/bench/postgres.bench.ts > @parser-kit/sql only: PG syntax node-sql-parser rejects",
           "benchmarks": [
             {
-              "id": "-464723716_7_0",
-              "name": "sql-lite",
+              "id": "-2013543344_7_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 2.1939530787356674,
               "samples": [],
@@ -421,14 +421,14 @@
       ]
     },
     {
-      "filepath": "packages/sql/bench/sql-lite.large.bench.ts",
+      "filepath": "packages/sql/bench/postgres.large.bench.ts",
       "groups": [
         {
-          "fullName": "packages/sql/bench/sql-lite.large.bench.ts > 64KB file",
+          "fullName": "packages/sql/bench/postgres.large.bench.ts > 64KB file",
           "benchmarks": [
             {
-              "id": "1053675279_0_0",
-              "name": "sql-lite",
+              "id": "1779557219_0_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 1.1994541659116682,
               "samples": [],
@@ -452,7 +452,7 @@
               "median": 38.134132499999964
             },
             {
-              "id": "1053675279_0_1",
+              "id": "1779557219_0_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 1.8597593665788832,
@@ -479,11 +479,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.large.bench.ts > 256KB file",
+          "fullName": "packages/sql/bench/postgres.large.bench.ts > 256KB file",
           "benchmarks": [
             {
-              "id": "1053675279_1_0",
-              "name": "sql-lite",
+              "id": "1779557219_1_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 1.1679214997310323,
               "samples": [],
@@ -507,7 +507,7 @@
               "median": 144.1094895000001
             },
             {
-              "id": "1053675279_1_1",
+              "id": "1779557219_1_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 5.85677884209118,
@@ -534,11 +534,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.large.bench.ts > 1024KB file",
+          "fullName": "packages/sql/bench/postgres.large.bench.ts > 1024KB file",
           "benchmarks": [
             {
-              "id": "1053675279_2_0",
-              "name": "sql-lite",
+              "id": "1779557219_2_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 3.3421842807557693,
               "samples": [],
@@ -562,7 +562,7 @@
               "median": 556.9413189999996
             },
             {
-              "id": "1053675279_2_1",
+              "id": "1779557219_2_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 3.27960489790472,
@@ -589,11 +589,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.large.bench.ts > pg_dump: pagila schema, 388 statements",
+          "fullName": "packages/sql/bench/postgres.large.bench.ts > pg_dump: pagila schema, 388 statements",
           "benchmarks": [
             {
-              "id": "1053675279_3_0",
-              "name": "sql-lite",
+              "id": "1779557219_3_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 2.3448401277300044,
               "samples": [],
@@ -621,14 +621,14 @@
       ]
     },
     {
-      "filepath": "packages/sql/bench/sql-lite.workloads.bench.ts",
+      "filepath": "packages/sql/bench/postgres.workloads.bench.ts",
       "groups": [
         {
-          "fullName": "packages/sql/bench/sql-lite.workloads.bench.ts > workload: OLTP mix (16 statements)",
+          "fullName": "packages/sql/bench/postgres.workloads.bench.ts > workload: OLTP mix (16 statements)",
           "benchmarks": [
             {
-              "id": "-815635442_0_0",
-              "name": "sql-lite",
+              "id": "-686018974_0_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 1.9236828683468437,
               "samples": [],
@@ -652,7 +652,7 @@
               "median": 0.5630815000000666
             },
             {
-              "id": "-815635442_0_1",
+              "id": "-686018974_0_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 3.193254986285731,
@@ -679,11 +679,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.workloads.bench.ts > workload: analytics report (CTEs, windows, joins)",
+          "fullName": "packages/sql/bench/postgres.workloads.bench.ts > workload: analytics report (CTEs, windows, joins)",
           "benchmarks": [
             {
-              "id": "-815635442_1_0",
-              "name": "sql-lite",
+              "id": "-686018974_1_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 2.4694344809285447,
               "samples": [],
@@ -707,7 +707,7 @@
               "median": 0.3771710000000894
             },
             {
-              "id": "-815635442_1_1",
+              "id": "-686018974_1_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 1.7261984168568243,
@@ -734,11 +734,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.workloads.bench.ts > workload: migration script (19 statements, one file)",
+          "fullName": "packages/sql/bench/postgres.workloads.bench.ts > workload: migration script (19 statements, one file)",
           "benchmarks": [
             {
-              "id": "-815635442_2_0",
-              "name": "sql-lite",
+              "id": "-686018974_2_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 2.9913057196229285,
               "samples": [],
@@ -762,7 +762,7 @@
               "median": 0.4564190000000963
             },
             {
-              "id": "-815635442_2_1",
+              "id": "-686018974_2_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 2.2490589127032314,
@@ -789,11 +789,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.workloads.bench.ts > workload: bulk INSERT (10000 rows)",
+          "fullName": "packages/sql/bench/postgres.workloads.bench.ts > workload: bulk INSERT (10000 rows)",
           "benchmarks": [
             {
-              "id": "-815635442_3_0",
-              "name": "sql-lite",
+              "id": "-686018974_3_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 7.747804274509168,
               "samples": [],
@@ -817,7 +817,7 @@
               "median": 205.34266199999956
             },
             {
-              "id": "-815635442_3_1",
+              "id": "-686018974_3_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 7.162452957270698,
@@ -844,11 +844,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.workloads.bench.ts > workload: wide SELECT (1000 columns)",
+          "fullName": "packages/sql/bench/postgres.workloads.bench.ts > workload: wide SELECT (1000 columns)",
           "benchmarks": [
             {
-              "id": "-815635442_4_0",
-              "name": "sql-lite",
+              "id": "-686018974_4_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 2.8585714716456496,
               "samples": [],
@@ -872,7 +872,7 @@
               "median": 10.702447499999835
             },
             {
-              "id": "-815635442_4_1",
+              "id": "-686018974_4_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 4.809242951227327,
@@ -899,11 +899,11 @@
           ]
         },
         {
-          "fullName": "packages/sql/bench/sql-lite.workloads.bench.ts > workload: malformed input (8 statements, each throws)",
+          "fullName": "packages/sql/bench/postgres.workloads.bench.ts > workload: malformed input (8 statements, each throws)",
           "benchmarks": [
             {
-              "id": "-815635442_5_0",
-              "name": "sql-lite",
+              "id": "-686018974_5_0",
+              "name": "@parser-kit/sql",
               "rank": 1,
               "rme": 1.4132562805302875,
               "samples": [],
@@ -927,7 +927,7 @@
               "median": 0.13130699999965145
             },
             {
-              "id": "-815635442_5_1",
+              "id": "-686018974_5_1",
               "name": "node-sql-parser",
               "rank": 2,
               "rme": 1.4514351912229815,

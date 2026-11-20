@@ -1,11 +1,11 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { type Copy, type ScriptItem, sqlLite, sqlLiteScript } from "../src/index";
+import { type Copy, postgres, type ScriptItem } from "../src/postgres/index";
 import { type DumpOutcome, type DumpRow, PG_DUMP_EXPECTATIONS } from "./pg-dump-corpus";
 import { splitPsqlScript } from "./psql-split";
 
 // Re-parses every statement of the pg_dump files in `fixtures/pg-dump/` with
-// `sqlLite.parse` and pins each outcome in `pg-dump-corpus.ts`. A statement
+// `postgres.parse` and pins each outcome in `pg-dump-corpus.ts`. A statement
 // that starts parsing, or stops, fails this test with an `expected -> actual`
 // line; flip its row (or regenerate the file, below) and update the README.
 //
@@ -16,11 +16,11 @@ import { splitPsqlScript } from "./psql-split";
 //                            may move to "fail".
 //
 // COPY data blocks and psql meta-commands (`\connect`, `\restrict`, …) are not
-// SQL `sqlLite.parse` accepts, so the splitter sets them aside. Each file is
-// also parsed whole, with `sqlLiteScript.diagnose`, which reads them itself:
+// SQL `postgres.parse` accepts, so the splitter sets them aside. Each file is
+// also parsed whole, with `postgres.diagnoseScript`, which reads them itself:
 // the statements it reports errors in must be exactly the "fail" rows, and
 // its meta-command and COPY items must match what the splitter found. A file
-// with no "fail" row must parse end to end with `sqlLiteScript.parse`.
+// with no "fail" row must parse end to end with `postgres.parseScript`.
 
 const FIXTURES = new URL("./fixtures/pg-dump/", import.meta.url);
 const EXPECTATIONS = new URL("./pg-dump-corpus.ts", import.meta.url);
@@ -34,7 +34,7 @@ const head = (sql: string) => {
 
 const outcome = (sql: string): DumpOutcome => {
   try {
-    sqlLite.parse(sql);
+    postgres.parse(sql);
     return "ok";
   } catch {
     return "fail";
@@ -112,7 +112,7 @@ describe("pg_dump corpus", () => {
       });
 
       it("parses as a whole script, failing in exactly the recorded statements", () => {
-        const { ast, errors } = sqlLiteScript.diagnose(text);
+        const { ast, errors } = postgres.diagnoseScript(text);
         const failing = expected.filter(([o]) => o === "fail").map(([, line]) => line);
         expect(
           failingStatements(
@@ -120,7 +120,7 @@ describe("pg_dump corpus", () => {
             errors.map((error) => error.start.row),
           ),
         ).toEqual(failing);
-        if (failing.length === 0) expect(() => sqlLiteScript.parse(text)).not.toThrow();
+        if (failing.length === 0) expect(() => postgres.parseScript(text)).not.toThrow();
         // Every "ok" statement is an item, and any other statement item is
         // recovery's leftover from inside a failing one.
         const starts = ast.filter((item) => item.kind !== "psqlMeta").map((item) => item.span.start.row);

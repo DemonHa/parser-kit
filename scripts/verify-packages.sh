@@ -15,7 +15,8 @@ trap 'rm -rf "$WORK"' EXIT
 PACK="$WORK/pack"
 mkdir -p "$PACK"
 
-# verify <package dir> <tarball name prefix> [allowlist regex]
+# verify <package dir> <tarball name prefix> [allowlist regex] [extra required entries...]
+# Pass "" as the allowlist to require extra entries without one.
 verify() {
   local dir=$1 prefix=$2 allowed=${3:-} tgz
   (cd "$ROOT/$dir" && pnpm pack --pack-destination "$PACK" >/dev/null)
@@ -38,7 +39,7 @@ verify() {
   fi
   local required
   for required in LICENSE README.md package.json build/esm/index.js build/cjs/index.js \
-    build/esm/index.d.ts build/cjs/index.d.ts build/esm/package.json build/cjs/package.json; do
+    build/esm/index.d.ts build/cjs/index.d.ts build/esm/package.json build/cjs/package.json "${@:4}"; do
     grep -qx "package/$required" "$WORK/entries.txt" || { echo "::error::$dir: missing $required"; exit 1; }
   done
   # Tests, benches, goldens and corpus fixtures stay in the repo.
@@ -63,7 +64,9 @@ verify() {
 }
 
 verify packages/core parser-kit-core
-verify packages/sql parser-kit-sql
+# Each SQL dialect is also a subpath export (`@parser-kit/sql/postgres`).
+verify packages/sql parser-kit-sql "" build/esm/postgres/index.js build/cjs/postgres/index.js \
+  build/esm/postgres/index.d.ts build/cjs/postgres/index.d.ts
 # @parser-kit/dbml is private until its first release, but `pnpm pack` still
 # packs it. Its tarball is held to an allowlist of what consumers need.
 verify packages/dbml parser-kit-dbml '^package/(build/|src/|LICENSE$|README\.md$|CHANGELOG\.md$|package\.json$)'
@@ -79,28 +82,36 @@ npm install --no-audit --no-fund "$PACK"/*.tgz >/dev/null
 
 cat > esm.mjs <<'JS'
 import * as core from "@parser-kit/core";
-import { sqlLite, sqlLiteScript } from "@parser-kit/sql";
+import * as sql from "@parser-kit/sql";
+import { postgres } from "@parser-kit/sql/postgres";
 if (!core.defineGrammar) throw new Error("core: ESM export missing");
-const [stmt] = sqlLite.parse("SELECT 1 AS one");
+if (Object.keys(sql).join() !== "postgres") throw new Error(`sql: unexpected ESM exports ${Object.keys(sql)}`);
+if (sql.postgres !== postgres) throw new Error("sql: the root and /postgres entries load separate copies");
+const [stmt] = postgres.parse("SELECT 1 AS one");
 if (stmt?.kind !== "select") throw new Error("sql: ESM parse failed");
-if (sqlLiteScript.parse("\\connect db\nSELECT 1;\n").length !== 2) throw new Error("sql: ESM script parse failed");
-console.log(`ESM ok: core ${Object.keys(core).length} exports, sql parses`);
+if (postgres.parseScript("\\connect db\nSELECT 1;\n").length !== 2) throw new Error("sql: ESM script parse failed");
+if (postgres.diagnose("SELECT FROM WHERE").errors.length !== 1) throw new Error("sql: ESM diagnose failed");
+console.log(`ESM ok: core ${Object.keys(core).length} exports, sql parses from the root and /postgres`);
 JS
 
 cat > cjs.cjs <<'JS'
 const core = require("@parser-kit/core");
-const { sqlLite } = require("@parser-kit/sql");
+const sql = require("@parser-kit/sql");
+const { postgres } = require("@parser-kit/sql/postgres");
 if (!core.defineGrammar) throw new Error("core: CJS export missing");
-const [stmt] = sqlLite.parse("SELECT 1 AS one");
+if (Object.keys(sql).join() !== "postgres") throw new Error(`sql: unexpected CJS exports ${Object.keys(sql)}`);
+if (sql.postgres !== postgres) throw new Error("sql: the root and /postgres entries load separate copies");
+const [stmt] = postgres.parse("SELECT 1 AS one");
 if (stmt?.kind !== "select") throw new Error("sql: CJS parse failed");
+if (postgres.diagnoseScript("\\connect db\nSELECT 1;\n").ast.length !== 2) throw new Error("sql: CJS script parse failed");
 try {
-  sqlLite.parse("SELECT FROM WHERE");
+  postgres.parse("SELECT FROM WHERE");
   throw new Error("sql: CJS parse accepted malformed input");
 } catch (e) {
   // sql must share core's ParseError class, not bundle a copy of it.
   if (!(e instanceof core.ParseError)) throw e;
 }
-console.log(`CJS ok: core ${Object.keys(core).length} exports, sql parses`);
+console.log(`CJS ok: core ${Object.keys(core).length} exports, sql parses from the root and /postgres`);
 JS
 
 cat > dbml-esm.mjs <<'JS'
@@ -121,20 +132,36 @@ node dbml-esm.mjs
 node dbml-cjs.cjs
 
 # The declarations, AST types included, must resolve for a TypeScript consumer
-# from both an ES module and a CommonJS one.
+# from both an ES module and a CommonJS one, through the root and the subpath.
 cat > consumer.mts <<'TS'
-import { type ScriptItem, type Stmt, sqlLite } from "@parser-kit/sql";
-const stmts: Stmt[] = sqlLite.parse("SELECT 1");
-export const items: ScriptItem[] = stmts;
+import { type Postgres, postgres } from "@parser-kit/sql";
+import * as pg from "@parser-kit/sql/postgres";
+type ScriptItem = pg.ScriptItem;
+const stmts: Postgres.Stmt[] = postgres.parse("SELECT 1");
+const items: ScriptItem[] = pg.postgres.parseScript("SELECT 1");
+const tokens: pg.PostgresTokenType[] = ["ident"];
+export const all: ScriptItem[] = [...stmts, ...items, ...pg.postgres.diagnose("x").ast];
+export { tokens };
 TS
 cat > consumer.cts <<'TS'
 import sql = require("@parser-kit/sql");
-const stmts: sql.Stmt[] = sql.sqlLite.parse("SELECT 1");
-export const items: sql.ScriptItem[] = stmts;
+import pg = require("@parser-kit/sql/postgres");
+const stmts: sql.Postgres.Stmt[] = sql.postgres.parse("SELECT 1");
+export const items: pg.ScriptItem[] = [...stmts, ...pg.postgres.diagnoseScript("x").ast];
 TS
 "$ROOT/node_modules/.bin/tsc" --noEmit --strict --module nodenext --moduleResolution nodenext \
   consumer.mts consumer.cts
-echo "TypeScript ok: @parser-kit/sql types resolve from ESM and CJS (nodenext)"
+echo "TypeScript ok: @parser-kit/sql and /postgres types resolve from ESM and CJS (nodenext)"
+
+# TypeScript's legacy `node` resolution ignores `exports`; `typesVersions`
+# maps the subpath for it.
+cat > legacy.ts <<'TS'
+import { type Stmt, postgres } from "@parser-kit/sql/postgres";
+export const stmts: Stmt[] = postgres.parse("SELECT 1");
+TS
+"$ROOT/node_modules/.bin/tsc" --noEmit --strict --target es2022 --module commonjs --moduleResolution node --ignoreDeprecations 5.0 \
+  legacy.ts
+echo "TypeScript ok: @parser-kit/sql/postgres types resolve under moduleResolution node"
 
 cat > dbml-consumer.mts <<'TS'
 import { dbml } from "@parser-kit/dbml";

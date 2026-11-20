@@ -1,6 +1,6 @@
 import type { ParseError } from "@parser-kit/core";
 import { expect, it } from "vitest";
-import { sqlLite } from "../src/index";
+import { postgres } from "../src/postgres/index";
 import { CORPUS } from "./corpus";
 
 // --- byte-exact parity harness ---
@@ -358,7 +358,7 @@ const MALFORMED = [
   // An unknown keyword where a clause was expected.
   "SELECT * FRUM t;\nSELECT 1;",
   // A backtracked branch whose deeper error `preferFarthest` substitutes in.
-  // sql-lite enables it; js-lite does not, so this is the only harness that
+  // The PostgreSQL grammar enables it; js-lite does not, so this is the only harness that
   // covers that substitution.
   "CREATE TABLE IF NOT EXIST foo (id int);\nSELECT 1;",
   // A clause truncated at the statement terminator.
@@ -447,7 +447,7 @@ const describeError = (error: ParseError) => ({ message: error.message, end: err
 
 it("parses the corpus to byte-identical ASTs", async () => {
   const sources = [...CORPUS.map((sample) => sample.sql), ...SUPPLEMENTAL, ...MULTI_LINE, ...LEXER_EDGE_CASES];
-  const entries = sources.map((source) => ({ source, ast: capture(() => sqlLite.parse(source)) }));
+  const entries = sources.map((source) => ({ source, ast: capture(() => postgres.parse(source)) }));
 
   // Every source above is valid SQL, so `capture` must not have caught
   // anything. Without this a corpus row with a typo in it degrades to a pinned
@@ -462,7 +462,7 @@ it("reports byte-identical diagnostics for malformed input", async () => {
   const entries = MALFORMED.map((source) => ({
     source,
     ...capture(() => {
-      const { ast, errors } = sqlLite.diagnose(source);
+      const { ast, errors } = postgres.diagnose(source);
       return { errors: errors.map(describeError), ast };
     }),
   }));
