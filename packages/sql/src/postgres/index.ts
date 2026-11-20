@@ -13,7 +13,10 @@ import { type SqlTokenType, sqlLexer, sqlScriptLexer } from "./lexer";
 export type { Diagnosis } from "../dialect";
 export type * from "./ast";
 
-/** The token types the PostgreSQL lexers produce. */
+/**
+ * The token types the PostgreSQL lexers use. `copydata` appears only inside the
+ * script parser; `postgres.lexer` and `postgres.scriptLexer` never emit it.
+ */
 export type PostgresTokenType = SqlTokenType;
 
 /**

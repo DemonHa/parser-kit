@@ -77,7 +77,9 @@ describe("postgres", () => {
 // stay out of the public types. Every type `grammar.ts` exports must be on it.
 it("re-exports every AST type the grammar declares", () => {
   const exportedTypes = (file: string) =>
-    [...readFileSync(new URL(file, import.meta.url), "utf8").matchAll(/^export type (\w+)/gm)].map((m) => m[1]);
+    [...readFileSync(new URL(file, import.meta.url), "utf8").matchAll(/^export (?:type|interface) (\w+)/gm)].map(
+      (m) => m[1],
+    );
   const listed = (file: string) => {
     const source = readFileSync(new URL(file, import.meta.url), "utf8");
     const block = /export type \{([^}]*)\} from "\.\/grammar"/.exec(source)?.[1] ?? "";

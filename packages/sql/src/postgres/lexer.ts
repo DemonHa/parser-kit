@@ -37,7 +37,7 @@ export type SqlTokenType =
 
 // --- Quoted literals ---
 // PG reads every quoted form in its scanner (scan.l), and so does this file:
-// This lexer owns its `'…'`, `E'…'`, `"…"`, `B'…'`, `X'…'` and `U&` readers rather
+// it owns its `'…'`, `E'…'`, `"…"`, `B'…'`, `X'…'` and `U&` readers rather
 // than borrowing core's `readers.string`, which is lenient where PG is not —
 // it lets an unterminated literal run to the end of input, and knows only the
 // `{n,t,r,b,f}` backslash escapes. Running off the end croaks here, as it does
