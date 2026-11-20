@@ -11,8 +11,10 @@
 //   item (or ends the output), on a line of its own;
 // - a comment inside an item's span, which the canonical layout has no safe
 //   place for, is moved to just before the item, on a line of its own, in
-//   source order. So is a block comment between a `COPY … FROM STDIN` and its
-//   `;`, which would trail the `;`, where psql allows only a `--` comment.
+//   source order. So is any comment on a `COPY … FROM STDIN`'s line but the one
+//   `--` comment psql allows after its `;`: the one after the `;` in the
+//   source, which psql reads to the LF (past a bare CR), or else the last
+//   trailing one.
 //
 // Comments are copied verbatim (in a block comment, CRs before an LF are
 // dropped), so no comment is lost or changed. Every comment ends up outside
@@ -100,7 +102,9 @@ export const format = (text: string, options?: FormatOptions): string => {
   const units: Unit[] = [];
   let next = 0;
   // The item before, whose trailing comments are being collected.
-  let previous: { item: ScriptItem; endRow: number; trailing: Comment[] } | undefined;
+  let previous:
+    | { item: ScriptItem; endRow: number; trailing: Comment[]; copyAt?: number; copyRow?: number; copyAfter: Comment[] }
+    | undefined;
 
   const take = (before: number) => {
     const taken: Comment[] = [];
@@ -109,6 +113,12 @@ export const format = (text: string, options?: FormatOptions): string => {
   };
   const between = (before: number) => {
     for (const c of take(before)) {
+      // The comment after a `COPY … FROM STDIN;` (before its rows) is read to
+      // the LF, past any bare CR, so only that place can hold it.
+      if (previous?.copyAt !== undefined && c.start >= previous.copyAt && c.row === previous.copyRow) {
+        previous.copyAfter.push(c);
+        continue;
+      }
       // Nothing may follow a `--` comment on its line. A bare CR ends one
       // without starting a new row, so check the comment before, not the row.
       const last = previous?.trailing.at(-1);
@@ -116,7 +126,8 @@ export const format = (text: string, options?: FormatOptions): string => {
         previous !== undefined &&
         previous.item.kind !== "psqlMeta" &&
         c.row === previous.endRow &&
-        !last?.text.startsWith("--")
+        // A COPY's are all moved before it but one, so they don't land past its rows.
+        (previous.copyAt !== undefined || !last?.text.startsWith("--"))
       ) {
         previous.trailing.push(c);
       } else {
@@ -125,7 +136,14 @@ export const format = (text: string, options?: FormatOptions): string => {
     }
   };
 
-  const pending: { item: ScriptItem; inner: Comment[]; trailing: Comment[]; unit: Unit; endRow: number }[] = [];
+  const pending: {
+    item: ScriptItem;
+    inner: Comment[];
+    trailing: Comment[];
+    copyAfter: Comment[];
+    unit: Unit;
+    endRow: number;
+  }[] = [];
   // Where a COPY's rows end in the source: just past the first line after its
   // `;` that is exactly `\.`.
   const rowsEnd = (from: number) => {
@@ -148,11 +166,12 @@ export const format = (text: string, options?: FormatOptions): string => {
       item,
       inner: take(end),
       trailing: [] as Comment[],
+      copyAfter: [] as Comment[],
       unit: { text: "", row: rowOf(start), endRow: 0 },
       endRow: span.end.row,
     };
     // Trailing comments go by the row the statement ends on.
-    previous = { item, endRow: span.end.row, trailing: entry.trailing };
+    previous = { item, endRow: span.end.row, trailing: entry.trailing, copyAfter: entry.copyAfter };
     pending.push(entry);
     units.push(entry.unit);
     // The item ends at its `;`, if one comes before the next item.
@@ -162,13 +181,17 @@ export const format = (text: string, options?: FormatOptions): string => {
     const semicolon = ends[nextEnd] !== undefined && ends[nextEnd]! <= limit ? ends[nextEnd] : undefined;
     boundary = semicolon ?? end;
     if (item.kind === "copy" && item.data !== undefined) {
+      if (semicolon !== undefined) {
+        previous.copyAt = semicolon;
+        previous.copyRow = rowOf(semicolon);
+      }
       boundary = rowsEnd(boundary);
       entry.endRow = rowOf(boundary);
     }
   });
   between(text.length + 1);
 
-  for (const { item, inner, trailing, unit, endRow } of pending) {
+  for (const { item, inner, trailing, copyAfter, unit, endRow } of pending) {
     unit.endRow = endRow;
     if (item.kind === "psqlMeta") {
       unit.text = stringifyScript([item], options);
@@ -178,8 +201,11 @@ export const format = (text: string, options?: FormatOptions): string => {
     const whole = stringifyScript([item], options);
     if (!whole.startsWith(statement)) throw new Error("format: a statement printed differently in a script");
     const copyIn = item.kind === "copy" && whole.length > statement.length;
-    // psql allows only a `--` comment after a `COPY … FROM STDIN;`.
-    const after = copyIn ? trailing.filter((c) => c.text.startsWith("--")) : trailing;
+    // psql allows only a `--` comment after a `COPY … FROM STDIN;`: the one
+    // there in the source if any, else the last trailing one if it is a `--`
+    // comment. The rest move before the statement.
+    const last = trailing.slice(-1);
+    const after = !copyIn ? trailing : copyAfter.length > 0 ? copyAfter : last.filter((c) => c.text.startsWith("--"));
     inner.push(...trailing.filter((c) => !after.includes(c)));
     for (const c of trailing) unit.endRow = Math.max(unit.endRow, c.endRow);
     const body = statement + after.map((c) => ` ${c.text}`).join("") + whole.slice(statement.length);

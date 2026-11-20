@@ -160,6 +160,16 @@ describe("postgres.format", () => {
     expect(postgres.format(once)).toBe(once);
   });
 
+  it("keeps the comment after a COPY's ; on that line, wherever the ; is", () => {
+    // psql reads that comment to the LF, past a bare CR, so it can't go anywhere else.
+    expect(postgres.format("COPY t FROM stdin\n; --a\rSELECT 1\n\\.\n")).toBe(
+      "COPY t FROM STDIN; --a\rSELECT 1\n\\.\n",
+    );
+    expect(postgres.format("COPY t FROM stdin -- a\r/* b */; --c\rd\n1\n\\.\n")).toBe(
+      "-- a\n/* b */\nCOPY t FROM STDIN; --c\rd\n1\n\\.\n",
+    );
+  });
+
   it("keeps nested block comments whole", () => {
     expect(postgres.format("/* a /* b */ c */ select 1")).toBe("/* a /* b */ c */\nSELECT 1;\n");
   });
