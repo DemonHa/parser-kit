@@ -48,8 +48,9 @@ import * as tables from "./stringify-cases/tables";
 // Where the two deliberately disagree, the source is listed in
 // `PARSER_DIFFERENCES` or `PRINTER_DIFFERENCES` with its reason. A printer
 // entry names every path where the trees differ, and must match exactly at
-// every layout, so the rest of the statement is still checked and an entry can't go
-// stale; a parser entry that stops holding fails too. Nothing is skipped
+// every layout, so the rest of the statement is still checked, and its source must
+// still be in the corpus and printable, so an entry can't go stale; a parser
+// entry that stops holding fails too. Nothing is skipped
 // silently: a new disagreement is either a bug to fix or a new entry.
 // `LIBPG_QUERY_REPORT=1` prints the counts.
 
@@ -380,6 +381,7 @@ describe("libpg_query differential", () => {
 
   it("prints SQL that PostgreSQL parses to the same tree", () => {
     const allowed = new Map(PRINTER_DIFFERENCES.map((entry) => [entry.sql, entry.paths]));
+    const compared = new Set<string>();
     const failures: string[] = [];
     let printed = 0;
     let differing = 0;
@@ -421,6 +423,7 @@ describe("libpg_query differential", () => {
             return;
           }
           if (options === OPTIONS[0]) printed++;
+          if (options === OPTIONS.at(-1) && listed !== undefined) compared.add(sql);
           const problem = printedProblem([expected[i]], out, listed);
           if (problem === undefined) continue;
           failures.push(`${sql}\n  ${optionsLabel(options)}\n    printed: ${out}\n    ${problem}`);
@@ -438,6 +441,16 @@ describe("libpg_query differential", () => {
       `printer: ${printed} statements printed, ${printed - differing} the same tree, ${differing} with listed differences; ${skipped} not printable yet; ${notCompared} sources not compared (a parser disagreement or rejected by both)`,
     );
     expect(failures).toEqual([]);
+    // An entry whose source left the corpus, or is no longer printable, would
+    // otherwise go unchecked.
+    expect(PRINTER_DIFFERENCES.map(({ sql }) => sql).filter((sql) => !compared.has(sql))).toEqual([]);
+  });
+
+  it("lists each source once", () => {
+    for (const list of [PARSER_DIFFERENCES, PRINTER_DIFFERENCES]) {
+      const sources = list.map(({ sql }) => sql);
+      expect(sources.filter((sql, i) => sources.indexOf(sql) !== i)).toEqual([]);
+    }
   });
 });
 

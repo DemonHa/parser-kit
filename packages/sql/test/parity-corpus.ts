@@ -3,7 +3,8 @@
 // every one of them back through the parser, so they live in their own module
 // rather than in either test file. `MALFORMED`, at the end, holds the invalid
 // inputs whose diagnostics the parity harness pins; the libpg_query
-// differential test checks that PostgreSQL rejects them too.
+// differential test checks PostgreSQL's verdict on them too (the exceptions
+// are in its `PARSER_DIFFERENCES`).
 
 // The benchmark corpus is picked for head-to-head fairness against
 // node-sql-parser, not for grammar coverage, and every row of it is a single

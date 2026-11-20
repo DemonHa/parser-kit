@@ -348,7 +348,7 @@ Every item here was checked against the current grammar and fails to parse.
 
 ### Known wrong ASTs
 
-One kind of input is known to parse into the wrong tree. Report any other as a bug.
+These inputs are known to parse into the wrong tree. Report any other as a bug.
 
 - **A configuration parameter that spells a special form's name.** Wherever `SET` / `SHOW` / `RESET` syntax is read (the statements, a routine's `SET`, and `ALTER ROLE` / `ALTER DATABASE … SET | RESET`), a parameter written quoted, or as a plain `name = value` / `name TO value`, gets the tree of the special form it spells:
   - `SET "time zone" = 'UTC'` and `SET TIME ZONE 'UTC'` both give `name: ["time zone"]`. The same holds for `"session authorization"`, `"transaction isolation level"`, `"transaction snapshot"` and `"xml option"`;
@@ -356,6 +356,8 @@ One kind of input is known to parse into the wrong tree. Report any other as a b
   - `SET schema = 'x'` and `SET "schema" = 'x'` give the same tree as `SET SCHEMA 'x'` (which sets `search_path`), and `SET names = 'u'` the same as `SET NAMES 'u'` (which sets `client_encoding`).
 
   PostgreSQL reads each such spelling as a parameter of that literal name, which doesn't exist, so the statement fails there when run. (`SHOW "all"` is no exception: PostgreSQL reads it as `SHOW ALL` too.)
+- **A parenthesised arm that holds its own `WITH`.** `(WITH a AS (…) SELECT …) UNION SELECT …` gives the same tree as `WITH a AS (…) (SELECT …) UNION SELECT …`, though in the second the CTE is in scope for every arm.
+- **A quoted column named like an SQL value function.** A lone `"system_user"`, `"current_catalog"` or `"current_schema"` gives the same tree as the bare `system_user` / `current_catalog` / `current_schema`, which PostgreSQL reads as the function.
 
 A number's `value` alone is a double; where that loses digits, type or scale, the literal's text is kept in `raw` (see [AST conventions](#ast-conventions)).
 
