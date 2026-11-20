@@ -2803,9 +2803,10 @@ const parenQuery = seq(skip(punc("(")), field("q", query), skip(punc(")"))).map(
 // The number node for a literal's text and any sign the grammar folds into it,
 // `raw` attached only when `value` loses the text (see the `number` member of
 // `Expr`). The sign is applied after decoding: `Number("-0x10")` is NaN. A
-// value past the safe integers or overflowed to ±Infinity loses digits; so,
-// for PG, does any decimal text other than the plain digits `String` gives
-// back for the value (`1.0`, `5.`, `1e2` and `007` all differ from theirs). A
+// value past the safe integers or overflowed to ±Infinity loses digits; a
+// fraction or exponent loses the type and scale PG reads from it (`1.0`, `5.`,
+// `1e2`); and any other decimal text `String` doesn't give back for the value
+// (`007`) keeps its text too. A
 // radix integer (`0x1F`, `0o17`, `0b101`) is an integer to PG either way.
 const RADIX_PREFIX = /^0[box]/i;
 const DECIMAL_DIGITS = /^[0-9]+$/;

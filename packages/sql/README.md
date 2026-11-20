@@ -328,11 +328,16 @@ Every item here was checked against the current grammar and fails to parse.
 
 ### Known wrong ASTs
 
-One input is known to parse into the wrong tree. Report any other as a bug.
+One kind of input is known to parse into the wrong tree. Report any other as a bug.
 
-- A quoted configuration parameter that spells one of `SET` / `SHOW` / `RESET`'s multi-word forms gives that form's tree: `SET "time zone" = 'UTC'` and `SET TIME ZONE 'UTC'` both give `name: ["time zone"]`, and the same holds for `"session authorization"`, `"transaction isolation level"` and `"xml option"`. PostgreSQL reads the quoted spelling as a parameter of that literal name, which doesn't exist, so the statement fails there when run.
+- **A configuration parameter that spells a special form's name.** Wherever `SET` / `SHOW` / `RESET` syntax is read (the statements, a routine's `SET`, and `ALTER ROLE` / `ALTER DATABASE … SET | RESET`), a parameter written quoted, or as a plain `name = value` / `name TO value`, gets the tree of the special form it spells:
+  - `SET "time zone" = 'UTC'` and `SET TIME ZONE 'UTC'` both give `name: ["time zone"]`. The same holds for `"session authorization"`, `"transaction isolation level"`, `"transaction snapshot"` and `"xml option"`;
+  - `RESET "all"` gives the same tree as `RESET ALL`;
+  - `SET schema = 'x'` and `SET "schema" = 'x'` give the same tree as `SET SCHEMA 'x'` (which sets `search_path`), and `SET names = 'u'` the same as `SET NAMES 'u'` (which sets `client_encoding`).
 
-Numbers below 2^53 in magnitude keep only double precision (see [AST conventions](#ast-conventions)). That is a documented limitation of the number node, not a wrong tree.
+  PostgreSQL reads each such spelling as a parameter of that literal name, which doesn't exist, so the statement fails there when run. (`SHOW "all"` is no exception: PostgreSQL reads it as `SHOW ALL` too.)
+
+A number's `value` alone is a double; where that loses digits, type or scale, the literal's text is kept in `raw` (see [AST conventions](#ast-conventions)).
 
 ### Accepted, but PostgreSQL rejects
 
