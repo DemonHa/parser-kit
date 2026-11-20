@@ -203,10 +203,10 @@ The statements are printed from the tree, so the SQL is canonical as `stringify`
 
 - A comment between statements that starts on the line the statement before it ends on stays after that statement's `;`, on the same line.
 - Any other comment between statements, or before the first or after the last, goes on a line of its own where it was.
-- A comment inside a statement moves to just before that statement, on a line of its own. Comments keep their order. So does a block comment after a `COPY … FROM STDIN`'s `;`, since psql allows only a `--` comment there.
+- A comment inside a statement moves to just before that statement, on a line of its own, and comments keep their order. A block comment after a `COPY … FROM STDIN`'s `;` moves there too, since psql allows only a `--` comment after that `;`.
 - One blank line is kept where the source had one or more between two of these.
 
-Comments are copied verbatim, nested block comments and all. `--` inside a string, a quoted name or a dollar-quoted body is not a comment and is left in it. Line endings become `\n`, including CRLFs inside block comments. A comment never shares a line with SQL after it, so a `--` comment can't swallow the code that follows.
+Comments are copied verbatim, nested block comments and all. `--` inside a string, a quoted name or a dollar-quoted body is not a comment and is left in it. The output's own line breaks are `\n`, and CRLFs inside block comments become `\n`. COPY rows are data and are kept byte for byte, CRLFs included. A comment never shares a line with SQL after it, so a `--` comment can't swallow the code that follows.
 
 **What is guaranteed.**
 
@@ -214,13 +214,14 @@ Comments are copied verbatim, nested block comments and all. `--` inside a strin
 - It keeps every comment's text.
 - It is idempotent: `format(format(text))` is `format(text)`.
 
-The tests check all three at widths `Infinity`, 80, 40 and 1 and with every non-default option. They run over the test corpora, both pg_dump files and a list of comment-heavy scripts, each again with a comment put before every token. PostgreSQL 17's own parser (libpg_query) reads the formatted SQL to the same statement trees as the source. The tree guarantee is `stringify`'s, so its [known limits](#known-limits) apply here too.
+The tests check all three over the test corpora, both pg_dump files and a list of comment-heavy scripts, at widths `Infinity`, 80, 40 and 1 and with every non-default option. They check them again, at the default width and width 1, with a comment put before every token of each source. PostgreSQL 17's own parser (libpg_query) reads the formatted SQL to the same statement trees as the source. The tree guarantee is `stringify`'s, so its [known limits](#known-limits) apply here too.
 
 **Limits.**
 
 - Comments are placed at statement level: one inside a statement moves out of it, ahead of the statement. Keeping comments between clauses or list items would need spans on more of the AST.
 - The text is read as a psql script, so the rows after a `COPY … FROM STDIN;` are data and must end with a `\.` line. A last `COPY … FROM STDIN` with no `;` and no rows gets an empty rows block, as in `stringifyScript`.
 - SQL that doesn't parse throws the first `ParseError`. Nothing is formatted.
+- Placement counts only `\n` (and so CRLF) as a line break. With bare-CR line endings the meaning and every comment are still kept, but a comment on its own line can end up trailing the statement before it, blank lines aren't kept, and a bare CR inside a block comment stays as it is.
 
 ## AST conventions
 
