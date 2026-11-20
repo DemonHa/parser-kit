@@ -1,9 +1,9 @@
 import type { Span } from "@parser-kit/core";
 import {
+  atLineEnd,
   type Ctx,
   colorSetting,
   defineElement,
-  expectLineEnd,
   fail,
   type Ident,
   isPunc,
@@ -47,15 +47,17 @@ export const TABLE_GROUP_SETTINGS: SettingsSpec = {
 const readGroupItem = (ctx: Ctx): TableGroupMember | Note => {
   if (isNoteItem(ctx)) return ctx.parse(noteItem);
   const name = readQualifiedName(ctx, "a table name or a note");
-  expectLineEnd(ctx, 'a new line or "}"');
+  // Not `expectLineEnd`: a name with more after it (`Note n { … }`) is most
+  // likely no member, so `diagnose` doesn't keep it.
+  if (!atLineEnd(ctx)) fail(ctx, 'a new line or "}"');
   return { type: "member", ...name };
 };
 
 export const tableGroupElement = defineElement("tablegroup", "TableGroup", (ctx, start): TableGroup => {
   skipNewlines(ctx);
   const name = readIdent(ctx, "a table group name");
-  const { settings, settingsAllowed } = readHeaderSettings(ctx, TABLE_GROUP_SETTINGS);
-  if (!isPunc(ctx.peek(), "{")) fail(ctx, settingsAllowed ? '"[" or "{"' : '"{"');
-  const items = readBody(ctx, readGroupItem);
+  const { settings, settingsAllowed, openSwallowed } = readHeaderSettings(ctx, TABLE_GROUP_SETTINGS);
+  if (!openSwallowed && !isPunc(ctx.peek(), "{")) fail(ctx, settingsAllowed ? '"[" or "{"' : '"{"');
+  const items = readBody(ctx, readGroupItem, openSwallowed);
   return { type: "tableGroup", name, settings, items, span: ctx.spanFrom(start) };
 });

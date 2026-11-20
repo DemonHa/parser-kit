@@ -5,6 +5,7 @@ import {
   type LexerDef,
   type ModeDef,
   type ModeTransition,
+  ParseError,
   type Position,
   type Reader,
   readers,
@@ -412,17 +413,125 @@ const rawNames = new WeakMap<Token<DbmlTokenType>, string>();
  */
 export const rawName = (token: Token<DbmlTokenType>): string => rawNames.get(token) ?? token.value;
 
+// Single-line tokens whose lexer error, inside `[ … ]` or `( … )`, takes the
+// closing bracket with it: the string ends at its line's end, unclosed.
+const SWALLOWS_CLOSER = new Set(["Unterminated string", "Unterminated quoted identifier"]);
+
+// Line break tokens the parse stream makes up (see `forParsing`).
+const restoredBreaks = new WeakSet<Token<DbmlTokenType>>();
+
+/** True for a line break the parse stream restored after such a lexer error. For the grammar only. */
+export const isRestoredBreak = (token: Token<DbmlTokenType> | null): boolean =>
+  token !== null && restoredBreaks.has(token);
+
 // `tokens` with comments dropped and each identifier replaced by a copy whose
 // value is lowercased, its raw text recorded in `rawNames`. `peek` hands back
 // the same copy until it is consumed, so the map keeps working across lookahead.
+//
+// It also mends one lexer error for `diagnose`'s recovery. A string left open
+// inside brackets ends at its line's end, so the lexer stays in the inline mode
+// and reads the following line breaks as spaces, until a brace or a closing
+// bracket leaves it. The stream then reads ahead, to the list's own closer or
+// the first brace, whichever comes first (each token is read ahead once):
+//
+//   - the closer: the list goes on past the string (`[note: 'x,⏎ pk]`), and
+//     the tokens pass through as they are;
+//   - a brace, or the end of the input: the string took the closer with it
+//     (`[note: 'x]⏎ name text⏎}`), so up to that brace, or to a closer found
+//     later, the stream puts back a line break before each token on a later
+//     row, and the grammar sees the lines as they are written.
+//
+// (`parse` stops at the lexer error, so none of this shows there.) Bracket
+// depth is tracked the way the lexer's mode transitions do.
 const forParsing = (tokens: TokenStream<DbmlTokenType>): TokenStream<DbmlTokenType> => {
   let current: Token<DbmlTokenType> | null = null;
-  const peek = (): Token<DbmlTokenType> | null => {
-    if (current !== null) return current;
+  // Tokens read ahead, and a lexer error met doing so, to surface in turn.
+  // (`aheadAt` is the next one to hand out; the array is emptied once drained.)
+  let ahead: Token<DbmlTokenType>[] = [];
+  let aheadAt = 0;
+  let pending: ParseError | null = null;
+  let depth = 0;
+  // The depth of a list a string was left open in, until read-ahead decides.
+  let deciding = 0;
+  // The depth of a list whose closer a string took; 0 when none did. A list
+  // opened after it (deeper) lexes its own lines normally.
+  let restoreAt = 0;
+  let lastEnd: Position | null = null;
+
+  const pull = (): Token<DbmlTokenType> | null => {
     let token = tokens.peek();
     while (token !== null && token.type === "comment") {
       tokens.next();
       token = tokens.peek();
+    }
+    return token;
+  };
+  const noteError = (error: unknown): void => {
+    if (depth > 0 && error instanceof ParseError && SWALLOWS_CLOSER.has(error.msg)) deciding = depth;
+  };
+  const readAhead = (level: number): void => {
+    let open = level;
+    for (;;) {
+      let token: Token<DbmlTokenType> | null;
+      try {
+        token = pull();
+      } catch (error) {
+        pending = error instanceof ParseError ? error : null;
+        if (pending === null) throw error;
+        break;
+      }
+      if (token === null) break;
+      ahead.push(token);
+      tokens.next();
+      if (token.type !== "punc") continue;
+      if (token.value === "{" || token.value === "}") break;
+      if (token.value === "[" || token.value === "(") open++;
+      else if (token.value === "]" || token.value === ")") {
+        if (open === level) return; // the list's own closer: nothing to restore
+        open--;
+      }
+    }
+    restoreAt = level;
+  };
+
+  const peek = (): Token<DbmlTokenType> | null => {
+    if (current !== null) return current;
+    if (deciding > 0) {
+      const level = deciding;
+      deciding = 0;
+      readAhead(level);
+    }
+    let token: Token<DbmlTokenType> | null;
+    if (aheadAt < ahead.length) {
+      token = ahead[aheadAt]!;
+    } else if (pending !== null) {
+      const error = pending;
+      pending = null;
+      noteError(error);
+      throw error;
+    } else {
+      try {
+        token = pull();
+      } catch (error) {
+        noteError(error);
+        throw error;
+      }
+    }
+    if (
+      restoreAt > 0 &&
+      depth <= restoreAt &&
+      token !== null &&
+      lastEnd !== null &&
+      token.position.start.row > lastEnd.row
+    ) {
+      const restored: Token<DbmlTokenType> = {
+        type: "punc",
+        value: "\n",
+        position: { start: lastEnd, end: { row: lastEnd.row + 1, col: 0 } },
+      };
+      restoredBreaks.add(restored);
+      current = restored;
+      return restored;
     }
     if (token !== null && token.type === "ident") {
       const folded = token.value.toLowerCase();
@@ -439,7 +548,23 @@ const forParsing = (tokens: TokenStream<DbmlTokenType>): TokenStream<DbmlTokenTy
     next: () => {
       const token = peek();
       current = null;
-      tokens.next();
+      if (token === null) return null;
+      lastEnd = token.position.end;
+      if (restoredBreaks.has(token)) return token;
+      if (aheadAt < ahead.length) {
+        aheadAt++;
+        if (aheadAt === ahead.length) {
+          ahead = [];
+          aheadAt = 0;
+        }
+      } else {
+        tokens.next();
+      }
+      if (token.type === "punc") {
+        if (token.value === "[" || token.value === "(") depth++;
+        else if (depth > 0 && ["]", ")", "{", "}"].includes(token.value)) depth--;
+        if (depth < restoreAt) restoreAt = 0;
+      }
       return token;
     },
     peek,

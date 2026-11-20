@@ -8,7 +8,8 @@ import {
   type Span,
   type Token,
 } from "@parser-kit/core";
-import { type DbmlTokenType, dedentNote, rawName } from "../lexer";
+import { type DbmlTokenType, dedentNote, isRestoredBreak, rawName } from "../lexer";
+import { bodyCutShort, report, skipLine, skipSetting, wasReported } from "./recovery";
 import type { Endpoint, Relation } from "./ref";
 
 // The rules every construct shares: names, values, the settings framework and
@@ -126,15 +127,32 @@ export const isNewline = (token: Tok | null): boolean => isPunc(token, "\n");
 
 /** True at a line break, the end of input or a body's `}`: where a line may end. */
 export const atLineEnd = (ctx: Ctx): boolean => {
-  const token = ctx.peek();
+  // Through `lookAhead`, so that under `diagnose` a lexer error right after a
+  // complete item is recorded and the item kept.
+  const token = lookAhead(ctx, 0);
   return token === null || isNewline(token) || isPunc(token, "}");
+};
+
+/**
+ * The token `n` past the cursor, like `ctx.peekAhead`. Lexing is lazy, so
+ * looking ahead can raise a later token's lexer error; under `diagnose` that
+ * error is recorded and the lookahead sees the end of the input there, so the
+ * item being read can still end before it and be kept.
+ */
+export const lookAhead = (ctx: Ctx, n: number): Tok | null => {
+  try {
+    return ctx.peekAhead(n);
+  } catch (error) {
+    if (!report(ctx, error)) throw error;
+    return null;
+  }
 };
 
 /** The first token after any line breaks `from` tokens past the cursor, without consuming anything. */
 export const peekPastNewlines = (ctx: Ctx, from = 0): Tok | null => {
   let n = from;
-  while (isNewline(ctx.peekAhead(n))) n++;
-  return ctx.peekAhead(n);
+  while (isNewline(lookAhead(ctx, n))) n++;
+  return lookAhead(ctx, n);
 };
 
 /** Join already-rendered options: `"a"`, `"a" or "b"`, `"a", "b" or "c"`. */
@@ -222,9 +240,26 @@ export const touches = (end: Position, token: Tok | null): boolean =>
 export const bracketOnLaterLine = (ctx: Ctx): boolean =>
   isNewline(ctx.peek()) && touches(ctx.lastEnd(), ctx.peek()) && isPunc(peekPastNewlines(ctx), "[");
 
-/** A line's content is over: the next token must end it (a line break, `}` or the end of input). */
+/**
+ * `fail`, except that under `diagnose` the error is only recorded and the
+ * caller carries on. For junk after a complete item: the item is kept, and the
+ * enclosing body or the top level skips the junk, whose error there starts at
+ * the same token and so isn't recorded again.
+ */
+export const failAfterItem = (ctx: Ctx, expected: string): void => {
+  try {
+    fail(ctx, expected);
+  } catch (error) {
+    if (!report(ctx, error)) throw error;
+  }
+};
+
+/**
+ * A line's content is over: the next token must end it (a line break, `}` or
+ * the end of input). Under `diagnose`, what was read is kept (`failAfterItem`).
+ */
 export const expectLineEnd = (ctx: Ctx, expected = "a new line"): void => {
-  if (!atLineEnd(ctx)) fail(ctx, expected);
+  if (!atLineEnd(ctx)) failAfterItem(ctx, expected);
 };
 
 // --- Names ---
@@ -462,7 +497,9 @@ const readSetting = (ctx: Ctx, spec: SettingsSpec): Setting => {
 
 /**
  * A settings list, `[a, b: c]`. It may be empty and may span lines (the lexer
- * drops newlines inside brackets), but takes no stray or trailing comma.
+ * drops newlines inside brackets), but takes no stray or trailing comma. Under
+ * `diagnose`, a bad setting is dropped and the list resumes at its next `,` or
+ * `]`; a list left open ends where the skip stopped.
  */
 export const readSettings = (ctx: Ctx, spec: SettingsSpec): Setting[] => {
   expectPunc(ctx, "[");
@@ -472,12 +509,20 @@ export const readSettings = (ctx: Ctx, spec: SettingsSpec): Setting[] => {
     return settings;
   }
   for (;;) {
-    settings.push(readSetting(ctx, spec));
-    if (isPunc(ctx.peek(), "]")) {
+    try {
+      settings.push(readSetting(ctx, spec));
+      if (isPunc(ctx.peek(), "]")) {
+        ctx.next();
+        return settings;
+      }
+      expectPunc(ctx, ",", '"," or "]"');
+    } catch (error) {
+      if (!report(ctx, error)) throw error;
+      const stop = skipSetting(ctx);
+      if (stop === null) return settings;
       ctx.next();
-      return settings;
+      if (stop === "]") return settings;
     }
-    expectPunc(ctx, ",", '"," or "]"');
   }
 };
 
@@ -496,18 +541,24 @@ export const readOptionalSettings = (ctx: Ctx, spec: SettingsSpec): Setting[] =>
  * drops a `\r` like a space, so a CRLF line ending counts as one here;
  * `@dbml/core` does not count it.) `settingsAllowed` says whether a `[` could
  * still have come where the cursor stops, for the caller's error message.
+ * `openSwallowed` is for `diagnose`: a string left open in the list ran to
+ * the line's end, taking any `{` with it, so the body is read as if opened.
  */
 export const readHeaderSettings = (
   ctx: Ctx,
   spec: SettingsSpec,
-): { settings: Setting[]; hasSettings: boolean; settingsAllowed: boolean } => {
+): { settings: Setting[]; hasSettings: boolean; settingsAllowed: boolean; openSwallowed: boolean } => {
   const spacedBreak = isNewline(ctx.peek()) && !touches(ctx.lastEnd(), ctx.peek());
   if (spacedBreak && isPunc(peekPastNewlines(ctx), "[")) skipNewlines(ctx);
   const hasSettings = isPunc(ctx.peek(), "[");
   const settings = readOptionalSettings(ctx, spec);
   const settingsAllowed = !hasSettings && (spacedBreak || !isNewline(ctx.peek()));
+  const restored = isRestoredBreak(ctx.peek());
   skipNewlines(ctx);
-  return { settings, hasSettings, settingsAllowed };
+  // Only this header's own list can have taken its `{`; a restored break may
+  // also come from a list left open in an earlier element.
+  const openSwallowed = hasSettings && restored && !isPunc(ctx.peek(), "{");
+  return { settings, hasSettings, settingsAllowed, openSwallowed };
 };
 
 // --- Bodies ---
@@ -517,21 +568,36 @@ export const readHeaderSettings = (
  * ends at a line break, and the close may follow the last item on its line,
  * so a whole body may sit on one line (`Table a { id int }`). Reaching the end
  * of input before `}` fails. `item` reads one item and leaves the cursor at its
- * line's end.
+ * line's end. Under `diagnose`, a bad line is dropped and the body resumes on
+ * the next one, and a body still open at the end of the input ends there;
+ * with `openSwallowed` (see `readHeaderSettings`) there is no `{` to read.
  */
-export const readBody = <T>(ctx: Ctx, item: (ctx: Ctx) => T): T[] => {
-  expectPunc(ctx, "{");
+export const readBody = <T>(ctx: Ctx, item: (ctx: Ctx) => T, openSwallowed = false): T[] => {
+  const open = ctx.position();
+  if (!openSwallowed) expectPunc(ctx, "{");
   const items: T[] = [];
+  // Where the last item started.
+  let itemStart: Position | null = null;
   for (;;) {
-    skipNewlines(ctx);
-    if (isPunc(ctx.peek(), "}")) {
-      ctx.next();
-      return items;
+    try {
+      skipNewlines(ctx);
+      if (isPunc(ctx.peek(), "}")) {
+        ctx.next();
+        return items;
+      }
+      if (ctx.eof()) fail(ctx, '"}"');
+      if (bodyCutShort(ctx, open, itemStart, openSwallowed)) return items;
+      itemStart = ctx.position();
+      items.push(item(ctx));
+      if (!atLineEnd(ctx)) fail(ctx, 'a new line or "}"');
+    } catch (error) {
+      // An item that resynchronised past its own `}` leaves only what follows
+      // that `}` on its line, which is junk like any after a complete item.
+      const resynchronised = wasReported(ctx, error);
+      if (!report(ctx, error)) throw error;
+      if (resynchronised && !ctx.eof() && !atLineEnd(ctx)) failAfterItem(ctx, 'a new line or "}"');
+      if (!skipLine(ctx)) return items;
     }
-    if (ctx.eof()) fail(ctx, '"}"');
-    items.push(item(ctx));
-    if (ctx.eof()) fail(ctx, '"}"');
-    if (!isNewline(ctx.peek()) && !isPunc(ctx.peek(), "}")) fail(ctx, 'a new line or "}"');
   }
 };
 

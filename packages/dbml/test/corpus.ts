@@ -1748,4 +1748,98 @@ export const MALFORMED: Sample[] = [
   { category: "lexical", name: "unterminated expression", dbml: "Table t {\n  id int [default: `now()]\n}\n" },
   // The lexer path of "unknown character", kept because it is the commonest SQL habit.
   { category: "lexical", name: "trailing semicolon", dbml: "Table t {\n  id int\n};\n" },
+
+  // --- recovery: several errors in one document ---
+  // Each holds errors after its first, and valid parts around them, so the
+  // diagnostics golden pins what `diagnose` resynchronises at and what it keeps.
+  {
+    category: "recovery",
+    name: "errors in several tables",
+    dbml: "Table a {\n  id int\n  42 bad\n}\nTable b [note: 1] {\n  id int\n}\nTable c {\n  id\n  name text\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "bad lines throughout a table",
+    dbml: "Table t {\n  id int\n  , oops\n  name text\n  email\n  age int [pk unique]\n  created_at timestamp\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "errors in several settings",
+    dbml: "Table t {\n  id int [default: , note: 42, pk, ref: u.id, unique]\n  name text\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "header error then valid elements",
+    dbml: "Table {\n  id int\n}\nRef: a.id > b.id\nEnum e {\n  v\n}\nTable t as {\n  x int\n}\nTable ok {\n  x int\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "errors in nested blocks",
+    dbml: "Table t {\n  a int\n  indexes {\n    a [clustered]\n    (a, b) [unique]\n    [pk\n  }\n  checks {\n    a > 0\n    `a > 0` [name: 1]\n  }\n  b int\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "missing open brace then a valid table",
+    dbml: "Table users\n  id int\n  note text\n  Note: 'x'\n  table varchar\n}\nTable ok {\n  id int\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "garbage lines between elements",
+    dbml: "42\nTable a {\n  id int\n}\n}\nfoo bar\nEnum e {\n  v\n}\n] [\n",
+  },
+  {
+    category: "recovery",
+    name: "errors in refs",
+    dbml: "Ref: a.x b.y\nRef {\n  a.x >\n}\nRef {\n  a.x > b.y\n  c.x > d.y\n}\nRef: c.x > d.y [delete: explode, color: #fff]\n",
+  },
+  {
+    category: "recovery",
+    name: "errors in enum values",
+    dbml: "enum e {\n  a,\n  b [pk]\n  c\n  d [note: 1, note: 'ok']\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "errors in records rows",
+    dbml: "records t(a, b) {\n  1, [2]\n  3, 4\n  5 6\n  'x', true\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "errors in a project, a group and a sticky note",
+    dbml: "Project p {\n  version: 2\n  name: 'x'\n}\nTableGroup g {\n  a b\n  c\n}\nNote n {\n}\nNote m {\n  'ok'\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "unclosed body after an earlier error",
+    dbml: "Table a {\n  42\n  id int\n",
+  },
+  {
+    category: "recovery",
+    name: "unclosed nested block at end of input",
+    dbml: "Table a {\n  id int\n  indexes {\n    (id\n",
+  },
+  {
+    category: "recovery",
+    name: "errors in single-line bodies",
+    dbml: "Table a { id int, }\nTable b { x }\nTable c { y int }\n",
+  },
+  {
+    category: "recovery",
+    name: "junk after complete items",
+    dbml: "Table a {\n  id int pk junk\n  name text [note: 'n'] more\n}\nRef: a.id > b.id junk\nTable b {\n  id int\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "unterminated string then valid elements",
+    dbml: "Table a {\n  id int [note: 'oops]\n  name text\n}\nTable b {\n  Note: 'never closed\n  id int\n}\nEnum e {\n  v\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "bad block notes in a table",
+    dbml: "Table a {\n  Note { }\n  id int\n  Note { 'x' 'y' }\n  name text\n}\nTable b {\n  id int\n}\n",
+  },
+  {
+    category: "recovery",
+    name: "lexer errors in several places",
+    dbml: "Table a {\n  id int $\n  name text\n}\n@\nTable b {\n  id int [default: `now()]\n  x int\n}\n",
+  },
 ];

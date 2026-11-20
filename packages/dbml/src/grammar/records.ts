@@ -1,4 +1,5 @@
 import { custom, type Span } from "@parser-kit/core";
+import { isRestoredBreak } from "../lexer";
 import {
   atEnumConstant,
   atLineEnd,
@@ -8,6 +9,7 @@ import {
   defineElement,
   type EnumConstant,
   type ExpressionValue,
+  expectLineEnd,
   expectPunc,
   expectSpace,
   fail,
@@ -16,6 +18,7 @@ import {
   isPunc,
   isString,
   isWord,
+  lookAhead,
   type NullValue,
   type NumberValue,
   peekPastNewlines,
@@ -36,6 +39,7 @@ import {
   skipNewlines,
   type TT,
 } from "./common";
+import { report, skipSetting } from "./recovery";
 
 // Sample rows for a table, at the top level, `records table(col, …) { … }`, or
 // inside the table, `records (col, …) { … }` with the column list optional.
@@ -85,7 +89,8 @@ export const RECORDS_SETTINGS: SettingsSpec = {
 };
 
 // `(a, b)`; it may span lines (the lexer drops line breaks inside parentheses)
-// and may be empty.
+// and may be empty. Under `diagnose` a bad column name is dropped, as a bad
+// setting is from a settings list, so the rows are still read.
 const readColumnList = (ctx: Ctx): Ident[] => {
   expectPunc(ctx, "(");
   const columns: Ident[] = [];
@@ -94,12 +99,20 @@ const readColumnList = (ctx: Ctx): Ident[] => {
     return columns;
   }
   for (;;) {
-    columns.push(readIdent(ctx, "a column name"));
-    if (isPunc(ctx.peek(), ")")) {
+    try {
+      columns.push(readIdent(ctx, "a column name"));
+      if (isPunc(ctx.peek(), ")")) {
+        ctx.next();
+        return columns;
+      }
+      expectPunc(ctx, ",", '"," or ")"');
+    } catch (error) {
+      if (!report(ctx, error)) throw error;
+      const stop = skipSetting(ctx, ")");
+      if (stop === null) return columns;
       ctx.next();
-      return columns;
+      if (stop === ")") return columns;
     }
-    expectPunc(ctx, ",", '"," or ")"');
   }
 };
 
@@ -133,7 +146,7 @@ const readRow = (ctx: Ctx): RecordRow => {
     }
     ctx.next();
   }
-  if (!atLineEnd(ctx)) fail(ctx, '",", a new line or "}"');
+  expectLineEnd(ctx, '",", a new line or "}"');
   return { fields, span: ctx.spanFrom(start) };
 };
 
@@ -149,9 +162,9 @@ export const recordsElement = defineElement("records", "records", (ctx, start): 
   const table = readQualifiedName(ctx, "a table name");
   if (!isPunc(ctx.peek(), "(")) fail(ctx, '"("');
   const columns = readColumnList(ctx);
-  const { settings, settingsAllowed } = readHeaderSettings(ctx, RECORDS_SETTINGS);
-  expectBody(ctx, settingsAllowed);
-  const rows = readBody(ctx, readRow);
+  const { settings, settingsAllowed, openSwallowed } = readHeaderSettings(ctx, RECORDS_SETTINGS);
+  if (!openSwallowed) expectBody(ctx, settingsAllowed);
+  const rows = readBody(ctx, readRow, openSwallowed);
   return { type: "records", table, columns, settings, rows, span: ctx.spanFrom(start) };
 });
 
@@ -162,7 +175,7 @@ export const recordsElement = defineElement("records", "records", (ctx, start): 
  */
 export const isRecordsItem = (ctx: Ctx): boolean => {
   if (!isWord(ctx.peek(), "records")) return false;
-  const next = ctx.peekAhead(1);
+  const next = lookAhead(ctx, 1);
   return isPunc(next, "(") || isPunc(next, "[") || isPunc(next, "{");
 };
 
@@ -176,9 +189,16 @@ export const recordsItem = custom<Records, TT>(
     const columns = isPunc(ctx.peek(), "(") ? readColumnList(ctx) : null;
     const hasSettings = isPunc(ctx.peek(), "[");
     const settings = readOptionalSettings(ctx, RECORDS_SETTINGS);
-    expectBody(ctx, !hasSettings);
-    expectSpace(ctx);
-    const rows = readBody(ctx, readRow);
+    // Under `diagnose`: a string left open in the header took the `{` with it
+    // (see `readHeaderSettings`).
+    const openSwallowed = isRestoredBreak(ctx.peek());
+    if (openSwallowed) {
+      skipNewlines(ctx);
+    } else {
+      expectBody(ctx, !hasSettings);
+      expectSpace(ctx);
+    }
+    const rows = readBody(ctx, readRow, openSwallowed);
     return { type: "records", table: null, columns, settings, rows, span: ctx.spanFrom(start) };
   },
   { expected: '"records"', first: [{ type: "ident", value: "records" }] },
