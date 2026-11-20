@@ -20,4 +20,32 @@ describe("stringify: DML, transaction and session statements", () => {
       'CALL "coalesce"(1);\nCALL "trim"();\nCALL s.coalesce();\nCALL "left"();\nCALL p(VARIADIC a);',
     );
   });
+
+  it("quotes a reserved word as a utility option's name or value", () => {
+    expect(print('EXPLAIN ("select" 1, "all", analyze, analyse, FORMAT "select", x on, y "on") SELECT 1')).toBe(
+      'EXPLAIN ("select" 1, "all", ANALYZE, ANALYSE, FORMAT "select", X on, Y on) SELECT 1;',
+    );
+    expect(print('VACUUM ("select", index_cleanup "null", full, verbose "user") t')).toBe(
+      'VACUUM ("select", INDEX_CLEANUP "null", FULL, VERBOSE "user") t;',
+    );
+    // COPY's option names may be reserved words bare; its values may not.
+    expect(print('COPY t FROM STDIN (null "null", default "all", force_not_null ("select", b), force_quote *)')).toBe(
+      'COPY t FROM STDIN WITH (NULL "null", DEFAULT "all", FORCE_NOT_NULL ("select", b), FORCE_QUOTE *);',
+    );
+  });
+
+  it("quotes a word time zone, which PostgreSQL takes as an identifier only", () => {
+    const sql =
+      'SET TIME ZONE "year"; SET TIME ZONE america; SET TIME ZONE "local"; SET TIME ZONE LOCAL; SET TIME ZONE 7';
+    expect(stringify(postgres.parse(sql))).toBe(
+      'SET TIME ZONE "year";\nSET TIME ZONE "america";\nSET TIME ZONE "local";\nSET TIME ZONE DEFAULT;\nSET TIME ZONE 7;',
+    );
+  });
+
+  it("writes CLUSTER's lone VERBOSE as the flag, which predates the option list", () => {
+    const sql = "CLUSTER VERBOSE; CLUSTER (VERBOSE); CLUSTER VERBOSE t; CLUSTER (VERBOSE, x 1)";
+    expect(stringify(postgres.parse(sql))).toBe(
+      "CLUSTER VERBOSE;\nCLUSTER VERBOSE;\nCLUSTER (VERBOSE) t;\nCLUSTER (VERBOSE, X 1);",
+    );
+  });
 });

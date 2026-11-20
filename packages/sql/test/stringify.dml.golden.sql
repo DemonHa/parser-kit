@@ -243,6 +243,26 @@ WITH (
   S 'it''s'
 );
 
+-- COPY binary t FROM STDIN (toast.header)
+COPY BINARY t FROM STDIN WITH (TOAST.HEADER);
+
+-- COPY binary t FROM STDIN (on_error ignore)
+COPY BINARY t FROM STDIN WITH (ON_ERROR ignore);
+
+-- COPY binary t FROM STDIN (delimiter 1)
+COPY BINARY t FROM STDIN WITH (DELIMITER 1);
+
+-- COPY binary t FROM STDIN (force_quote ('a'))
+COPY BINARY t FROM STDIN WITH (FORCE_QUOTE ('a'));
+
+-- COPY binary t FROM STDIN (force_null)
+COPY BINARY t FROM STDIN WITH (FORCE_NULL);
+
+-- COPY t FROM STDIN (null "null", default "all", force_not_null ("select", b))
+COPY t
+FROM STDIN
+WITH (NULL "null", DEFAULT "all", FORCE_NOT_NULL ("select", b));
+
 -- TRUNCATE t
 TRUNCATE TABLE t;
 
@@ -333,11 +353,17 @@ SET TIME ZONE DEFAULT;
 -- SET TIME ZONE -7
 SET TIME ZONE -7;
 
+-- SET TIME ZONE 7
+SET TIME ZONE 7;
+
+-- SET TIME ZONE "year"
+SET TIME ZONE "year";
+
 -- SET TIME ZONE INTERVAL '-08:00' HOUR TO MINUTE
 SET TIME ZONE INTERVAL '-08:00' HOUR TO MINUTE;
 
 -- SET TIME ZONE america
-SET TIME ZONE america;
+SET TIME ZONE "america";
 
 -- SET TIME ZONE "local"
 SET TIME ZONE "local";
@@ -536,6 +562,13 @@ EXPLAIN (ANALYZE, BUFFERS FALSE, FORMAT json, "Odd") DELETE FROM t;
 -- EXPLAIN (SELECT 1)
 EXPLAIN SELECT 1;
 
+-- EXPLAIN ("select" 1, "values", "with", "table", "all", FORMAT "select") SELECT 1
+EXPLAIN ("select" 1, "values", "with", "table", "all", FORMAT "select")
+  SELECT 1;
+
+-- VACUUM ("select", index_cleanup "null", full, x left, y "values") t
+VACUUM ("select", INDEX_CLEANUP "null", FULL, X left, Y "values") t;
+
 -- EXPLAIN VALUES (1)
 EXPLAIN VALUES (1);
 
@@ -576,7 +609,10 @@ VACUUM (PARALLEL 4, INDEX_CLEANUP auto) a, b;
 CLUSTER;
 
 -- CLUSTER VERBOSE
-CLUSTER (VERBOSE);
+CLUSTER VERBOSE;
+
+-- CLUSTER (VERBOSE)
+CLUSTER VERBOSE;
 
 -- CLUSTER t
 CLUSTER t;

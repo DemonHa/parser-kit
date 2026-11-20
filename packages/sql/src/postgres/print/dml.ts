@@ -73,7 +73,9 @@ const relation = (name: string[], only: boolean | undefined): Doc =>
   only ? [kw("ONLY"), " ", qualified(name)] : qualified(name);
 
 // The utility statements' parenthesised options: `(ANALYZE, FORMAT json)`.
-const UTILITY: OptionStyle = { eq: false, keywords: true };
+const UTILITY: OptionStyle = { eq: false, keywords: true, reservedNames: false, reservedValues: false };
+// COPY's option names are PG's ColLabel (`NULL ''`).
+const COPY: OptionStyle = { ...UTILITY, reservedNames: true };
 const utilityOptions = (options: readonly RelationOption[]): Doc =>
   options.length > 0 ? [" ", relationOptions(options, UTILITY)] : "";
 
@@ -242,7 +244,7 @@ const isDelimiter = (o: RelationOption | undefined): boolean =>
 const copyOptions = (c: Copy): { prefix: Doc; delimiters: Doc; options: Doc } => {
   const options = c.options ?? [];
   const list = (opts: readonly RelationOption[]): Doc =>
-    opts.length > 0 ? [kw("WITH"), " ", relationOptions(opts, UTILITY)] : "";
+    opts.length > 0 ? [kw("WITH"), " ", relationOptions(opts, COPY)] : "";
   if (c.legacy !== true) return { prefix: "", delimiters: "", options: list(options) };
   const words = (opts: readonly RelationOption[]): Doc[] | null => {
     const out: Doc[] = [];
@@ -336,8 +338,9 @@ const configValue = (e: Expr, words: "value" | "word" | "zone"): Doc => {
   if (e.kind !== "name") return expr(e);
   const word = e.parts[0]!;
   if (words === "value" && word === "on") return word;
-  // LOCAL bare is TIME ZONE's DEFAULT.
-  if (words === "zone" && word === "local") return quoted(word);
+  // PG's zone_value takes an IDENT, no keyword: a word is always quoted
+  // (bare LOCAL, for one, is TIME ZONE's DEFAULT).
+  if (words === "zone") return quoted(word);
   return ident(word);
 };
 
@@ -440,6 +443,12 @@ const LOCK_MODES: Record<LockMode, string> = {
   accessExclusive: "ACCESS EXCLUSIVE",
 };
 
+const isVerboseFlag = (options: readonly RelationOption[]): boolean =>
+  options.length === 1 &&
+  options[0]!.name === "verbose" &&
+  options[0]!.value === null &&
+  options[0]!.namespace === undefined;
+
 const DISCARD = { all: "ALL", plans: "PLANS", sequences: "SEQUENCES", temp: "TEMP" } as const;
 const REINDEX = { index: "INDEX", table: "TABLE", schema: "SCHEMA", database: "DATABASE", system: "SYSTEM" } as const;
 
@@ -539,7 +548,8 @@ export const dmlFamily = defineFamily(
     vacuum: (s) => [kw("VACUUM"), utilityOptions(s.options), targets(s.tables)],
     cluster: (s) => [
       kw("CLUSTER"),
-      utilityOptions(s.options),
+      // `CLUSTER (VERBOSE)` with no table is PG 17's; the flag is older.
+      s.table === undefined && isVerboseFlag(s.options) ? ` ${kw("VERBOSE")}` : utilityOptions(s.options),
       s.table !== undefined ? [" ", qualified(s.table)] : "",
       s.index !== undefined ? [" ", kw("USING"), " ", ident(s.index)] : "",
     ],
