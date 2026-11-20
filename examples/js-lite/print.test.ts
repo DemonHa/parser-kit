@@ -22,10 +22,24 @@ import { type Expr, expressionTable, jsLite, type Stmt } from "./grammar";
 
 // Parentheses come from the grammar's own Pratt table. Binary nodes are keyed
 // by their operator; every other operator node by the kind its group names in
-// `nodes`. An arrow function is an atom whose body runs to the end of the
-// expression, so it is declared with the bp that body is parsed at.
+// `nodes`; atoms by null. An arrow function is an atom whose body runs to the
+// end of the expression, so it is declared with the bp that body is parsed at.
 const prec = precedence<Expr>(expressionTable, {
-  key: (e) => (e.kind === "binary" ? e.op : e.kind),
+  key: (e) => {
+    switch (e.kind) {
+      case "binary":
+        return e.op;
+      case "number":
+      case "string":
+      case "boolean":
+      case "null":
+      case "ident":
+      case "array":
+        return null;
+      default:
+        return e.kind;
+    }
+  },
   print: (e): Doc => expr(e),
   atoms: { arrow: 0 },
 });

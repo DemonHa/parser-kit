@@ -51,14 +51,17 @@ export interface PrattPrintMeta {
   /**
    * The node keys this group builds, as the printer's `key` function names
    * them. An `ops` group without a custom `parse` is keyed by its ops already;
-   * name the nodes of `match` and `parse` groups here.
+   * name the nodes of `match` and `parse` groups here. A record gives each
+   * node its own `rhs`, for a group that builds nodes ending differently
+   * (`{ like: 11, in: "none" }`).
    */
-  nodes?: readonly string[];
+  nodes?: readonly string[] | Readonly<Record<string, number | "none">>;
   /**
    * Where the node's trailing operand is parsed: the bp a custom `parse`
    * passes to `parseRhs` for it, or `"none"` when the node ends in a token of
-   * its own (`)`, `]`, a name). Derived for `ops` groups without `parse`; a
-   * group with `parse` and no `rhs` is treated as fully open.
+   * its own (`)`, `]`, a name). Ignored for `ops` groups without `parse`,
+   * whose tail is derived; a group with `parse` and no `rhs` is treated as
+   * fully open.
    */
   rhs?: number | "none";
 }

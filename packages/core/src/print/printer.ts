@@ -20,6 +20,19 @@ export type Handlers<T, K extends keyof T> = {
   readonly [V in T[K] & PropertyKey]: (node: Variant<T, K, V>, print: (node: T) => Doc) => Doc;
 };
 
+/**
+ * `Handlers<T, K>` when every value of `T[K]` is a string or number literal,
+ * else an error message: a wide `string` or a boolean discriminant would drop
+ * the required keys and, with them, exhaustiveness.
+ */
+export type CheckedHandlers<T, K extends keyof T> = string extends T[K]
+  ? "definePrinter: the discriminant must be string or number literals, not string"
+  : number extends T[K]
+    ? "definePrinter: the discriminant must be string or number literals, not number"
+    : [Exclude<T[K], string | number>] extends [never]
+      ? Handlers<T, K>
+      : "definePrinter: the discriminant must be string or number literals";
+
 /** A printer for union `T`: call it with a node. */
 export interface NodePrinter<T, K extends keyof T> {
   (node: T): Doc;
@@ -69,8 +82,8 @@ const build = <T, K extends keyof T>(key: K, handlers: Handlers<T, K>): NodePrin
  */
 export const definePrinter =
   <T>() =>
-  <K extends keyof T>(key: K, handlers: Handlers<T, K>): NodePrinter<T, K> =>
-    build(key, handlers);
+  <K extends keyof T>(key: K, handlers: CheckedHandlers<T, K>): NodePrinter<T, K> =>
+    build(key, handlers as Handlers<T, K>);
 
 /**
  * A printer that reuses `base` and replaces some of its handlers, e.g. a

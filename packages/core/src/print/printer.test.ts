@@ -92,6 +92,15 @@ describe("definePrinter", () => {
     });
     // @ts-expect-error — not a key of the union.
     definePrinter<Node>()("tag", {});
+    // A wide or boolean discriminant would drop the required keys.
+    type Wide = { kind: "a"; x: string } | { kind: string; y: number };
+    // @ts-expect-error — `string` is not a literal.
+    definePrinter<Wide>()("kind", {});
+    type Bool = { ok: true } | { ok: false };
+    // @ts-expect-error — booleans can't key a handler table.
+    definePrinter<Bool>()("ok", {});
+    type Num = { n: 1 } | { n: 2 };
+    definePrinter<Num>()("n", { 1: () => "one", 2: () => "two" });
     expectTypeOf(definePrinter<Node>()("kind", { a: (n) => n.x, b: (n) => String(n.y) })).toEqualTypeOf<
       NodePrinter<Node, "kind">
     >();

@@ -33,7 +33,14 @@ export {
   precedence,
   type Side,
 } from "./precedence";
-export { definePrinter, extendPrinter, type Handlers, type NodePrinter, type Printable } from "./printer";
+export {
+  type CheckedHandlers,
+  definePrinter,
+  extendPrinter,
+  type Handlers,
+  type NodePrinter,
+  type Printable,
+} from "./printer";
 export { type Quote, type QuoteMode, type QuotingRules, quoting } from "./quoting";
 export { type RenderOptions, render } from "./render";
 export { doc };

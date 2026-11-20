@@ -234,7 +234,7 @@ Every grammar exposes:
 
 ## Printing: `@parser-kit/core/print`
 
-An opt-in entry point for the other direction, AST → text. It holds a Wadler/Leijen-style document IR (the model prettier uses), a renderer that lays a document out for a line width, typed exhaustive printers (`definePrinter`), parentheses derived from your Pratt table (`precedence`) and a quoting policy for names and strings (`quoting`). You write the printer by hand, one handler per node, and build docs instead of strings. The entry is about 2.5 KB minified and gzipped, and nothing in the parsing API imports it, so parse-only bundles don't grow.
+An opt-in entry point for the other direction, AST → text. It holds a Wadler/Leijen-style document IR (the model prettier uses), a renderer that lays a document out for a line width, typed exhaustive printers (`definePrinter`), parentheses derived from your Pratt table (`precedence`) and a quoting policy for names and strings (`quoting`). You write the printer by hand, one handler per node, and build docs instead of strings. The entry is about 2.9 KB minified and gzipped, and nothing in the parsing API imports it, so parse-only bundles don't grow.
 
 ```ts
 import { doc, render } from "@parser-kit/core/print";
@@ -293,6 +293,7 @@ const printFrom = definePrinter<Printable<FromItem>>()("kind", {
 - **Recursion goes through `print`.** Each handler gets the printer it runs in as its second argument. Recurse through it rather than the printer's name, so a printer built by `extendPrinter` applies its overrides all the way down.
 - **`extendPrinter(base, overrides)`** reuses every handler of `base` and replaces some, e.g. a dialect that prints a few nodes differently. To print a wider union, spread `base.handlers` into a new `definePrinter` call for it and add the new variants; the reused handlers recurse through the wider printer.
 - **`Printable<T>`** is `T` with every `span` optional, all the way down, so the printer accepts hand-built trees as well as parsed ones. Printers should never read spans.
+- The discriminant's values must be string or number literals; a wide `string` or a boolean discriminant is a compile error, since it would quietly drop exhaustiveness.
 - A node whose discriminant has no handler at run time (a hand-built tree with a typo) throws a `TypeError`.
 
 ### Parentheses from the Pratt table: `precedence`
@@ -312,7 +313,7 @@ export const expressionTable: Omit<PrattDef<Expr, TT>, "atom"> = {
 const expression = pratt({ atom, ...expressionTable });
 
 const prec = precedence<Expr>(expressionTable, {
-  key: (n) => (n.kind === "binary" ? n.op : n.kind),
+  key: (n) => (n.kind === "binary" ? n.op : ATOMS.has(n.kind) ? null : n.kind),
   print: (n): Doc => printExpr(n),
   atoms: { arrow: 0 }, // an atom whose body runs on: `x => x + 1`
 });
@@ -321,11 +322,11 @@ binary: (n) => group([prec.child(n, n.left, "left"), " ", n.op, indent([line, pr
 call: (n, print) => [prec.child(n, n.callee, "left"), list("(", n.args.map(print), ")")],
 ```
 
-- **Keys.** An `ops` group without a custom `parse` is keyed by its ops: return the operator from `key` for the nodes it builds, or `{ prefix: op }` for a prefix op (the same op can be both, like `-`). Any group can name its nodes in `nodes` instead. A key the table doesn't name is an atom, never wrapped.
-- **Two optional fields on Pratt groups**, `nodes` and `rhs`, are printer metadata; the parser ignores them. `rhs` says where a custom `parse` reads its trailing operand (the bp it passes to `parseRhs`), or `"none"` when the node ends in a token of its own (`)`, `]`, a name). It is derived for `ops` groups without `parse`; a `parse` group without it is treated as open to every operator, which is safe but adds parentheses.
-- **Sides.** `"left"` and `"right"` are the operands before and after the operator; `"inner"` is an operand between tokens of the node (a ternary's middle, call arguments) and is never wrapped. A prefix operator's operand is its `"right"`.
-- **Conservative where unsure.** A custom-`parse` group without an explicit `assoc` is treated as non-associative, so a chain of it is parenthesised (`(a BETWEEN b AND c) BETWEEN …`). A parent the table doesn't know wraps every operator child. A key two groups build with different binding powers throws when the table is read.
-- **Context.** `prec.operand(node, minBp?, context?)` handles operands the grammar parses outside the table, at a given bp (0, the default, is a whole expression). `contexts: { b: restrictedTable }` names cut-down tables for positions the grammar parses with fewer operators; pass the name as the last argument of `child` or `operand`, and nodes that table can't build are wrapped there. `prec.parens(…)` answers the question without printing, and `wrap` replaces the default `["(", doc, ")"]`.
+- **Keys.** An `ops` group without a custom `parse` is keyed by its ops: return the operator from `key` for the nodes it builds, or `{ prefix: op }` for a prefix op (the same op can be both, like `-`). Any group can name its nodes in `nodes` instead. Return `null` for an atom (a node that starts and ends with tokens of its own: names, literals, parenthesised or bracketed forms). A key no group names throws, so a forgotten node fails loudly instead of printing without the parentheses it needs.
+- **Two optional fields on Pratt groups**, `nodes` and `rhs`, are printer metadata; the parser ignores them. `rhs` says where a custom `parse` reads its trailing operand (the bp it passes to `parseRhs`), or `"none"` when the node ends in a token of its own (`)`, `]`, a name). A group whose nodes end differently gives each its own: `nodes: { like: 11, in: "none" }`. For an `ops` group without `parse` the tail is derived and `rhs` is ignored; a `parse` group without it is treated as open to every operator, which is safe but adds parentheses.
+- **Sides.** `"left"` and `"right"` are the operands before and after the operator. A prefix operator's operand is its `"right"`. `"inner"` is an operand between tokens of the node (call arguments, a ternary's middle) and is never wrapped, so use it only when the token after it can't continue an expression; BETWEEN's lower bound, followed by `AND`, is a `"right"` operand.
+- **Conservative where unsure.** A custom-`parse` group without an explicit `assoc` is treated as non-associative, so a chain of it is parenthesised (`(a BETWEEN b AND c) BETWEEN …`). A postfix whose token an infix group also starts is guarded against that group too, since the parser offers the token to infix lookup where the postfix declines. A key two groups build with different binding powers or associativity throws when the table is read. `when` guards aren't modelled: guards that only look ahead (the usual kind) are fine, but one that depends on the left operand can make the printer's answer wrong.
+- **Context.** `prec.operand(node, minBp?, context?)` handles operands the grammar parses outside the table, at a given bp (0, the default, is a whole expression). `contexts: { b: restrictedTable }` names cut-down tables for positions the grammar parses with fewer operators (PG's `b_expr`). Pass the name to `child` or `operand`: nodes that table can't build are wrapped, and the context carries on to every `child` / `operand` call made while printing that operand, until a pair of parentheses restores the full table. `prec.parens(…)` answers the question without printing, and `wrap` replaces the default `["(", doc, ")"]`.
 
 ### Quoting: `quoting`
 

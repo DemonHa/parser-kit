@@ -112,7 +112,8 @@ const full: Rule<Node, TT> = pratt<Node, TT>({ atom, ...table });
 const grammar = defineGrammar({ lexer, root: full });
 const parse = (s: string) => stripSpans(grammar.parse(s)) as Node;
 
-const key = (n: Node) => (n.type === "binary" ? n.op : n.type === "unary" ? { prefix: n.op } : n.type);
+const key = (n: Node) =>
+  n.type === "binary" ? n.op : n.type === "unary" ? { prefix: n.op } : n.type === "name" ? null : n.type;
 // The return type breaks the cycle between `prec` and `print` for inference.
 const prec = precedence<Node>(table, { key, print: (n): Doc => print(n) });
 
@@ -230,18 +231,13 @@ describe("precedence", () => {
     expect(roundTrip("a * (not a)")).toBe("a * (not a)");
   });
 
-  it("wraps every operator child of a parent the table doesn't name", () => {
-    const loose = precedence<Node>(table, { key: (n) => (n.type === "binary" ? n.op : n.type), print });
-    const plus: Node = {
-      type: "binary",
-      op: "+",
-      left: { type: "name", value: "a" },
-      right: { type: "name", value: "b" },
-    };
-    const unknown: Node = { type: "binary", op: "%", left: plus, right: { type: "name", value: "c" } };
-    expect(loose.parens(unknown, plus, "left")).toBe(true);
-    expect(loose.parens(unknown, unknown.right, "left")).toBe(false);
-    expect(loose.parens(plus, plus.left, "inner")).toBe(false);
+  it("throws on a key the table doesn't name, rather than guessing", () => {
+    const loose = precedence<Node>(table, { key: (n) => (n.type === "binary" ? n.op : null), print });
+    const odd: Node = { type: "binary", op: "%", left: parse("a"), right: parse("a") };
+    expect(() => loose.parens(parse("a + a"), odd, "left")).toThrow('no group builds "%"');
+    expect(() => prec.operand({ type: "unary", op: "~", operand: parse("a") })).toThrow(
+      'no group builds {"prefix":"~"}',
+    );
   });
 
   it("checks an operand position by its bp, for operands parsed outside the table", () => {
@@ -263,11 +259,63 @@ describe("precedence", () => {
     expect(render(b.child(sum, sum.left, "left", "b"), {})).toBe("a");
   });
 
+  it("applies a context all the way down, until parentheses restore the full table", () => {
+    // Only `<` in the restricted table: `+` binds tighter in the main one, but
+    // can't appear in the context at all, even as a grandchild.
+    const lt: typeof table = { infix: [table.infix![2]!] };
+    const b = precedence<Node, "b">(table, { key, print: (n): Doc => bp(n), contexts: { b: lt } });
+    const bp: (n: Node) => Doc = definePrinter<Node>()("type", {
+      ...print.handlers,
+      binary: (n) => [b.child(n, n.left, "left"), " ", n.op, " ", b.child(n, n.right, "right")],
+      unary: (n) => [n.op, n.op === "not" ? " " : "", b.child(n, n.operand, "right")],
+    });
+    expect(render(b.operand(parse("a < a + a"), 0, "b"), {})).toBe("a < (a + a)");
+    // Inside the parentheses the main table applies again.
+    expect(render(b.operand(parse("a + a < a * a"), 0, "b"), {})).toBe("(a + a) < (a * a)");
+    expect(render(b.operand(parse("a + a * a"), 0, "b"), {})).toBe("(a + a * a)");
+    expect(render(b.operand(parse("a < a + a"), 0), {})).toBe("a < a + a");
+  });
+
+  it("gives each node of a group its own tail", () => {
+    // `like` reads its pattern at bp 3, so it would swallow a following
+    // `and`; `in` ends in its own `)`.
+    type E = { k: "x" } | { k: "like"; l: E; r: E } | { k: "in"; l: E } | { k: "and"; l: E; r: E };
+    const t = {
+      infix: [
+        { ops: ["and"], bp: 4, nodes: ["and"] },
+        { ops: ["like"], bp: 6, parse: () => null, nodes: { like: 3, in: "none" as const } },
+      ],
+    };
+    const p = precedence<E>(t, { key: (n) => (n.k === "x" ? null : n.k), print: () => "" });
+    const x: E = { k: "x" };
+    const and: E = { k: "and", l: x, r: x };
+    expect(p.parens(and, { k: "like", l: x, r: x }, "left")).toBe(true);
+    expect(p.parens(and, { k: "in", l: x }, "left")).toBe(false);
+  });
+
+  it("wraps before a postfix whose token an infix group also takes", () => {
+    // Where the postfix's bp is too low, pratt offers its token to infix
+    // lookup: in `a + b!` the `!` is the bp-20 infix inside `+`'s operand.
+    type E = { k: "x" } | { k: "add"; l: E; r: E } | { k: "fact"; e: E };
+    const t = {
+      infix: [
+        { ops: ["+"], bp: 10, nodes: ["add"] },
+        { ops: ["!"], bp: 20 },
+      ],
+      postfix: [{ match: { first: () => [{ value: "!" }] }, bp: 5, nodes: ["fact"], rhs: "none" as const }],
+    };
+    const p = precedence<E>(t, { key: (n) => (n.k === "x" ? null : n.k), print: () => "" });
+    const x: E = { k: "x" };
+    const add: E = { k: "add", l: x, r: x };
+    expect(p.parens({ k: "fact", e: add }, add, "left")).toBe(true);
+    expect(p.parens({ k: "fact", e: x }, x, "left")).toBe(false);
+  });
+
   it("takes a custom wrapper and open atoms", () => {
     type E = { k: "lam"; body: E } | { k: "x" } | { k: "add"; l: E; r: E };
     const t = { infix: [{ ops: ["+"], bp: 10, nodes: ["add"] }] };
     const p = precedence<E>(t, {
-      key: (n) => n.k,
+      key: (n) => (n.k === "x" ? null : n.k),
       print: (n): Doc => (n.k === "x" ? "x" : n.k),
       wrap: (d) => ["[", d, "]"],
       atoms: { lam: 0 },
@@ -302,5 +350,17 @@ describe("precedence", () => {
         { key: () => "+", print },
       ),
     ).not.toThrow();
+    // Same bp, different associativity.
+    expect(() =>
+      precedence<Node>(
+        {
+          infix: [
+            { ops: ["+"], bp: 1 },
+            { ops: ["+"], bp: 1, assoc: "nonassoc" },
+          ],
+        },
+        { key: () => "+", print },
+      ),
+    ).toThrow(/two groups build "\+"/);
   });
 });
