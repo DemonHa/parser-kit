@@ -27,8 +27,8 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
 
-    // The examples type-check against core's source rather than its build
-    // output, so `pnpm types:check` works on a clean tree with no build step.
+    // The grammars (packages/sql, examples/*) type-check against core's source
+    // rather than its build output, so `pnpm types:check` works on a clean tree with no build step.
     // Resolved relative to this file, so every extending config inherits it.
     "paths": {
       "@parser-kit/core": ["./packages/core/src/index.ts"]
