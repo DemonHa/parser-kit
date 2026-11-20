@@ -717,6 +717,15 @@ WHERE
     ARRAY[cccccccccccccccccccc, dddddddddddddddddddddd]
   );
 
+-- SELECT a FROM t GROUP BY GROUPING SETS (aaaa + bbbb IN (1, 2), c), ROLLUP (aaaa + bbbb IS NULL), CUBE (aaaa + bbbb = ANY (ARRAY[1, 2])), GROUPING SETS (- aaaaaaaaaaaaaaaaaaaaaa AT TIME ZONE 'utc');
+SELECT a
+FROM t
+GROUP BY
+  GROUPING SETS ((aaaa + bbbb IN (1, 2)), c),
+  ROLLUP ((aaaa + bbbb IS NULL)),
+  CUBE ((aaaa + bbbb = ANY (ARRAY[1, 2]))),
+  GROUPING SETS ((-aaaaaaaaaaaaaaaaaaaaaa AT TIME ZONE 'utc'));
+
 -- SELECT * FROM users u;
 SELECT * FROM users AS u;
 

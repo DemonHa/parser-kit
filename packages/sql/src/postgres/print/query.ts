@@ -27,11 +27,11 @@ import type {
 import {
   clause,
   commaList,
-  firstChar,
   firstText,
   functionWord,
   ident,
   kw,
+  mayOpenWithParen,
   parenList,
   parens,
   qualified,
@@ -276,7 +276,7 @@ const opensCall = (doc: Doc): boolean => /^[a-z]+\(/.test(flat(group(doc)) ?? ""
 const grouping = (exprs: Expr[]): Doc => {
   if (exprs.length !== 1) return parenList(exprs.map(expr));
   const doc = expr(exprs[0]!);
-  return firstChar(doc) === "(" ? ["(", doc, ")"] : doc;
+  return mayOpenWithParen(doc) ? ["(", doc, ")"] : doc;
 };
 
 // --- the tail ---

@@ -214,7 +214,7 @@ const left = (parent: Expr, child: Expr): Doc => {
 // `IS DISTINCT FROM (…)`, `AT TIME ZONE (…)`). An operator chain on the left
 // breaks with a hanging indent, and a bracket opened on its last line would
 // close at the chain's first column instead. So when the node breaks, a
-// non-atomic left operand gets parentheses of its own lines (only then: flat,
+// non-atomic left operand gets parentheses on their own lines (only then: flat,
 // none are added), and the tail follows the closing one at the node's column.
 const leftThen = (parent: Expr, child: Expr, tail: Doc): Doc => {
   const doc = left(parent, child);

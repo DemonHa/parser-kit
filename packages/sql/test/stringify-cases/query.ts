@@ -125,6 +125,7 @@ export const cases = [
   "SELECT * FROM t WHERE (((s = 'active' OR s = 'trialing_customer') AND r = 'eu-west-1') OR p > 5) AND c > '2024-01-01';",
   "SELECT id FROM customers WHERE lower(first_name) || ' ' || lower(middle_name) || ' ' || lower(last_name) || ' ' || lower(suffix) IN (SELECT full_name FROM vip_list WHERE active AND region = 'emea' AND tier > 2);",
   "SELECT 1 FROM t WHERE aaaaaaaaaaaaaaaaaaaaaaaaaa + bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb = ANY (ARRAY[cccccccccccccccccccc, dddddddddddddddddddddd]);",
+  "SELECT a FROM t GROUP BY GROUPING SETS (aaaa + bbbb IN (1, 2), c), ROLLUP (aaaa + bbbb IS NULL), CUBE (aaaa + bbbb = ANY (ARRAY[1, 2])), GROUPING SETS (- aaaaaaaaaaaaaaaaaaaaaa AT TIME ZONE 'utc');",
 ];
 
 // Variants of the nested unions the printer reads (beyond expressions, FROM

@@ -263,6 +263,33 @@ export const clause = (keyword: Doc, body: Doc): Doc => group([keyword, indent([
  */
 export const firstChar = (doc: Doc): string => firstText(doc)[0] ?? "";
 
+/**
+ * Whether a doc may print `(` first, in either layout: unlike `firstChar`, this
+ * follows both branches of an `ifBreak`.
+ */
+export const mayOpenWithParen = (doc: Doc): boolean => {
+  const todo: Doc[] = [doc];
+  while (todo.length > 0) {
+    const d = todo.pop()!;
+    if (typeof d === "string") {
+      // Another branch may still be pending.
+      if (d[0] === "(") return true;
+      continue;
+    }
+    if (Array.isArray(d)) {
+      // Only the leftmost element that prints anything counts.
+      const firstNonEmpty = d.find((c) => !(typeof c === "string" && c === ""));
+      if (firstNonEmpty !== undefined) todo.push(firstNonEmpty);
+      continue;
+    }
+    const c = d as Exclude<Doc, string | readonly Doc[]>;
+    if (c.type === "line") continue;
+    if (c.type === "ifBreak") todo.push(c.breakContents, c.flatContents);
+    else todo.push(c.contents);
+  }
+  return false;
+};
+
 /** The last non-empty text a doc prints (" " for a line), or "". */
 export const lastText = (doc: Doc): string => {
   const todo: Doc[] = [doc];
