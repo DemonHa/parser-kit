@@ -1,12 +1,13 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import { loadModule, parseSync } from "libpg-query";
+import { ParseError } from "@parser-kit/core";
+import { formatSqlError, loadModule, parseSync, SqlError } from "libpg-query";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Stmt } from "../src/postgres/ast";
 import { postgres } from "../src/postgres/index";
 import { NotPrintableError, type StringifyOptions, stringify } from "../src/postgres/print/index";
 import { CORPUS } from "./corpus";
-import { LEXER_EDGE_CASES, MULTI_LINE, SUPPLEMENTAL } from "./parity-corpus";
+import { LEXER_EDGE_CASES, MALFORMED, MULTI_LINE, SUPPLEMENTAL } from "./parity-corpus";
 import { PG_BATTERY } from "./pg-coverage";
 import { splitPsqlScript } from "./psql-split";
 import * as dml from "./stringify-cases/dml";
@@ -19,32 +20,38 @@ import * as tables from "./stringify-cases/tables";
 //
 // `libpg-query` (pinned in the workspace catalog) is PostgreSQL 17's own raw
 // parser, libpg_query, compiled to WebAssembly. It is the oracle for two
-// properties over the whole corpus: the benchmark corpus, the parity lists,
-// every PostgreSQL coverage battery row (accepted or not), every statement of
-// the pg_dump fixtures (parsing or not) and each printer family's cases.
+// properties over the corpus: the benchmark corpus, the parity lists
+// (`MALFORMED` included), every PostgreSQL coverage battery row (accepted or
+// not), every statement of the pg_dump fixtures (parsing or not) and each
+// printer family's cases.
 //
 //   1. Parser agreement. `postgres.parse` accepts a source exactly when
 //      PostgreSQL's grammar does, and when both accept it they find the same
 //      number of statements.
 //   2. Printer meaning-preservation. For every statement the printer can
 //      print, PostgreSQL parses the printed SQL to the same tree as the
-//      original source. Our own round-trip test (`stringify.test.ts`) compares
-//      our trees, so it can't see a meaning our parser and printer both get
-//      wrong; this compares PostgreSQL's. Statements whose kind isn't printable
-//      yet throw `NotPrintableError` and are counted as skipped, so coverage
-//      grows by itself as statement families land.
+//      original source, at every layout in `OPTIONS`. Our own round-trip test
+//      (`stringify.test.ts`) compares our trees, so it can't see a meaning our
+//      parser and printer both get wrong; this compares PostgreSQL's.
+//      Statements whose kind isn't printable yet throw `NotPrintableError` and
+//      are counted as skipped, so coverage grows by itself as statement
+//      families land. Sources of more than one statement are also printed
+//      whole, with the statements' separators.
 //
-// The comparison is of libpg_query's full JSON parse tree, not its
-// fingerprint: a fingerprint ignores constants, which would hide `1.0`
-// becoming `1`. The only thing normalised away is position: every
-// `location` / `*_location` field and the statement's `stmt_location` /
-// `stmt_len`. Nothing else is rewritten.
+// The comparison is of libpg_query's full JSON parse tree for each statement,
+// not its fingerprint: a fingerprint ignores constants, which would hide `1.0`
+// becoming `1`. The statement wrapper (`RawStmt`, with its offset and length)
+// is dropped, and so is every numeric `location` / `*_location` field, which
+// is a byte offset. Nothing else is rewritten. (`CREATE TABLESPACE`'s
+// `location` is the directory, a string, and is kept.)
 //
 // Where the two deliberately disagree, the source is listed in
-// `PARSER_DIFFERENCES` or `PRINTER_DIFFERENCES` with its reason, and the test
-// checks that each listed difference still holds, so an entry can't go stale.
-// Nothing is skipped silently: a new disagreement is either a bug to fix or a
-// new entry. `LIBPG_QUERY_REPORT=1` prints the counts.
+// `PARSER_DIFFERENCES` or `PRINTER_DIFFERENCES` with its reason. A printer
+// entry names every path where the trees differ, and must match exactly at
+// every layout, so the rest of the statement is still checked and an entry can't go
+// stale; a parser entry that stops holding fails too. Nothing is skipped
+// silently: a new disagreement is either a bug to fix or a new entry.
+// `LIBPG_QUERY_REPORT=1` prints the counts.
 
 // The pg_dump fixtures' statements, split as psql would, parsing or not.
 const DUMP_STATEMENTS = readdirSync(new URL("./fixtures/pg-dump/", import.meta.url))
@@ -66,12 +73,12 @@ type ParserDifference = { sql: string; acceptedBy: "ours" | "postgres"; reason: 
 
 const NOT_YET_SUPPORTED = "Not supported yet (README: Not yet supported).";
 const IGNORE_NULLS =
-  "IGNORE / RESPECT NULLS on a window function (the `nullTreatment` node) is not in PostgreSQL 17's grammar; this grammar parses it. Not yet in the README's permissive list.";
+  "IGNORE / RESPECT NULLS on a window function (the `nullTreatment` node) is not in PostgreSQL 17's grammar; this grammar parses it.";
 const RELOPTIONS =
-  "CREATE TABLE's WITH (…) takes the general option shape COPY's options use, so `x -1`, `force_quote *` and `force_null (a, 'b')` parse there; PostgreSQL's reloptions take only `name [= value]`. Not yet in the README's permissive list.";
+  "CREATE TABLE's WITH (…) takes the general option shape COPY's options use, so `x -1`, `force_quote *` and `force_null (a, 'b')` parse there; PostgreSQL's reloptions take only `name [= value]`.";
 
+// Each "ours" entry is in the README's "Accepted, but PostgreSQL rejects" list.
 const PARSER_DIFFERENCES: ParserDifference[] = [
-  // Accepted here, rejected by PostgreSQL 17. README: "Accepted, but PostgreSQL rejects".
   {
     sql: dumpStatement("CREATE TABLE public.film ("),
     acceptedBy: "ours",
@@ -87,7 +94,6 @@ const PARSER_DIFFERENCES: ParserDifference[] = [
     acceptedBy: "ours",
     reason: "`uescape` with no string after it is read as an alias.",
   },
-  // Accepted here, rejected by PostgreSQL 17, and not yet listed in the README.
   { sql: "SELECT lag(x) IGNORE NULLS OVER (ORDER BY id) FROM t;", acceptedBy: "ours", reason: IGNORE_NULLS },
   { sql: "SELECT count(x) RESPECT NULLS FILTER (WHERE x) OVER () FROM t;", acceptedBy: "ours", reason: IGNORE_NULLS },
   {
@@ -109,7 +115,13 @@ const PARSER_DIFFERENCES: ParserDifference[] = [
     sql: 'SELECT a BETWEEN b COLLATE "C" AND c, a BETWEEN SYMMETRIC 1 AND 2, a NOT BETWEEN ASYMMETRIC b + 1 AND c;',
     acceptedBy: "ours",
     reason:
-      "BETWEEN's lower bound is a b_expr in PostgreSQL, which has no COLLATE; this grammar takes `b COLLATE \"C\"` there. Not yet in the README's permissive list.",
+      'BETWEEN\'s lower bound is a b_expr in PostgreSQL, which has no COLLATE; this grammar takes `b COLLATE "C"` there.',
+  },
+  {
+    sql: "SELECT B'12' FROM t;\nSELECT 1;",
+    acceptedBy: "postgres",
+    reason:
+      "PostgreSQL's lexer takes any characters in B'…' and checks the digits only when the value is read; this lexer rejects a digit other than 0 or 1 while lexing (a MALFORMED row).",
   },
   // Battery rows recorded as rejected here: statements not supported yet.
   { sql: "ALTER SYSTEM SET work_mem = '64MB';", acceptedBy: "postgres", reason: NOT_YET_SUPPORTED },
@@ -135,42 +147,64 @@ const PARSER_DIFFERENCES: ParserDifference[] = [
   },
 ];
 
-/** A source whose printed SQL PostgreSQL parses to a different tree, with why that is accepted. */
-type PrinterDifference = { sql: string; reason: string };
+/**
+ * A single-statement source whose printed SQL PostgreSQL parses to a
+ * different tree: every path where the two trees differ, in order, and why
+ * that is accepted. Any other difference in the statement still fails.
+ */
+type PrinterDifference = { sql: string; paths: string[]; reason: string };
 
-const PG_CATALOG =
-  "PostgreSQL's raw tree qualifies a type's keyword spelling with pg_catalog; our tree keeps the bare name, which the printer writes and PostgreSQL resolves to the same pg_catalog type through the search path.";
+const TARGETS = "$.0.SelectStmt.targetList";
 
 const PRINTER_DIFFERENCES: PrinterDifference[] = [
-  // `N'…'` is a typedLiteral of type `bpchar` (README: AST conventions), printed `bpchar '…'`.
-  { sql: "SELECT N'national', n'char';", reason: PG_CATALOG },
+  // Our tree loses the difference, and PostgreSQL resolves both to the same thing.
+  {
+    sql: "SELECT N'national', n'char';",
+    paths: [`${TARGETS}.0.ResTarget.val.TypeCast.typeName.names`, `${TARGETS}.1.ResTarget.val.TypeCast.typeName.names`],
+    reason:
+      "`N'…'` is a typedLiteral of type `bpchar` (README: AST conventions), printed `bpchar '…'`. PostgreSQL's tree has `pg_catalog.bpchar` for the source and `bpchar` for the print, which the search path resolves to the same type.",
+  },
   {
     sql: "SELECT 'it''s', E'a\\nb', 'tab\there', '', N'x', B'101', X'ff', 1.50, 5., 1e2, 0x1F, .5;",
-    reason: PG_CATALOG,
+    paths: [`${TARGETS}.4.ResTarget.val.TypeCast.typeName.names`],
+    reason: "`N'x'`, as in the row above.",
   },
-  // A quoted `"interval"` gives the same tree as the bare word (the grammar's
-  // KEYWORD_TYPE_NAMES leaves `interval` out because both name one type).
-  { sql: `SELECT "interval" '1', a::"interval", a::"between", "row" 'x';`, reason: PG_CATALOG },
+  {
+    sql: `SELECT "interval" '1', a::"interval", a::"between", "row" 'x';`,
+    paths: [`${TARGETS}.1.ResTarget.val.TypeCast.typeName.names`],
+    reason:
+      "A cast to `\"interval\"` gives the same tree as one to `interval` (the grammar's KEYWORD_TYPE_NAMES leaves it out, since both name one type), and the printer writes the keyword. PostgreSQL's tree has a bare `interval` for the source and `pg_catalog.interval` for the print, which the search path resolves to the same type.",
+  },
   {
     sql: "SELECT * FROM t LIMIT ALL;",
+    paths: ["$.0.SelectStmt.limitCount", "$.0.SelectStmt.limitOption"],
     reason:
-      "LIMIT ALL gives `limit: null`, the same tree as no LIMIT, so it prints as no LIMIT; PostgreSQL keeps a null limitCount. The two mean the same.",
+      "LIMIT ALL gives `limit: null`, the same tree as no LIMIT, so it prints as no LIMIT. PostgreSQL's tree has LIMIT NULL (an `isnull` constant) for the source, which also means no limit.",
   },
   {
     sql: "SELECT '{}'::int[3], '{}'::text[][];",
+    paths: [
+      `${TARGETS}.0.ResTarget.val.TypeCast.typeName.arrayBounds.0.Integer.ival`,
+      `${TARGETS}.1.ResTarget.val.TypeCast.typeName.arrayBounds`,
+    ],
     reason:
-      "A type's array sizes and dimension count aren't in the tree (`array: true`), so `int[3]` and `text[][]` print as `int[]` and `text[]`. PostgreSQL ignores both, so the meaning is the same.",
+      "A type's array sizes and dimension count aren't in our tree (`array: true`), so `int[3]` and `text[][]` print as `int[]` and `text[]`. PostgreSQL ignores both, so the meaning is the same.",
   },
-  // Printer known limits, each a real meaning change the tree can't express.
+  // Printer known limits: real meaning changes our tree can't express.
   {
     sql: "(WITH a AS (SELECT 1) SELECT 2 ORDER BY 1) UNION SELECT 3;",
+    paths: ["$.0.SelectStmt.larg.withClause", "$.0.SelectStmt.withClause"],
     reason:
-      "Known limit: the tree gives `(WITH a … SELECT …) UNION …` and `WITH a … SELECT … UNION …` the same shape, and the printer writes the second, which scopes the CTE over every arm.",
+      "Our tree gives `(WITH a … SELECT …) UNION …` and `WITH a … SELECT … UNION …` the same shape, and the printer writes the second, which scopes the CTE over every arm.",
   },
   {
     sql: 'SELECT "system_user", "current_catalog", "current_schema", "collation", "isnull" FROM "similar" AS "full";',
+    paths: [0, 1, 2].flatMap((i) => [
+      `${TARGETS}.${i}.ResTarget.val.ColumnRef`,
+      `${TARGETS}.${i}.ResTarget.val.${["FuncCall", "SQLValueFunction", "SQLValueFunction"][i]}`,
+    ]),
     reason:
-      "Known limit: a lone quoted `system_user` / `current_catalog` / `current_schema` column gives the same tree as the bare SQL function, which the printer writes.",
+      "A lone quoted `system_user` / `current_catalog` / `current_schema` column gives the same tree as the bare SQL function, which the printer writes.",
   },
 ];
 
@@ -182,57 +216,102 @@ const SOURCES = [
     ...SUPPLEMENTAL,
     ...MULTI_LINE,
     ...LEXER_EDGE_CASES,
+    ...MALFORMED,
     ...PG_BATTERY.map((row) => row.sql),
     ...DUMP_STATEMENTS,
   ]),
 ];
 
-// The layouts compared: one line, a narrow width, width 1 (every break the
-// layout allows, where a break the lexer reads as meaning would show), and the
-// non-default lexical options.
+// The layouts compared: the default (one line), width 80 (the goldens' width),
+// a narrow width, width 1 (every break the layout allows, where a break the
+// lexer reads as meaning would show), and the non-default lexical options.
 const OPTIONS: StringifyOptions[] = [
-  { width: Number.POSITIVE_INFINITY },
+  {},
+  { width: 80 },
   { width: 40 },
   { width: 1 },
   { width: 40, keywordCase: "lower", identifierQuote: "always", strings: "escape" },
 ];
 
-const isPositional = (key: string): boolean => key === "location" || key.endsWith("_location") || key === "stmt_len";
-
-/** `value` with every positional field removed, recursively. */
+/** `value` without its positions: every numeric `location` / `*_location` field, recursively. */
 const normalise = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(normalise);
   if (value === null || typeof value !== "object") return value;
   const out: Record<string, unknown> = {};
-  for (const [key, field] of Object.entries(value)) if (!isPositional(key)) out[key] = normalise(field);
+  for (const [key, field] of Object.entries(value)) {
+    const positional = (key === "location" || key.endsWith("_location")) && typeof field === "number";
+    if (!positional) out[key] = normalise(field);
+  }
   return out;
 };
 
-/** PostgreSQL's statement trees for `sql`, positions removed; throws when PostgreSQL rejects it. */
+/** PostgreSQL's statement trees for `sql`, positions removed; throws a `SqlError` when PostgreSQL rejects it. */
 const pgTrees = (sql: string): unknown[] =>
   ((parseSync(sql) as { stmts?: { stmt: unknown }[] }).stmts ?? []).map((raw) => normalise(raw.stmt));
 
-const accepts = (parse: () => unknown): boolean => {
+/** Whether `parse` returns; only the parse error `rejected` names counts as a rejection, anything else propagates. */
+const accepts = (parse: () => unknown, rejected: abstract new (...args: never[]) => Error): boolean => {
   try {
     parse();
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (error instanceof rejected) return false;
+    throw error;
   }
 };
 
-/** The path to the first place `a` and `b` differ, and both values there. */
-const firstDifference = (a: unknown, b: unknown, path = "$"): string => {
-  if (a !== null && b !== null && typeof a === "object" && typeof b === "object") {
+/** One place two trees differ: its path, and the value on each side (undefined where absent). */
+type Difference = { path: string; from: unknown; to: unknown };
+
+/**
+ * Every place `a` and `b` differ. Objects are compared key by key and arrays
+ * of one length item by item; anything else that differs (arrays of different
+ * lengths included) is one difference.
+ */
+const differences = (a: unknown, b: unknown, path = "$"): Difference[] => {
+  if (isDeepStrictEqual(a, b)) return [];
+  const bothObjects = a !== null && b !== null && typeof a === "object" && typeof b === "object";
+  if (
+    bothObjects &&
+    Array.isArray(a) === Array.isArray(b) &&
+    (!Array.isArray(a) || a.length === (b as unknown[]).length)
+  ) {
     const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])];
-    for (const key of keys) {
-      const x = (a as Record<string, unknown>)[key];
-      const y = (b as Record<string, unknown>)[key];
-      if (!isDeepStrictEqual(x, y)) return firstDifference(x, y, `${path}.${key}`);
-    }
+    return keys.flatMap((key) =>
+      differences((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], `${path}.${key}`),
+    );
   }
-  return `${path}: ${JSON.stringify(a)} became ${JSON.stringify(b)}`;
+  return [{ path, from: a, to: b }];
 };
+
+/**
+ * What is wrong with `printed` as SQL for the statements whose trees are
+ * `expected`: nothing (undefined) when PostgreSQL parses it to trees that
+ * differ at exactly the `allowed` paths.
+ */
+const printedProblem = (expected: unknown[], printed: string, allowed: readonly string[] = []): string | undefined => {
+  let got: unknown[];
+  try {
+    got = pgTrees(printed);
+  } catch (error) {
+    if (!(error instanceof SqlError)) throw error;
+    return `PostgreSQL rejects it: ${formatSqlError(error, printed)}`;
+  }
+  const found = differences(expected, got);
+  if (
+    isDeepStrictEqual(
+      found.map(({ path }) => path),
+      allowed,
+    )
+  )
+    return undefined;
+  const lines = found.map(({ path, from, to }) => `${path}: ${JSON.stringify(from)} became ${JSON.stringify(to)}`);
+  const listed = allowed.length > 0 ? `\n    listed: ${allowed.join(", ")}` : "";
+  return `${lines.length > 0 ? lines.join("\n    ") : "no difference"}${listed}`;
+};
+
+const optionsLabel = (options: StringifyOptions): string =>
+  JSON.stringify({ ...options, ...("width" in options && { width: String(options.width) }) });
 
 beforeAll(async () => {
   await loadModule();
@@ -240,7 +319,8 @@ beforeAll(async () => {
 
 describe("libpg_query differential", () => {
   // The normalisation removes positions and nothing else: a constant's type,
-  // parentheses that change grouping and a quoted name all still show.
+  // parentheses that change grouping, a quoted name and a string `location`
+  // all still show.
   it("compares trees without positions, keeping everything else", () => {
     const same = (a: string, b: string): boolean => isDeepStrictEqual(pgTrees(a), pgTrees(b));
     expect(same("SELECT  a   + 1 FROM t", "SELECT a+1\nFROM t")).toBe(true);
@@ -254,33 +334,57 @@ describe("libpg_query differential", () => {
     expect(same("SELECT a - (b - c)", "SELECT a - b - c")).toBe(false);
     expect(same('SELECT "A"', "SELECT A")).toBe(false);
     expect(same("SELECT a::int", "SELECT a::int4")).toBe(false);
+    expect(same("CREATE TABLESPACE ts LOCATION '/a'", "CREATE TABLESPACE ts LOCATION '/b'")).toBe(false);
+  });
+
+  // An allowlisted source is still compared everywhere outside its listed
+  // differences: a further change in it fails, and so does the listed
+  // difference disappearing.
+  it("holds an allowlisted source to exactly its listed differences", () => {
+    const entry = PRINTER_DIFFERENCES.find(({ sql }) => sql.includes("1.50"));
+    expect(entry).toBeDefined();
+    const { sql, paths: allowed } = entry!;
+    const expected = pgTrees(sql);
+    const printed = stringify(postgres.parse(sql)[0]!);
+    expect(printedProblem(expected, printed, allowed)).toBeUndefined();
+    expect(printedProblem(expected, printed.replace("1.50", "1.5"), allowed)).toBeDefined();
+    expect(printedProblem(expected, sql, allowed)).toBe(`no difference\n    listed: ${allowed.join(", ")}`);
+    expect(printedProblem(expected, "SELECT FROM WHERE", allowed)).toMatch(/^PostgreSQL rejects it/);
   });
 
   it("accepts exactly what PostgreSQL accepts, with the same statement count", () => {
     const disagreements: string[] = [];
     const counts: string[] = [];
-    let agree = 0;
+    let bothAccept = 0;
+    let bothReject = 0;
     for (const sql of SOURCES) {
-      const ours = accepts(() => postgres.parse(sql));
-      const theirs = accepts(() => parseSync(sql));
+      const ours = accepts(() => postgres.parse(sql), ParseError);
+      const theirs = accepts(() => parseSync(sql), SqlError);
       if (ours !== theirs) {
         disagreements.push(`${ours ? "ours" : "postgres"}: ${sql}`);
-        continue;
+      } else if (!ours) {
+        bothReject++;
+      } else {
+        bothAccept++;
+        const [mine, pg] = [postgres.parse(sql).length, pgTrees(sql).length];
+        if (mine !== pg) counts.push(`${mine} statements here, ${pg} in PostgreSQL: ${sql}`);
       }
-      agree++;
-      if (ours && postgres.parse(sql).length !== pgTrees(sql).length) counts.push(sql);
     }
     const expected = PARSER_DIFFERENCES.map(({ sql, acceptedBy }) => `${acceptedBy}: ${sql}`);
-    report(`parser: ${agree} agree, ${disagreements.length} disagree (${expected.length} allowlisted)`);
+    report(
+      `parser: ${bothAccept} sources both accept, ${bothReject} both reject, ${disagreements.length} disagree (${expected.length} allowlisted)`,
+    );
     expect(counts).toEqual([]);
     expect(disagreements.sort()).toEqual(expected.sort());
   });
 
   it("prints SQL that PostgreSQL parses to the same tree", () => {
-    const mismatches = new Map<string, string[]>();
+    const allowed = new Map(PRINTER_DIFFERENCES.map((entry) => [entry.sql, entry.paths]));
+    const failures: string[] = [];
     let printed = 0;
     let differing = 0;
     let skipped = 0;
+    let notCompared = 0;
     for (const sql of SOURCES) {
       let stmts: Stmt[];
       let expected: unknown[];
@@ -288,47 +392,52 @@ describe("libpg_query differential", () => {
         stmts = postgres.parse(sql);
         expected = pgTrees(sql);
       } catch {
-        continue; // a parser disagreement, checked above
+        notCompared++; // rejected by either parser: checked above
+        continue;
       }
-      if (stmts.length !== expected.length) continue; // a statement-count disagreement, checked above
+      if (stmts.length !== expected.length) {
+        notCompared++; // a statement-count disagreement, checked above
+        continue;
+      }
+      const listed = allowed.get(sql);
+      if (listed !== undefined && stmts.length !== 1) {
+        failures.push(`${sql}\n  a PRINTER_DIFFERENCES entry must be a single statement`);
+        continue;
+      }
+      let whole = true;
       stmts.forEach((stmt, i) => {
-        try {
-          stringify(stmt);
-        } catch (error) {
-          if (!(error instanceof NotPrintableError)) throw error;
-          skipped++;
-          return;
-        }
-        printed++;
-        let differs = false;
         for (const options of OPTIONS) {
-          const out = stringify(stmt, options);
-          let problem: string | undefined;
+          let out: string;
           try {
-            const got = pgTrees(out);
-            if (!isDeepStrictEqual(got, [expected[i]])) problem = firstDifference([expected[i]], got);
+            out = stringify(stmt, options);
           } catch (error) {
-            problem = `PostgreSQL rejects it: ${String(error)}`;
+            if (error instanceof NotPrintableError) {
+              skipped++;
+              whole = false;
+              return;
+            }
+            failures.push(`${sql}\n  ${optionsLabel(options)}: stringify threw ${String(error)}`);
+            whole = false;
+            return;
           }
+          if (options === OPTIONS[0]) printed++;
+          const problem = printedProblem([expected[i]], out, listed);
           if (problem === undefined) continue;
-          differs = true;
-          const lines = mismatches.get(sql) ?? [];
-          lines.push(
-            `${JSON.stringify({ ...options, width: String(options.width) })}\n    printed: ${out}\n    ${problem}`,
-          );
-          mismatches.set(sql, lines);
+          failures.push(`${sql}\n  ${optionsLabel(options)}\n    printed: ${out}\n    ${problem}`);
         }
-        if (differs) differing++;
+        if (listed !== undefined) differing++;
       });
+      // A source of several statements, printed whole with its separators.
+      if (whole && stmts.length > 1) {
+        const out = stringify(stmts);
+        const problem = printedProblem(expected, out);
+        if (problem !== undefined) failures.push(`${sql}\n  whole\n    printed: ${out}\n    ${problem}`);
+      }
     }
-    const allowed = new Set(PRINTER_DIFFERENCES.map(({ sql }) => sql));
-    const unexpected = [...mismatches].filter(([sql]) => !allowed.has(sql));
-    const stale = [...allowed].filter((sql) => !mismatches.has(sql));
     report(
-      `printer: ${printed} statements printed, ${printed - differing} agree, ${differing} differ (in ${mismatches.size} sources, ${allowed.size} allowlisted); ${skipped} not printable yet`,
+      `printer: ${printed} statements printed, ${printed - differing} the same tree, ${differing} with listed differences; ${skipped} not printable yet; ${notCompared} sources not compared (a parser disagreement or rejected by both)`,
     );
-    expect(unexpected.map(([sql, lines]) => `${sql}\n  ${lines.join("\n  ")}`)).toEqual([]);
-    expect(stale).toEqual([]);
+    expect(failures).toEqual([]);
   });
 });
 
