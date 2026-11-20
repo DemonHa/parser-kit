@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
 import { sqlLite } from "../src/index";
-import { splitPsqlScript } from "../src/psql-split";
+import { splitPsqlScript } from "../test/psql-split";
 
 // Large-file throughput: how do sql-lite and node-sql-parser compare when fed a
 // single big multi-statement SQL blob (think a schema dump or migration file)?

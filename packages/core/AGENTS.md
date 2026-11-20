@@ -112,6 +112,5 @@ feature:
   not to format them, so `pnpm lint:fix` can't quietly rewrite the baseline.
 - The `build` (`tsconfig.build.json`) compiles `src/` only; tests are excluded
   from it but are type-checked by `types:check`, as are the grammars in `../sql`
-  and `examples/`. The
-  published tarball ships `build/` plus `src/` (minus tests) so the emitted
+  and `examples/`. The published tarball ships `build/` plus `src/` (minus tests) so the emitted
   declaration maps resolve to real sources in editors. Don't commit `build/`.

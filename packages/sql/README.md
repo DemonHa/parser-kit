@@ -17,6 +17,8 @@ npm install @parser-kit/sql
 pnpm add @parser-kit/sql
 ```
 
+`@parser-kit/core` comes along as a dependency. If you import from it directly (`ParseError` for an `instanceof` check, `stripSpans`), add it to your own dependencies too, in a range that matches the one `@parser-kit/sql` declares, so both resolve to the same copy.
+
 ## Usage (PostgreSQL dialect)
 
 The PostgreSQL entry points are `sqlLite` (SQL as the server receives it) and `sqlLiteScript` (whole psql scripts). Both have `parse` and `diagnose`.
@@ -28,7 +30,7 @@ const ast = sqlLite.parse("SELECT id, count(DISTINCT tag) FROM posts WHERE creat
 // → Stmt[]: one node per statement, statements and expressions carrying a { start, end } span
 ```
 
-The root is a list of statements. `;` separates them, and the last one may leave it out. Empty statements (`;;`, a leading `;`, input that is only comments) produce no node, and `SELECT 1 SELECT 2` is still an error. Unquoted identifiers fold ASCII letters to lower case, as PostgreSQL does, and quoted ones keep their case. Keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is, and they are not kept in the AST. Every node type is exported from the package (`Stmt`, `Query`, `Expr`, `ScriptItem`, …), as are the lexers and the token type `SqlTokenType`.
+The root is a list of statements. `;` separates them, and the last one may leave it out. Empty statements (`;;`, a leading `;`, input that is only comments) produce no node, and `SELECT 1 SELECT 2` is still an error. Unquoted identifiers fold ASCII letters to lower case, as PostgreSQL does, and quoted ones keep their case. Keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is, and they are not kept in the AST. The node types are exported from the package (`Stmt`, `Query`, `Expr`, `ScriptItem`, …), as are the lexers and the token type `SqlTokenType`.
 
 `parse` throws a `ParseError` (exported by `@parser-kit/core`) at the first problem:
 
@@ -77,16 +79,16 @@ The statements are read by the same rules as `sqlLite`'s, so a script differs fr
 
 ## Repository layout
 
-The package lives at [`packages/sql`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql) in the parser-kit repo. Only `src/` and its build output are published; the tests, corpora, fixtures and benchmarks stay in the repo.
+The package lives at [`packages/sql`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql) in the parser-kit repo. Only `src/` and its build output are published. The tests, corpora, fixtures and benchmarks stay in the repo.
 
 | File | What it is |
 |---|---|
 | `src/lexer.ts` | Tokens: identifier folding (ASCII only, non-ASCII letters allowed), quoted and `U&"…"` identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` / `N'…'` strings with every escape PostgreSQL decodes, PostgreSQL numbers (`1e5`, `.5`, `5.`, `0xff`, `0o17`, `0b101`, `1_000`, with PostgreSQL 15+'s rejection of `123abc`), `$1` parameters, comments, and the operator reader. `sqlLexer` emits `comment` tokens. `sqlParseLexer`, which the grammar uses, drops them. `sqlScriptLexer` / `sqlScriptParseLexer` add psql meta-command lines and COPY data blocks |
 | `src/grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, one rule per statement, and the `sqlLite` / `sqlLiteScript` entry points |
 | `src/index.ts` | The package entry: re-exports both |
-| `src/psql-split.ts` | A test helper that splits a dump file into statements the way psql does. Not exported from the package entry |
 | `test/sql-lite.test.ts` | Unit tests, one `describe` per feature |
 | `test/entry.test.ts` | Pins the package entry's exports |
+| `test/psql-split.ts` | A test helper that splits a dump file into statements the way psql does |
 | `test/corpus.ts` | The statements the benchmark measures and the parity golden pins |
 | `test/parity.test.ts` + `test/parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus a supplemental list |
 | `test/pg-coverage.ts` + `test/pg-coverage.test.ts` | The PostgreSQL coverage battery: 609 statements with the bucket each one lands in |
@@ -249,7 +251,7 @@ PG_COVERAGE_REPORT=1 pnpm vitest run packages/sql/test/pg-coverage.test.ts
 
 ### pg_dump corpus
 
-`test/pg-dump-corpus.test.ts` runs real pg_dump output through `sqlLite.parse`, one statement at a time. `src/psql-split.ts` splits each file the way psql does. It respects strings, dollar quotes and `BEGIN ATOMIC` bodies. It also sets aside `COPY … FROM stdin` data blocks and `\` meta-command lines (`\connect`, `\restrict`, …), which `sqlLite.parse` doesn't take. Every statement's outcome is pinned in `test/pg-dump-corpus.ts`, so a statement that starts or stops parsing fails the test. The test then parses each file whole with `sqlLiteScript`. The errors must fall in exactly the pinned failing statements, and its meta-command and COPY items must match what the splitter found. A file with no failing statement must pass `sqlLiteScript.parse`. The dumps live in `test/fixtures/pg-dump/` (repository only, not in the npm package):
+`test/pg-dump-corpus.test.ts` runs real pg_dump output through `sqlLite.parse`, one statement at a time. `test/psql-split.ts` splits each file the way psql does. It respects strings, dollar quotes and `BEGIN ATOMIC` bodies. It also sets aside `COPY … FROM stdin` data blocks and `\` meta-command lines (`\connect`, `\restrict`, …), which `sqlLite.parse` doesn't take. Every statement's outcome is pinned in `test/pg-dump-corpus.ts`, so a statement that starts or stops parsing fails the test. The test then parses each file whole with `sqlLiteScript`. The errors must fall in exactly the pinned failing statements, and its meta-command and COPY items must match what the splitter found. A file with no failing statement must pass `sqlLiteScript.parse`. The dumps live in `test/fixtures/pg-dump/` (repository only, not in the npm package):
 
 - `pagila-schema.sql` is the [pagila](https://github.com/devrimgunduz/pagila) sample database's schema (pg_dump 15beta2 of a 12.11 server), vendored unmodified under the PostgreSQL License (`pagila-LICENSE.txt`).
 - `handwritten-pg17.sql` is written by hand in the shape pg_dumpall/pg_dump 17.6 produce. It covers what the sample dump lacks: `\restrict`, roles, row-level security and policies, default privileges, publications, identity columns, `ALTER INDEX … ATTACH PARTITION`, `BEGIN ATOMIC` bodies and COPY blocks.
@@ -488,7 +490,7 @@ The committed `bench-baseline.json` covers every bench file: the per-construct c
 
 ## Contributing
 
-Run everything from the repository root (`pnpm test`, `pnpm types:check`, `pnpm lint`). The repo-wide workflow is in [CONTRIBUTING.md](../../CONTRIBUTING.md). Specific to this grammar:
+Run everything from the repository root (`pnpm test`, `pnpm types:check`, `pnpm lint`). The repo-wide workflow is in [CONTRIBUTING.md](https://github.com/DemonHa/parser-kit/blob/main/CONTRIBUTING.md). Specific to this grammar:
 
 - **Tests first, at the level the change lives.** New syntax gets a `describe` block in `test/sql-lite.test.ts` asserting the span-stripped AST with `toEqual`, plus the error message for the nearest malformed input.
 - **Follow the [AST conventions](#ast-conventions).** A new field is optional and left out when absent, so trees for input that doesn't use the construct stay byte-identical.

@@ -12,12 +12,12 @@ internals and grammar-authoring gotchas.
 
 - `src/` — the published code. `lexer.ts` (tokens, folding, strings, psql
   script lexers), `grammar.ts` (AST types, reserved words, the Pratt table, one
-  rule per statement, the entry points), `index.ts` (the package entry),
-  `psql-split.ts` (a test helper, not exported from the entry).
+  rule per statement, the entry points), and `index.ts` (the package entry).
 - `test/` — unit tests (`sql-lite.test.ts`), the entry-surface pin
   (`entry.test.ts`), the parity harness and its goldens, the PostgreSQL coverage
   battery (`pg-coverage.ts`) and the pg_dump corpus (`pg-dump-corpus.ts`,
-  `fixtures/pg-dump/`, pagila vendored under the PostgreSQL License).
+  `fixtures/pg-dump/`, pagila vendored under the PostgreSQL License) and
+  `psql-split.ts`, the psql-style statement splitter the corpus test uses.
 - `bench/` — the node-sql-parser comparisons. `bench-baseline.json` at the repo
   root keys on their file paths and group names.
 
@@ -30,6 +30,9 @@ fixtures reach the tarball.
 - **The public API is `src/index.ts`.** Removing or renaming an export, or
   changing an AST node's shape, is a breaking change for npm consumers and needs
   a changeset that says so. `test/entry.test.ts` pins the exported values.
+  `copyDataError` and `routineDepth` are exported only because `index.ts`
+  re-exports all of `lexer.ts`. They are grammar/lexer plumbing, and trimming
+  them is part of the pending multi-dialect API decision.
 - **New AST fields are optional and left out when absent**, so trees for input
   that doesn't use the construct stay byte-identical (see the README's AST
   conventions).

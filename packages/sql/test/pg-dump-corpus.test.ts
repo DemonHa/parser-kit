@@ -1,8 +1,8 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { type Copy, type ScriptItem, sqlLite, sqlLiteScript } from "../src/index";
-import { splitPsqlScript } from "../src/psql-split";
 import { type DumpOutcome, type DumpRow, PG_DUMP_EXPECTATIONS } from "./pg-dump-corpus";
+import { splitPsqlScript } from "./psql-split";
 
 // Re-parses every statement of the pg_dump files in `fixtures/pg-dump/` with
 // `sqlLite.parse` and pins each outcome in `pg-dump-corpus.ts`. A statement
