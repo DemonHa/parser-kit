@@ -60,37 +60,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
-      # The published tarball must resolve catalog: specifiers and must import
-      # cleanly in both module systems. Only `pnpm pack` rewrites catalog:, so a
-      # leak here means the release script was switched to npm by mistake.
-      - name: Pack and verify the tarball
-        run: |
-          set -euo pipefail
-          cd packages/core
-          pnpm pack --pack-destination /tmp/pack
-          TGZ=$(ls /tmp/pack/*.tgz)
-          tar -xzOf "$TGZ" package/package.json > /tmp/manifest.json
-
-          # List the entries once, then grep the file. `tar | grep -q` is a
-          # trap under pipefail: grep exits on its first match, GNU tar dies
-          # writing to the closed pipe, and the pipeline reports the *match*
-          # as a failure. The negative check inverts the same way — a leaked
-          # test file would short-circuit grep and read as "nothing leaked".
-          tar -tzf "$TGZ" > /tmp/entries.txt
-
-          if grep -q '"catalog:"' /tmp/manifest.json; then
-            echo "::error::catalog: specifier leaked into the published manifest"
-            cat /tmp/manifest.json
-            exit 1
-          fi
-          for required in package/LICENSE package/README.md package/build/esm/index.js package/build/cjs/index.js; do
-            grep -qx "$required" /tmp/entries.txt || { echo "::error::missing $required"; exit 1; }
-          done
-          if grep -q '\.test\.ts$' /tmp/entries.txt; then
-            echo "::error::test files leaked into the tarball"; exit 1
-          fi
-
-          mkdir -p /tmp/smoke && cd /tmp/smoke && npm init -y >/dev/null
-          npm install "$TGZ" >/dev/null
-          node -e "import('@parser-kit/core').then(m => { if (!m.defineGrammar) throw new Error('ESM export missing'); console.log('ESM ok:', Object.keys(m).length, 'exports'); })"
-          node -e "const m = require('@parser-kit/core'); if (!m.defineGrammar) throw new Error('CJS export missing'); console.log('CJS ok:', Object.keys(m).length, 'exports');"
+      # Packs core and sql the way the release does, checks each tarball's
+      # manifest and contents, and installs both into a scratch project to
+      # import them from ESM, CJS and TypeScript. See the script for details.
+      - name: Pack and verify the tarballs
+        run: bash scripts/verify-packages.sh
