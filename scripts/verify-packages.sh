@@ -53,6 +53,7 @@ verify() {
   if [ -n "$allowed" ]; then
     local status=0
     grep -vE "$allowed" "$WORK/entries.txt" > "$WORK/unexpected.txt" || status=$?
+    [ "$status" -ne 2 ] || { echo "::error::$dir: grep failed on the allowlist regex"; exit 1; }
     if [ "$status" -ne 1 ]; then
       echo "::error::$dir: files outside the allowlist in the tarball"
       cat "$WORK/unexpected.txt"

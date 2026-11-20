@@ -39,17 +39,18 @@ fixtures reach the tarball.
 ## Rules
 
 - **The public API is `src/index.ts`.** `test/entry.test.ts` pins its exported
-  values and the signatures of `dbml.parse` / `dbml.diagnose`; any change to the
-  exports updates it. Don't export grammar internals (rules, the raw-name
-  lookup).
+  values and the parameters of `dbml.parse` / `dbml.diagnose` (and their return
+  types once the AST exists); any change to the exports updates it. Don't
+  export grammar internals (rules, the raw-name lookup).
 - **No changesets while the package is private.** The release that drops
   `private: true` adds the package's first changeset.
 - **Match `@dbml/core`'s syntax.** Accept what it accepts and reject what it
   rejects, syntactically. Where its docs and its implementation disagree,
   follow the implementation. Semantic checks (unknown tables, duplicates, empty
   tables, partial merging, colour validation) are not parse errors. Every
-  intended difference goes in the README's differences list and the
-  differential test's allowlist, with a reason.
+  intended difference goes in the differential test's allowlist with a
+  reason, and in the PR description so it reaches the README's differences
+  list.
 - **Keywords are case-insensitive and contextual, never reserved.** `Table`,
   `table` and `TABLE` are the same keyword, and a column, table, enum value or
   alias may still be named `note`, `ref`, `indexes`, `checks`, `records`,
@@ -87,10 +88,11 @@ fixtures reach the tarball.
   the diff out in the PR. Biome ignores `*.golden.json`.
 - **`@dbml/core` is only ever a test and bench dependency**, pinned to an exact
   version in the workspace catalog. Upgrading it is its own change that re-runs
-  the differential test and updates the allowlist and the README.
-- **README.** Only the change that publishes the package rewrites `README.md`
-  and the root README's packages row; feature changes put user-facing notes in
-  their PR description instead.
+  the differential test and updates the allowlist.
+- **README.** Until the package is published, only the change that publishes
+  it rewrites `README.md` and the root README's packages row. Other changes put
+  user-facing notes, including new differences from `@dbml/core`, in their PR
+  description instead.
 - **Before pushing**, run `pnpm lint`, `pnpm types:check`, `pnpm test` and
   `pnpm build` from the repo root, plus `bash scripts/verify-packages.sh` when
   packaging changes.
