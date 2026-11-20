@@ -1,0 +1,545 @@
+// Queries: SELECT, VALUES, TABLE and set operations, with their WITH and
+// ORDER BY / LIMIT / OFFSET / FETCH / locking tails, and every FROM item.
+//
+// `expr.ts` and `query.ts` import each other (expressions hold subqueries,
+// queries hold expressions), so neither may use the other's exports at module
+// load (no top-level calls, spreads or `extendPrinter` of them), only inside
+// functions.
+import { type Doc, definePrinter, group, indent, join, line, type NodePrinter } from "@parser-kit/core/print";
+import type {
+  ColumnDefinition,
+  Cte,
+  Expr,
+  FromItem,
+  GroupByItem,
+  JsonTableColumn,
+  LockingClause,
+  Preparable,
+  Query,
+  SelectItem,
+  SelectStmt,
+  SetOperation,
+  SetOpKind,
+  TableSample,
+  XmlNamespace,
+  XmlTableColumn,
+} from "../ast";
+import {
+  clause,
+  commaList,
+  firstText,
+  functionWord,
+  ident,
+  kw,
+  mayOpenWithParen,
+  parenList,
+  parens,
+  qualified,
+  quoted,
+  str,
+} from "./context";
+import {
+  atomic,
+  bExpr,
+  expr,
+  jsonBehavior,
+  jsonFormat,
+  jsonPassing,
+  jsonQuotes,
+  jsonValue,
+  jsonWrapper,
+  orderBy,
+  printExpr,
+  windowSpec,
+  xmlPassing,
+} from "./expr";
+import { flat } from "./flat";
+import { defineFamily, statementPrinter } from "./registry";
+import { typeName } from "./types";
+
+// --- names and aliases ---
+
+/** ` AS alias (a, b)`, or nothing. AS is always written: a keyword alias needs it. */
+// Exported for the DML family (UPDATE / DELETE / MERGE aliases), as are
+// `selectItems` (RETURNING), `withClause`, `isQuery` and `columnDefinition`.
+export const aliasClause = (alias: string | null | undefined, columns?: string[]): Doc =>
+  alias === null || alias === undefined
+    ? ""
+    : columns === undefined
+      ? ` ${kw("AS")} ${ident(alias)}`
+      : [` ${kw("AS")} ${ident(alias)} `, parenList(columns.map(ident))];
+
+const selectItem = (i: SelectItem): Doc =>
+  i.alias !== null ? [expr(i.expr), ` ${kw("AS")} ${ident(i.alias)}`] : expr(i.expr);
+
+/** A RETURNING-shaped list: what a SELECT list holds. */
+export const selectItems = (items: readonly SelectItem[]): Doc => commaList(items.map(selectItem));
+
+// --- WITH ---
+
+const QUERY_KINDS = new Set(["select", "values", "tableCmd", "setOp"]);
+export const isQuery = (s: Preparable): s is Query => QUERY_KINDS.has(s.kind);
+
+const cte = (c: Cte): Doc => [
+  // A first CTE named `recursive` would read as the keyword.
+  c.name === "recursive" ? quoted(c.name) : ident(c.name),
+  c.columns !== null ? [" ", parenList(c.columns.map(ident))] : "",
+  " ",
+  kw("AS"),
+  " ",
+  c.materialized === true ? `${kw("MATERIALIZED")} ` : c.materialized === false ? `${kw("NOT MATERIALIZED")} ` : "",
+  parens(isQuery(c.query) ? printQuery(c.query) : statementPrinter.print(c.query)),
+  c.search !== undefined
+    ? [
+        line,
+        clause(
+          kw(c.search.order === "depth" ? "SEARCH DEPTH FIRST BY" : "SEARCH BREADTH FIRST BY"),
+          commaList(c.search.by.map(ident)),
+        ),
+        ` ${kw("SET")} ${ident(c.search.set)}`,
+      ]
+    : "",
+  c.cycle !== undefined
+    ? [
+        line,
+        clause(kw("CYCLE"), commaList(c.cycle.columns.map(ident))),
+        " ",
+        kw("SET"),
+        " ",
+        ident(c.cycle.set),
+        c.cycle.mark !== null
+          ? [" ", kw("TO"), " ", expr(c.cycle.mark.to), " ", kw("DEFAULT"), " ", expr(c.cycle.mark.default)]
+          : "",
+        " ",
+        kw("USING"),
+        " ",
+        ident(c.cycle.using),
+      ]
+    : "",
+];
+
+/** `WITH [RECURSIVE] a AS (…), b AS (…)`. */
+export const withClause = (ctes: readonly Cte[], recursive: boolean | undefined): Doc =>
+  clause(recursive ? kw("WITH RECURSIVE") : kw("WITH"), commaList(ctes.map(cte)));
+
+// --- queries ---
+
+const hasWith = (q: Query): boolean => q.with_ !== null && q.with_ !== undefined;
+const hasTail = (q: Query): boolean => q.orderBy != null || q.limit != null || q.offset != null || q.locking != null;
+
+// The grammar puts a WITH written over a set operation on its leftmost arm
+// (see attachWith), reaching through any parenthesised arm on the way. So a
+// leftmost arm's WITH is written at the front of the whole query, where it
+// came from, unless some set operation on the way down has a WITH of its own.
+const hoistedWith = (q: Query): Query | null => {
+  let node = q;
+  while (node.kind === "setOp") {
+    if (hasWith(node)) return null;
+    node = node.left;
+  }
+  return node !== q && hasWith(node) ? node : null;
+};
+
+const LEVEL: Record<SetOpKind, number> = {
+  union: 1,
+  unionAll: 1,
+  except: 1,
+  exceptAll: 1,
+  intersect: 2,
+  intersectAll: 2,
+};
+const SET_OPS: Record<SetOpKind, string> = {
+  union: "UNION",
+  unionAll: "UNION ALL",
+  except: "EXCEPT",
+  exceptAll: "EXCEPT ALL",
+  intersect: "INTERSECT",
+  intersectAll: "INTERSECT ALL",
+};
+
+/**
+ * A query, WITH and tail included. `hoisted` is a leftmost arm whose WITH an
+ * enclosing query has already written, when `q` is on the way down to it.
+ */
+export const printQuery = (q: Query, hoisted: Query | null = null): Doc => {
+  const parts: Doc[] = [];
+  let skip = hoisted;
+  if (hasWith(q)) {
+    if (q !== hoisted) parts.push(withClause(q.with_!, q.recursive));
+  } else if (hoisted === null) {
+    skip = hoistedWith(q);
+    if (skip !== null) parts.push(withClause(skip.with_!, skip.recursive));
+  }
+  body(q, skip, parts);
+  tail(q, parts);
+  return group(join(line, parts));
+};
+
+// The clauses of a query without its WITH and tail, appended to `parts`.
+const body = (q: Query, hoisted: Query | null, parts: Doc[]): void => {
+  switch (q.kind) {
+    case "select":
+      selectBody(q, parts);
+      return;
+    case "values":
+      parts.push(clause(kw("VALUES"), commaList(q.rows.map((row) => parenList(row.map(expr))))));
+      return;
+    case "tableCmd":
+      parts.push([kw("TABLE"), " ", q.only ? `${kw("ONLY")} ` : "", qualified(q.name)]);
+      return;
+    case "setOp": {
+      // A left-deep run of set operations (`SELECT 1 UNION ALL SELECT 2 …`, as
+      // generated bulk SQL runs to thousands) is walked in a loop.
+      const spine: SetOperation[] = [q];
+      let node = q;
+      while (node.left.kind === "setOp" && !needsParens(node.left, hoisted, LEVEL[node.left.op] < LEVEL[node.op])) {
+        node = node.left;
+        spine.push(node);
+      }
+      arm(node.left, hoisted, (a) => a.kind === "setOp" && LEVEL[a.op] < LEVEL[node.op], parts);
+      for (let i = spine.length - 1; i >= 0; i--) {
+        const n = spine[i]!;
+        parts.push(kw(SET_OPS[n.op]));
+        arm(n.right, null, (a) => a.kind === "setOp" && LEVEL[a.op] <= LEVEL[n.op], parts);
+      }
+      return;
+    }
+  }
+};
+
+// A set-operation arm, parenthesised when it has a WITH or a tail of its own
+// (which would otherwise belong to the whole query) or binds looser than the
+// set operation it is in.
+const needsParens = (a: Query, hoisted: Query | null, looser: boolean): boolean =>
+  hasTail(a) || (hasWith(a) && a !== hoisted) || looser;
+const arm = (a: Query, hoisted: Query | null, looser: (a: Query) => boolean, parts: Doc[]): void => {
+  if (needsParens(a, hoisted, looser(a))) {
+    parts.push(parens(printQuery(a, hoisted)));
+  } else {
+    body(a, hoisted, parts);
+  }
+};
+
+const selectBody = (q: SelectStmt, parts: Doc[]): void => {
+  const head =
+    q.distinct === false
+      ? kw("SELECT")
+      : q.distinct === true
+        ? kw("SELECT DISTINCT")
+        : [kw("SELECT DISTINCT ON"), " ", parenList(q.distinct.map(expr))];
+  parts.push(q.columns.length === 0 ? head : clause(head, selectItems(q.columns)));
+  if (q.into !== undefined) {
+    const modifiers = q.into.modifiers?.map((m) => `${kw(m.toUpperCase())} `) ?? [];
+    parts.push([kw("INTO"), " ", modifiers, qualified(q.into.name)]);
+  }
+  if (q.from !== null) parts.push(clause(kw("FROM"), commaList(q.from.map(printFrom))));
+  if (q.where !== null) parts.push(clause(kw("WHERE"), expr(q.where)));
+  if (q.groupBy !== null) {
+    parts.push(
+      clause(q.groupByDistinct ? kw("GROUP BY DISTINCT") : kw("GROUP BY"), commaList(q.groupBy.map(groupByItem))),
+    );
+  }
+  if (q.having !== null) parts.push(clause(kw("HAVING"), expr(q.having)));
+  if (q.window !== null) {
+    parts.push(
+      clause(kw("WINDOW"), commaList(q.window.map((w) => [ident(w.name), " ", kw("AS"), " ", windowSpec(w.spec)]))),
+    );
+  }
+};
+
+const GROUPINGS = { rollup: "ROLLUP", cube: "CUBE" } as const;
+
+const groupByItem = (g: GroupByItem): Doc => {
+  switch (g.kind) {
+    case "rollup":
+    case "cube":
+      return [kw(GROUPINGS[g.kind]), " ", parenList(g.args.map(grouping))];
+    case "groupingSets":
+      return [kw("GROUPING SETS"), " ", parenList(g.sets.map(grouping))];
+    case "emptyGrouping":
+      return "()";
+    default: {
+      // An item opening with a call named like the ROLLUP / CUBE constructs
+      // would read as one.
+      const doc = expr(g);
+      return /^(?:rollup|cube)$/.test(firstText(doc)) && opensCall(doc) ? ["(", doc, ")"] : doc;
+    }
+  }
+};
+
+// Whether the doc's first word is followed by `(`.
+const opensCall = (doc: Doc): boolean => /^[a-z]+\(/.test(flat(group(doc)) ?? "");
+
+// One grouping inside ROLLUP / CUBE / GROUPING SETS: `a`, `(a, b)` or `()`. A
+// lone expression that itself opens with `(` is parenthesised once more, or
+// its own parentheses would read as the grouping's.
+const grouping = (exprs: Expr[]): Doc => {
+  if (exprs.length !== 1) return parenList(exprs.map(expr));
+  const doc = expr(exprs[0]!);
+  return mayOpenWithParen(doc) ? ["(", doc, ")"] : doc;
+};
+
+// --- the tail ---
+
+const STRENGTHS = {
+  update: "FOR UPDATE",
+  noKeyUpdate: "FOR NO KEY UPDATE",
+  share: "FOR SHARE",
+  keyShare: "FOR KEY SHARE",
+} as const;
+
+const locking = (l: LockingClause): Doc => [
+  l.of.length > 0
+    ? clause(`${kw(STRENGTHS[l.strength])} ${kw("OF")}`, commaList(l.of.map(qualified)))
+    : kw(STRENGTHS[l.strength]),
+  l.wait === "nowait" ? ` ${kw("NOWAIT")}` : l.wait === "skipLocked" ? ` ${kw("SKIP LOCKED")}` : "",
+];
+
+// A FETCH count is PG's select_fetch_first_value, a c_expr or a signed
+// constant: anything else is parenthesised.
+const fetchCount = (e: Expr): Doc => (e.kind === "number" || e.kind === "param" ? expr(e) : ["(", expr(e), ")"]);
+
+// LIMIT n OFFSET m, or the standard OFFSET m FETCH FIRST n ROWS … when the
+// limit needs the FETCH spelling (WITH TIES, or the count-less ROW ONLY).
+const tail = (q: Query, parts: Doc[]): void => {
+  if (q.orderBy != null) parts.push(orderBy(q.orderBy));
+  const offset = q.offset != null ? clause(kw("OFFSET"), expr(q.offset)) : null;
+  if (q.limit != null) {
+    const implicit = q.limit.kind === "number" && q.limit.implicit === true;
+    if (q.withTies || implicit) {
+      if (offset !== null) parts.push(offset);
+      parts.push([
+        kw("FETCH FIRST"),
+        " ",
+        implicit ? "" : [fetchCount(q.limit), " "],
+        kw(implicit ? "ROW" : "ROWS"),
+        " ",
+        kw(q.withTies ? "WITH TIES" : "ONLY"),
+      ]);
+    } else {
+      parts.push(clause(kw("LIMIT"), expr(q.limit)));
+      if (offset !== null) parts.push(offset);
+    }
+  } else if (offset !== null) {
+    parts.push(offset);
+  }
+  if (q.locking != null) for (const l of q.locking) parts.push(locking(l));
+};
+
+// --- FROM items ---
+
+/** `name type [COLLATE c]`: a column definition list's entry, a composite type's attribute. */
+export const columnDefinition = (d: ColumnDefinition): Doc => [
+  ident(d.name),
+  " ",
+  typeName(d.type),
+  d.collate !== undefined ? [" ", kw("COLLATE"), " ", qualified(d.collate)] : "",
+];
+
+// PG's func_alias_clause: an alias clause, or a column definition list with or
+// without an alias.
+const funcAlias = (
+  alias: string | null,
+  columns: string[] | undefined,
+  definitions: ColumnDefinition[] | undefined,
+): Doc =>
+  definitions === undefined
+    ? aliasClause(alias, columns)
+    : [" ", kw("AS"), " ", alias !== null ? [ident(alias), " "] : "", parenList(definitions.map(columnDefinition))];
+
+const lateral = (l: boolean | undefined): string => (l ? `${kw("LATERAL")} ` : "");
+const ordinality = (o: boolean | undefined): string => (o ? ` ${kw("WITH ORDINALITY")}` : "");
+
+const tablesample = (t: TableSample | undefined): Doc =>
+  t === undefined
+    ? ""
+    : [
+        " ",
+        kw("TABLESAMPLE"),
+        " ",
+        functionWord(t.method),
+        " ",
+        parenList(t.args.map(expr)),
+        t.repeatable !== null ? [" ", kw("REPEATABLE"), " ", parens(expr(t.repeatable))] : "",
+      ];
+
+const JOINS = {
+  inner: "JOIN",
+  left: "LEFT JOIN",
+  right: "RIGHT JOIN",
+  full: "FULL JOIN",
+  cross: "CROSS JOIN",
+} as const;
+
+type Join = Extract<FromItem, { kind: "join" }>;
+
+// A join without its alias clause. Joins nest to the left, so the left item is
+// written bare; a join on the right is parenthesised (PG nests `a JOIN b JOIN
+// c ON p ON q` that way, and the parentheses say so).
+// A left-deep run of joins (`a JOIN b ON … JOIN c ON …`) is walked in a loop,
+// so thousands of them don't run out of stack.
+const joinBody = (j: Join): Doc => {
+  const spine: Join[] = [j];
+  let node = j;
+  while (node.left.kind === "join" && node.left.alias === undefined) {
+    node = node.left;
+    spine.push(node);
+  }
+  const parts: Doc[] = [printFrom(node.left)];
+  for (let i = spine.length - 1; i >= 0; i--) parts.push(joinStep(spine[i]!));
+  return parts;
+};
+
+// One join after its left item: the join words, the right item and the qualifier.
+const joinStep = (j: Join): Doc => [
+  line,
+  j.natural ? `${kw("NATURAL")} ` : "",
+  kw(JOINS[j.joinType]),
+  " ",
+  j.right.kind === "join" && j.right.alias === undefined ? parens(joinBody(j.right)) : printFrom(j.right),
+  j.on !== null ? [" ", kw("ON"), " ", expr(j.on)] : "",
+  j.using !== null
+    ? [
+        " ",
+        kw("USING"),
+        " ",
+        parenList(j.using.map(ident)),
+        j.usingAlias !== undefined ? [" ", kw("AS"), " ", ident(j.usingAlias)] : "",
+      ]
+    : "",
+];
+
+// The variant tests read the flag itself (not `in`), so the field-coverage
+// check sees it read.
+const xmlNamespace = (n: XmlNamespace): Doc =>
+  (n as { default?: true }).default
+    ? [kw("DEFAULT"), " ", bExpr(n.uri)]
+    : [bExpr(n.uri), " ", kw("AS"), " ", ident((n as { name: string }).name)];
+
+const xmlTableColumn = (c: XmlTableColumn): Doc => {
+  if ((c as { forOrdinality?: true }).forOrdinality) return [ident(c.name), " ", kw("FOR ORDINALITY")];
+  const col = c as Extract<XmlTableColumn, { type: unknown }>;
+  return [
+    ident(col.name),
+    " ",
+    typeName(col.type),
+    col.path !== undefined ? [" ", kw("PATH"), " ", bExpr(col.path)] : "",
+    col.default !== undefined ? [" ", kw("DEFAULT"), " ", bExpr(col.default)] : "",
+    col.notNull === true ? ` ${kw("NOT NULL")}` : col.notNull === false ? ` ${kw("NULL")}` : "",
+  ];
+};
+
+const jsonPath = (path: string | undefined): Doc[] => (path === undefined ? [] : [[kw("PATH"), " ", str(path)]]);
+
+// A column named `nested` would open a NESTED PATH entry.
+const jsonColumnName = (name: string): string => (name === "nested" ? quoted(name) : ident(name));
+
+const jsonTableColumn = (c: JsonTableColumn): Doc => {
+  switch (c.kind) {
+    case "ordinality":
+      return [jsonColumnName(c.name), " ", kw("FOR ORDINALITY")];
+    case "exists":
+      return join(" ", [
+        jsonColumnName(c.name),
+        typeName(c.type),
+        kw("EXISTS"),
+        ...jsonPath(c.path),
+        ...jsonBehavior(c.onError, "ERROR"),
+      ]);
+    case "value":
+      return join(" ", [
+        [jsonColumnName(c.name), " ", typeName(c.type), jsonFormat(c.format)],
+        ...jsonPath(c.path),
+        ...jsonWrapper(c.wrapper),
+        ...jsonQuotes(c.quotes),
+        ...jsonBehavior(c.onEmpty, "EMPTY"),
+        ...jsonBehavior(c.onError, "ERROR"),
+      ]);
+    case "nested":
+      return [
+        kw("NESTED PATH"),
+        " ",
+        str(c.path),
+        c.pathName !== undefined ? [" ", kw("AS"), " ", ident(c.pathName)] : "",
+        " ",
+        kw("COLUMNS"),
+        " ",
+        parenList(c.columns.map(jsonTableColumn)),
+      ];
+  }
+};
+
+/** A FROM item. */
+export const printFrom: NodePrinter<FromItem, "kind"> = definePrinter<FromItem>()("kind", {
+  table: (t) => [
+    t.only ? `${kw("ONLY")} ` : "",
+    qualified(t.name),
+    aliasClause(t.alias, t.columns),
+    tablesample(t.tablesample),
+  ],
+  subquery: (s) => [lateral(s.lateral), parens(printQuery(s.query)), aliasClause(s.alias, s.columns)],
+  function: (f) => [
+    lateral(f.lateral),
+    printExpr(f.call),
+    ordinality(f.ordinality),
+    funcAlias(f.alias, f.columns, f.columnDefinitions),
+  ],
+  rowsFrom: (r) => [
+    lateral(r.lateral),
+    kw("ROWS FROM"),
+    " ",
+    parenList(
+      r.calls.map((c, i) => {
+        const defs = r.callColumnDefinitions?.[i];
+        return defs ? [printExpr(c), " ", kw("AS"), " ", parenList(defs.map(columnDefinition))] : printExpr(c);
+      }),
+    ),
+    ordinality(r.ordinality),
+    funcAlias(r.alias, r.columns, r.columnDefinitions),
+  ],
+  jsonTable: (j) => [
+    lateral(j.lateral),
+    kw("JSON_TABLE"),
+    parens([
+      commaList([
+        jsonValue(j.table.context),
+        [str(j.table.path), j.table.pathName !== undefined ? [" ", kw("AS"), " ", ident(j.table.pathName)] : ""],
+      ]),
+      ...jsonPassing(j.table.passing).map((d) => [line, d]),
+      line,
+      kw("COLUMNS"),
+      " ",
+      parenList(j.table.columns.map(jsonTableColumn)),
+      ...jsonBehavior(j.table.onError, "ERROR").map((d) => [line, d]),
+    ]),
+    aliasClause(j.alias, j.columns),
+  ],
+  xmlTable: (x) => [
+    lateral(x.lateral),
+    kw("XMLTABLE"),
+    parens([
+      x.namespaces !== undefined ? [kw("XMLNAMESPACES"), parenList(x.namespaces.map(xmlNamespace)), ",", line] : "",
+      atomic(x.rowPath),
+      " ",
+      xmlPassing(x.passing),
+      line,
+      kw("COLUMNS"),
+      " ",
+      indent(commaList(x.tableColumns.map(xmlTableColumn))),
+    ]),
+    aliasClause(x.alias, x.columns),
+  ],
+  join: (j) => (j.alias === undefined ? joinBody(j) : [parens(joinBody(j)), aliasClause(j.alias, j.columns)]),
+});
+
+/** The query statements. */
+export const queryFamily = defineFamily(
+  "query",
+  {
+    select: (q) => printQuery(q),
+    values: (q) => printQuery(q),
+    tableCmd: (q) => printQuery(q),
+    setOp: (q) => printQuery(q),
+  },
+  [],
+);

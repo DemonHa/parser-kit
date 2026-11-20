@@ -1,11 +1,13 @@
-// The shared statement corpus. Two consumers need the exact same statements, so
-// it lives here rather than in either of them:
+// The shared statement corpus. Several consumers need the exact same
+// statements, so it lives here rather than in any of them:
 //
 //   - `postgres.bench.ts` pits @parser-kit/sql against `node-sql-parser` over the
 //     `pg: true` rows (the two parsers must be fed identical input for the
 //     throughput numbers to mean anything).
 //   - `parity.test.ts` pins a byte-exact AST golden for every row, so a
 //     refactor that changes what these statements parse to is a test failure.
+//   - `stringify.test.ts` round-trips every row through the printer, and
+//     `stringify.bench.ts` times the printer on the `pg: true` rows.
 //
 // Keeping one array means the parity goldens always cover what the benchmark
 // measures. The statements themselves are lifted from `postgres.test.ts`.
@@ -14,7 +16,7 @@
 // from the shared-row counts (`select (5 statements)`, …) and
 // `bench-baseline.json` keys on those names, so a new shared row renames the
 // groups and `pnpm bench:compare` quietly stops matching them instead of
-// reporting a regression. Widen parity coverage in `parity.test.ts`'s own lists,
+// reporting a regression. Widen parity coverage in `parity-corpus.ts`'s lists,
 // and change this array only when you mean to change what the benchmark
 // measures — then refresh the baseline.
 

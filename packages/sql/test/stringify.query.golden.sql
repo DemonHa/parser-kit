@@ -1,0 +1,1016 @@
+-- SELECT - -1, -(-a), - - - b, @ -1, |/ 25, ~ ~a, - +a, -(1)::int;
+SELECT - -1, - -a, - - -b, @ -1, |/25, ~ ~a, - +a, -1::int;
+
+-- SELECT x OPERATOR(pg_catalog.+) y, OPERATOR(pg_catalog.-) 1, x OPERATOR(=) ANY (arr), OPERATOR(-) a * b;
+SELECT
+  x OPERATOR(pg_catalog.+) y,
+  OPERATOR(pg_catalog.-) 1,
+  x OPERATOR(=) ANY (arr),
+  OPERATOR(-) a * b;
+
+-- SELECT 2 ^ -3 ^ 4, -2 ^ 2, (a + b) * c, a - (b - c), a || b || c, a && b && c, (a && b) || c, a & (b | c);
+SELECT
+  2 ^ -3 ^ 4,
+  -2 ^ 2,
+  (a + b) * c,
+  a - (b - c),
+  a || b || c,
+  a && b && c,
+  a && b || c,
+  a & (b | c);
+
+-- SELECT NOT (a AND b) OR c, NOT a = b, (NOT a) = b, a AND (b OR c), NOT NOT a;
+SELECT NOT (a AND b) OR c, NOT a = b, (NOT a) = b, a AND (b OR c), NOT NOT a;
+
+-- SELECT CAST(a + b AS int), (a)::int, -x::int, (-x)::int, a::int[]::text;
+SELECT (a + b)::int, a::int, -x::int, (-x)::int, a::int[]::text;
+
+-- SELECT a COLLATE "C" < b, x AT TIME ZONE 'UTC' AT TIME ZONE 'x', x AT LOCAL, (a || b) COLLATE "C";
+SELECT
+  a COLLATE "C" < b,
+  x AT TIME ZONE 'UTC' AT TIME ZONE 'x',
+  x AT LOCAL,
+  (a || b) COLLATE "C";
+
+-- SELECT a = ANY (b), a < ALL (SELECT 1), a + ANY (b) + c, a LIKE ANY (b), a NOT ILIKE ALL (b), a = ANY ((1, 2));
+SELECT
+  a = ANY (b),
+  a < ALL (SELECT 1),
+  a + ANY (b) + c,
+  a LIKE ANY (b),
+  a NOT ILIKE ALL (b),
+  a = ANY ((1, 2));
+
+-- SELECT (a = b) = c, (a < b) IS NULL, (a IS NULL) IS NULL, (a LIKE b) LIKE c, (a IN (1)) IN (true);
+SELECT
+  (a = b) = c,
+  a < b IS NULL,
+  (a IS NULL) IS NULL,
+  (a LIKE b) LIKE c,
+  (a IN (1)) IN (TRUE);
+
+-- SELECT (a BETWEEN 1 AND 2) BETWEEN true AND false, (a IS TRUE) IS NOT FALSE, a NOT IN (1) IS NULL;
+SELECT
+  (a BETWEEN 1 AND 2) BETWEEN TRUE AND FALSE,
+  (a IS TRUE) IS NOT FALSE,
+  a NOT IN (1) IS NULL;
+
+-- SELECT a BETWEEN b COLLATE "C" AND c, a BETWEEN SYMMETRIC 1 AND 2, a NOT BETWEEN ASYMMETRIC b + 1 AND c;
+SELECT
+  a BETWEEN (b COLLATE "C") AND c,
+  a BETWEEN SYMMETRIC 1 AND 2,
+  a NOT BETWEEN ASYMMETRIC b + 1 AND c;
+
+-- SELECT a LIKE 'x!%' ESCAPE '!', a NOT SIMILAR TO 'b' ESCAPE '#', a ILIKE b || c;
+SELECT a LIKE 'x!%' ESCAPE '!', a NOT SIMILAR TO 'b' ESCAPE '#', a ILIKE b || c;
+
+-- SELECT (f(x))[1], (a).b, (a).*, a[1].b, $1[1], (ARRAY[1, 2])[1], (t.c)[1:2], a[:2], a[1:], a[:], (row(1, 2)).f1;
+SELECT
+  (f(x))[1],
+  (a).b,
+  (a).*,
+  a[1].b,
+  $1[1],
+  (ARRAY[1, 2])[1],
+  t.c[1:2],
+  a[:2],
+  a[1:],
+  a[:],
+  (ROW(1, 2)).f1;
+
+-- SELECT ((SELECT a FROM t)).x, (SELECT a FROM t)[1];
+SELECT (SELECT a FROM t).x, (SELECT a FROM t)[1];
+
+-- SELECT 'it''s', E'a\nb', 'tab	here', '', N'x', B'101', X'ff', 1.50, 5., 1e2, 0x1F, .5;
+SELECT 'it''s', 'a
+b', 'tab	here', '', bpchar 'x', B'101', X'ff', 1.50, 5., 1e2, 31, .5;
+
+-- SELECT 'a'
+-- 'b', 'c';
+SELECT 'ab', 'c';
+
+-- SELECT INTERVAL '1' DAY, INTERVAL(3) '1 s', INTERVAL '1' DAY TO SECOND(3), INTERVAL '1-2' YEAR TO MONTH;
+SELECT
+  INTERVAL '1' DAY,
+  INTERVAL(3) '1 s',
+  INTERVAL '1' DAY TO SECOND(3),
+  INTERVAL '1-2' YEAR TO MONTH;
+
+-- SELECT TIMESTAMP(3) WITH TIME ZONE '2024-01-01', DOUBLE PRECISION '1', "char" 'a', varchar(3) 'abc', s.t 'x';
+SELECT
+  timestamp(3) with time zone '2024-01-01',
+  double precision '1',
+  "char" 'a',
+  varchar(3) 'abc',
+  s.t 'x';
+
+-- SELECT a::double precision, a::timestamp(3) without time zone, a::interval day to second(3), a::bit varying(4);
+SELECT
+  a::double precision,
+  a::timestamp(3) without time zone,
+  a::interval day to second(3),
+  a::bit varying(4);
+
+-- SELECT a::character varying(10)[], a::"int", a::pg_catalog.int4, a::"MyType", a::"double precision", a::int ARRAY;
+SELECT
+  a::character varying(10)[],
+  a::"int",
+  a::pg_catalog.int4,
+  a::"MyType",
+  a::"double precision",
+  a::int[];
+
+-- SELECT 1 AS "select", a AS "Mixed", "from".x, "a""b" FROM "from" AS "user";
+SELECT 1 AS "select", a AS "Mixed", "from".x, "a""b" FROM "from" AS "user";
+
+-- SELECT t.*, s.t.* FROM s.t, "T";
+SELECT t.*, s.t.* FROM s.t, "T";
+
+-- SELECT count(DISTINCT a), count(ALL a), f(VARIADIC arr), f(a, VARIADIC b), f(a => 1, b := 2), count(*);
+SELECT
+  count(DISTINCT a),
+  count(ALL a),
+  f(VARIADIC arr),
+  f(a, VARIADIC b),
+  f(a => 1, b => 2),
+  count(*);
+
+-- SELECT string_agg(a, ',' ORDER BY a DESC), array_agg(DISTINCT a ORDER BY a), pg_catalog.substring(a, 1);
+SELECT
+  string_agg(a, ',' ORDER BY a DESC),
+  array_agg(DISTINCT a ORDER BY a),
+  pg_catalog.substring(a, 1);
+
+-- SELECT "normalize"(a, b), normalize(a), normalize(a, nfkd), "xmlelement"(a), "json"(a), json_object('{a,1}');
+SELECT
+  "normalize"(a, b),
+  normalize(a),
+  NORMALIZE(a, NFKD),
+  "xmlelement"(a),
+  "json"(a),
+  json_object('{a,1}');
+
+-- SELECT substring(a, 1, 2), substring(a FROM 2), substring(a FOR 2), substring(a FROM 1 FOR 2), substring(a SIMILAR b ESCAPE c);
+SELECT
+  substring(a, 1, 2),
+  SUBSTRING(a FROM 2),
+  SUBSTRING(a FOR 2),
+  SUBSTRING(a FROM 1 FOR 2),
+  SUBSTRING(a SIMILAR b ESCAPE c);
+
+-- SELECT trim(a), trim(BOTH FROM a), trim(LEADING 'x' FROM a), trim('x' FROM a), position(a || b IN c), position((a IN (1)) IN c);
+SELECT
+  TRIM(a),
+  TRIM(BOTH FROM a),
+  TRIM(LEADING 'x' FROM a),
+  TRIM('x' FROM a),
+  POSITION(a || b IN c),
+  POSITION((a IN (1)) IN c);
+
+-- SELECT extract(epoch FROM x), extract('Day' FROM x), overlay(a PLACING b FROM 1 FOR 2), overlay(a PLACING b FROM 1), COLLATION FOR (a);
+SELECT
+  EXTRACT(epoch FROM x),
+  EXTRACT('Day' FROM x),
+  OVERLAY(a PLACING b FROM 1 FOR 2),
+  OVERLAY(a PLACING b FROM 1),
+  COLLATION FOR (a);
+
+-- SELECT CURRENT_DATE, CURRENT_TIMESTAMP(3), LOCALTIME, USER, SESSION_USER, CURRENT_ROLE;
+SELECT
+  CURRENT_DATE,
+  CURRENT_TIMESTAMP(3),
+  LOCALTIME,
+  USER,
+  SESSION_USER,
+  CURRENT_ROLE;
+
+-- SELECT sum(a) OVER (w ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE NO OTHERS) FROM t;
+SELECT
+  sum(a) OVER (
+    w
+    ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE NO OTHERS
+  )
+FROM t;
+
+-- SELECT count(*) FILTER (WHERE a) OVER (), lag(a) IGNORE NULLS OVER w, first_value(a) RESPECT NULLS OVER (w) FROM t WINDOW w AS (ORDER BY a USING <);
+SELECT
+  count(*) FILTER (WHERE a) OVER (),
+  lag(a) IGNORE NULLS OVER w,
+  first_value(a) RESPECT NULLS OVER w
+FROM t
+WINDOW w AS (ORDER BY a USING <);
+
+-- SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY a DESC NULLS FIRST), rank() OVER (PARTITION BY a, b RANGE CURRENT ROW EXCLUDE TIES) FROM t;
+SELECT
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY a DESC NULLS FIRST),
+  rank() OVER (PARTITION BY a, b RANGE CURRENT ROW EXCLUDE TIES)
+FROM t;
+
+-- SELECT sum(a) OVER (GROUPS BETWEEN UNBOUNDED PRECEDING AND 2 FOLLOWING EXCLUDE GROUP), sum(a) OVER (ROWS 3 PRECEDING EXCLUDE CURRENT ROW) FROM t;
+SELECT
+  sum(a) OVER (
+    GROUPS BETWEEN UNBOUNDED PRECEDING AND 2 FOLLOWING EXCLUDE GROUP
+  ),
+  sum(a) OVER (ROWS 3 PRECEDING EXCLUDE CURRENT ROW)
+FROM t;
+
+-- SELECT ROW(), ROW(1), (1, 2), ARRAY[[1, 2], [3, 4]], ARRAY[]::int[], ARRAY(SELECT 1), ARRAY[ARRAY[1]];
+SELECT
+  ROW(),
+  ROW(1),
+  (1, 2),
+  ARRAY[[1, 2], [3, 4]],
+  ARRAY[]::int[],
+  ARRAY(SELECT 1),
+  ARRAY[ARRAY[1]];
+
+-- SELECT (a, b) OVERLAPS ROW(c, d), EXISTS (SELECT 1), NOT EXISTS (SELECT 1), a IN ((SELECT 1)), a NOT IN (SELECT 1);
+SELECT
+  (a, b) OVERLAPS ROW(c, d),
+  EXISTS (SELECT 1),
+  NOT EXISTS (SELECT 1),
+  a IN ((SELECT 1)),
+  a NOT IN (SELECT 1);
+
+-- SELECT a IS DISTINCT FROM b + 1, a IS NOT DISTINCT FROM b, a ISNULL, a NOTNULL, a IS UNKNOWN, a IS NOT NFKC NORMALIZED, a IS NORMALIZED;
+SELECT
+  a IS DISTINCT FROM b + 1,
+  a IS NOT DISTINCT FROM b,
+  a IS NULL,
+  a IS NOT NULL,
+  a IS UNKNOWN,
+  a IS NOT NFKC NORMALIZED,
+  a IS NORMALIZED;
+
+-- SELECT x IS DOCUMENT, x IS NOT DOCUMENT, x IS JSON, x IS NOT JSON OBJECT WITH UNIQUE KEYS, x IS JSON ARRAY WITHOUT UNIQUE;
+SELECT
+  x IS DOCUMENT,
+  x IS NOT DOCUMENT,
+  x IS JSON,
+  x IS NOT JSON OBJECT WITH UNIQUE KEYS,
+  x IS JSON ARRAY WITHOUT UNIQUE KEYS;
+
+-- SELECT CASE WHEN a THEN 1 WHEN b THEN 2 ELSE 3 END, CASE a WHEN 1 THEN 'x' END, CASE WHEN a THEN b END IS NULL;
+SELECT
+  CASE WHEN a THEN 1 WHEN b THEN 2 ELSE 3 END,
+  CASE a WHEN 1 THEN 'x' END,
+  CASE WHEN a THEN b END IS NULL;
+
+-- SELECT JSON_OBJECT(), JSON_OBJECT(RETURNING jsonb), JSON_OBJECT('a' VALUE 1, (k || 'x') VALUE v FORMAT JSON NULL ON NULL WITH UNIQUE KEYS RETURNING json);
+SELECT
+  JSON_OBJECT(),
+  JSON_OBJECT(RETURNING jsonb),
+  JSON_OBJECT(
+    'a' VALUE 1,
+    (k || 'x') VALUE v FORMAT JSON
+    NULL ON NULL
+    WITH UNIQUE KEYS
+    RETURNING json
+  );
+
+-- SELECT JSON_OBJECT(k : v ABSENT ON NULL), JSON_ARRAY(), JSON_ARRAY(1, 'a' FORMAT JSON ENCODING utf8 ABSENT ON NULL RETURNING jsonb FORMAT JSON);
+SELECT
+  JSON_OBJECT(k VALUE v ABSENT ON NULL),
+  JSON_ARRAY(),
+  JSON_ARRAY(
+    1,
+    'a' FORMAT JSON ENCODING utf8
+    ABSENT ON NULL
+    RETURNING jsonb FORMAT JSON
+  );
+
+-- SELECT JSON_ARRAY(SELECT a FROM t FORMAT JSON RETURNING jsonb), JSON_ARRAY(SELECT 1);
+SELECT
+  JSON_ARRAY(SELECT a FROM t FORMAT JSON RETURNING jsonb),
+  JSON_ARRAY(SELECT 1);
+
+-- SELECT JSON_OBJECTAGG(k VALUE v ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb) FILTER (WHERE k IS NOT NULL) OVER (PARTITION BY g) FROM t;
+SELECT
+  JSON_OBJECTAGG(
+    k VALUE v
+    ABSENT ON NULL
+    WITH UNIQUE KEYS
+    RETURNING jsonb
+  ) FILTER (WHERE k IS NOT NULL) OVER (PARTITION BY g)
+FROM t;
+
+-- SELECT JSON_ARRAYAGG(a ORDER BY b NULL ON NULL RETURNING jsonb), JSON_ARRAYAGG(a FORMAT JSON) OVER () FROM t;
+SELECT
+  JSON_ARRAYAGG(a ORDER BY b NULL ON NULL RETURNING jsonb),
+  JSON_ARRAYAGG(a FORMAT JSON) OVER ()
+FROM t;
+
+-- SELECT JSON('{"a": 1}' FORMAT JSON WITH UNIQUE KEYS), JSON(a WITHOUT UNIQUE), JSON_SCALAR(1 + 1), JSON_SERIALIZE(a FORMAT JSON RETURNING bytea);
+SELECT
+  JSON('{"a": 1}' FORMAT JSON WITH UNIQUE KEYS),
+  JSON(a WITHOUT UNIQUE KEYS),
+  JSON_SCALAR(1 + 1),
+  JSON_SERIALIZE(a FORMAT JSON RETURNING bytea);
+
+-- SELECT JSON_VALUE(js, '$.a' PASSING 1 AS x, 'y' AS "Y" RETURNING int DEFAULT 0 ON EMPTY ERROR ON ERROR) FROM t;
+SELECT
+  JSON_VALUE(
+    js,
+    '$.a'
+    PASSING 1 AS x, 'y' AS "Y"
+    RETURNING int
+    DEFAULT 0 ON EMPTY
+    ERROR ON ERROR
+  )
+FROM t;
+
+-- SELECT JSON_QUERY(js FORMAT JSON, '$.a' RETURNING jsonb WITH CONDITIONAL WRAPPER OMIT QUOTES EMPTY ARRAY ON EMPTY EMPTY OBJECT ON ERROR) FROM t;
+SELECT
+  JSON_QUERY(
+    js FORMAT JSON,
+    '$.a'
+    RETURNING jsonb
+    WITH CONDITIONAL WRAPPER
+    OMIT QUOTES
+    EMPTY ARRAY ON EMPTY
+    EMPTY OBJECT ON ERROR
+  )
+FROM t;
+
+-- SELECT JSON_QUERY(js, '$' WITHOUT WRAPPER KEEP QUOTES ON SCALAR STRING), JSON_QUERY(js, '$' WITH WRAPPER NULL ON ERROR), JSON_EXISTS(js, '$.a' PASSING 1 AS n UNKNOWN ON ERROR), JSON_EXISTS(js, '$' TRUE ON ERROR) FROM t;
+SELECT
+  JSON_QUERY(js, '$' WITHOUT WRAPPER KEEP QUOTES),
+  JSON_QUERY(js, '$' WITH UNCONDITIONAL WRAPPER NULL ON ERROR),
+  JSON_EXISTS(js, '$.a' PASSING 1 AS n UNKNOWN ON ERROR),
+  JSON_EXISTS(js, '$' TRUE ON ERROR)
+FROM t;
+
+-- SELECT * FROM JSON_TABLE(js, '$' AS root PASSING 1 AS n COLUMNS (id FOR ORDINALITY, a int PATH '$.a' NULL ON EMPTY, b text FORMAT JSON PATH '$.b' WITH WRAPPER KEEP QUOTES, e bool EXISTS PATH '$.e' FALSE ON ERROR, NESTED PATH '$.c[*]' AS c COLUMNS (x int)) ERROR ON ERROR) AS jt;
+SELECT *
+FROM
+  JSON_TABLE(
+    js,
+    '$' AS root
+    PASSING 1 AS n
+    COLUMNS (
+      id FOR ORDINALITY,
+      a int PATH '$.a' NULL ON EMPTY,
+      b text FORMAT JSON PATH '$.b' WITH UNCONDITIONAL WRAPPER KEEP QUOTES,
+      e bool EXISTS PATH '$.e' FALSE ON ERROR,
+      NESTED PATH '$.c[*]' AS c COLUMNS (x int)
+    )
+    ERROR ON ERROR
+  ) AS jt;
+
+-- SELECT * FROM t, LATERAL JSON_TABLE(t.js, '$[*]' COLUMNS (a text, NESTED '$.b' COLUMNS (b int DEFAULT 1 ON ERROR))) AS j (x, y);
+SELECT *
+FROM
+  t,
+  LATERAL JSON_TABLE(
+    t.js,
+    '$[*]'
+    COLUMNS (a text, NESTED PATH '$.b' COLUMNS (b int DEFAULT 1 ON ERROR))
+  ) AS j (x, y);
+
+-- SELECT XMLELEMENT(NAME a), XMLELEMENT(NAME "select", XMLATTRIBUTES(1 AS x, b), 'c', d), XMLELEMENT(NAME e, 'f');
+SELECT
+  XMLELEMENT(NAME a),
+  XMLELEMENT(NAME "select", XMLATTRIBUTES(1 AS x, b), 'c', d),
+  XMLELEMENT(NAME e, 'f');
+
+-- SELECT XMLFOREST(a, b AS "B"), XMLPI(NAME php), XMLPI(NAME php, 'echo'), XMLCONCAT(a, b), XMLCONCAT(a);
+SELECT
+  XMLFOREST(a, b AS "B"),
+  XMLPI(NAME php),
+  XMLPI(NAME php, 'echo'),
+  xmlconcat(a, b),
+  xmlconcat(a);
+
+-- SELECT XMLROOT(x, VERSION '1.0', STANDALONE YES), XMLROOT(x, VERSION NO VALUE, STANDALONE NO VALUE), XMLROOT(x, VERSION v, STANDALONE NO);
+SELECT
+  XMLROOT(x, VERSION '1.0', STANDALONE YES),
+  XMLROOT(x, VERSION NO VALUE, STANDALONE NO VALUE),
+  XMLROOT(x, VERSION v, STANDALONE NO);
+
+-- SELECT XMLPARSE(DOCUMENT a PRESERVE WHITESPACE), XMLPARSE(CONTENT a STRIP WHITESPACE), XMLPARSE(CONTENT a);
+SELECT
+  XMLPARSE(DOCUMENT a PRESERVE WHITESPACE),
+  XMLPARSE(CONTENT a STRIP WHITESPACE),
+  XMLPARSE(CONTENT a);
+
+-- SELECT XMLSERIALIZE(DOCUMENT a AS text INDENT), XMLSERIALIZE(CONTENT a AS varchar(10) NO INDENT), XMLSERIALIZE(CONTENT a AS text);
+SELECT
+  XMLSERIALIZE(DOCUMENT a AS text INDENT),
+  XMLSERIALIZE(CONTENT a AS varchar(10) NO INDENT),
+  XMLSERIALIZE(CONTENT a AS text);
+
+-- SELECT XMLEXISTS('//a' PASSING BY REF doc), XMLEXISTS(p PASSING doc BY VALUE), XMLEXISTS(('/' || p) PASSING (d || e));
+SELECT
+  XMLEXISTS('//a' PASSING BY REF doc),
+  XMLEXISTS(p PASSING doc BY VALUE),
+  XMLEXISTS(('/' || p) PASSING (d || e));
+
+-- SELECT * FROM XMLTABLE(XMLNAMESPACES('http://x' AS x, DEFAULT 'http://d'), '//row' PASSING BY VALUE doc COLUMNS id int PATH '@id' NOT NULL, name text DEFAULT 'n' || 'm' NULL, ord FOR ORDINALITY) AS x;
+SELECT *
+FROM
+  XMLTABLE(
+    XMLNAMESPACES('http://x' AS x, DEFAULT 'http://d'),
+    '//row' PASSING BY VALUE doc
+    COLUMNS id int PATH '@id' NOT NULL,
+      name text DEFAULT 'n' || 'm' NULL,
+      ord FOR ORDINALITY
+  ) AS x;
+
+-- SELECT * FROM XMLTABLE('/r' PASSING d COLUMNS a int) x (b), LATERAL XMLTABLE(('/' || p) PASSING (d) COLUMNS a text PATH 'x' DEFAULT 'y');
+SELECT *
+FROM
+  XMLTABLE('/r' PASSING d COLUMNS a int) AS x (b),
+  LATERAL XMLTABLE(('/' || p) PASSING d COLUMNS a text PATH 'x' DEFAULT 'y');
+
+-- SELECT * FROM ROWS FROM (XMLELEMENT(NAME a), f(1) AS (a int)) WITH ORDINALITY;
+SELECT * FROM ROWS FROM (XMLELEMENT(NAME a), f(1) AS (a int)) WITH ORDINALITY;
+
+-- (SELECT 1 ORDER BY 1) UNION SELECT 2;
+(SELECT 1 ORDER BY 1) UNION SELECT 2;
+
+-- SELECT 1 UNION (SELECT 2 UNION SELECT 3);
+SELECT 1 UNION (SELECT 2 UNION SELECT 3);
+
+-- SELECT 1 INTERSECT (SELECT 2 UNION SELECT 3);
+SELECT 1 INTERSECT (SELECT 2 UNION SELECT 3);
+
+-- (SELECT 1 UNION SELECT 2) INTERSECT SELECT 3;
+(SELECT 1 UNION SELECT 2) INTERSECT SELECT 3;
+
+-- SELECT 1 UNION SELECT 2 INTERSECT SELECT 3 EXCEPT ALL SELECT 4 INTERSECT ALL SELECT 5;
+SELECT 1
+UNION
+SELECT 2
+INTERSECT
+SELECT 3
+EXCEPT ALL
+SELECT 4
+INTERSECT ALL
+SELECT 5;
+
+-- WITH a AS (SELECT 1) SELECT * FROM a UNION SELECT 2 ORDER BY 1 LIMIT 3;
+WITH a AS (SELECT 1) SELECT * FROM a UNION SELECT 2 ORDER BY 1 LIMIT 3;
+
+-- WITH a AS (SELECT 1) (WITH b AS (SELECT 2) SELECT 3) UNION SELECT 4;
+WITH a AS (SELECT 1) (WITH b AS (SELECT 2) SELECT 3) UNION SELECT 4;
+
+-- SELECT 1 UNION (WITH b AS (SELECT 2) SELECT * FROM b);
+SELECT 1 UNION (WITH b AS (SELECT 2) SELECT * FROM b);
+
+-- WITH a AS (SELECT 1) (SELECT 1 UNION SELECT 2 ORDER BY 1) UNION SELECT 3;
+WITH a AS (SELECT 1) (SELECT 1 UNION SELECT 2 ORDER BY 1) UNION SELECT 3;
+
+-- (WITH a AS (SELECT 1) SELECT 2 ORDER BY 1) UNION SELECT 3;
+WITH a AS (SELECT 1) (SELECT 2 ORDER BY 1) UNION SELECT 3;
+
+-- (SELECT 1 LIMIT 1) UNION ALL (VALUES (2) OFFSET 1) ORDER BY 1 FETCH FIRST 5 ROWS ONLY;
+(SELECT 1 LIMIT 1) UNION ALL (VALUES (2) OFFSET 1) ORDER BY 1 LIMIT 5;
+
+-- WITH x AS (VALUES (1)) VALUES (2) UNION TABLE x;
+WITH x AS (VALUES (1)) VALUES (2) UNION TABLE x;
+
+-- WITH RECURSIVE t (n) AS NOT MATERIALIZED (SELECT 1 UNION ALL SELECT n + 1 FROM t) SEARCH DEPTH FIRST BY n SET ord CYCLE n SET is_cycle TO true DEFAULT false USING path SELECT * FROM t;
+WITH RECURSIVE
+  t (n) AS NOT MATERIALIZED (SELECT 1 UNION ALL SELECT n + 1 FROM t)
+  SEARCH DEPTH FIRST BY n SET ord
+  CYCLE n SET is_cycle TO TRUE DEFAULT FALSE USING path
+SELECT *
+FROM t;
+
+-- WITH a AS MATERIALIZED (SELECT 1), b (x, y) AS (SELECT 1, 2) SEARCH BREADTH FIRST BY x, y SET o CYCLE x, y SET c USING p TABLE b;
+WITH
+  a AS MATERIALIZED (SELECT 1),
+  b (x, y) AS (SELECT 1, 2)
+  SEARCH BREADTH FIRST BY x, y SET o
+  CYCLE x, y SET c USING p
+TABLE b;
+
+-- SELECT a INTO TEMP TABLE b FROM t; SELECT a INTO GLOBAL TEMPORARY b FROM t; SELECT INTO UNLOGGED x FROM t;
+SELECT a INTO TEMP b FROM t;
+
+-- SELECT a INTO TEMP TABLE b FROM t; SELECT a INTO GLOBAL TEMPORARY b FROM t; SELECT INTO UNLOGGED x FROM t;
+SELECT a INTO GLOBAL TEMPORARY b FROM t;
+
+-- SELECT a INTO TEMP TABLE b FROM t; SELECT a INTO GLOBAL TEMPORARY b FROM t; SELECT INTO UNLOGGED x FROM t;
+SELECT INTO UNLOGGED x FROM t;
+
+-- TABLE ONLY t; TABLE s.t ORDER BY 1 LIMIT 1; VALUES (1, 'a') ORDER BY 1 LIMIT 1 OFFSET 1; SELECT FROM t; SELECT;
+TABLE ONLY t;
+
+-- TABLE ONLY t; TABLE s.t ORDER BY 1 LIMIT 1; VALUES (1, 'a') ORDER BY 1 LIMIT 1 OFFSET 1; SELECT FROM t; SELECT;
+TABLE s.t ORDER BY 1 LIMIT 1;
+
+-- TABLE ONLY t; TABLE s.t ORDER BY 1 LIMIT 1; VALUES (1, 'a') ORDER BY 1 LIMIT 1 OFFSET 1; SELECT FROM t; SELECT;
+VALUES (1, 'a') ORDER BY 1 LIMIT 1 OFFSET 1;
+
+-- TABLE ONLY t; TABLE s.t ORDER BY 1 LIMIT 1; VALUES (1, 'a') ORDER BY 1 LIMIT 1 OFFSET 1; SELECT FROM t; SELECT;
+SELECT FROM t;
+
+-- TABLE ONLY t; TABLE s.t ORDER BY 1 LIMIT 1; VALUES (1, 'a') ORDER BY 1 LIMIT 1 OFFSET 1; SELECT FROM t; SELECT;
+SELECT;
+
+-- SELECT * FROM t ORDER BY a FETCH FIRST ROW WITH TIES; SELECT * FROM t ORDER BY a FETCH FIRST (1 + 1) ROWS WITH TIES;
+SELECT * FROM t ORDER BY a FETCH FIRST ROW WITH TIES;
+
+-- SELECT * FROM t ORDER BY a FETCH FIRST ROW WITH TIES; SELECT * FROM t ORDER BY a FETCH FIRST (1 + 1) ROWS WITH TIES;
+SELECT * FROM t ORDER BY a FETCH FIRST (1 + 1) ROWS WITH TIES;
+
+-- SELECT * FROM t FETCH NEXT ROW ONLY; SELECT * FROM t LIMIT $1 OFFSET $2 ROWS FOR NO KEY UPDATE OF t SKIP LOCKED FOR KEY SHARE;
+SELECT * FROM t FETCH FIRST ROW ONLY;
+
+-- SELECT * FROM t FETCH NEXT ROW ONLY; SELECT * FROM t LIMIT $1 OFFSET $2 ROWS FOR NO KEY UPDATE OF t SKIP LOCKED FOR KEY SHARE;
+SELECT *
+FROM t
+LIMIT $1
+OFFSET $2
+FOR NO KEY UPDATE OF t SKIP LOCKED
+FOR KEY SHARE;
+
+-- SELECT a FROM t GROUP BY ROLLUP (a, (b, c)), CUBE ((a)), GROUPING SETS ((), (a), ((a, b)), ((SELECT 1))), (), (rollup(a));
+SELECT a
+FROM t
+GROUP BY
+  ROLLUP (a, (b, c)),
+  CUBE (a),
+  GROUPING SETS ((), a, ((a, b)), ((SELECT 1))),
+  (),
+  (rollup(a));
+
+-- SELECT a FROM t GROUP BY DISTINCT a, (a, b), ROW(a, b) HAVING count(*) > 1 WINDOW w1 AS (PARTITION BY a), w2 AS (w1 ORDER BY b);
+SELECT a
+FROM t
+GROUP BY DISTINCT a, (a, b), ROW(a, b)
+HAVING count(*) > 1
+WINDOW w1 AS (PARTITION BY a), w2 AS (w1 ORDER BY b);
+
+-- SELECT * FROM a JOIN (b JOIN c ON p) ON q, d CROSS JOIN (e NATURAL JOIN f), g FULL JOIN h USING (x) AS u;
+SELECT *
+FROM
+  a
+  JOIN (b JOIN c ON p) ON q,
+  d
+  CROSS JOIN (e NATURAL JOIN f),
+  g
+  FULL JOIN h USING (x) AS u;
+
+-- SELECT * FROM (a JOIN b USING (x) AS j) AS k (y, z), (a LEFT JOIN b ON true) RIGHT JOIN c ON true;
+SELECT *
+FROM
+  (a JOIN b USING (x) AS j) AS k (y, z),
+  a
+  LEFT JOIN b ON TRUE
+  RIGHT JOIN c ON TRUE;
+
+-- SELECT * FROM a NATURAL LEFT JOIN b, LATERAL (SELECT 1) AS s, ROWS FROM (f(1) AS (a int), g()) WITH ORDINALITY AS r (x, y, z);
+SELECT *
+FROM
+  a
+  NATURAL LEFT JOIN b,
+  LATERAL (SELECT 1) AS s,
+  ROWS FROM (f(1) AS (a int), g()) WITH ORDINALITY AS r (x, y, z);
+
+-- SELECT * FROM f() AS (a int, b text COLLATE "C"), g() AS x (a int), h(1) WITH ORDINALITY AS y, LATERAL k(VARIADIC a) z;
+SELECT *
+FROM
+  f() AS (a int, b text COLLATE "C"),
+  g() AS x (a int),
+  h(1) WITH ORDINALITY AS y,
+  LATERAL k(VARIADIC a) AS z;
+
+-- SELECT * FROM ONLY t AS x (a) TABLESAMPLE system (10), u TABLESAMPLE bernoulli (5, 6) REPEATABLE (1 + 1), (SELECT 1);
+SELECT *
+FROM
+  ONLY t AS x (a) TABLESAMPLE system (10),
+  u TABLESAMPLE bernoulli (5, 6) REPEATABLE (1 + 1),
+  (SELECT 1);
+
+-- SELECT * FROM "xmltable"(a), "json_table"(b), "rows"(c);
+SELECT * FROM "xmltable"(a), "json_table"(b), rows(c);
+
+-- SELECT JSON_OBJECT((a, b) OVERLAPS (c, d) : 1), "exists", "exists".x, "exists"(1) FROM "exists";
+SELECT
+  JSON_OBJECT(((a, b) OVERLAPS (c, d)) VALUE 1),
+  "exists",
+  "exists".x,
+  "exists"(1)
+FROM "exists";
+
+-- SELECT SUBSTRING(a SIMILAR (b LIKE c) ESCAPE d), SUBSTRING(a SIMILAR (NOT b SIMILAR TO c) ESCAPE d), SUBSTRING((a = b) SIMILAR c ESCAPE d);
+SELECT
+  SUBSTRING(a SIMILAR (b LIKE c) ESCAPE d),
+  SUBSTRING(a SIMILAR (NOT b SIMILAR TO c) ESCAPE d),
+  SUBSTRING((a = b) SIMILAR c ESCAPE d);
+
+-- SELECT sum(a) OVER (ORDER BY a ROWS "unbounded" PRECEDING), sum(a) OVER (ROWS BETWEEN "current" + 1 PRECEDING AND CURRENT ROW) FROM t;
+SELECT
+  sum(a) OVER (ORDER BY a ROWS (unbounded) PRECEDING),
+  sum(a) OVER (ROWS BETWEEN (current + 1) PRECEDING AND CURRENT ROW)
+FROM t;
+
+-- SELECT sum(a) OVER ("rows" ORDER BY a) FROM t WINDOW "rows" AS (), w AS ("partition");
+SELECT sum(a) OVER ("rows" ORDER BY a)
+FROM t
+WINDOW rows AS (), w AS ("partition");
+
+-- SELECT 1 FROM t ORDER BY a FETCH FIRST "rows" ROWS WITH TIES;
+SELECT 1 FROM t ORDER BY a FETCH FIRST (rows) ROWS WITH TIES;
+
+-- WITH "recursive" AS (SELECT 1) SELECT 1;
+WITH "recursive" AS (SELECT 1) SELECT 1;
+
+-- SELECT "interval" '1', a::"interval", a::"between", "row" 'x';
+SELECT "interval" '1', a::interval, a::"between", "row" 'x';
+
+-- SELECT "system_user", "current_catalog", "current_schema", "collation", "isnull" FROM "similar" AS "full";
+SELECT system_user, current_catalog, current_schema, "collation", "isnull"
+FROM "similar" AS "full";
+
+-- SELECT JSON_OBJECT('a' VALUE (x IS JSON) WITH UNIQUE KEYS), JSON((x IS JSON OBJECT) WITHOUT UNIQUE KEYS), JSON_OBJECTAGG(k VALUE (v IS JSON) WITH UNIQUE KEYS) FROM t;
+SELECT
+  JSON_OBJECT('a' VALUE (x IS JSON) WITH UNIQUE KEYS),
+  JSON((x IS JSON OBJECT) WITHOUT UNIQUE KEYS),
+  JSON_OBJECTAGG(k VALUE (v IS JSON) WITH UNIQUE KEYS)
+FROM t;
+
+-- SELECT 1 FROM t GROUP BY (rollup(a)) + 1, (cube(a))::int, (rollup(a)) IS NULL, rollup, cube + 1;
+SELECT 1
+FROM t
+GROUP BY (rollup(a) + 1), (cube(a)::int), (rollup(a) IS NULL), rollup, cube + 1;
+
+-- SELECT "national" 'x', 1::"national", "nullif"(1), nullif(1, 2), "operator"(1), EXTRACT("value" FROM a) FROM JSON_TABLE(js, '$' COLUMNS ("nested" path, "nested" "path" PATH '$')) AS j;
+SELECT
+  "national" 'x',
+  1::"national",
+  "nullif"(1),
+  nullif(1, 2),
+  "operator"(1),
+  EXTRACT('value' FROM a)
+FROM JSON_TABLE(js, '$' COLUMNS ("nested" path, "nested" path PATH '$')) AS j;
+
+-- SELECT JSON_QUERY(j, (p IS JSON) WITH WRAPPER), JSON_QUERY(j, (p IS JSON ARRAY) WITHOUT WRAPPER), "collation".foo '1', 'x'::"collation".foo;
+SELECT
+  JSON_QUERY(j, (p IS JSON) WITH UNCONDITIONAL WRAPPER),
+  JSON_QUERY(j, (p IS JSON ARRAY) WITHOUT WRAPPER),
+  "collation".foo '1',
+  'x'::collation.foo;
+
+-- SELECT * FROM orders WHERE status = 'paid' AND created_at >= '2024-01-01' AND customer_id = 42 AND total > 100 OR a * b + c * d - e > f;
+SELECT *
+FROM orders
+WHERE
+  status = 'paid' AND
+    created_at >= '2024-01-01' AND
+    customer_id = 42 AND
+    total > 100 OR
+    a * b + c * d - e > f;
+
+-- SELECT * FROM events WHERE NOT (kind = 'aaaaaaaaaa' OR kind = 'bbbbbbbbbb' OR kind = 'cccccccccc' OR kind = 'dddddddddd');
+SELECT *
+FROM events
+WHERE
+  NOT (
+    kind = 'aaaaaaaaaa' OR
+      kind = 'bbbbbbbbbb' OR
+      kind = 'cccccccccc' OR
+      kind = 'dddddddddd'
+  );
+
+-- SELECT * FROM orders AS o WHERE (o.status = 'shipped' OR o.status = 'delivered' OR o.status = 'returned_to_sender') AND o.created_at > now() - INTERVAL '30 days';
+SELECT *
+FROM orders AS o
+WHERE
+  (
+    o.status = 'shipped' OR
+      o.status = 'delivered' OR
+      o.status = 'returned_to_sender'
+  ) AND
+    o.created_at > now() - INTERVAL '30 days';
+
+-- SELECT * FROM t WHERE (((s = 'active' OR s = 'trialing_customer') AND r = 'eu-west-1') OR p > 5) AND c > '2024-01-01';
+SELECT *
+FROM t
+WHERE
+  ((s = 'active' OR s = 'trialing_customer') AND r = 'eu-west-1' OR p > 5) AND
+    c > '2024-01-01';
+
+-- SELECT id FROM customers WHERE lower(first_name) || ' ' || lower(middle_name) || ' ' || lower(last_name) || ' ' || lower(suffix) IN (SELECT full_name FROM vip_list WHERE active AND region = 'emea' AND tier > 2);
+SELECT id
+FROM customers
+WHERE
+  (
+    lower(first_name) ||
+      ' ' ||
+      lower(middle_name) ||
+      ' ' ||
+      lower(last_name) ||
+      ' ' ||
+      lower(suffix)
+  ) IN (
+    SELECT full_name FROM vip_list WHERE active AND region = 'emea' AND tier > 2
+  );
+
+-- SELECT 1 FROM t WHERE aaaaaaaaaaaaaaaaaaaaaaaaaa + bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb = ANY (ARRAY[cccccccccccccccccccc, dddddddddddddddddddddd]);
+SELECT 1
+FROM t
+WHERE
+  (aaaaaaaaaaaaaaaaaaaaaaaaaa + bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) = ANY (
+    ARRAY[cccccccccccccccccccc, dddddddddddddddddddddd]
+  );
+
+-- SELECT a FROM t GROUP BY GROUPING SETS (aaaa + bbbb IN (1, 2), c), ROLLUP (aaaa + bbbb IS NULL), CUBE (aaaa + bbbb = ANY (ARRAY[1, 2])), GROUPING SETS (- aaaaaaaaaaaaaaaaaaaaaa AT TIME ZONE 'utc');
+SELECT a
+FROM t
+GROUP BY
+  GROUPING SETS ((aaaa + bbbb IN (1, 2)), c),
+  ROLLUP ((aaaa + bbbb IS NULL)),
+  CUBE ((aaaa + bbbb = ANY (ARRAY[1, 2]))),
+  GROUPING SETS ((-aaaaaaaaaaaaaaaaaaaaaa AT TIME ZONE 'utc'));
+
+-- SELECT * FROM users u;
+SELECT * FROM users AS u;
+
+-- SELECT id, name AS n, u.age full_age FROM users u;
+SELECT id, name AS n, u.age AS full_age FROM users AS u;
+
+-- SELECT DISTINCT a FROM t;
+SELECT DISTINCT a FROM t;
+
+-- SELECT DISTINCT ON (a, b) a FROM t;
+SELECT DISTINCT ON (a, b) a FROM t;
+
+-- SELECT 1 OFFSET 5 LIMIT 10;
+SELECT 1 LIMIT 10 OFFSET 5;
+
+-- SELECT (SELECT max(x) FROM u) m FROM t;
+SELECT (SELECT max(x) FROM u) AS m FROM t;
+
+-- SELECT rank() OVER w AS r FROM t WINDOW w AS (PARTITION BY a ORDER BY b);
+SELECT rank() OVER w AS r FROM t WINDOW w AS (PARTITION BY a ORDER BY b);
+
+-- SELECT * FROM (VALUES (1), (2)) t;
+SELECT * FROM (VALUES (1), (2)) AS t;
+
+-- SELECT 1 FROM t WHERE x = ANY (SELECT id FROM u);
+SELECT 1 FROM t WHERE x = ANY (SELECT id FROM u);
+
+-- SELECT a FROM t UNION SELECT a FROM u EXCEPT ALL SELECT a FROM v;
+SELECT a FROM t UNION SELECT a FROM u EXCEPT ALL SELECT a FROM v;
+
+-- SELECT * FROM t FOR UPDATE OF t, u NOWAIT;
+SELECT * FROM t FOR UPDATE OF t, u NOWAIT;
+
+-- WITH cte AS (SELECT 1 AS x) SELECT x FROM cte;
+WITH cte AS (SELECT 1 AS x) SELECT x FROM cte;
+
+-- WITH RECURSIVE r (n) AS (SELECT 1) SELECT * FROM r;
+WITH RECURSIVE r (n) AS (SELECT 1) SELECT * FROM r;
+
+-- SELECT a || b || c FROM t;
+SELECT a || b || c FROM t;
+
+-- SELECT x::int FROM t;
+SELECT x::int FROM t;
+
+-- SELECT age BETWEEN 1 AND 10 FROM t;
+SELECT age BETWEEN 1 AND 10 FROM t;
+
+-- SELECT id IN (1, 2, 3) FROM t;
+SELECT id IN (1, 2, 3) FROM t;
+
+-- SELECT coalesce(a, 0), now() FROM t;
+SELECT coalesce(a, 0), now() FROM t;
+
+-- SELECT data -> 'k' FROM t;
+SELECT data -> 'k' FROM t;
+
+-- SELECT name LIKE 'a%' FROM t;
+SELECT name LIKE 'a%' FROM t;
+
+-- SELECT 1 FROM users u JOIN teams t ON u.team_id = t.id;
+SELECT 1 FROM users AS u JOIN teams AS t ON u.team_id = t.id;
+
+-- SELECT 1 FROM a LEFT JOIN b USING (id) CROSS JOIN c;
+SELECT 1 FROM a LEFT JOIN b USING (id) CROSS JOIN c;
+
+-- SELECT * FROM a CROSS JOIN LATERAL unnest(a.tags) t;
+SELECT * FROM a CROSS JOIN LATERAL unnest(a.tags) AS t;
+
+-- SELECT * FROM t AS x TABLESAMPLE bernoulli (10) REPEATABLE (5);
+SELECT * FROM t AS x TABLESAMPLE bernoulli (10) REPEATABLE (5);
+
+-- SELECT * FROM ONLY t AS x (a, b) TABLESAMPLE system (10), (VALUES (1, 2)) AS v (c, d);
+SELECT *
+FROM ONLY t AS x (a, b) TABLESAMPLE system (10), (VALUES (1, 2)) AS v (c, d);
+
+-- SELECT * FROM generate_series(1, 3) g (n) JOIN ONLY (s.u) ON true, LATERAL (SELECT 1) l (one);
+SELECT *
+FROM
+  generate_series(1, 3) AS g (n)
+  JOIN ONLY s.u ON TRUE,
+  LATERAL (SELECT 1) AS l (one);
+
+-- SELECT * FROM ((a JOIN b ON true) j JOIN c USING (id)) AS x (p, q), ((SELECT 1) UNION (SELECT 2)) s;
+SELECT *
+FROM
+  ((a JOIN b ON TRUE) AS j JOIN c USING (id)) AS x (p, q),
+  (SELECT 1 UNION SELECT 2) AS s;
+
+-- SELECT * FROM ROWS FROM (f(1), g()) WITH ORDINALITY AS r (a, b, n), unnest(arr) WITH ORDINALITY u;
+SELECT *
+FROM
+  ROWS FROM (f(1), g()) WITH ORDINALITY AS r (a, b, n),
+  unnest(arr) WITH ORDINALITY AS u;
+
+-- SELECT -a, NOT b FROM t;
+SELECT -a, NOT b FROM t;
+
+-- SELECT +a, -2 ^ 2, a ^ b ^ c, a % b, a::int ^ 2 FROM t;
+SELECT +a, -2 ^ 2, a ^ b ^ c, a % b, a::int ^ 2 FROM t;
+
+-- SELECT a & b, c | d, e # f, g << 1, h >> 1, doc @? '$.x' FROM t;
+SELECT a & b, c | d, e # f, g << 1, h >> 1, doc @? '$.x' FROM t;
+
+-- SELECT CASE WHEN a THEN 1 WHEN b THEN 2 ELSE 3 END, CASE x WHEN 1 THEN 'a' END FROM t;
+SELECT CASE WHEN a THEN 1 WHEN b THEN 2 ELSE 3 END, CASE x WHEN 1 THEN 'a' END
+FROM t;
+
+-- SELECT ARRAY[1, 2, 3], a[1], b[1:2] FROM t;
+SELECT ARRAY[1, 2, 3], a[1], b[1:2] FROM t;
+
+-- SELECT ROW(1, 2) FROM t;
+SELECT ROW(1, 2) FROM t;
+
+-- SELECT extract(year FROM d), position('a' IN s), substring(s FROM 1 FOR 2), trim(BOTH 'x' FROM s) FROM t;
+SELECT
+  EXTRACT(year FROM d),
+  POSITION('a' IN s),
+  SUBSTRING(s FROM 1 FOR 2),
+  TRIM(BOTH 'x' FROM s)
+FROM t;
+
+-- SELECT a IS NULL, b IS NOT NULL, c IS DISTINCT FROM d, e IS NOT DISTINCT FROM f FROM t;
+SELECT a IS NULL, b IS NOT NULL, c IS DISTINCT FROM d, e IS NOT DISTINCT FROM f
+FROM t;
+
+-- SELECT true, false, null, a IS TRUE, b IS NOT FALSE FROM t;
+SELECT TRUE, FALSE, NULL, a IS TRUE, b IS NOT FALSE FROM t;
+
+-- SELECT a SIMILAR TO 'x%', b AT TIME ZONE 'utc', c COLLATE "C" FROM t;
+SELECT a SIMILAR TO 'x%', b AT TIME ZONE 'utc', c COLLATE "C" FROM t;
+
+-- SELECT a IN (SELECT id FROM u), b NOT IN (1, 2) FROM t;
+SELECT a IN (SELECT id FROM u), b NOT IN (1, 2) FROM t;
+
+-- SELECT (a, b), (a, b) = (1, 2), x = ANY ((a, b)) FROM t;
+SELECT (a, b), (a, b) = (1, 2), x = ANY ((a, b)) FROM t;
+
+-- SELECT (a, b) OVERLAPS (c, d), ROW(a, b) OVERLAPS ROW(c, d), NOT (a, b) OVERLAPS (c, d) AND e FROM t;
+SELECT
+  (a, b) OVERLAPS (c, d),
+  ROW(a, b) OVERLAPS ROW(c, d),
+  NOT (a, b) OVERLAPS (c, d) AND e
+FROM t;
+
+-- SELECT a BETWEEN SYMMETRIC 1 AND 2, b NOT BETWEEN ASYMMETRIC 1 AND 2, c NOT BETWEEN 1 AND 2 FROM t;
+SELECT
+  a BETWEEN SYMMETRIC 1 AND 2,
+  b NOT BETWEEN ASYMMETRIC 1 AND 2,
+  c NOT BETWEEN 1 AND 2
+FROM t;
+
+-- SELECT a IS JSON, b IS NOT JSON OBJECT WITH UNIQUE KEYS, c IS JSON ARRAY WITHOUT UNIQUE FROM t;
+SELECT
+  a IS JSON,
+  b IS NOT JSON OBJECT WITH UNIQUE KEYS,
+  c IS JSON ARRAY WITHOUT UNIQUE KEYS
+FROM t;
+
+-- SELECT EXISTS (SELECT 1 FROM u) FROM t;
+SELECT EXISTS (SELECT 1 FROM u) FROM t;
+
+-- SELECT INTERVAL '1 day' FROM t;
+SELECT INTERVAL '1 day' FROM t;
+
+-- SELECT current_date, current_timestamp(3), localtime(0), user, session_user FROM t;
+SELECT CURRENT_DATE, CURRENT_TIMESTAMP(3), LOCALTIME(0), USER, SESSION_USER
+FROM t;
+
+-- SELECT date '2024-01-01', time '10:00', timestamp(3) with time zone '2024-01-01 00:00' FROM t;
+SELECT
+  date '2024-01-01',
+  time '10:00',
+  timestamp(3) with time zone '2024-01-01 00:00'
+FROM t;
+
+-- SELECT overlay(s PLACING 'ab' FROM 2 FOR 3), overlay(s PLACING 'x' FROM 1), overlay(s, 'x', 1) FROM t;
+SELECT
+  OVERLAY(s PLACING 'ab' FROM 2 FOR 3),
+  OVERLAY(s PLACING 'x' FROM 1),
+  overlay(s, 'x', 1)
+FROM t;
+
+-- SELECT count(*) FILTER (WHERE a > 1) FROM t;
+SELECT count(*) FILTER (WHERE a > 1) FROM t;
+
+-- SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM t;
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM t;
+
+-- SELECT count(*) FROM t;
+SELECT count(*) FROM t;
+
+-- SELECT count(distinct x) FROM t;
+SELECT count(DISTINCT x) FROM t;
+
+-- SELECT array_agg(a ORDER BY b DESC) FROM t;
+SELECT array_agg(a ORDER BY b DESC) FROM t;
+
+-- SELECT string_agg(a, ',' ORDER BY b) FROM t;
+SELECT string_agg(a, ',' ORDER BY b) FROM t;
+
+-- SELECT f(a => 1, b => 2) FROM t;
+SELECT f(a => 1, b => 2) FROM t;
+
+-- SELECT lag(x) IGNORE NULLS OVER (ORDER BY id) FROM t;
+SELECT lag(x) IGNORE NULLS OVER (ORDER BY id) FROM t;
+
+-- SELECT count(x) RESPECT NULLS FILTER (WHERE x) OVER () FROM t;
+SELECT count(x) RESPECT NULLS FILTER (WHERE x) OVER () FROM t;
+
+-- SELECT t.* FROM t;
+SELECT t.* FROM t;
+
+-- SELECT sum(x) OVER (PARTITION BY a ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t;
+SELECT
+  sum(x) OVER (
+    PARTITION BY a
+    ORDER BY id
+    ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+  )
+FROM t;
+
+-- SELECT sum(x) OVER (RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM t;
+SELECT sum(x) OVER (RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM t;
+
+-- SELECT sum(x) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) FROM t;
+SELECT sum(x) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) FROM t;
+
+-- SELECT sum(x) OVER (ROWS 5 PRECEDING) FROM t;
+SELECT sum(x) OVER (ROWS 5 PRECEDING) FROM t;
+
+-- SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM t;
+SELECT
+  sum(x) OVER (
+    ORDER BY id
+    ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW
+  )
+FROM t;
+
+-- SELECT sum(x) OVER (GROUPS 1 PRECEDING EXCLUDE TIES), sum(x) OVER (RANGE CURRENT ROW EXCLUDE NO OTHERS) FROM t;
+SELECT
+  sum(x) OVER (GROUPS 1 PRECEDING EXCLUDE TIES),
+  sum(x) OVER (RANGE CURRENT ROW EXCLUDE NO OTHERS)
+FROM t;
+
+-- SELECT a FROM t ORDER BY a USING <, b USING > NULLS FIRST, c DESC;
+SELECT a FROM t ORDER BY a USING <, b USING > NULLS FIRST, c DESC;
+
+-- SELECT a FROM t GROUP BY CUBE (a, b), ROLLUP (c), GROUPING SETS ((a), ());
+SELECT a FROM t GROUP BY CUBE (a, b), ROLLUP (c), GROUPING SETS (a, ());
+
+-- SELECT a FROM t GROUP BY DISTINCT a, ();
+SELECT a FROM t GROUP BY DISTINCT a, ();
+
+-- SELECT a, count(*) INTO TABLE reports.summary FROM t GROUP BY ALL a;
+SELECT a, count(*) INTO reports.summary FROM t GROUP BY a;
+
+-- SELECT a INTO GLOBAL TEMP scratch FROM t;
+SELECT a INTO GLOBAL TEMP scratch FROM t;
+
+-- SELECT 1 ORDER BY 1 OFFSET 5 ROWS FETCH NEXT 3 ROWS WITH TIES;
+SELECT 1 ORDER BY 1 OFFSET 5 FETCH FIRST 3 ROWS WITH TIES;
+
+-- SELECT 1 UNION VALUES (2);
+SELECT 1 UNION VALUES (2);
+
+-- SELECT * FROM t FOR NO KEY UPDATE FOR KEY SHARE SKIP LOCKED;
+SELECT * FROM t FOR NO KEY UPDATE FOR KEY SHARE SKIP LOCKED;
+
+-- WITH a AS MATERIALIZED (SELECT 1), b AS NOT MATERIALIZED (SELECT 2) SELECT * FROM a, b;
+WITH a AS MATERIALIZED (SELECT 1), b AS NOT MATERIALIZED (SELECT 2)
+SELECT *
+FROM a, b;
+
+-- WITH RECURSIVE t (id) AS (SELECT 1) SEARCH BREADTH FIRST BY id SET ord CYCLE id SET is_cycle TO 'Y' DEFAULT 'N' USING path SELECT * FROM t;
+WITH RECURSIVE
+  t (id) AS (SELECT 1)
+  SEARCH BREADTH FIRST BY id SET ord
+  CYCLE id SET is_cycle TO 'Y' DEFAULT 'N' USING path
+SELECT *
+FROM t;
+
+-- SELECT a::double precision, b::timestamp(3) with time zone, c::interval day to second FROM t;
+SELECT
+  a::double precision,
+  b::timestamp(3) with time zone,
+  c::interval day to second
+FROM t;
