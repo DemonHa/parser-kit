@@ -1,6 +1,7 @@
 import type { Infer, Rule } from "@parser-kit/core";
 import { type Column, column } from "./column";
 import { type Ctx, fail, isName, quoteOptions, type TT } from "./common";
+import { checksItem, indexesItem, isChecksItem, isIndexesItem } from "./indexes";
 import { isPartialInjection, partialInjection } from "./injection";
 import { isNoteItem, noteItem } from "./note";
 import { isRecordsItem, recordsItem } from "./records";
@@ -24,6 +25,8 @@ const TABLE_ITEMS = [
   { display: "a note", matches: isNoteItem, rule: noteItem },
   { display: "a partial injection", matches: isPartialInjection, rule: partialInjection, tableOnly: true },
   { display: "records", matches: isRecordsItem, rule: recordsItem, tableOnly: true },
+  { display: '"indexes"', matches: isIndexesItem, rule: indexesItem },
+  { display: '"checks"', matches: isChecksItem, rule: checksItem },
 ] as const satisfies readonly TableItemEntry[];
 
 type Entry = (typeof TABLE_ITEMS)[number];

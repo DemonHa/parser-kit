@@ -458,7 +458,12 @@ describe("Table errors", () => {
     ["Table t {\n  Note { 'a' 'b' }\n}", 'Expected "}" but found a string', 2, 13],
     ["Table t {\n  Note: 'a' [color: #fff]\n}", 'Expected a new line or "}" but found "["', 2, 12],
     ["Table t {\n  id int [ref: > users.(id)]\n}", 'Expected a column name but found "("', 2, 23],
-    ["Table t {\n  [pk]\n}", 'Expected a column, a note, a partial injection or records but found "["', 2, 2],
+    [
+      "Table t {\n  [pk]\n}",
+      'Expected a column, a note, a partial injection, records, "indexes" or "checks" but found "["',
+      2,
+      2,
+    ],
     ["Table t {\n  id:int\n}", 'Expected a column type but found ":"', 2, 4],
     ["Table a[note: 'x'] {\n  id int\n}", 'Expected a space but found "["', 1, 7],
     ["Table a as b[note: 'x'] {\n  id int\n}", 'Expected a space but found "["', 1, 12],

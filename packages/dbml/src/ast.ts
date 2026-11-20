@@ -18,6 +18,16 @@ export type {
 } from "./grammar/common";
 export type { Enum, EnumValue } from "./grammar/enum";
 export type { TableGroup, TableGroupMember } from "./grammar/group";
+export type {
+  CheckEntry,
+  Checks,
+  IndexColumn,
+  IndexComposite,
+  IndexEntry,
+  Indexes,
+  IndexField,
+  IndexOrder,
+} from "./grammar/indexes";
 export type { PartialInjection } from "./grammar/injection";
 export type { Note, StickyNote } from "./grammar/note";
 export type { TablePartial } from "./grammar/partial";
