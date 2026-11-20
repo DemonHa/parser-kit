@@ -297,7 +297,7 @@ const isPlain = (c: Call): boolean =>
 // A one-part call named by one of PG's col_name keywords is written quoted, an
 // ordinary function to PG, unless it has the shape of the keyword form PG (and
 // this grammar) read as a plain call: `coalesce(a, b)`, `substring(a, 1)`,
-// `normalize(a)`, a legacy `json_object(…)`. TRIM, EXTRACT, POSITION and ROW
+// `normalize(a)`, `merge_action()`, a legacy `json_object(…)`. TRIM, EXTRACT, POSITION and ROW
 // are left bare whatever their shape: quoted, this grammar still reads them as
 // the keyword form, so no spelling of another shape would parse back.
 const bareForm = (name: string, c: Call): boolean => {
@@ -312,6 +312,9 @@ const bareForm = (name: string, c: Call): boolean => {
       return isPlain(c) && c.args.length > 0;
     case "normalize":
       return isPlain(c) && c.args.length === 1;
+    // MERGE ... RETURNING's MERGE_ACTION(); quoted, it would be a user function.
+    case "merge_action":
+      return isPlain(c) && c.args.length === 0;
     case "json_object":
       return c.args.length > 0 && !c.distinct && !c.all && !c.variadic && c.orderBy === undefined;
     case "substring":

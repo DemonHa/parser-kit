@@ -726,6 +726,18 @@ GROUP BY
   CUBE ((aaaa + bbbb = ANY (ARRAY[1, 2]))),
   GROUPING SETS ((-aaaaaaaaaaaaaaaaaaaaaa AT TIME ZONE 'utc'));
 
+-- WITH m AS (MERGE INTO t USING s ON true WHEN MATCHED THEN DELETE RETURNING *) SELECT * FROM m
+WITH m AS (MERGE INTO t USING s ON TRUE WHEN MATCHED THEN DELETE RETURNING *)
+SELECT *
+FROM m;
+
+-- WITH i AS (INSERT INTO t DEFAULT VALUES RETURNING id), u AS (UPDATE t SET a = 1 FROM i WHERE t.id = i.id RETURNING *) SELECT * FROM u
+WITH
+  i AS (INSERT INTO t DEFAULT VALUES RETURNING id),
+  u AS (UPDATE t SET a = 1 FROM i WHERE t.id = i.id RETURNING *)
+SELECT *
+FROM u;
+
 -- SELECT * FROM users u;
 SELECT * FROM users AS u;
 
@@ -1014,3 +1026,11 @@ SELECT
   b::timestamp(3) with time zone,
   c::interval day to second
 FROM t;
+
+-- WITH m AS (MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE RETURNING t.id) SELECT * FROM m;
+WITH
+  m AS (
+    MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE RETURNING t.id
+  )
+SELECT *
+FROM m;
