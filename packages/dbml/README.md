@@ -5,9 +5,9 @@
 A fast, typed [DBML](https://dbml.dbdiagram.io/docs/) parser for JavaScript and TypeScript, built with [`@parser-kit/core`](https://www.npmjs.com/package/@parser-kit/core). It turns DBML into a span-annotated AST with exported TypeScript types, and can recover from errors for editor tooling.
 
 - **The DBML language as [`@dbml/core`](https://www.npmjs.com/package/@dbml/core) 12 reads it:** `Project`, `Table`, `Ref`, `Enum`, indexes and checks, `TableGroup`, sticky notes, `TablePartial` and `records`. A differential test holds it to `@dbml/core` 12.1.0, and the few deliberate [differences](#differences-from-dbmlcore) are listed below.
-- **Fast.** About 2× faster than `@dbml/parse`'s lex and parse stage, and 10–38× faster than `@dbml/core`'s `Parser.parse`, which also validates and builds a model. See [Benchmarks](#benchmarks).
+- **Fast.** About 2× faster than `@dbml/parse`'s lex and parse stage, and 10–22× faster than `@dbml/core`'s `Parser.parse`, which also validates and builds a model. See [Benchmarks](#benchmarks).
 - **Recovers from errors.** `dbml.diagnose` reports every error it finds and keeps the rest of the document: a bad setting, line or element is dropped, not the whole file.
-- **Typed.** Every node is a discriminated union member (`Element`, `TableItem`, `Setting`, `Value`, …), exported for `switch (node.type)` or `switch (node.kind)`.
+- **Typed.** Every element, table item, setting and value is a discriminated union member (`Element`, `TableItem`, `Setting`, `Value`, …), exported for `switch (node.type)` or `switch (node.kind)`.
 - **Small.** About 13 KB minified and gzipped, `@parser-kit/core` included, with no other dependencies.
 - **Dual ESM / CommonJS**, with type declarations. Node 18 or later.
 
@@ -85,7 +85,7 @@ The methods don't use `this`, so `const { parse } = dbml` and `sources.map(dbml.
 
 Everything below parses to its own node. Keywords are case-insensitive (`Table`, `table`, `TABLE`) and contextual, never reserved: a table, column, enum value or alias may be called `note`, `ref`, `table`, `indexes`, `records`, `pk`, `null` and so on.
 
-- **Project:** `Project name { database_type: 'PostgreSQL'  Note: '…' }`, name optional, with any `key: 'string'` property and both note forms.
+- **Project:** `Project name { … }`, name optional, with one `key: 'string'` property (`database_type: 'PostgreSQL'`) or note per line, in both note forms.
 - **Table:** a schema-qualified or quoted name (`Table s."order items"`), an alias (`as U`), settings (`[headercolor: #3498DB, note: '…']` plus custom properties, multi-word keys included), and a single-line body (`Table a { id int }`).
   - **Columns:** types with arguments (`varchar(255)`, `decimal(10, 2)`, `varchar(MAX)`), array suffixes (`int[]`, `int[3]`), quoted (`"double precision"`) and schema-qualified (`s.status`) types.
   - **Column settings:** `pk` / `primary key`, `null` / `not null`, `unique`, `increment`, `default:` (number, signed or with an exponent, string, backtick expression, `true` / `false` / `null`, enum value), `note:`, inline `ref:` (repeatable), `check:` (repeatable) and custom properties. A bare `pk` or `unique` may follow the type (`id int pk`). A settings list may span lines.
@@ -94,7 +94,7 @@ Everything below parses to its own node. Keywords are case-insensitive (`Table`,
   - **Checks:** `` checks { `price >= 0` [name: 'positive_price'] } ``.
 - **Ref:** short (`Ref name: a.b > c.d`), long (`Ref name { a.b > c.d }`) and inline (`[ref: > users.id]`) forms; the relations `<`, `>`, `-` and `<>` with optional sides (`>?`, `?<>?`, …); composite (`t.(a, b)`) and schema-qualified (`s.t.c`) endpoints; the settings `delete:` / `update:` (`cascade`, `restrict`, `set null`, `set default`, `no action`), `color:`, `inactive`, `note:` and custom properties.
 - **Enum:** schema-qualified names, an alias (`enum v2.job_status as JobStatus`), quoted values and value notes (`"on hold" [note: '…']`).
-- **TableGroup:** `TableGroup name [color: #hex, note: '…'] { users  s.posts  Note: '…' }`, custom settings included.
+- **TableGroup:** `TableGroup name [color: #hex, note: '…'] { … }`, custom settings included, with one member (`users`, `s.posts`) or `Note` per line.
 - **Sticky notes:** `Note name [color: #hex] { '…' }` at the top level.
 - **TablePartial and injection:** `TablePartial name [headercolor: #hex, note: '…'] { … }`, whose body takes columns, notes, indexes and checks, and `~name` inside a table. Injections are kept where they are written, not merged.
 - **records:** top level (`records users(id, name) [example] { … }`) and inside a table (`records (id, name) { … }`, column list optional). One row per line, fields separated by commas; a field may be a string, a signed number, `true` / `false` / `null`, a backtick expression or an enum value (`status.active`), or empty (`1, , 3`).
@@ -139,10 +139,10 @@ stripSpans(table.items[0]);
 
 - **Spans.** Every element, item, name, value and setting has a `span: { start, end }`. Each end is a `{ row, col }`, with a 1-based `row` and a 0-based `col` (the `(2:22)` in error messages). String and quoted-name spans include their quotes. A span starts and ends at real tokens, so a comment after a node is outside it.
 - **Names** keep their case as written. An `Ident` is `{ value, quoted?: true, span }`, and a quoted name is decoded (`"full name"` gives `{ value: "full name", quoted: true }`). A dotted name is a `QualifiedName`, `{ schema: Ident | null, name: Ident }`. A ref endpoint is `{ table: QualifiedName, columns: Ident[], composite }`: the last part is the column, the one before it the table and the one before that the schema.
-- **Strings are decoded.** `'it\'s'` gives `"it's"`. A `'''…'''` string carries `multiline: true`, and double-quoted text where a string is expected (`[note: "x"]`) carries `doubleQuoted: true`. Note text is dedented the way `@dbml/core` does it; other strings keep their text as written. Backtick expressions are kept raw.
+- **Strings are decoded.** `'it\'s'` gives `"it's"`. A `'''…'''` string carries `multiline: true`, and double-quoted text where a string is expected (`[note: "x"]`) carries `doubleQuoted: true`. Note text is dedented the way `@dbml/core` does it (except an index's `note:`, which core keeps as written too); other strings keep their text as written. Backtick expressions are kept raw.
 - **Numbers.** A number is `{ kind: "number", value }`, with any sign folded in. It also has `raw`, the text as written, whenever `value` alone would lose it: `1.50`, `1e5`, `007`, `-0`, or an integer beyond `Number.MAX_SAFE_INTEGER`. `42` and `-7` have no `raw`.
-- **Settings** are an ordered list in source order, duplicates kept. Known flags and keys have their own `kind` (`pk`, `null`, `unique`, `default`, `note`, `ref`, `action`, `check`, …); other `key: value` settings, and known ones that only carry a value (`headercolor`, `color`, an index's `name` and `type`), are `{ kind: "property", key, value }`.
-- **Absent fields** are `null` or `[]` (`alias: null`, `args: null` without parentheses), and flags are `?: true`, present only when set.
+- **Settings** are an ordered list in source order, duplicates kept. Known flags and keys have their own `kind` (`pk`, `null`, `unique`, `default`, `note`, `ref`, `action`, `check`, …); other `key: value` settings, and known ones that only carry a value (`headercolor`, `color`, an index's `name` and `type`, a check's `name`), are `{ kind: "property", key, value }`.
+- **Absent fields** are `null` or `[]` (`alias: null`, `args: null` without parentheses). Optional flags are `?: true`, present only when set (`quoted`, `multiline`, `leftOptional`, …); a few yes/no fields are plain booleans, always present (`not` on a `null` setting, `composite` on an endpoint).
 - **Comments are not kept.** `dbmlLexer` still emits them as `comment` tokens.
 - **Nothing is resolved.** This is a syntax tree: schemas are not defaulted, partials are not merged, and refs, enum types, group members and records targets are not checked against the tables they name.
 
@@ -170,7 +170,7 @@ Recovery is a best effort. Some errors take more with them than you might expect
 
 **Rejected here, accepted by `@dbml/core`'s parser:**
 
-- More than two parts in a table, enum, type, sticky-note, group-member or records-target name (`Table a.b.c`), more than three in a ref endpoint, or more than three in an enum value (`s.e.v.w`). Core reads these as a nested schema.
+- More than two parts in a table, enum, sticky-note, group-member or records-target name (`Table a.b.c`), more than three in a ref endpoint, or more than three in a records field's enum value (`s.e.v.w`). Core's parser reads these as a nested schema.
 - A single-part inline ref target (`[ref: > id]`).
 - Repeated signs (`--1`, `- -1`) in a default or a records field.
 - Chained type suffixes (`int(1)(2)`, `int[](1)`) and comma-separated array sizes (`int[1,2]`).
@@ -198,7 +198,7 @@ Recovery is a best effort. Some errors take more with them than you might expect
 
 ## Benchmarks
 
-Measured with vitest bench against `@dbml/core` 12.1.0 and `@dbml/parse` 12.1.0, on Node 22 in a shared cloud container. Absolute numbers moved up to 25% between runs, so trust the ratios.
+Measured with vitest bench against `@dbml/core` 12.1.0 and `@dbml/parse` 12.1.0, on Node 22 in a shared cloud container; each range is three runs. Absolute numbers moved by up to a third between runs (the committed `bench-baseline.json` is one of the slower ones), so trust the ratios.
 
 | Input | `@parser-kit/dbml` | vs `@dbml/parse` (lex + parse) | vs `@dbml/core` `Parser.parse` (full) |
 |---|---|---|---|
@@ -210,7 +210,7 @@ Measured with vitest bench against `@dbml/core` 12.1.0 and `@dbml/parse` 12.1.0,
 
 - **Like for like** is the `@dbml/parse` column: its compiler's lex and parse stage, which builds a syntax tree and collects syntax errors but doesn't validate or bind. The bench skips that stage's front-matter re-lex, which a real `@dbml/core` call pays, so the ratio there is conservative (about 1.3–1.6× larger without the skip).
 - **`Parser.parse`** is what a `@dbml/core` user calls. It also validates, binds and builds its model, so it is not like for like; it is shown for scale.
-- **Cost per KB** is about 175–240 µs, flat from 23 KB to 1.86 MB. Long strings and backtick expressions stay linear up to 2 MB.
+- **Cost per KB** is about 200–265 µs in the runs above, flat from 23 KB to 463 KB. A separate run that kept doubling the generated schema found it flat up to 1.86 MB, and a single string or backtick expression linear up to 2 MB (the committed bench stops at 463 KB and 500 KB).
 - **`diagnose`** costs what `parse` costs on valid input, and is about 2× faster than `@dbml/parse`'s recovering parse stage on input with errors.
 
 From a clone of the repository root: `pnpm vitest bench --run packages/dbml/bench`.

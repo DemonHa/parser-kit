@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { Parser } from "@dbml/core";
 import { createInputStream, ParseError, stripSpans } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
 import { dbml, dbmlLexer } from "../src/index";
@@ -314,6 +315,8 @@ describe("README AST conventions", () => {
 describe("README differences from @dbml/core", () => {
   it.each([
     "Table a.b.c {\n  id int\n}",
+    "enum a.b.c {\n  x\n}",
+    "Table t {\n  id int\n}\nrecords t(id) {\n  s.e.v.w\n}",
     "Table t {\n  id int [ref: > id]\n}",
     "Table t {\n  id int [default: --1]\n}",
     "Table t {\n  id int [default: - -1]\n}",
@@ -346,7 +349,28 @@ describe("README differences from @dbml/core", () => {
     expect(column?.type === "column" && [column.dataType.arraySizes, column.settings]).toEqual([[], []]);
   });
 
-  it("an empty note is the empty string", () => {
+  it("index fields keep their source order, where @dbml/core puts composites first", () => {
+    const source = "Table t {\n  a int\n  b int\n  c int\n  indexes {\n    a (b, c)\n  }\n}";
+    const [table] = dbml.parse(source).elements;
+    const indexes = table?.type === "table" ? table.items[3] : undefined;
+    expect(indexes?.type === "indexes" && indexes.entries[0]!.fields.map((field) => field.kind)).toEqual([
+      "column",
+      "composite",
+    ]);
+    const model = Parser.parse(source, "dbmlv2").normalize() as unknown as {
+      indexes: Record<string, { columnIds: number[] }>;
+      indexColumns: Record<string, { value: string }>;
+    };
+    const [index] = Object.values(model.indexes);
+    expect(index!.columnIds.map((id) => model.indexColumns[id]!.value)).toEqual(["b", "c", "a"]);
+  });
+
+  it("an empty note is the empty string, where @dbml/core has null", () => {
+    const model = Parser.parse("Table t {\n  a int [note: '']\n}", "dbmlv2").normalize() as unknown as {
+      fields: Record<string, { note?: string | null }>;
+    };
+    expect(Object.values(model.fields).map((field) => field.note)).toEqual([null]);
+
     const [table] = dbml.parse("Table t {\n  a int [note: '']\n}").elements;
     const column = table?.type === "table" ? table.items[0] : undefined;
     expect(column?.type === "column" && stripSpans(column.settings[0])).toEqual({
