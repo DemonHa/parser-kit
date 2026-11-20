@@ -277,7 +277,7 @@ Two real grammars double as the kit's genericity/integration tests and as the fa
 
 ## Design notes & current limits
 
-- **Stringify/printing**: printers are written by hand, not derived from the grammar. A separate, opt-in `@parser-kit/core/print` entry will provide the building blocks. The `Rule.print` / `Rule.inverse` hooks, `custom(…, { print })`, the second argument to `map(fn, inverse)` and the `Printer` type are deprecated: nothing ever called them, and they will be removed before 1.0.
+- **Stringify/printing**: printers are written by hand, not derived from the grammar. The separate, opt-in [`@parser-kit/core/print`](#printing-parser-kitcoreprint) entry provides the building blocks. The `Rule.print` / `Rule.inverse` hooks, `custom(…, { print })`, the second argument to `map(fn, inverse)` and the `Printer` type are deprecated: nothing ever called them, and they will be removed before 1.0.
 - **Tokenization is context-sensitive when you opt in**: readers dispatch on the current character, but [modes, transitions, and `LexContext`](#context-sensitive-lexing-modes--transitions) give the lexer/parser interplay that JS regex-vs-division and template literals need. A mode-free lexer stays a plain context-free tokenizer.
 - **`InputStream` ships a string implementation only** — the interface is the contract, but there's no streaming/incremental reader yet.
 - **`oneOf` validation** runs at definition time when possible; branches behind `lazy()` forward references are validated on first parse instead.
