@@ -2,6 +2,7 @@ import type {
   Column,
   DataType,
   DbmlDocument,
+  Element,
   Endpoint,
   Enum,
   IndexEntry,
@@ -29,18 +30,23 @@ import type {
 // shape follows `@dbml/core`'s model, because that model is what consumers of
 // DBML (diagram renderers, SQL exporters) are written against:
 //
-//   - unqualified tables, enums and groups default to the `public` schema;
+//   - unqualified tables and enums are in the `public` schema, and so is
+//     every table group;
 //   - inline refs (`[ref: > t.c]`) are refs like any other, listed with the
 //     document's refs;
 //   - table partials are merged into the tables that inject them;
-//   - aliases in ref endpoints are resolved to the table they name;
+//   - a table alias in a ref endpoint, a group member or a records target is
+//     resolved to the table it names;
 //   - column types are flattened to `@dbml/core`'s `type_name` / `args`
-//     strings, defaults to `{ type, value }` with its type names.
+//     strings, defaults to `{ type, value }` with its type names;
+//   - when a setting is repeated, the last one wins (`@dbml/core` rejects the
+//     repeat as a validation error, so the test never sees it).
 //
 // What it leaves out, on purpose: anything syntactic that the model doesn't
-// keep (spans, quoting, setting order, note forms), and anything the model
-// derives by validation rather than parsing (records values coerced to the
-// column types, enum members resolved from defaults).
+// keep (spans, quoting, setting order, note forms, enum aliases, Project
+// properties other than `database_type`), and anything the model derives by
+// validation rather than parsing (records values coerced to their column's
+// type, the enum member a default names).
 //
 // `projectDocument` maps this package's AST onto the shape. It is the part an
 // adapter onto a `@dbml/core`-style model would reuse; the `@dbml/core` side
@@ -63,7 +69,7 @@ export interface ProjectedProject {
   note: string | null;
 }
 
-/** A custom property (`[owner: 'x']`), keyed by its name in `settings`. */
+/** A custom property (`[owner: 'x']`), keyed by its lowercased name in `settings`. */
 export interface ProjectedProperty {
   type: "string" | "number" | "bool" | "color";
   value: string | number | boolean;
@@ -102,7 +108,8 @@ export interface ProjectedDefault {
 }
 
 export interface ProjectedIndex {
-  columns: { type: "column" | "expression"; value: string; sortOrder: "asc" | "desc" | null }[];
+  /** `sortOrder` is `desc` or `null`: the model keeps no `asc`, the default. */
+  columns: { type: "column" | "expression"; value: string; sortOrder: "desc" | null }[];
   name: string | null;
   type: string | null;
   unique: boolean;
@@ -119,6 +126,7 @@ export interface ProjectedCheck {
 export type Cardinality = "1" | "*" | "0..1" | "0..*";
 
 export interface ProjectedEndpoint {
+  /** As written, `null` when unqualified (the model doesn't default an endpoint's schema). */
   schema: string | null;
   table: string;
   columns: string[];
@@ -158,12 +166,9 @@ export interface ProjectedStickyNote {
   color: string | null;
 }
 
-/**
- * A records block, with each field as written. `@dbml/core` coerces values to
- * their column's type, so only the field kinds that survive that unchanged
- * are compared: see `ProjectedField`.
- */
+/** A records block. A block that lists no columns is dropped, as `@dbml/core` drops it. */
 export interface ProjectedRecords {
+  /** As written, `null` when unqualified. */
   schema: string | null;
   table: string;
   columns: string[];
@@ -171,12 +176,22 @@ export interface ProjectedRecords {
 }
 
 /**
- * A record field reduced to what `@dbml/core` keeps whatever the column type:
- * strings, booleans and `null` keep their value; a number keeps only that it
- * is a number (core truncates it under an integer column); anything else (an
- * expression, an enum value, an empty field) keeps only that it is there.
+ * A record field. Strings, booleans, numbers and expressions keep their value;
+ * `null` and an empty field are both `null`; an enum value keeps only that it
+ * is one, since the model drops which member it names.
+ *
+ * `@dbml/core` coerces a value that doesn't fit its column's type (it
+ * truncates a fraction in an integer column, turns a number into text in a
+ * string column, …), and this shape doesn't model that: the documents the test
+ * compares hold only values that fit their columns.
  */
-export type ProjectedField = string | boolean | null | { number: true } | { other: true };
+export type ProjectedField =
+  | string
+  | boolean
+  | null
+  | { number: number }
+  | { expression: string }
+  | { enumValue: true };
 
 export const DEFAULT_SCHEMA = "public";
 
@@ -184,36 +199,36 @@ export const DEFAULT_SCHEMA = "public";
 
 /** Maps a parsed document onto the common shape. */
 export const projectDocument = (doc: DbmlDocument): ProjectedDocument => {
-  const of = <T extends DbmlDocument["elements"][number]["type"]>(type: T) =>
-    doc.elements.filter(
-      (element): element is Extract<DbmlDocument["elements"][number], { type: T }> => element.type === type,
-    );
+  const of = <T extends Element["type"]>(type: T) =>
+    doc.elements.filter((element): element is Extract<Element, { type: T }> => element.type === type);
 
+  const tables = of("table");
   const enums = of("enum");
-  const scope: Scope = { tables: tableResolver(of("table")), enumType: enumTypeBinder(enums) };
+  const scope: Scope = { resolveTable: tableResolver(tables), enumOf: enumResolver(enums) };
   const partials = new Map(of("tablePartial").map((partial) => [partial.name.value, partial]));
-  const tables = of("table").map((table) => projectTable(table, partials, scope));
+  const projected = tables.map((table) => projectTable(table, partials, scope));
   const project = of("project")[0];
 
   return {
     project: project ? projectProject(project) : { name: null, databaseType: null, note: null },
-    tables: tables.map(({ table }) => table),
-    refs: [...tables.flatMap(({ refs }) => refs), ...of("ref").map((ref) => projectRef(ref, scope))],
+    tables: projected.map(({ table }) => table),
+    refs: [...projected.flatMap(({ refs }) => refs), ...of("ref").map((ref) => projectRef(ref, scope))],
     enums: enums.map(projectEnum),
     tableGroups: of("tableGroup").map((group) => projectTableGroup(group, scope)),
     notes: of("stickyNote").map(projectSticky),
-    records: [...tables.flatMap(({ records }) => records), ...of("records").map((records) => projectRecords(records))]
-      // `@dbml/core` drops a records block that lists no columns.
-      .filter((records) => records.columns.length > 0),
+    records: [
+      ...projected.flatMap(({ records }) => records),
+      ...of("records").map((records) => projectTopLevelRecords(records, scope)),
+    ].filter((records) => records.columns.length > 0),
   };
 };
 
-/** Name lookups the projection needs across elements. */
+/** Name lookups that cross elements. */
 interface Scope {
-  /** A ref endpoint's or group member's table, with aliases resolved. */
-  tables: (name: QualifiedName) => { schema: string | null; table: string };
-  /** Whether a column type names a declared enum, and which. */
-  enumType: (type: DataType) => { schema: string | null; name: string } | undefined;
+  /** The table a name refers to, with a table alias resolved. */
+  resolveTable: (name: QualifiedName) => { schema: string | null; table: string };
+  /** The declared enum a column type names, if any. */
+  enumOf: (type: DataType) => { schema: string | null; name: string } | undefined;
 }
 
 // --- Tables and partials ---
@@ -222,12 +237,14 @@ interface Scope {
 interface Body {
   columns: ProjectedColumn[];
   /** Each column's inline refs, keyed by column name. */
-  inlineRefs: Map<string, { relation: Relation; target: Endpoint }[]>;
+  inlineRefs: Map<string, InlineRef[]>;
   indexes: ProjectedIndex[];
   checks: ProjectedCheck[];
   note: string | null;
   headerColor: string | null;
 }
+
+type InlineRef = Extract<Setting, { kind: "ref" }>;
 
 const projectBody = (items: readonly TableItem[], settings: readonly Setting[], scope: Scope): Body => {
   const columns = items.filter((item): item is Column => item.type === "column");
@@ -249,16 +266,9 @@ const projectBody = (items: readonly TableItem[], settings: readonly Setting[], 
     for (const column of pkColumns) column.pk = false;
   }
 
-  // A `Note` item wins over a `note:` setting, and the last `Note` item wins.
-  const noteItem = last(items.filter((item): item is Note => item.type === "note"));
   return {
     columns: projected,
-    inlineRefs: new Map(
-      columns.map((column) => [
-        column.name.value,
-        column.settings.flatMap((setting) => (setting.kind === "ref" ? [setting] : [])),
-      ]),
-    ),
+    inlineRefs: new Map(columns.map((column) => [column.name.value, settingsOf(column.settings, "ref")])),
     indexes,
     checks: items.flatMap((item) =>
       item.type === "checks"
@@ -268,7 +278,8 @@ const projectBody = (items: readonly TableItem[], settings: readonly Setting[], 
           }))
         : [],
     ),
-    note: noteItem?.value.value ?? noteOf(settings),
+    // A `Note` item wins over a `note:` setting.
+    note: last(items.filter((item): item is Note => item.type === "note"))?.value.value ?? noteOf(settings),
     headerColor: propertyValue(settings, "headercolor"),
   };
 };
@@ -284,9 +295,9 @@ const projectBody = (items: readonly TableItem[], settings: readonly Setting[], 
  *   - the partials' indexes and checks come first, the last injected first,
  *     followed by the table's own; a partial check's name is prefixed with
  *     the table's name (`t.chk`);
- *   - a partial column's inline refs list the column first and the target
- *     second, with the column's schema defaulted to `public`; a table
- *     column's list the target first, with the schema as written.
+ *   - a table column's inline ref lists the target first and the column
+ *     second, with the column's schema as written; a partial column's lists
+ *     the column first, with its schema defaulted to `public`.
  */
 const projectTable = (
   table: Table,
@@ -296,84 +307,93 @@ const projectTable = (
   const own = projectBody(table.items, table.settings, scope);
   const schema = table.name.schema?.value ?? null;
   const name = table.name.name.value;
-  const self = (column: string, relation: Cardinality, schemaName = schema): ProjectedEndpoint => ({
-    schema: schemaName,
-    table: name,
-    columns: [column],
-    relation,
-  });
 
-  // The injections in source order, each with its partial projected.
-  const injections = table.items.flatMap((item) => {
+  // Each injection's partial, projected; an injection of an unknown partial adds nothing.
+  const injected = new Map<TableItem, Body>();
+  for (const item of table.items) {
     const partial = item.type === "partialInjection" ? partials.get(item.name.value) : undefined;
-    return partial ? [{ item, body: projectBody(partial.items, partial.settings, scope) }] : [];
-  });
-  const lastFirst = [...injections].reverse();
+    if (partial) injected.set(item, projectBody(partial.items, partial.settings, scope));
+  }
+  const lastFirst = [...injected].reverse();
 
   // Which injection supplies each column name the table doesn't define.
   const taken = new Set(own.columns.map((column) => column.name));
   const supplier = new Map<string, TableItem>();
-  for (const { item, body } of lastFirst)
+  for (const [item, body] of lastFirst)
     for (const column of body.columns)
       if (!taken.has(column.name)) {
         taken.add(column.name);
         supplier.set(column.name, item);
       }
 
+  /** The refs of a column's inline refs; `fromPartial` picks the endpoint order and schema described above. */
+  const inlineRefs = (column: string, refs: readonly InlineRef[], fromPartial: boolean): ProjectedRef[] =>
+    refs.map(({ relation, target }) => {
+      const [left, right] = cardinalities(relation);
+      const ownEnd = {
+        schema: fromPartial ? (schema ?? DEFAULT_SCHEMA) : schema,
+        table: name,
+        columns: [column],
+        relation: left,
+      };
+      const other = endpoint(target, right, scope);
+      return inlineRef(fromPartial ? [ownEnd, other] : [other, ownEnd]);
+    });
+
+  const ownColumns = new Map(own.columns.map((column) => [column.name, column]));
   const columns: ProjectedColumn[] = [];
   const refs: ProjectedRef[] = [];
-  const ownColumns = new Map(own.columns.map((column) => [column.name, column]));
   for (const item of table.items) {
     if (item.type === "column") {
       const column = ownColumns.get(item.name.value)!;
       columns.push(column);
-      for (const ref of own.inlineRefs.get(column.name) ?? []) {
-        const [left, right] = cardinalities(ref.relation);
-        refs.push(inlineRef([endpoint(ref.target, right, scope), self(column.name, left)]));
-      }
+      refs.push(...inlineRefs(column.name, own.inlineRefs.get(column.name) ?? [], false));
     }
-    const injected = injections.find((injection) => injection.item === item);
-    if (!injected) continue;
-    for (const column of injected.body.columns) {
+    const body = injected.get(item);
+    if (!body) continue;
+    for (const column of body.columns) {
       if (supplier.get(column.name) !== item) continue;
       columns.push(column);
-      for (const ref of injected.body.inlineRefs.get(column.name) ?? []) {
-        const [left, right] = cardinalities(ref.relation);
-        refs.push(inlineRef([self(column.name, left, schema ?? DEFAULT_SCHEMA), endpoint(ref.target, right, scope)]));
-      }
+      refs.push(...inlineRefs(column.name, body.inlineRefs.get(column.name) ?? [], true));
     }
   }
 
-  const note = own.note ?? lastFirst.map(({ body }) => body.note).find((value) => value !== null) ?? null;
-  const headerColor =
-    own.headerColor ?? lastFirst.map(({ body }) => body.headerColor).find((value) => value !== null) ?? null;
+  const fromPartials = <T>(pick: (body: Body) => T | null): T | null =>
+    lastFirst.map(([, body]) => pick(body)).find((value) => value !== null) ?? null;
 
   const projected: ProjectedTable = {
     schema: schema ?? DEFAULT_SCHEMA,
     name,
     alias: table.alias?.value ?? null,
-    note,
-    headerColor,
+    note: own.note ?? fromPartials((body) => body.note),
+    headerColor: own.headerColor ?? fromPartials((body) => body.headerColor),
     settings: customProperties(table.settings, ["headercolor"]),
     columns,
-    indexes: [...lastFirst.flatMap(({ body }) => body.indexes), ...own.indexes],
+    indexes: [...lastFirst.flatMap(([, body]) => body.indexes), ...own.indexes],
     checks: [
-      ...lastFirst.flatMap(({ body }) =>
+      ...lastFirst.flatMap(([, body]) =>
         body.checks.map((check) => ({ ...check, name: check.name === null ? null : `${name}.${check.name}` })),
       ),
       ...own.checks,
     ],
   };
+
+  // A records block inside the table lists all its columns when it names none.
   const records = table.items
     .filter((item): item is Records => item.type === "records")
-    .map((records) => projectRecords(records, { schema, name, columns: columns.map((column) => column.name) }));
+    .map((records) => ({
+      schema,
+      table: name,
+      columns: records.columns?.map((column) => column.value) ?? columns.map((column) => column.name),
+      rows: projectRows(records),
+    }));
   return { table: projected, refs, records };
 };
 
 const projectColumn = (column: Column, scope: Scope): ProjectedColumn => {
   const { settings } = column;
-  const nullSetting = lastOf(settings, "null");
-  const defaultSetting = lastOf(settings, "default");
+  const nullSetting = last(settingsOf(settings, "null"));
+  const defaultSetting = last(settingsOf(settings, "default"));
   return {
     name: column.name.value,
     type: projectType(column.dataType, scope),
@@ -383,7 +403,7 @@ const projectColumn = (column: Column, scope: Scope): ProjectedColumn => {
     increment: settings.some((setting) => setting.kind === "increment"),
     default: defaultSetting ? projectDefault(defaultSetting.value) : null,
     note: noteOf(settings),
-    checks: settings.flatMap((setting) => (setting.kind === "check" ? [setting.expression.value] : [])),
+    checks: settingsOf(settings, "check").map((check) => check.expression.value),
     settings: customProperties(settings, []),
   };
 };
@@ -398,14 +418,15 @@ const projectColumn = (column: Column, scope: Scope): ProjectedColumn => {
  */
 const projectType = (dataType: DataType, scope: Scope): ProjectedColumn["type"] => {
   const args = dataType.args === null ? null : dataType.args.map(typeArg).join(",");
-  const suffix = `${args === null ? "" : `(${args})`}${dataType.arraySizes.map((size) => `[${size === null ? "" : numberText(size)}]`).join("")}`;
-  const enumType = dataType.arraySizes.length === 0 ? scope.enumType(dataType) : undefined;
-  const schema = enumType ? enumType.schema : (dataType.name.schema?.value ?? null);
-  const name = enumType ? enumType.name : dataType.name.name.value;
+  const arrays = dataType.arraySizes.map((size) => `[${size === null ? "" : numberText(size)}]`).join("");
+  const suffix = `${args === null ? "" : `(${args})`}${arrays}`;
+  const enumType = arrays === "" ? scope.enumOf(dataType) : undefined;
+  if (enumType) return { schema: enumType.schema, name: `${enumType.name}${suffix}`, args };
+  const schema = dataType.name.schema?.value ?? null;
   return {
     schema,
-    name: `${schema === null || enumType ? "" : `${schema}.`}${name}${suffix}`,
-    args: dataType.arraySizes.length === 0 ? args : null,
+    name: `${schema === null ? "" : `${schema}.`}${dataType.name.name.value}${suffix}`,
+    args: arrays === "" ? args : null,
   };
 };
 
@@ -441,7 +462,7 @@ const projectDefault = (value: Value): ProjectedDefault => {
       return { type: "expression", value: value.value };
     case "enumConstant":
       // The model keeps only the member's name.
-      return { type: "string", value: value.path[value.path.length - 1]!.value };
+      return { type: "string", value: last(value.path)!.value };
     case "identifier":
       return { type: "string", value: value.value.value };
   }
@@ -454,7 +475,6 @@ const projectIndex = (entry: IndexEntry): ProjectedIndex => ({
       ...(column.kind === "column"
         ? { type: "column" as const, value: column.name.value }
         : { type: "expression" as const, value: column.expression.value }),
-      // The model keeps `desc` only; `asc` is the default.
       sortOrder: column.order === "desc" ? "desc" : null,
     })),
   name: propertyValue(entry.settings, "name"),
@@ -467,11 +487,11 @@ const projectIndex = (entry: IndexEntry): ProjectedIndex => ({
 // --- Name resolution ---
 
 /**
- * Resolves a ref endpoint's or group member's table: an unqualified name that
- * is some table's alias names that table. The schema stays as written (`null`
- * when unqualified), as in `@dbml/core`'s endpoints.
+ * Resolves a name that refers to a table: an unqualified name that is some
+ * table's alias names that table. The schema stays as written (`null` when
+ * unqualified), as in `@dbml/core`'s endpoints.
  */
-const tableResolver = (tables: readonly Table[]): Scope["tables"] => {
+const tableResolver = (tables: readonly Table[]): Scope["resolveTable"] => {
   const aliases = new Map<string, QualifiedName>();
   for (const table of tables) if (table.alias) aliases.set(table.alias.value, table.name);
   return (name) => {
@@ -487,7 +507,7 @@ const tableResolver = (tables: readonly Table[]): Scope["tables"] => {
  * with the schema as the type writes it, or for an alias as the enum writes
  * it (`null` when unqualified).
  */
-const enumTypeBinder = (enums: readonly Enum[]): Scope["enumType"] => {
+const enumResolver = (enums: readonly Enum[]): Scope["enumOf"] => {
   const key = (schema: string, name: string) => JSON.stringify([schema, name]);
   const names = new Set<string>();
   const aliases = new Map<string, QualifiedName>();
@@ -513,11 +533,12 @@ const cardinalities = (relation: Relation): [Cardinality, Cardinality] => {
 };
 
 const endpoint = (end: Endpoint, relation: Cardinality, scope: Scope): ProjectedEndpoint => ({
-  ...scope.tables(end.table),
+  ...scope.resolveTable(end.table),
   columns: end.columns.map((column) => column.value),
   relation,
 });
 
+/** An inline ref: it has no name and no settings of its own. */
 const inlineRef = (endpoints: [ProjectedEndpoint, ProjectedEndpoint]): ProjectedRef => ({
   name: null,
   endpoints,
@@ -533,8 +554,7 @@ const projectRef = (ref: Ref, scope: Scope): ProjectedRef => {
   const [left, right] = cardinalities(ref.relation);
   const { settings } = ref;
   const action = (on: "delete" | "update") =>
-    last(settings.filter((setting): setting is SettingOf<"action"> => setting.kind === "action" && setting.on === on))
-      ?.action ?? null;
+    last(settingsOf(settings, "action").filter((setting) => setting.on === on))?.action ?? null;
   return {
     name: ref.name?.value ?? null,
     endpoints: [endpoint(ref.left, left, scope), endpoint(ref.right, right, scope)],
@@ -573,7 +593,7 @@ const projectTableGroup = (group: TableGroup, scope: Scope): ProjectedTableGroup
   settings: customProperties(group.settings, ["color"]),
   tables: group.items.flatMap((item) => {
     if (item.type !== "member") return [];
-    const { schema, table } = scope.tables(item);
+    const { schema, table } = scope.resolveTable(item);
     return [{ schema: schema ?? DEFAULT_SCHEMA, name: table }];
   }),
 });
@@ -584,16 +604,17 @@ const projectSticky = (note: StickyNote): ProjectedStickyNote => ({
   color: propertyValue(note.settings, "color"),
 });
 
-/** A records block; one inside a table gets the table's name, and all its columns when it lists none. */
-const projectRecords = (
-  records: Records,
-  owner?: { schema: string | null; name: string; columns: string[] },
-): ProjectedRecords => ({
-  schema: owner ? owner.schema : (records.table!.schema?.value ?? null),
-  table: owner ? owner.name : records.table!.name.value,
-  columns: records.columns?.map((column) => column.value) ?? owner?.columns ?? [],
-  rows: records.rows.map((row) => row.fields.map(projectField)),
-});
+/** A top-level records block (`records t(a, b) { … }`), which always names its table. */
+const projectTopLevelRecords = (records: Records, scope: Scope): ProjectedRecords => {
+  if (records.table === null) throw new Error("a top-level records block names its table");
+  return {
+    ...scope.resolveTable(records.table),
+    columns: records.columns?.map((column) => column.value) ?? [],
+    rows: projectRows(records),
+  };
+};
+
+const projectRows = (records: Records): ProjectedField[][] => records.rows.map((row) => row.fields.map(projectField));
 
 const projectField = (field: RecordField): ProjectedField => {
   switch (field.kind) {
@@ -604,9 +625,11 @@ const projectField = (field: RecordField): ProjectedField => {
     case "empty":
       return null;
     case "number":
-      return { number: true };
-    default:
-      return { other: true };
+      return { number: field.value };
+    case "expression":
+      return { expression: field.value };
+    case "enumConstant":
+      return { enumValue: true };
   }
 };
 
@@ -616,16 +639,15 @@ const last = <T>(items: readonly T[]): T | undefined => items[items.length - 1];
 
 type SettingOf<K extends Setting["kind"]> = Extract<Setting, { kind: K }>;
 
-const lastOf = <K extends Setting["kind"]>(settings: readonly Setting[], kind: K): SettingOf<K> | undefined =>
-  last(settings.filter((setting): setting is SettingOf<K> => setting.kind === kind));
+const settingsOf = <K extends Setting["kind"]>(settings: readonly Setting[], kind: K): SettingOf<K>[] =>
+  settings.filter((setting): setting is SettingOf<K> => setting.kind === kind);
 
-const noteOf = (settings: readonly Setting[]): string | null =>
-  settings.find((setting): setting is SettingOf<"note"> => setting.kind === "note")?.value.value ?? null;
+const noteOf = (settings: readonly Setting[]): string | null => last(settingsOf(settings, "note"))?.value.value ?? null;
 
-/** The value of the first known `key: value` property with this (lowercase) key, as text. */
+/** The value of a known `key: value` property (`headercolor`, `color`, `name`, `type`) as text. */
 const propertyValue = (settings: readonly Setting[], key: string): string | null => {
-  const setting = settings.find((s) => s.kind === "property" && s.key.value === key);
-  if (setting?.kind !== "property") return null;
+  const setting = last(settingsOf(settings, "property").filter((property) => property.key.value === key));
+  if (!setting) return null;
   const { value } = setting;
   return value.kind === "identifier" ? value.value.value : "value" in value ? String(value.value) : null;
 };
@@ -640,14 +662,16 @@ const customProperties = (
   known: readonly string[],
 ): Record<string, ProjectedProperty> => {
   const result: Record<string, ProjectedProperty> = {};
-  for (const setting of settings)
-    if (setting.kind === "property" && !known.includes(setting.key.value))
-      result[setting.key.value.toLowerCase()] = propertyOf(setting.value);
+  for (const setting of settingsOf(settings, "property"))
+    if (!known.includes(setting.key.value)) result[setting.key.value.toLowerCase()] = propertyOf(setting.value);
   return result;
 };
 
+/** A custom property's value: the grammar takes a string, a number, a boolean, a color or `none`. */
 const propertyOf = (value: Value): ProjectedProperty => {
   switch (value.kind) {
+    case "string":
+      return { type: "string", value: value.value };
     case "number":
       return { type: "number", value: value.value };
     case "boolean":
@@ -658,6 +682,6 @@ const propertyOf = (value: Value): ProjectedProperty => {
       // `none`, which `@dbml/core` files as a color.
       return { type: "color", value: value.value.value };
     default:
-      return { type: "string", value: "value" in value ? String(value.value) : "" };
+      throw new Error(`unexpected custom property value: ${value.kind}`);
   }
 };

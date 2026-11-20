@@ -1,5 +1,5 @@
 import { Parser } from "@dbml/core";
-import { createInputStream, type Token } from "@parser-kit/core";
+import { createInputStream, ParseError, type Token } from "@parser-kit/core";
 import { describe, expect, it } from "vitest";
 import { type DbmlTokenType, dbml, dbmlLexer } from "../src/index";
 import { type CoreModel, projectCoreModel } from "./core-projection";
@@ -11,18 +11,22 @@ import { type ProjectedDocument, projectDocument } from "./projection";
 // `@dbml/core` (pinned to 12.1.0 in the workspace catalog) is the incumbent
 // DBML parser and the de facto spec. This file holds this package to it:
 //
-//   - Every `CORPUS` document parses with both, and both results, mapped onto
-//     the common shape in `projection.ts`, are equal: tables, columns, types,
-//     settings, defaults, notes, indexes, checks, refs (inline ones included),
-//     enums, table groups, sticky notes, records and the project, with table
-//     partials merged the way `@dbml/core` merges them.
+//   - Every `CORPUS` document, and every `PROJECTION_CASES` document below,
+//     parses with both, and both results, mapped onto the common shape in
+//     `projection.ts`, are equal: tables, columns, types, settings, defaults,
+//     notes, indexes, checks, refs (inline ones included), enums, table
+//     groups, sticky notes, records and the project, with table partials
+//     merged the way `@dbml/core` merges them.
 //   - Every `MALFORMED` input is rejected by both. Error messages are not
 //     compared; they differ by design.
 //   - A deterministic batch of mutants of the corpus (a token dropped,
-//     repeated, replaced, or a line break inserted) gets the same verdict
-//     from both, counting as a `@dbml/core` rejection only an error in its
-//     syntax range (codes 1000–1999). Validation errors (unknown tables,
-//     duplicates, …) are not parse errors here.
+//     repeated or replaced, another token inserted, or a line break inserted)
+//     gets the same verdict from both.
+//
+// "Rejected by `@dbml/core`" means it reports an error outside
+// `SEMANTIC_CODES`. Errors in that list (unknown names, duplicates, empty
+// tables, …) come from its validator; this package leaves those checks to a
+// later semantic pass and must accept such a document.
 //
 // Where the two parsers deliberately disagree, the case is listed in
 // `KNOWN_DIFFERENCES` with its reason, and the test checks that the
@@ -35,26 +39,89 @@ const coreParser = new Parser();
 const coreProjection = (source: string): ProjectedDocument =>
   projectCoreModel(coreParser.parse(source, "dbmlv2").normalize() as unknown as CoreModel);
 
-/** `@dbml/core`'s error codes for `source`, or `null` when it accepts it. */
-const coreErrors = (source: string): number[] | null => {
+/**
+ * `@dbml/core` error codes that are semantic, not syntactic: name
+ * resolution, duplicates, empty elements, conflicting settings, record field
+ * counts, colour validation.
+ */
+const SEMANTIC_CODES = new Set([
+  3003, // DUPLICATE_NAME
+  3012, // DUPLICATE_TABLE_SETTING
+  3015, // DUPLICATE_TABLEGROUP_ELEMENT_NAME
+  3016, // DUPLICATE_TABLEGROUP_FIELD_NAME
+  3018, // EMPTY_TABLE
+  3023, // DUPLICATE_COLUMN_NAME
+  3024, // DUPLICATE_COLUMN_SETTING
+  3029, // DUPLICATE_ENUM_ELEMENT_NAME
+  3031, // DUPLICATE_ENUM_ELEMENT_SETTING
+  3033, // EMPTY_ENUM
+  3036, // DUPLICATE_REF_SETTING
+  3046, // NOTE_REDEFINED
+  3050, // DUPLICATE_NOTE_SETTING
+  3056, // DUPLICATE_INDEX_SETTING
+  3057, // DUPLICATE_INDEX_COLUMN
+  3061, // PROJECT_REDEFINED
+  3069, // DUPLICATE_TABLE_PARTIAL_ELEMENT_NAME
+  3070, // DUPLICATE_TABLE_PARTIAL_SETTING
+  3074, // DUPLICATE_TABLE_PARTIAL_INJECTION_NAME
+  3081, // DUPLICATE_CHECK_SETTING
+  3086, // DUPLICATE_COLUMN_REFERENCES_IN_RECORDS
+  3087, // DUPLICATE_RECORDS_FOR_TABLE
+  3089, // DUPLICATE_RECORDS_SETTING
+  3098, // DUPLICATE_TABLEGROUP_SETTING
+  4000, // BINDING_ERROR (unknown table, column, enum or schema)
+  5001, // CIRCULAR_REF (two refs with the same endpoints)
+  5002, // SAME_ENDPOINT
+  5007, // UNEQUAL_FIELDS_BINARY_REF
+  5008, // CONFLICTING_SETTING (`null` and `not null`)
+  5009, // TABLE_REAPPEAR_IN_TABLEGROUP
+]);
+
+/**
+ * Whether a `@dbml/core` error is semantic. Code 3085 (INVALID_RECORDS_FIELD)
+ * covers both a row with the wrong number of fields, which is semantic
+ * ("Expected 2 values but got 1"), and a malformed row, which isn't ("Invalid
+ * record row structure").
+ */
+const isSemantic = (code: number, message: string) =>
+  SEMANTIC_CODES.has(code) || (code === 3085 && message.startsWith("Expected "));
+
+/**
+ * What `@dbml/core` makes of `source`: `accepts`; `invalid` when its parser
+ * takes it but validation fails, with only `SEMANTIC_CODES` or errors from its
+ * model (a missing column, a duplicate field, which come without a code);
+ * `rejects` otherwise. `@dbml/core` wraps every exception as a diagnostic, so
+ * anything else without a code is a crash inside it, and is thrown rather
+ * than counted as a rejection.
+ */
+const coreVerdict = (source: string): "accepts" | "invalid" | "rejects" => {
   try {
     coreParser.parse(source, "dbmlv2");
-    return null;
+    return "accepts";
   } catch (error) {
-    const diags = (error as { diags?: { code: number }[] }).diags;
+    const diags = (error as { diags?: unknown[] }).diags;
     if (!diags) throw error;
-    return diags.map((diag) => diag.code);
+    let semantic = true;
+    for (const diag of diags as { code?: unknown; message?: string }[]) {
+      if (typeof diag.code === "number") semantic &&= isSemantic(diag.code, diag.message ?? "");
+      else if (!(diag instanceof Error && (diag as { error?: unknown }).error === "error"))
+        throw new Error(`@dbml/core crashed: ${diag.message}`, { cause: diag });
+    }
+    return semantic ? "invalid" : "rejects";
   }
 };
 
-const isSyntaxError = (code: number) => code >= 1000 && code < 2000;
+/** Whether `@dbml/core`'s parser takes `source`, whatever its validator says. */
+const coreParses = (source: string) => coreVerdict(source) !== "rejects";
 
+/** Whether this package parses `source`. Anything thrown besides a `ParseError` is a crash and propagates. */
 const accepts = (source: string): boolean => {
   try {
     dbml.parse(source);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (error instanceof ParseError) return false;
+    throw error;
   }
 };
 
@@ -77,10 +144,10 @@ const canonical = (doc: ProjectedDocument): ProjectedDocument => {
 };
 
 // `@dbml/core` 12.1.0 merges table partials with `Array#toReversed`, which
-// Node 18 lacks, so on Node 18 it throws a TypeError for any table that
-// injects a partial. Those documents are still parsed by this package there;
-// only the comparison (and their mutants) are skipped, and they run on every
-// newer Node.
+// Node 18 lacks, so on Node 18 it crashes on any table that injects a
+// partial. There, those documents are still parsed by this package, but their
+// comparison is reported as skipped and their mutants aren't generated; both
+// run on every newer Node.
 const coreMergesPartials = typeof (Array.prototype as { toReversed?: unknown }).toReversed === "function";
 const injectsPartial = (source: string) =>
   dbml
@@ -159,6 +226,17 @@ Table t2 {
   },
   {
     name: "several pk columns make a composite primary key index",
+    dbml: `Table u {
+  a int [pk]
+  b int [pk]
+  indexes {
+    a [unique]
+  }
+}
+`,
+  },
+  {
+    name: "several pk columns in a partial make its own primary key index",
     dbml: `TablePartial p {
   a int [pk]
   b int [pk]
@@ -168,13 +246,25 @@ Table t {
   ~p
   c int
 }
+`,
+  },
+  {
+    name: "records values, and a records block naming a table by its alias",
+    dbml: `enum e {
+  a
+}
 
-Table u {
-  a int [pk]
-  b int [pk]
-  indexes {
-    a [unique]
-  }
+Table s.users as U {
+  id int
+  score float
+  status e
+  label varchar
+  created timestamp
+}
+
+records U(id, score, status, label, created) {
+  -3, -2.5, e.a, 'x', \`now()\`
+  4, 1e2, null, , '2024-01-01'
 }
 `,
   },
@@ -198,6 +288,18 @@ Table t {
   u e(1)
   p pg.uuid
   q "pg"."int 4"
+}
+`,
+  },
+  {
+    name: "array suffixes opening a later line",
+    dbml: `Table t {
+  tags text
+  []
+  grid int
+
+  [3]
+  [] [not null]
 }
 `,
   },
@@ -259,11 +361,15 @@ Ref: t.c > t.d [Who: 'me']
 interface KnownDifference {
   /** Why the parsers disagree, for the README's differences list. */
   reason: string;
-  /** What this package does with each document; `@dbml/core` does the opposite. */
+  /**
+   * What this package does with each document. `@dbml/core` does the
+   * opposite: when this package rejects, `@dbml/core`'s parser takes the
+   * document (its validator may still object); when this package accepts,
+   * `@dbml/core` rejects it (see `coreVerdict`).
+   */
   ours: "rejects" | "accepts";
-  /** Documents that show the difference: `@dbml/core` accepts them fully, or rejects them with a syntax error. */
   documents: string[];
-  /** `MALFORMED` entries that `@dbml/core` accepts because of it. */
+  /** `MALFORMED` entries that show it: `@dbml/core`'s parser takes them. */
   malformed?: string[];
   /** Mutants (see `mutants` below) that show it, by id. */
   mutants?: string[];
@@ -272,17 +378,19 @@ interface KnownDifference {
 const KNOWN_DIFFERENCES: KnownDifference[] = [
   {
     reason:
-      "More than two parts in a table, sticky note or records name (`a.b.c`), or more than three in a ref " +
-      "endpoint: `@dbml/core` reads the extra parts as a nested schema and accepts them where nothing has to " +
-      "resolve against them, but doesn't support nested schemas.",
+      "More than two parts in a table, sticky note, records or table group member name (`a.b.c`), or more " +
+      "than three in a ref endpoint: `@dbml/core`'s parser reads the extra parts as a nested schema, which " +
+      "its model then accepts where nothing has to resolve against it and otherwise reports as unknown.",
     ours: "rejects",
     documents: [
       "Table a.b.c {\n  id int\n}\n",
       "Note a.b.c {\n  'x'\n}\n",
       "Table a.b.t {\n  a int\n}\nrecords a.b.t(a) {\n  1\n}\n",
       "Table a.b.c {\n  d int\n}\nTable e {\n  f int\n}\nRef: a.b.c.d > e.f\n",
+      "Table t {\n  id int\n}\nTableGroup g {\n  x.y.t\n}\n",
     ],
-    malformed: ["table name with three parts"],
+    malformed: ["table name with three parts", "ref endpoint with four parts"],
+    mutants: ["hr and payroll schema #4"],
   },
   {
     reason:
@@ -290,11 +398,13 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
       "table; here an inline ref target needs a table and a column.",
     ours: "rejects",
     documents: ["Table t {\n  id int\n  c int [ref: > id]\n}\n"],
+    malformed: ["ref setting single-part target"],
   },
   {
     reason: "Repeated signs on a number (`--1`, `- -1`) in a default or a records field.",
     ours: "rejects",
     documents: ["Table t {\n  c int [default: --1]\n}\n", "Table t {\n  a int\n}\nrecords t(a) {\n  - -1\n}\n"],
+    mutants: ["default negative float #2"],
   },
   {
     reason: "Chained column type suffixes (`int(1)(2)`, `int[](1)`) and comma-separated array sizes (`int[1,2]`).",
@@ -321,12 +431,13 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
   },
   {
     reason:
-      "The same, the other way: a comment or `\\r\\n` before an index's later-line sort order hides the line " +
-      "break `@dbml/core` attaches `[desc]` across.",
+      "The same, the other way: a comment or `\\r\\n` before an index column's later-line sort order, or a " +
+      "column type's later-line array suffix, hides the line break `@dbml/core` attaches the `[` across.",
     ours: "rejects",
     documents: [
       "Table t {\n  id int\n  indexes {\n    id// c\n    [desc]\n  }\n}\n",
       "Table t {\r\n  id int\r\n  indexes {\r\n    id\r\n    [desc]\r\n  }\r\n}\r\n",
+      "Table t {\r\n  tags text\r\n  []\r\n}\r\n",
     ],
   },
   {
@@ -334,30 +445,40 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
     ours: "accepts",
     documents: ["Project p {\n  table: 'x'\n}\n"],
   },
+  {
+    reason:
+      "Colour literals aren't validated: `#` followed by letters and digits is a colour (`#3a5x`, `#11223344`), " +
+      "as `@dbml/core`'s lexer reads it, but its validator takes only 3- or 6-digit hex.",
+    ours: "accepts",
+    documents: ["Table t [headercolor: #3a5x] {\n  id int\n}\n", "Table t [headercolor: #11223344] {\n  id int\n}\n"],
+  },
 ];
 
 // --- Mutants ---
 
-/**
- * A deterministic set of near-miss documents: for each corpus document of up
- * to 2,000 characters, `MUTANTS_PER_DOCUMENT` mutants, each changing one token at a position
- * drawn from a generator seeded by the document's name. A mutant's id is the
- * document's name and its index (`"table basic #2"`), so adding corpus
- * documents leaves existing ids alone.
- */
+/** Mutants per corpus document; a mutant's id is its document's name and its index (`"table basic #2"`). */
 const MUTANTS_PER_DOCUMENT = 8;
 
-const mutants = (): { id: string; source: string }[] => {
+/**
+ * A deterministic set of near-miss documents: for each corpus document of up
+ * to 2,000 characters, `MUTANTS_PER_DOCUMENT` mutants, each changing the
+ * document at one token drawn by a generator seeded with the document's name,
+ * so adding corpus documents leaves existing ids alone. A mutation that leaves
+ * the document unchanged is dropped. `withPartials: false` leaves out the
+ * documents that inject a partial (see `coreMergesPartials`).
+ */
+const mutants = ({ withPartials }: { withPartials: boolean }): { id: string; source: string }[] => {
   const result: { id: string; source: string }[] = [];
   for (const sample of CORPUS) {
     if (sample.dbml.length > 2000) continue;
-    if (!coreMergesPartials && injectsPartial(sample.dbml)) continue;
+    if (!withPartials && injectsPartial(sample.dbml)) continue;
     const tokens = tokenize(sample.dbml);
     if (tokens.length < 2) continue;
-    let seed = [...sample.name].reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) >>> 0, 7);
+    // A 32-bit linear congruential generator; `Math.imul` keeps the product exact.
+    let seed = [...sample.name].reduce((hash, char) => (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0, 7);
     const random = (below: number) => {
-      seed = (seed * 1103515245 + 12345) >>> 0;
-      return (seed >>> 8) % below;
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return (seed >>> 16) % below;
     };
     for (let index = 0; index < MUTANTS_PER_DOCUMENT; index++) {
       const token = tokens[random(tokens.length)]!;
@@ -373,7 +494,7 @@ const mutants = (): { id: string; source: string }[] => {
         before + otherText + after, // replace it with another token of the document
         `${before}${otherText} ${text}${after}`, // insert another token before it
       ][random(5)]!;
-      result.push({ id: `${sample.name} #${index}`, source });
+      if (source !== sample.dbml) result.push({ id: `${sample.name} #${index}`, source });
     }
   }
   return result;
@@ -402,28 +523,34 @@ const compareProjections = (sample: Pick<Sample, "dbml">, skip: (note?: string) 
   expect(ours).toEqual(canonical(coreProjection(sample.dbml)));
 };
 
+const allowlist = (pick: (difference: KnownDifference) => string[] | undefined) =>
+  new Set(KNOWN_DIFFERENCES.flatMap((difference) => pick(difference) ?? []));
+
 describe("differential: CORPUS projects the same with both parsers", () => {
   it.for(named(CORPUS))("%s", ([, sample], { skip }) => compareProjections(sample, skip));
 });
 
 describe("differential: more documents project the same with both parsers", () => {
+  it("names every case uniquely", () => {
+    const names = PROJECTION_CASES.map((sample) => sample.name);
+    expect(names.filter((name, index) => names.indexOf(name) !== index)).toEqual([]);
+  });
+
   it.for(named(PROJECTION_CASES))("%s", ([, sample], { skip }) => compareProjections(sample, skip));
 });
 
 describe("differential: MALFORMED is rejected by both parsers", () => {
-  const allowed = new Map(
-    KNOWN_DIFFERENCES.flatMap((difference) => (difference.malformed ?? []).map((name) => [name, difference])),
-  );
+  const allowed = allowlist((difference) => difference.malformed);
 
   it.each(named(MALFORMED))("%s", (name, sample: Sample) => {
     expect(accepts(sample.dbml)).toBe(false);
-    // A known difference: `@dbml/core` accepts it.
-    expect(coreErrors(sample.dbml) === null).toBe(allowed.has(name));
+    // Unless it is a known difference, `@dbml/core` rejects it too.
+    expect(coreParses(sample.dbml)).toBe(allowed.has(name));
   });
 
   it("lists only MALFORMED entries in the known differences", () => {
     const names = new Set(MALFORMED.map((sample) => sample.name));
-    expect([...allowed.keys()].filter((name) => !names.has(name))).toEqual([]);
+    expect([...allowed].filter((name) => !names.has(name))).toEqual([]);
   });
 });
 
@@ -433,35 +560,30 @@ describe("differential: known differences still hold", () => {
   );
 
   it.each(cases)("%s", (_, difference: KnownDifference, source: string) => {
-    const errors = coreErrors(source);
-    if (difference.ours === "rejects") {
-      expect(accepts(source)).toBe(false);
-      expect(errors).toBeNull();
-    } else {
-      expect(accepts(source)).toBe(true);
-      expect(errors).not.toBeNull();
-    }
+    expect(accepts(source)).toBe(difference.ours === "accepts");
+    expect(coreParses(source)).toBe(difference.ours === "rejects");
   });
 });
 
 describe("differential: corpus mutants get the same verdict from both parsers", () => {
-  const all = mutants();
-  const allowed = new Map(
-    KNOWN_DIFFERENCES.flatMap((difference) => (difference.mutants ?? []).map((id) => [id, difference])),
-  );
+  const all = mutants({ withPartials: coreMergesPartials });
+  const allowed = allowlist((difference) => difference.mutants);
 
-  it("generates a few hundred mutants", () => {
-    expect(all.length).toBeGreaterThan(300);
+  it("generates several hundred mutants", () => {
+    expect(all.length).toBeGreaterThan(500);
+  });
+
+  it("lists only existing mutants in the known differences", () => {
+    const ids = new Set(mutants({ withPartials: true }).map(({ id }) => id));
+    expect([...allowed].filter((id) => !ids.has(id))).toEqual([]);
   });
 
   it("agrees on every mutant outside the known differences", () => {
     const disagreements = all.flatMap(({ id, source }) => {
       const ours = accepts(source);
-      const errors = coreErrors(source);
-      const core = errors === null;
-      // Ours stricter only where core's rejection is a validation error, not syntax.
-      const agree = ours === core || (ours && errors!.every((code) => !isSyntaxError(code)));
-      return agree !== allowed.has(id) ? [] : [{ id, ours, core: errors ?? "accepts", source }];
+      const core = coreVerdict(source);
+      const agree = ours === (core !== "rejects");
+      return agree !== allowed.has(id) ? [] : [{ id, ours, core, source }];
     });
     expect(disagreements).toEqual([]);
   });

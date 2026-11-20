@@ -3,6 +3,7 @@ import type {
   ProjectedColumn,
   ProjectedDefault,
   ProjectedDocument,
+  ProjectedEndpoint,
   ProjectedField,
   ProjectedIndex,
   ProjectedProperty,
@@ -83,7 +84,7 @@ export interface CoreModel {
     schemaName?: string | null;
     tableName: string;
     columns: string[];
-    values: { value: unknown; type: string }[][];
+    values: { value?: unknown; type: string }[][];
   }>;
 }
 
@@ -138,15 +139,17 @@ export const projectCoreModel = (model: CoreModel): ProjectedDocument => {
     refs: Object.values(model.refs).map(
       (ref): ProjectedRef => ({
         name: ref.name ?? null,
-        endpoints: ref.endpointIds.map((id) => {
-          const end = model.endpoints[id]!;
-          return {
-            schema: end.schemaName ?? null,
-            table: end.tableName,
-            columns: [...end.fieldNames],
-            relation: end.relation,
-          };
-        }) as ProjectedRef["endpoints"],
+        endpoints: endpointPair(
+          ref.endpointIds.map((id) => {
+            const end = model.endpoints[id]!;
+            return {
+              schema: end.schemaName ?? null,
+              table: end.tableName,
+              columns: [...end.fieldNames],
+              relation: end.relation,
+            };
+          }),
+        ),
         // The model keeps an action as written (`CASCADE`); the AST lowercases it.
         onDelete: ref.onDelete?.toLowerCase() ?? null,
         onUpdate: ref.onUpdate?.toLowerCase() ?? null,
@@ -189,18 +192,40 @@ export const projectCoreModel = (model: CoreModel): ProjectedDocument => {
   };
 };
 
+const endpointPair = (endpoints: ProjectedEndpoint[]): ProjectedRef["endpoints"] => {
+  const [left, right, ...rest] = endpoints;
+  if (!left || !right || rest.length > 0) throw new Error(`a ref with ${endpoints.length} endpoints`);
+  return [left, right];
+};
+
+const PROPERTY_TYPES: Record<string, ProjectedProperty["type"]> = {
+  string: "string",
+  number: "number",
+  bool: "bool",
+  color: "color",
+};
+
 const properties = (metadata: Metadata | undefined): Record<string, ProjectedProperty> => {
   const result: Record<string, ProjectedProperty> = {};
-  for (const [key, { value, type }] of Object.entries(metadata ?? {}))
-    result[key] = { type: type as ProjectedProperty["type"], value };
+  for (const [key, { value, type }] of Object.entries(metadata ?? {})) {
+    const known = PROPERTY_TYPES[type];
+    if (!known) throw new Error(`unexpected custom property type: ${type}`);
+    result[key] = { type: known, value };
+  }
   return result;
 };
 
-/** A record value reduced as `ProjectedField` describes. */
-const field = ({ value, type }: { value: unknown; type: string }): ProjectedField => {
-  if (value === null) return null;
-  if (type === "integer" || type === "real") return typeof value === "number" ? { number: true } : { other: true };
-  if (typeof value === "string" && type !== "expression") return value;
-  if (typeof value === "boolean") return value;
-  return { other: true };
+/**
+ * A record value as `ProjectedField` describes it. The model types each value
+ * by its column (`integer`, `real`, `string`, `datetime`, `bool`,
+ * `expression`, …). It keeps no value for an enum member: in a column of that
+ * enum's type the value is left out, in any other column it is an empty
+ * expression.
+ */
+const field = ({ value, type }: { value?: unknown; type: string }): ProjectedField => {
+  if (value === undefined || (type === "expression" && value === "")) return { enumValue: true };
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return { number: value };
+  if (type === "expression") return { expression: String(value) };
+  return String(value);
 };
