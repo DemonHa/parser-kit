@@ -80,6 +80,7 @@
     "@parser-kit/core": "workspace:^"
   },
   "devDependencies": {
+    "libpg-query": "catalog:",
     "node-sql-parser": "catalog:",
     "tsc-alias": "catalog:",
     "typescript": "catalog:",
