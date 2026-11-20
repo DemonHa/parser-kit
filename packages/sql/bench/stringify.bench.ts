@@ -1,9 +1,10 @@
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
 import type { Stmt } from "../src/postgres/ast";
-import { postgres } from "../src/postgres/index";
-import { NotPrintableError, stringify } from "../src/postgres/print/index";
+import { NotPrintableError, postgres } from "../src/postgres/index";
 import { CORPUS } from "../test/corpus";
+
+const { stringify } = postgres;
 
 // Printing speed: the PostgreSQL printer against node-sql-parser's `sqlify`,
 // each printing its own parser's AST of the same statements. Only statements

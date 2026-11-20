@@ -5,16 +5,52 @@ import type * as RootTypes from "../src/index";
 import * as entry from "../src/index";
 import type * as PostgresTypes from "../src/postgres/index";
 import * as postgresEntry from "../src/postgres/index";
+import type * as ParserTypes from "../src/postgres/parser";
+import * as parserEntry from "../src/postgres/parser";
 
 // The package's public surface: `src/index.ts` is what `@parser-kit/sql`
-// resolves to and `src/postgres/index.ts` is `@parser-kit/sql/postgres`. A
+// resolves to, `src/postgres/index.ts` is `@parser-kit/sql/postgres` and
+// `src/postgres/parser.ts` is `@parser-kit/sql/postgres/parser`. A
 // value disappearing from (or appearing in) either is an API change for npm
 // consumers, so the lists are pinned here. The built ESM/CJS entry points are
 // checked against a packed tarball in CI's "Package" job.
-it("exports one object per dialect and nothing else", () => {
-  expect(Object.keys(entry).sort()).toEqual(["postgres"]);
-  expect(Object.keys(postgresEntry).sort()).toEqual(["postgres"]);
+it("exports one object per dialect and the printer's error, and nothing else", () => {
+  expect(Object.keys(entry).sort()).toEqual(["NotPrintableError", "postgres"]);
+  expect(Object.keys(postgresEntry).sort()).toEqual(["NotPrintableError", "postgres"]);
   expect(entry.postgres).toBe(postgresEntry.postgres);
+  expect(entry.NotPrintableError).toBe(postgresEntry.NotPrintableError);
+});
+
+// The parse-only entry: the same object less the printer, sharing its methods.
+it("exports a parse-only dialect object from /postgres/parser", () => {
+  expect(Object.keys(parserEntry).sort()).toEqual(["postgres"]);
+  const { postgres: parser } = parserEntry;
+  const { postgres } = postgresEntry;
+  expect(Object.isFrozen(parser)).toBe(true);
+  expect(Object.keys(parser).sort()).toEqual(
+    Object.keys(postgres)
+      .filter((key) => key !== "stringify" && key !== "stringifyScript")
+      .sort(),
+  );
+  for (const key of Object.keys(parser) as (keyof typeof parser)[]) expect(parser[key]).toBe(postgres[key]);
+  expect(parser.parse("SELECT 1")).toHaveLength(1);
+});
+
+// The parse-only entry must not load the printer, or it would weigh as much as
+// the full one in a bundle.
+it("keeps the printer out of the parse-only entry's imports", () => {
+  const imports = (file: string) =>
+    [...readFileSync(new URL(file, import.meta.url), "utf8").matchAll(/^import .* from "([^"]+)";/gm)].map((m) => m[1]);
+  expect(imports("../src/postgres/parser.ts").sort()).toEqual([
+    "../dialect",
+    "./ast",
+    "./grammar",
+    "./lexer",
+    "@parser-kit/core",
+  ]);
+  for (const file of ["../src/postgres/grammar.ts", "../src/postgres/lexer.ts"]) {
+    expect(imports(file).filter((path) => path?.includes("print"))).toEqual([]);
+  }
 });
 
 describe("postgres", () => {
@@ -28,6 +64,8 @@ describe("postgres", () => {
       "parse",
       "parseScript",
       "scriptLexer",
+      "stringify",
+      "stringifyScript",
     ]);
     expect(Object.isFrozen(postgres)).toBe(true);
   });
@@ -53,7 +91,9 @@ describe("postgres", () => {
   });
 
   it("works with its methods detached", () => {
-    const { parse, diagnose, parseScript, diagnoseScript } = postgres;
+    const { parse, diagnose, parseScript, diagnoseScript, stringify, stringifyScript } = postgres;
+    expect(stringify(parse("select 1"))).toBe("SELECT 1;");
+    expect(stringifyScript(parseScript("\\x\nselect 1"))).toBe("\\x\nSELECT 1;");
     expect(["SELECT 1", "SELECT 2"].map(parse)).toHaveLength(2);
     expect(diagnose("SELECT 1").errors).toEqual([]);
     expect(parseScript("\\x\n")).toHaveLength(1);
@@ -102,6 +142,20 @@ it("types the results with the AST types", () => {
   expectTypeOf(postgres.parseScript).returns.toEqualTypeOf<ScriptItem[]>();
   expectTypeOf(postgres.diagnoseScript).returns.toEqualTypeOf<{ ast: ScriptItem[]; errors: ParseError[] }>();
   expectTypeOf(postgres.lexer).toEqualTypeOf<Lexer<PostgresTypes.PostgresTokenType>>();
+  expectTypeOf(postgres.stringify).toEqualTypeOf<
+    (node: PostgresTypes.StringifyInput, options?: PostgresTypes.StringifyOptions) => string
+  >();
+  expectTypeOf(postgres.stringifyScript).toEqualTypeOf<
+    (items: PostgresTypes.StringifyScriptInput, options?: PostgresTypes.StringifyScriptOptions) => string
+  >();
+  expectTypeOf<PostgresTypes.PostgresDialect>().toMatchTypeOf<PostgresTypes.PostgresParser>();
+  expectTypeOf(parserEntry.postgres).toEqualTypeOf<ParserTypes.PostgresParser>();
+  expectTypeOf<ParserTypes.PostgresParser>().toEqualTypeOf<PostgresTypes.PostgresParser>();
+  expectTypeOf<ParserTypes.Stmt>().toEqualTypeOf<PostgresTypes.Stmt>();
+  expectTypeOf<ParserTypes.Diagnosis<number>>().toEqualTypeOf<PostgresTypes.Diagnosis<number>>();
+  expectTypeOf<ParserTypes.PostgresTokenType>().toEqualTypeOf<PostgresTypes.PostgresTokenType>();
+  // @ts-expect-error -- the parse-only object has no printer
+  expectTypeOf(parserEntry.postgres.stringify);
   expectTypeOf<PostgresTypes.PsqlMeta>().toMatchTypeOf<ScriptItem>();
   expectTypeOf<Extract<Stmt, { kind: "select" }>>().toMatchTypeOf<PostgresTypes.Query>();
   expectTypeOf<Extract<PostgresTypes.Expr, { kind: "number" }>["value"]>().toEqualTypeOf<number>();
@@ -116,6 +170,10 @@ it("namespaces the AST types at the root and keeps the grammars private", () => 
   expectTypeOf(entry.postgres).toEqualTypeOf<RootTypes.PostgresDialect>();
   expectTypeOf<RootTypes.Postgres.Stmt>().toEqualTypeOf<PostgresTypes.Stmt>();
   expectTypeOf<RootTypes.Diagnosis<number>>().toEqualTypeOf<PostgresTypes.Diagnosis<number>>();
+  expectTypeOf<RootTypes.PostgresParser>().toEqualTypeOf<PostgresTypes.PostgresParser>();
+  // The printer's types are a dialect's own, so the root leaves them to the subpath.
+  // @ts-expect-error -- no unqualified StringifyOptions at the root
+  expectTypeOf<RootTypes.StringifyOptions>();
   // A second dialect's `Stmt` would collide with an unqualified one at the root.
   // @ts-expect-error -- the root has no unqualified AST types
   expectTypeOf<RootTypes.Stmt>();
