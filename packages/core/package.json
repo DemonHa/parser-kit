@@ -54,12 +54,25 @@
         "default": "./build/cjs/print/index.js"
       }
     },
+    "./print/testing": {
+      "import": {
+        "types": "./build/esm/print/testing.d.ts",
+        "default": "./build/esm/print/testing.js"
+      },
+      "require": {
+        "types": "./build/cjs/print/testing.d.ts",
+        "default": "./build/cjs/print/testing.js"
+      }
+    },
     "./package.json": "./package.json"
   },
   "typesVersions": {
     "*": {
       "print": [
         "./build/cjs/print/index.d.ts"
+      ],
+      "print/testing": [
+        "./build/cjs/print/testing.d.ts"
       ]
     }
   },

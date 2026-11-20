@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { block, type Doc, hardline, join, list, render } from "./index";
+import { block, type Doc, hardline, join, list, quoting, render } from "./index";
 
 // A genericity guard: a tiny printer for a DBML-shaped schema language, written
 // against the public IR only. Its layout is fixed (tabs, one column per line,
@@ -17,6 +17,8 @@ type ColumnSetting =
 
 interface Column {
   name: string;
+  /** The source quoted the name. Kept where still valid, so editor text round-trips. */
+  quoted?: true;
   type: string;
   settings: ColumnSetting[];
 }
@@ -36,9 +38,17 @@ interface Table {
 }
 
 // Names are bare words when they can be, else double-quoted. Strings are
-// single-quoted with backslash escapes. Quoting is decided from the value.
-const name = (n: string): string => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(n) ? n : `"${n.replace(/["\\]/g, "\\$&")}"`);
-const str = (s: string): string => `'${s.replace(/['\\]/g, "\\$&")}'`;
+// single-quoted. Both use backslash escapes. Quoting is decided from the value,
+// so a hand-built tree with a bad hint still prints valid text.
+const quoteName = quoting({
+  quote: '"',
+  escape: "backslash",
+  start: /[A-Za-z_]/,
+  part: /[A-Za-z0-9_]/,
+  reserved: (w) => ["table", "enum", "ref", "note", "indexes", "project"].includes(w.toLowerCase()),
+});
+const name = (n: string, quoted?: true): string => quoteName(n, "preserve-if-valid", quoted);
+const str = quoting({ quote: "'", escape: "backslash" });
 
 const columnSetting = (s: ColumnSetting): Doc => {
   switch (s.kind) {
@@ -59,10 +69,11 @@ const columnSetting = (s: ColumnSetting): Doc => {
 
 const settings = (items: Doc[]): Doc => list(" [", items, "]", { empty: "omit" });
 
-const column = (c: Column): Doc => [name(c.name), " ", c.type, settings(c.settings.map(columnSetting))];
+const column = (c: Column): Doc => [name(c.name, c.quoted), " ", c.type, settings(c.settings.map(columnSetting))];
 
 const index = (i: Index): Doc => {
-  const cols = i.columns.length === 1 ? name(i.columns[0]!) : ["(", join(", ", i.columns.map(name)), ")"];
+  const names = i.columns.map((c) => name(c));
+  const cols = names.length === 1 ? names[0]! : ["(", join(", ", names), ")"];
   return [cols, settings(i.settings)];
 };
 
@@ -153,6 +164,21 @@ describe("a DBML-shaped printer on the doc IR", () => {
       { name: 'say "hi"', columns: [{ name: "a b", type: "int", settings: [] }], indexes: [], note: "\\'" },
     ]);
     expect(out).toBe('Table "say \\"hi\\"" {\n\t"a b" int\n\n\tNote: \'\\\\\\\'\'\n}');
+  });
+
+  it("keeps a quoted hint, quotes reserved words and ignores a bare hint that would be invalid", () => {
+    const out = print([
+      {
+        name: "Note",
+        columns: [
+          { name: "id", quoted: true, type: "int", settings: [] },
+          { name: "table", type: "int", settings: [] },
+          { name: "9lives", type: "int", settings: [] },
+        ],
+        indexes: [],
+      },
+    ]);
+    expect(out).toBe('Table "Note" {\n\t"id" int\n\t"table" int\n\t"9lives" int\n}');
   });
 
   it("keeps settings lists on one line however long they get", () => {

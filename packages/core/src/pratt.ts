@@ -42,35 +42,61 @@ export interface PrattHelpers<T> {
  */
 export type PrattGuard<T, TT extends string = string> = (ctx: ParseContext<TT>, left: T) => boolean;
 
-export type PrattInfix<T, TT extends string = string> =
-  | {
-      ops: readonly string[];
-      bp: number;
-      /** Restrict matching to one token type; defaults to matching by value. */
-      type?: TT;
-      assoc?: "left" | "right" | "nonassoc";
-      /** Decline after the operator matched; see {@link PrattGuard}. */
-      when?: PrattGuard<T, TT>;
-      map?: (op: string, left: T, right: T, span: Span) => T;
-      /** Custom tail parse (ternary): consumes the operator itself. */
-      parse?: (ctx: ParseContext<TT>, left: T, helpers: PrattHelpers<T>) => T;
-    }
-  | {
-      /**
-       * Dispatch on a rule's first set instead of literal op values — the hook
-       * for multi-word operators (`word("ident", "between")`, `phrase("ident",
-       * "not", "like")`). Groups are tried in declaration order and the first
-       * match wins, so operators sharing a leading token (NOT LIKE / NOT
-       * BETWEEN / NOT IN) must be one group dispatching internally.
-       */
-      match: Rule<unknown, TT>;
-      bp: number;
-      assoc?: "left" | "right" | "nonassoc";
-      /** Decline after the operator matched; see {@link PrattGuard}. */
-      when?: PrattGuard<T, TT>;
-      /** Consumes the operator (typically via the match rule) and the RHS. */
-      parse: (ctx: ParseContext<TT>, left: T, helpers: PrattHelpers<T>) => T;
-    };
+/**
+ * Optional metadata on a group for `precedence()` in `@parser-kit/core/print`,
+ * which reads binding powers from the same table so a printer parenthesises
+ * only where the parser needs it. The parser ignores these fields.
+ */
+export interface PrattPrintMeta {
+  /**
+   * The node keys this group builds, as the printer's `key` function names
+   * them. An `ops` group without a custom `parse` is keyed by its ops already;
+   * name the nodes of `match` and `parse` groups here. A record gives each
+   * node its own `rhs`, for a group that builds nodes ending differently
+   * (`{ like: 11, in: "none" }`).
+   */
+  nodes?: readonly string[] | Readonly<Record<string, number | "none">>;
+  /**
+   * Where the node's trailing operand is parsed: the bp a custom `parse`
+   * passes to `parseRhs` for it, or `"none"` when the node ends in a token of
+   * its own (`)`, `]`, a name). Ignored for `ops` groups without `parse`,
+   * whose tail is derived; a group with `parse` and no `rhs` is treated as
+   * fully open.
+   */
+  rhs?: number | "none";
+}
+
+export type PrattInfix<T, TT extends string = string> = PrattPrintMeta &
+  (
+    | {
+        ops: readonly string[];
+        bp: number;
+        /** Restrict matching to one token type; defaults to matching by value. */
+        type?: TT;
+        assoc?: "left" | "right" | "nonassoc";
+        /** Decline after the operator matched; see {@link PrattGuard}. */
+        when?: PrattGuard<T, TT>;
+        map?: (op: string, left: T, right: T, span: Span) => T;
+        /** Custom tail parse (ternary): consumes the operator itself. */
+        parse?: (ctx: ParseContext<TT>, left: T, helpers: PrattHelpers<T>) => T;
+      }
+    | {
+        /**
+         * Dispatch on a rule's first set instead of literal op values — the hook
+         * for multi-word operators (`word("ident", "between")`, `phrase("ident",
+         * "not", "like")`). Groups are tried in declaration order and the first
+         * match wins, so operators sharing a leading token (NOT LIKE / NOT
+         * BETWEEN / NOT IN) must be one group dispatching internally.
+         */
+        match: Rule<unknown, TT>;
+        bp: number;
+        assoc?: "left" | "right" | "nonassoc";
+        /** Decline after the operator matched; see {@link PrattGuard}. */
+        when?: PrattGuard<T, TT>;
+        /** Consumes the operator (typically via the match rule) and the RHS. */
+        parse: (ctx: ParseContext<TT>, left: T, helpers: PrattHelpers<T>) => T;
+      }
+  );
 
 export interface PrattDef<T, TT extends string = string> {
   atom: Rule<T, TT>;
@@ -80,16 +106,18 @@ export interface PrattDef<T, TT extends string = string> {
     /** Restrict matching to one token type; defaults to matching by value. */
     type?: TT;
     map?: (op: string, operand: T, span: Span) => T;
+    /** Printer metadata, ignored by the parser; see {@link PrattPrintMeta}. */
+    nodes?: readonly string[];
   }[];
   infix?: readonly PrattInfix<T, TT>[];
-  postfix?: readonly {
+  postfix?: readonly (PrattPrintMeta & {
     match: Rule<unknown, TT>;
     bp: number;
     /** Decline after the postfix matched; see {@link PrattGuard}. */
     when?: PrattGuard<T, TT>;
     /** Consumes the whole postfix (call args, member name, index). */
     parse: (ctx: ParseContext<TT>, left: T, helpers: PrattHelpers<T>) => T;
-  }[];
+  })[];
 }
 
 const opMatches = <TT extends string>(token: Token<TT>, ops: readonly string[], type?: TT) =>
