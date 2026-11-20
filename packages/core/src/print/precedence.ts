@@ -16,7 +16,8 @@
 // it errs towards parentheses. A key the table doesn't name is an error, not a
 // guess, and so is a table where an operator token means different things at
 // different bps (a postfix and a tighter infix sharing a token, unless both
-// have guards): there even parentheses can change the parse.
+// have guards): there even parentheses can change the parse. Guards are
+// assumed to read only their own node's tokens.
 import type { Doc } from "./doc";
 
 /** A first-set entry of a `match` rule, as `Rule.first()` returns it. */
@@ -169,7 +170,8 @@ const index = (table: PrecedenceTable, atoms: Readonly<Record<string, number>>) 
     bps.push(g.bp);
     // Where a postfix declines for want of bp, pratt offers its token to infix
     // lookup: a tighter infix group on the same token makes the token's meaning
-    // depend on where it sits, unless guards on both tell the two apart (the
+    // depend on where it sits, unless guards on both tell the two apart by the
+    // node's own tokens (the
     // postfix takes the token wherever its bp allows and its guard accepts). A
     // tighter postfix declared later is the same hazard; one declared earlier
     // wins wherever the looser one could.
