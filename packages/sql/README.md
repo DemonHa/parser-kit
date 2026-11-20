@@ -203,7 +203,7 @@ The statements are printed from the tree, so the SQL is canonical as `stringify`
 
 - A comment between statements that starts on the line the statement before it ends on stays after that statement's `;`, on the same line, unless a `--` comment is already there.
 - Any other comment between statements, or before the first or after the last, goes on a line of its own where it was.
-- A comment inside a statement moves to just before that statement, on a line of its own, and comments keep their order. A block comment after a `COPY … FROM STDIN`'s `;` moves there too, since psql allows only a `--` comment after that `;`.
+- A comment inside a statement moves to just before that statement, on a line of its own, and comments keep their order. So does a block comment between a `COPY … FROM STDIN` and its `;` (`COPY t FROM stdin /* x */;`), which would otherwise be written after the `;`, where psql allows only a `--` comment.
 - One blank line is kept where the source had one or more between two of these.
 
 Comments are copied verbatim, nested block comments and all. `--` inside a string, a quoted name or a dollar-quoted body is not a comment and is left in it. The output's own line breaks are `\n`, and a line break inside a block comment is written `\n` (a CRLF, or any run of CRs before an LF). COPY rows are data and are kept byte for byte, CRLFs included. A comment never shares a line with SQL after it, so a `--` comment can't swallow the code that follows.

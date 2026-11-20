@@ -11,8 +11,8 @@
 //   item (or ends the output), on a line of its own;
 // - a comment inside an item's span, which the canonical layout has no safe
 //   place for, is moved to just before the item, on a line of its own, in
-//   source order. So is a block comment trailing a `COPY … FROM STDIN`, since
-//   psql allows only a `--` comment after that `;`.
+//   source order. So is a block comment between a `COPY … FROM STDIN` and its
+//   `;`, which would trail the `;`, where psql allows only a `--` comment.
 //
 // Comments are copied verbatim (in a block comment, CRs before an LF are
 // dropped), so no comment is lost or changed. Every comment ends up outside
@@ -68,7 +68,7 @@ export const format = (text: string, options?: FormatOptions): string => {
       end: offset(end),
       row: start.row,
       endRow: end.row,
-      text: raw.startsWith("--") ? raw.replace(/\r$/, "") : raw.replace(/\r+\n/g, "\n"),
+      text: raw.startsWith("--") ? raw.replace(/\r+$/, "") : raw.replace(/\r+\n/g, "\n"),
     });
   }
   const comments = [...byStart.values()].sort((a, b) => a.start - b.start);

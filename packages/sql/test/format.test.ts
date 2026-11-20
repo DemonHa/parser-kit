@@ -154,6 +154,12 @@ describe("postgres.format", () => {
     expect(postgres.format(once)).toBe(once);
   });
 
+  it("drops every CR ending the -- comment after a COPY's ;, so formatting twice changes nothing", () => {
+    const once = postgres.format("COPY t FROM stdin; -- x\r\r\n1\n\\.\n");
+    expect(once).toBe("COPY t FROM STDIN; -- x\n1\n\\.\n");
+    expect(postgres.format(once)).toBe(once);
+  });
+
   it("keeps nested block comments whole", () => {
     expect(postgres.format("/* a /* b */ c */ select 1")).toBe("/* a /* b */ c */\nSELECT 1;\n");
   });
