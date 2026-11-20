@@ -8,7 +8,7 @@ import {
   sqlParseLexer,
   sqlScriptLexer,
   sqlScriptParseLexer,
-} from "./index";
+} from "../src/index";
 
 // --- helpers ---
 

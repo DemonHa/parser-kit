@@ -1,6 +1,6 @@
 import { Parser } from "node-sql-parser";
 import { bench, describe } from "vitest";
-import { sqlLite } from "./index";
+import { sqlLite } from "../src/index";
 
 // Real-world workloads: sql-lite vs node-sql-parser on the shapes of SQL an
 // application actually feeds a parser, rather than the one-construct-per-row

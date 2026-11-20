@@ -79,15 +79,11 @@ importers:
         specifier: 'catalog:'
         version: 3.2.7(@types/node@26.4.0)(jiti@2.6.1)(yaml@2.9.0)
 
-  examples/sql-lite:
-    dependencies:
-      '@parser-kit/core':
-        specifier: workspace:*
-        version: link:../../packages/core
+  packages/core:
     devDependencies:
-      node-sql-parser:
+      tsc-alias:
         specifier: 'catalog:'
-        version: 5.1.0
+        version: 1.9.2
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -95,8 +91,15 @@ importers:
         specifier: 'catalog:'
         version: 3.2.7(@types/node@26.4.0)(jiti@2.6.1)(yaml@2.9.0)
 
-  packages/core:
+  packages/sql:
+    dependencies:
+      '@parser-kit/core':
+        specifier: workspace:^
+        version: link:../core
     devDependencies:
+      node-sql-parser:
+        specifier: 'catalog:'
+        version: 5.1.0
       tsc-alias:
         specifier: 'catalog:'
         version: 1.9.2

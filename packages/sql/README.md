@@ -1,25 +1,38 @@
-# sql-lite
+# @parser-kit/sql
 
-A PostgreSQL 17 SQL grammar built with [`@parser-kit/core`](../../packages/core). It is not published. It exists for three reasons:
+[![npm](https://img.shields.io/npm/v/@parser-kit/sql.svg)](https://www.npmjs.com/package/@parser-kit/sql)
 
-- **An example.** It's the largest grammar in the repo and the one to read for keyword tiers, Pratt operator tables, hand-written `custom` rules, backtracking and error recovery working together on a real language.
-- **The kit's integration test.** Its unit tests, plus byte-exact AST and diagnostic goldens, are what catch a "generic" core change that quietly breaks a real grammar.
-- **A benchmark.** It is measured against [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) (PostgreSQL mode), the most widely used JavaScript SQL parser.
+A fast, typed SQL parser for JavaScript and TypeScript, built with [`@parser-kit/core`](https://www.npmjs.com/package/@parser-kit/core). Its first dialect is **PostgreSQL 17**; more dialects are planned. It turns SQL into a span-annotated AST with exported TypeScript types, reads whole psql and pg_dump scripts, and can recover from errors for editor tooling.
 
-Despite the name, it covers nearly all of PostgreSQL 17's grammar. It accepts 604 of the 609 statements in the coverage battery, and every statement in the pg_dump corpus. Both dump files parse end to end. See [PostgreSQL coverage](#postgresql-coverage) for what is still missing.
+- **Nearly all of PostgreSQL 17.** It accepts 604 of the 609 statements in the [coverage battery](#compared-with-node-sql-parser) (node-sql-parser: 235), and every statement in the [pg_dump corpus](#pg_dump-corpus). See [PostgreSQL coverage](#postgresql-coverage) for what is still missing.
+- **Fast.** 2–5.5× faster than [`node-sql-parser`](https://www.npmjs.com/package/node-sql-parser) on most [benchmarks](#benchmarks) (about even on a bulk `INSERT`), measured only on input both parsers accept.
+- **Typed.** Every node is a discriminated union member (`Stmt`, `Query`, `Expr`, …), exported for `switch (node.kind)`.
+- **Dual ESM / CommonJS**, with type declarations. Node 18 or later.
 
-## Usage
+## Install
+
+```sh
+npm install @parser-kit/sql
+# or
+pnpm add @parser-kit/sql
+```
+
+`@parser-kit/core` comes along as a dependency. If you import from it directly (`ParseError` for an `instanceof` check, `stripSpans`), add it to your own dependencies too, in a range that matches the one `@parser-kit/sql` declares, so both resolve to the same copy.
+
+## Usage (PostgreSQL dialect)
+
+The PostgreSQL entry points are `sqlLite` (SQL as the server receives it) and `sqlLiteScript` (whole psql scripts). Both have `parse` and `diagnose`.
 
 ```ts
-import { sqlLite } from "./index";
+import { sqlLite } from "@parser-kit/sql";
 
 const ast = sqlLite.parse("SELECT id, count(DISTINCT tag) FROM posts WHERE created_at > now() - interval '7 days' GROUP BY id");
 // → Stmt[]: one node per statement, statements and expressions carrying a { start, end } span
 ```
 
-The root is a list of statements. `;` separates them, and the last one may leave it out. Empty statements (`;;`, a leading `;`, input that is only comments) produce no node, and `SELECT 1 SELECT 2` is still an error. Unquoted identifiers fold ASCII letters to lower case, as PostgreSQL does, and quoted ones keep their case. Keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is, and they are not kept in the AST. The node types are exported from `grammar.ts` (`Stmt`, `Query`, `Expr`, `ScriptItem`, …).
+The root is a list of statements. `;` separates them, and the last one may leave it out. Empty statements (`;;`, a leading `;`, input that is only comments) produce no node, and `SELECT 1 SELECT 2` is still an error. Unquoted identifiers fold ASCII letters to lower case, as PostgreSQL does, and quoted ones keep their case. Keywords PostgreSQL treats as unreserved (`type`, `role`, `comment`, `data`, `rows`, …) stay usable as names. Comments (`--` and nested `/* */`) are allowed anywhere whitespace is, and they are not kept in the AST. The node types are exported from the package (`Stmt`, `Query`, `Expr`, `ScriptItem`, …), as are the lexers and the token type `SqlTokenType`.
 
-`parse` throws a `ParseError` at the first problem:
+`parse` throws a `ParseError` (exported by `@parser-kit/core`) at the first problem:
 
 ```ts
 sqlLite.parse("SELECT id FROM users WHERE;");
@@ -39,7 +52,7 @@ const { ast, errors } = sqlLite.diagnose("SELECT 1;\nSELECT FROM WHERE;\nDELETE 
 `sqlLite` parses SQL the way the PostgreSQL server receives it, so a psql meta-command (`\connect db`) or the rows after `COPY … FROM stdin` are errors there, as they are for the server. `sqlLiteScript` has the same `parse` and `diagnose` and reads a whole file the way psql runs it. That includes pg_dump and pg_dumpall output:
 
 ```ts
-import { sqlLiteScript } from "./index";
+import { sqlLiteScript } from "@parser-kit/sql";
 
 sqlLiteScript.parse("\\connect app\nCOPY t (a, b) FROM stdin;\n1\tx\n2\ty\n\\.\nSELECT 1;\n");
 // → ScriptItem[]:
@@ -64,22 +77,25 @@ The statements are read by the same rules as `sqlLite`'s, so a script differs fr
 - **Where a WITH lands.** A `WITH` written over a set operation whose first arm has its own `WITH` goes on the `setOp` node. Every other `WITH` goes on the leftmost `SELECT` (or `VALUES` / `TABLE`) arm, as before.
 - **Set-operation tails.** An `ORDER BY` / `LIMIT` / `OFFSET` / locking tail written after a set operation or a parenthesised query applies to the whole query. On a set operation it sits on the `setOp` node as optional fields, and the arms carry no tail.
 
-## Layout
+## Repository layout
+
+The package lives at [`packages/sql`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql) in the parser-kit repo. Only `src/` and its build output are published. The tests, corpora, fixtures and benchmarks stay in the repo.
 
 | File | What it is |
 |---|---|
-| `lexer.ts` | Tokens: identifier folding (ASCII only, non-ASCII letters allowed), quoted and `U&"…"` identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` / `N'…'` strings with every escape PostgreSQL decodes, PostgreSQL numbers (`1e5`, `.5`, `5.`, `0xff`, `0o17`, `0b101`, `1_000`, with PostgreSQL 15+'s rejection of `123abc`), `$1` parameters, comments, and the operator reader. `sqlLexer` emits `comment` tokens. `sqlParseLexer`, which the grammar uses, drops them. `sqlScriptLexer` / `sqlScriptParseLexer` add psql meta-command lines and COPY data blocks |
-| `grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, one rule per statement, and the `sqlLite` / `sqlLiteScript` entry points |
-| `index.ts` | Re-exports both |
-| `sql-lite.test.ts` | Unit tests, one `describe` per feature |
-| `corpus.ts` | The statements the benchmark measures and the parity golden pins |
-| `parity.test.ts` + `parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus a supplemental list |
-| `pg-coverage.ts` + `pg-coverage.test.ts` | The PostgreSQL coverage battery: 609 statements with the bucket each one lands in |
-| `pg-dump-corpus.ts` + `pg-dump-corpus.test.ts` | The pg_dump corpus: whether each statement of the dumps in `fixtures/pg-dump/` parses, and whether each file parses whole through `sqlLiteScript` |
-| `psql-split.ts` | A test helper that splits a dump file into statements the way psql does |
-| `sql-lite.bench.ts` | Throughput over the corpus, per category |
-| `sql-lite.large.bench.ts` | Throughput on 64 KB / 256 KB / 1 MB multi-statement files, and on the pagila schema dump |
-| `sql-lite.workloads.bench.ts` | Throughput on real-world workloads |
+| `src/lexer.ts` | Tokens: identifier folding (ASCII only, non-ASCII letters allowed), quoted and `U&"…"` identifiers, `'…'` / `E'…'` / `$tag$…$tag$` / `B'…'` / `X'…'` / `U&'…'` / `N'…'` strings with every escape PostgreSQL decodes, PostgreSQL numbers (`1e5`, `.5`, `5.`, `0xff`, `0o17`, `0b101`, `1_000`, with PostgreSQL 15+'s rejection of `123abc`), `$1` parameters, comments, and the operator reader. `sqlLexer` emits `comment` tokens. `sqlParseLexer`, which the grammar uses, drops them. `sqlScriptLexer` / `sqlScriptParseLexer` add psql meta-command lines and COPY data blocks |
+| `src/grammar.ts` | The grammar: the AST types, the reserved-word set, the expression Pratt table, one rule per statement, and the `sqlLite` / `sqlLiteScript` entry points |
+| `src/index.ts` | The package entry: re-exports both |
+| `test/sql-lite.test.ts` | Unit tests, one `describe` per feature |
+| `test/entry.test.ts` | Pins the package entry's exports |
+| `test/psql-split.ts` | A test helper that splits a dump file into statements the way psql does |
+| `test/corpus.ts` | The statements the benchmark measures and the parity golden pins |
+| `test/parity.test.ts` + `test/parity.*.golden.json` | Byte-exact AST (spans included) and `diagnose()` output for the corpus plus a supplemental list |
+| `test/pg-coverage.ts` + `test/pg-coverage.test.ts` | The PostgreSQL coverage battery: 609 statements with the bucket each one lands in |
+| `test/pg-dump-corpus.ts` + `test/pg-dump-corpus.test.ts` | The pg_dump corpus: whether each statement of the dumps in `test/fixtures/pg-dump/` parses, and whether each file parses whole through `sqlLiteScript` |
+| `bench/sql-lite.bench.ts` | Throughput over the corpus, per category |
+| `bench/sql-lite.large.bench.ts` | Throughput on 64 KB / 256 KB / 1 MB multi-statement files, and on the pagila schema dump |
+| `bench/sql-lite.workloads.bench.ts` | Throughput on real-world workloads |
 
 ## PostgreSQL coverage
 
@@ -203,9 +219,9 @@ The target is PostgreSQL 17's `gram.y`. The lists below are grouped the way the 
 
 ### Compared with node-sql-parser
 
-The battery in `pg-coverage.ts` has 609 distinct statements, all syntactically valid in PostgreSQL 17 (a few need 17 rather than 16). They cover the command reference and the query and expression chapters, from everyday idioms (upserts, pagination, `date_trunc` reports, pg_dump-style DDL) to the long tail. Each statement goes through `sqlLite.parse(sql)` and node-sql-parser 5.1.0's `new Parser().astify(sql, { database: "PostgreSQL" })`:
+The battery in `test/pg-coverage.ts` has 609 distinct statements, all syntactically valid in PostgreSQL 17 (a few need 17 rather than 16). They cover the command reference and the query and expression chapters, from everyday idioms (upserts, pagination, `date_trunc` reports, pg_dump-style DDL) to the long tail. Each statement goes through `sqlLite.parse(sql)` and node-sql-parser 5.1.0's `new Parser().astify(sql, { database: "PostgreSQL" })`:
 
-| Area | Statements | Both | sql-lite only | node-sql-parser only | Neither |
+| Area | Statements | Both | @parser-kit/sql only | node-sql-parser only | Neither |
 |---|---:|---:|---:|---:|---:|
 | Queries | 99 | 64 | 35 | 0 | 0 |
 | Expressions | 87 | 51 | 36 | 0 | 0 |
@@ -218,24 +234,24 @@ The battery in `pg-coverage.ts` has 609 distinct statements, all syntactically v
 | Roles and privileges | 26 | 8 | 18 | 0 | 0 |
 | **Total** | **609** | **235** | **369** | **0** | **5** |
 
-So sql-lite accepts 604 of the 609 statements (99.2%), and node-sql-parser accepts 235 (38.6%). No statement is accepted by node-sql-parser alone. The five sql-lite rejects:
+So @parser-kit/sql accepts 604 of the 609 statements (99.2%), and node-sql-parser accepts 235 (38.6%). No statement is accepted by node-sql-parser alone. The five @parser-kit/sql rejects:
 
 - `ALTER TABLE … ADD CONSTRAINT … UNIQUE USING INDEX idx`.
 - `ALTER TYPE … ADD / DROP ATTRIBUTE`.
 - `ALTER SYSTEM`.
 - `CREATE RULE` and `CREATE TRANSFORM`.
 
-"Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where sql-lite parses a statement into the wrong tree are listed [below](#known-wrong-asts).
+"Accepts" means "parses without throwing". It is a necessary condition for a correct AST, not a sufficient one. The known cases where @parser-kit/sql parses a statement into the wrong tree are listed [below](#known-wrong-asts).
 
 The test fails if any statement changes bucket. To print the table above:
 
 ```sh
-PG_COVERAGE_REPORT=1 pnpm vitest run examples/sql-lite/pg-coverage.test.ts
+PG_COVERAGE_REPORT=1 pnpm vitest run packages/sql/test/pg-coverage.test.ts
 ```
 
 ### pg_dump corpus
 
-`pg-dump-corpus.test.ts` runs real pg_dump output through `sqlLite.parse`, one statement at a time. `psql-split.ts` splits each file the way psql does. It respects strings, dollar quotes and `BEGIN ATOMIC` bodies. It also sets aside `COPY … FROM stdin` data blocks and `\` meta-command lines (`\connect`, `\restrict`, …), which `sqlLite.parse` doesn't take. Every statement's outcome is pinned in `pg-dump-corpus.ts`, so a statement that starts or stops parsing fails the test. The test then parses each file whole with `sqlLiteScript`. The errors must fall in exactly the pinned failing statements, and its meta-command and COPY items must match what the splitter found. A file with no failing statement must pass `sqlLiteScript.parse`. The dumps live in `fixtures/pg-dump/`:
+`test/pg-dump-corpus.test.ts` runs real pg_dump output through `sqlLite.parse`, one statement at a time. `test/psql-split.ts` splits each file the way psql does. It respects strings, dollar quotes and `BEGIN ATOMIC` bodies. It also sets aside `COPY … FROM stdin` data blocks and `\` meta-command lines (`\connect`, `\restrict`, …), which `sqlLite.parse` doesn't take. Every statement's outcome is pinned in `test/pg-dump-corpus.ts`, so a statement that starts or stops parsing fails the test. The test then parses each file whole with `sqlLiteScript`. The errors must fall in exactly the pinned failing statements, and its meta-command and COPY items must match what the splitter found. A file with no failing statement must pass `sqlLiteScript.parse`. The dumps live in `test/fixtures/pg-dump/` (repository only, not in the npm package):
 
 - `pagila-schema.sql` is the [pagila](https://github.com/devrimgunduz/pagila) sample database's schema (pg_dump 15beta2 of a 12.11 server), vendored unmodified under the PostgreSQL License (`pagila-LICENSE.txt`).
 - `handwritten-pg17.sql` is written by hand in the shape pg_dumpall/pg_dump 17.6 produce. It covers what the sample dump lacks: `\restrict`, roles, row-level security and policies, default privileges, publications, identity columns, `ALTER INDEX … ATTACH PARTITION`, `BEGIN ATOMIC` bodies and COPY blocks.
@@ -249,8 +265,8 @@ PG_COVERAGE_REPORT=1 pnpm vitest run examples/sql-lite/pg-coverage.test.ts
 To print the table, or to rewrite `pg-dump-corpus.ts` after a grammar change (review the diff: no row may move to `fail`):
 
 ```sh
-PG_DUMP_CORPUS_REPORT=1 pnpm vitest run examples/sql-lite/pg-dump-corpus.test.ts
-PG_DUMP_CORPUS_WRITE=1 pnpm vitest run examples/sql-lite/pg-dump-corpus.test.ts
+PG_DUMP_CORPUS_REPORT=1 pnpm vitest run packages/sql/test/pg-dump-corpus.test.ts
+PG_DUMP_CORPUS_WRITE=1 pnpm vitest run packages/sql/test/pg-dump-corpus.test.ts
 ```
 
 ### Not yet supported
@@ -294,7 +310,7 @@ Every item here was checked against the current grammar and fails to parse.
 - `SET col = (DEFAULT)`. `SET col = DEFAULT` works.
 - Operator-class options in an `ON CONFLICT` element (`(a ops (k = v))`).
 - `SET TIME ZONE INTERVAL(p) '…'`. `SET TIME ZONE INTERVAL '…' HOUR` works.
-- A routine name that sql-lite reserves, such as `left`, after `ON FUNCTION` / `COMMENT ON FUNCTION`.
+- A routine name that @parser-kit/sql reserves, such as `left`, after `ON FUNCTION` / `COMMENT ON FUNCTION`.
 - A reserved word after the dot in a qualified `HANDLER` / `VALIDATOR` name (`HANDLER s.select`).
 
 **Scripts** (`sqlLiteScript`)
@@ -329,7 +345,7 @@ The grammar is deliberately more permissive than PostgreSQL in places. These inp
 - **The empty `USING ()` join list.**
 - **Impossible type modifiers:** `x::int(4)`.
 - **A whole-valued float where PostgreSQL wants an integer constant:** `MODULUS 4.0` or `MODULUS 4.` in a hash partition bound, `int[5.]`.
-- **Named parameters** such as `$name`. PostgreSQL only has positional ones (`$1`). sql-lite keeps `$name` for templated SQL.
+- **Named parameters** such as `$name`. PostgreSQL only has positional ones (`$1`). @parser-kit/sql keeps `$name` for templated SQL.
 - **`UESCAPE` with no string after it:** `SELECT U&'x' uescape FROM t` reads `uescape` as an alias.
 - **Names PostgreSQL restricts:**
   - `SET TIME ZONE` with a non-reserved keyword as the zone (`SET TIME ZONE zone`);
@@ -354,7 +370,7 @@ Two smaller divergences: quoted identifiers longer than 63 bytes are not truncat
 
 ### Behaviour changes
 
-sql-lite isn't published yet, so these breaks come before any 0.x release. They are listed for anyone tracking the grammar in this repo.
+These breaks landed while the grammar was the unpublished `examples/sql-lite` example in the parser-kit repo, before the first npm release. They are listed for anyone who tracked it there.
 
 **Inputs that used to parse and are now rejected**, because PostgreSQL rejects them, almost all in its grammar. Two (`GRANT r TO u WITH GRANT OPTION`, `SEQUENCE NAME` in `CREATE SEQUENCE`) are post-parse errors there, refused here because the check is local:
 
@@ -418,63 +434,65 @@ sql-lite isn't published yet, so these breaks come before any 0.x release. They 
 
 ## Benchmarks
 
-Three bench files compare sql-lite with node-sql-parser 5.1.0 in PostgreSQL mode. **Every head-to-head group uses only input both parsers accept,** except the malformed-input group, whose inputs both parsers reject. `sql-lite.workloads.bench.ts` checks this at load time and refuses to run if either parser rejects a workload. PostgreSQL syntax that node-sql-parser rejects (`DELETE … RETURNING`, `FOR UPDATE SKIP LOCKED`, `ALTER TABLE … RENAME COLUMN`, …) is left out of the comparisons. A real application's SQL would include some of it.
+Three bench files compare @parser-kit/sql with node-sql-parser 5.1.0 in PostgreSQL mode. The bench files predate the package and label it `sql-lite`, its name as a repo example. **Every head-to-head group uses only input both parsers accept,** except the malformed-input group, whose inputs both parsers reject. `sql-lite.workloads.bench.ts` checks this at load time and refuses to run if either parser rejects a workload. PostgreSQL syntax that node-sql-parser rejects (`DELETE … RETURNING`, `FOR UPDATE SKIP LOCKED`, `ALTER TABLE … RENAME COLUMN`, …) is left out of the comparisons. A real application's SQL would include some of it.
 
 ### Real-world workloads (`sql-lite.workloads.bench.ts`)
 
-| Workload | sql-lite ops/s | mean | node-sql-parser ops/s | mean | Relative |
+| Workload | @parser-kit/sql ops/s | mean | node-sql-parser ops/s | mean | Relative |
 |---|---:|---:|---:|---:|---|
-| OLTP mix: 16 statements, one `parse` call each | 555 | 1.80 ms | 162 | 6.17 ms | sql-lite 3.42× faster |
-| Analytics report: 2 CTEs, 3 window functions, 3 joins, `CASE` | 957 | 1.04 ms | 317 | 3.15 ms | sql-lite 3.02× faster |
-| Migration script: 19 DDL statements in one 1.6 KB file | 781 | 1.28 ms | 220 | 4.56 ms | sql-lite 3.56× faster |
-| Bulk `INSERT`: 10,000 rows of 5 values, 406.5 KB | 2.16 | 463 ms | 1.86 | 538 ms | sql-lite 1.16× faster |
-| Wide `SELECT`: 1,000 columns, 21.3 KB | 37.7 | 26.5 ms | 9.52 | 105 ms | sql-lite 3.96× faster |
-| Malformed input: 8 statements, every one throws | 1,920 | 0.52 ms | 301 | 3.32 ms | sql-lite 6.38× faster |
+| OLTP mix: 16 statements, one `parse` call each | 1,651 | 0.61 ms | 465 | 2.15 ms | @parser-kit/sql 3.55× faster |
+| Analytics report: 2 CTEs, 3 window functions, 3 joins, `CASE` | 2,285 | 0.44 ms | 800 | 1.25 ms | @parser-kit/sql 2.86× faster |
+| Migration script: 19 DDL statements in one 1.6 KB file | 1,898 | 0.53 ms | 559 | 1.79 ms | @parser-kit/sql 3.40× faster |
+| Bulk `INSERT`: 10,000 rows of 5 values, 406.5 KB | 4.92 | 203 ms | 4.62 | 216 ms | @parser-kit/sql 1.06× faster |
+| Wide `SELECT`: 1,000 columns, 21.3 KB | 90.5 | 11.1 ms | 29.8 | 33.6 ms | @parser-kit/sql 3.04× faster |
+| Malformed input: 8 statements, every one throws | 6,769 | 0.15 ms | 1,219 | 0.82 ms | @parser-kit/sql 5.55× faster |
 
-The bulk `INSERT` is the closest workload. Nearly all of that input is literals and commas, so the work is per token. sql-lite costs roughly 46 µs per 5-value row, and the cost is linear in the row count. The previous recording had node-sql-parser 1.29× ahead here, so treat this row as roughly even. Malformed input shows the widest gap.
+The bulk `INSERT` is the closest workload. Nearly all of that input is literals and commas, so the work is per token. @parser-kit/sql costs roughly 20 µs per 5-value row, and the cost is linear in the row count. Both parsers had ±7–8% variance on this row, and an earlier recording had node-sql-parser 1.29× ahead, so treat it as roughly even. Malformed input shows the widest gap.
 
 ### Statement corpus and large files
 
-| Group | sql-lite ops/s | node-sql-parser ops/s | Relative |
+| Group | @parser-kit/sql ops/s | node-sql-parser ops/s | Relative |
 |---|---:|---:|---|
-| Whole shared corpus (28 statements) | 365 | 131 | 2.79× |
-| `select` (5) | 5,072 | 1,085 | 4.68× |
-| `select-adv` (4) | 3,293 | 943 | 3.49× |
-| `cte` (2) | 9,847 | 2,889 | 3.41× |
-| `dml` (4) | 4,132 | 1,345 | 3.07× |
-| `ddl` (6) | 2,535 | 853 | 2.97× |
-| `expr` (7) | 3,345 | 640 | 5.23× |
-| 64 KB file (1,722 statements) | 7.98 | 2.52 | 3.17× |
-| 256 KB file (6,889 statements) | 2.56 | 0.66 | 3.85× |
-| 1 MB file (27,557 statements) | 0.63 | 0.18 | 3.50× |
-| pagila schema dump (388 statements) | 31.3 | — | sql-lite only |
+| Whole shared corpus (28 statements) | 1,235 | 371 | 3.33× |
+| `select` (5) | 12,562 | 3,647 | 3.44× |
+| `select-adv` (4) | 9,911 | 2,574 | 3.85× |
+| `cte` (2) | 23,578 | 10,969 | 2.15× |
+| `dml` (4) | 11,102 | 5,657 | 1.96× |
+| `ddl` (6) | 8,251 | 2,222 | 3.71× |
+| `expr` (7) | 8,102 | 2,025 | 4.00× |
+| 64 KB file (1,722 statements) | 26.3 | 8.78 | 3.00× |
+| 256 KB file (6,889 statements) | 6.95 | 2.10 | 3.31× |
+| 1 MB file (27,557 statements) | 1.77 | 0.53 | 3.36× |
+| pagila schema dump (388 statements) | 77.6 | — | @parser-kit/sql only |
 
-"Relative" is sql-lite's speed-up over node-sql-parser. `sql-lite.large.bench.ts` also has a sql-lite-only group that parses the pagila schema dump statement by statement. node-sql-parser rejects most pg_dump DDL, so there is no comparison.
+"Relative" is @parser-kit/sql's speed-up over node-sql-parser. `sql-lite.large.bench.ts` also has a group for @parser-kit/sql alone that parses the pagila schema dump statement by statement. node-sql-parser rejects most pg_dump DDL, so there is no comparison.
 
 ### Methodology
 
 - These are [vitest bench](https://vitest.dev/guide/features.html#benchmarking) (tinybench) results: ops/s is iterations of the whole group body per second, and mean is the time per iteration.
 - Each workload is built once at module load. Generated inputs are deterministic (no `Math.random`), so every run parses identical text.
 - Both parsers are called the way an application would call them: `sqlLite.parse(sql)` against `new Parser().astify(sql, { database: "PostgreSQL" })`, with one `Parser` instance reused.
-- **Recorded on:** 2026-10-23, with Node 22.22.0, vitest 3.2.7 and node-sql-parser 5.1.0. The machine was a Linux container with 4 vCPUs (Intel Xeon @ 2.80 GHz) and 15 GB RAM.
-- The run was one `pnpm bench:save` with nothing else running. **The numbers are noisy.** The previous recording, from the same container on 2026-10-22 and an older grammar, had node-sql-parser 8–68% faster per group. That parser's code hasn't changed, so the gap is machine noise. Compare the ratios, not raw ops/s across runs. Variance (`rme`) stayed within ±7% for most groups. The wide `SELECT` (node-sql-parser, ±10%) and the 64 KB file (±13% and ±16%) were the noisiest.
+- **Recorded on:** 2026-11-20, with Node 22.23.5, vitest 3.2.7 and node-sql-parser 5.1.0. The machine was a Linux container with 4 vCPUs (Intel Xeon @ 2.30 GHz) and 15 GB RAM.
+- The run was one `pnpm bench:save` with nothing else running. **The numbers are noisy.** Absolute ops/s move a lot between machines and runs (this run's machine was 2–3.5× faster than the previous recording's for both parsers), so compare the ratios, not raw ops/s across runs. Variance (`rme`) stayed within ±4% for most groups. The bulk `INSERT` (±8% and ±7%) and node-sql-parser's 256 KB file (±6%) were the noisiest.
 
 ### Running them
 
+From a clone of the repository root:
+
 ```sh
-pnpm bench                                                          # every bench file
-pnpm vitest bench --run examples/sql-lite/sql-lite.workloads.bench.ts   # just the workloads
-pnpm bench:compare                                                  # diff against bench-baseline.json
-pnpm bench:save                                                     # re-record bench-baseline.json
+pnpm bench                                                               # every bench file
+pnpm vitest bench --run packages/sql/bench/sql-lite.workloads.bench.ts   # just the workloads
+pnpm bench:compare                                                       # diff against bench-baseline.json
+pnpm bench:save                                                          # re-record bench-baseline.json
 ```
 
 The committed `bench-baseline.json` covers every bench file: the per-construct corpus, the large files, the pagila dump and the workloads. It was recorded in the same run as the tables above, so `bench:compare` shows a delta for every group. Benchmarks don't run in CI.
 
 ## Contributing
 
-The repo-wide workflow is in [CONTRIBUTING.md](../../CONTRIBUTING.md). Specific to this grammar:
+Run everything from the repository root (`pnpm test`, `pnpm types:check`, `pnpm lint`). The repo-wide workflow is in [CONTRIBUTING.md](https://github.com/DemonHa/parser-kit/blob/main/CONTRIBUTING.md). Specific to this grammar:
 
-- **Tests first, at the level the change lives.** New syntax gets a `describe` block in `sql-lite.test.ts` asserting the span-stripped AST with `toEqual`, plus the error message for the nearest malformed input.
+- **Tests first, at the level the change lives.** New syntax gets a `describe` block in `test/sql-lite.test.ts` asserting the span-stripped AST with `toEqual`, plus the error message for the nearest malformed input.
 - **Follow the [AST conventions](#ast-conventions).** A new field is optional and left out when absent, so trees for input that doesn't use the construct stay byte-identical.
 - **Prove new keywords stay unreserved.** PostgreSQL leaves most keywords usable as names, and so does this grammar: only the words in `RESERVED` are refused as bare names. Every feature that matches a new word by value comes with a "keeps … unreserved as names and aliases" test showing the word still works as a column, table and alias (for example `SELECT rows, ordinality FROM t AS rows;`). Don't add to `RESERVED` to make a parse work.
 - **Pin observable output in the parity golden.** `parity.test.ts` serialises the full AST, spans included, for every `corpus.ts` row and its own `SUPPLEMENTAL` / `MULTI_LINE` / `LEXER_EDGE_CASES` lists, plus `diagnose()` output for `MALFORMED`. New node shapes go in `SUPPLEMENTAL`, not `corpus.ts`. The benchmark's group names count the corpus's shared rows, and `bench-baseline.json` keys on those names, so a new `pg: true` corpus row renames them and silently disconnects `pnpm bench:compare`. When output is *meant* to move, regenerate with `pnpm test -- -u` (the `--` matters) and call the diff out in review. Never regenerate to make a refactor pass.
