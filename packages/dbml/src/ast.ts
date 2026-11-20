@@ -17,9 +17,13 @@ export type {
   Value,
 } from "./grammar/common";
 export type { Enum, EnumValue } from "./grammar/enum";
-export type { Note } from "./grammar/note";
+export type { TableGroup, TableGroupMember } from "./grammar/group";
+export type { PartialInjection } from "./grammar/injection";
+export type { Note, StickyNote } from "./grammar/note";
+export type { TablePartial } from "./grammar/partial";
 export type { Project, ProjectProperty } from "./grammar/project";
+export type { EmptyField, RecordField, RecordRow, Records } from "./grammar/records";
 export type { Endpoint, Ref, Relation } from "./grammar/ref";
 export type { DbmlDocument, Element } from "./grammar/root";
 export type { Table } from "./grammar/table";
-export type { TableItem } from "./grammar/table-items";
+export type { PartialItem, TableItem } from "./grammar/table-items";

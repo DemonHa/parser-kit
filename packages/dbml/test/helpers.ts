@@ -4,7 +4,7 @@ import type { DbmlDocument, Element } from "../src/index";
 import { dbml } from "../src/index";
 
 /** The top-level elements an error message lists, in registry order. */
-export const ELEMENTS = '"Project", "Table", "Ref" or "Enum"';
+export const ELEMENTS = '"Project", "Table", "Ref", "Enum", "TableGroup", "Note", "TablePartial" or "records"';
 
 /** The document's elements with spans stripped. */
 export const elements = (text: string): Element[] => stripSpans(dbml.parse(text)).elements;
