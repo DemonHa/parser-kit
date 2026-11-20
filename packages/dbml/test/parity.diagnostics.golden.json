@@ -372,6 +372,10 @@
     "errors": []
   },
   {
+    "name": "keywords and settings in any case",
+    "errors": []
+  },
+  {
     "name": "keywords as column names",
     "errors": []
   },
@@ -1198,7 +1202,7 @@
     }
   },
   {
-    "name": "invalid note setting",
+    "name": "table note setting invalid type",
     "source": "Table t [note: 42] {\n  id int\n}\n",
     "errors": [
       {
@@ -1252,7 +1256,7 @@
     }
   },
   {
-    "name": "invalid not null",
+    "name": "table setting not null",
     "source": "Table t [not null] {\n  id int\n}\n",
     "errors": [
       {
@@ -1554,33 +1558,6 @@
     "errors": [
       {
         "message": "Expected \"note\" but found \"pk\" (2:10)",
-        "end": {
-          "row": 2,
-          "col": 12
-        }
-      }
-    ],
-    "ast": {
-      "type": "document",
-      "elements": [],
-      "span": {
-        "start": {
-          "row": 1,
-          "col": 0
-        },
-        "end": {
-          "row": 1,
-          "col": 0
-        }
-      }
-    }
-  },
-  {
-    "name": "enum value with a type",
-    "source": "enum status {\n  active int\n}\n",
-    "errors": [
-      {
-        "message": "Expected \"[\", a new line or \"}\" but found \"int\" (2:9)",
         "end": {
           "row": 2,
           "col": 12

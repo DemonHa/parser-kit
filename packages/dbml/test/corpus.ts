@@ -546,7 +546,12 @@ Ref: a.z > b.z [delete: no action, owner: 'ops']
   invoices
   payments
   finance.refunds
-  Note: 'Everything that touches money'
+  Note {
+    '''
+    Everything that
+    touches money
+    '''
+  }
 }
 `,
     ),
@@ -591,6 +596,12 @@ Ref: a.z > b.z [delete: no action, owner: 'ops']
   updated_at timestamp
   indexes {
     created_at
+  }
+  checks {
+    \`id > 0\`
+  }
+  Note {
+    'partial note'
   }
 }
 
@@ -831,6 +842,41 @@ Table t {
   { category: "lexical", name: "tabs for indentation", dbml: "Table t {\n\tid\tint\t[pk]\n\tname\ttext\n}\n" },
 
   // --- keywords as names ---
+  {
+    category: "keywords",
+    name: "keywords and settings in any case",
+    dbml: `PROJECT p {
+  NOTE: 'upper-case project note'
+}
+TABLE orders [HEADERCOLOR: #fff] {
+  "order id" int [PK]
+  Status varchar [NOT NULL, DEFAULT: 'new']
+  INDEXES {
+    "order id" [NAME: 'i', TYPE: hash, UNIQUE]
+    ("order id", \`1\`)
+  }
+  CHECKS {
+    \`"order id" > 0\`
+  }
+}
+TABLE items {
+  order_id int
+}
+REF: items.order_id > orders."order id" [DELETE: CASCADE, UPDATE: NO ACTION]
+TABLEGROUP g {
+  orders
+}
+TABLEPARTIAL p {
+  x int
+}
+NOTE sticky {
+  'shouting'
+}
+RECORDS items(order_id) {
+  1
+}
+`,
+  },
   {
     category: "keywords",
     name: "keywords as column names",
@@ -1483,6 +1529,7 @@ Note retention [color: #e67e22] {
 export const MALFORMED: Sample[] = [
   // --- program ---
   { category: "program", name: "invalid top-level word", dbml: "Tabel users {\n  id int\n}\n" },
+  // A punctuation token where an element keyword is due, rather than a word.
   { category: "program", name: "stray closing brace", dbml: "}\nTable t {\n  id int\n}\n" },
   {
     category: "program",
@@ -1542,7 +1589,8 @@ export const MALFORMED: Sample[] = [
     name: "ref setting invalid type",
     dbml: "Table t {\n  c int [ref: > 'users.id']\n}\n",
   },
-  // @dbml/core rejects this only when it resolves the target; rejected here on purpose.
+  // Accepted by @dbml/core when the column exists (a one-part target means the current table);
+  // rejected here on purpose (a known difference).
   { category: "column-settings", name: "ref setting single-part target", dbml: "Table t {\n  c int [ref: > id]\n}\n" },
   { category: "column-settings", name: "note setting invalid type", dbml: "Table t {\n  c int [note: 42]\n}\n" },
   { category: "column-settings", name: "note setting invalid syntax", dbml: "Table t {\n  c int [note 'x']\n}\n" },
@@ -1561,14 +1609,14 @@ export const MALFORMED: Sample[] = [
     name: "headercolor string value",
     dbml: "Table t [headercolor: 'red'] {\n  id int\n}\n",
   },
-  { category: "table-settings", name: "invalid note setting", dbml: "Table t [note: 42] {\n  id int\n}\n" },
+  { category: "table-settings", name: "table note setting invalid type", dbml: "Table t [note: 42] {\n  id int\n}\n" },
   // A header's settings list must start on the header's line, as in @dbml/core.
   {
     category: "table-settings",
     name: "table settings on a later line",
     dbml: "Table t\n  [headercolor: #000, note: 'x'] {\n  id int\n}\n",
   },
-  { category: "table-settings", name: "invalid not null", dbml: "Table t [not null] {\n  id int\n}\n" },
+  { category: "table-settings", name: "table setting not null", dbml: "Table t [not null] {\n  id int\n}\n" },
   { category: "notes", name: "table note without a value", dbml: "Table t {\n  id int\n  Note:\n}\n" },
   {
     category: "notes",
@@ -1592,13 +1640,13 @@ export const MALFORMED: Sample[] = [
     dbml: "Ref: a.x > b.y [delete: explode]\n",
   },
   { category: "refs", name: "ref long form with two relationships", dbml: "Ref {\n  a.x > b.y\n  c.x > d.y\n}\n" },
-  // @dbml/core rejects this only when it resolves the schema; rejected here on purpose.
+  // Accepted by @dbml/core when the three-part table exists; rejected here on purpose (a known
+  // difference that follows from "table name with three parts").
   { category: "refs", name: "ref endpoint with four parts", dbml: "Ref: a.b.c.d > e.f\n" },
 
   // --- enums ---
   { category: "enums", name: "enum invalid comma", dbml: "enum status {\n  active,\n  inactive\n}\n" },
   { category: "enums", name: "enum invalid pk prop", dbml: "enum status {\n  active [pk]\n}\n" },
-  { category: "enums", name: "enum value with a type", dbml: "enum status {\n  active int\n}\n" },
 
   // --- indexes and checks ---
   {

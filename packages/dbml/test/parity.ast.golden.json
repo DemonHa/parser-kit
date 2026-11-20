@@ -25832,7 +25832,7 @@
   },
   {
     "name": "table group with settings and note",
-    "source": "Table invoices {\n  id int\n}\n\nTable payments {\n  id int\n}\n\nTable finance.refunds {\n  id int\n}\n\nTableGroup billing [color: #345, note: 'money things'] {\n  invoices\n  payments\n  finance.refunds\n  Note: 'Everything that touches money'\n}\n",
+    "source": "Table invoices {\n  id int\n}\n\nTable payments {\n  id int\n}\n\nTable finance.refunds {\n  id int\n}\n\nTableGroup billing [color: #345, note: 'money things'] {\n  invoices\n  payments\n  finance.refunds\n  Note {\n    '''\n    Everything that\n    touches money\n    '''\n  }\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -26360,27 +26360,28 @@
               "type": "note",
               "value": {
                 "kind": "string",
-                "value": "Everything that touches money",
+                "value": "Everything that\ntouches money\n",
+                "multiline": true,
                 "span": {
                   "start": {
-                    "row": 17,
-                    "col": 8
+                    "row": 18,
+                    "col": 4
                   },
                   "end": {
-                    "row": 17,
-                    "col": 39
+                    "row": 21,
+                    "col": 7
                   }
                 }
               },
-              "form": "inline",
+              "form": "block",
               "span": {
                 "start": {
                   "row": 17,
                   "col": 2
                 },
                 "end": {
-                  "row": 17,
-                  "col": 39
+                  "row": 22,
+                  "col": 3
                 }
               }
             }
@@ -26391,7 +26392,7 @@
               "col": 0
             },
             "end": {
-              "row": 18,
+              "row": 23,
               "col": 1
             }
           }
@@ -26403,7 +26404,7 @@
           "col": 0
         },
         "end": {
-          "row": 18,
+          "row": 23,
           "col": 1
         }
       }
@@ -27006,7 +27007,7 @@
   },
   {
     "name": "table partial with injection",
-    "source": "TablePartial base_template [headercolor: #aabbcc, note: 'shared columns'] {\n  id int [pk, not null]\n  created_at timestamp [default: `now()`]\n  updated_at timestamp\n  indexes {\n    created_at\n  }\n}\n\nTablePartial soft_delete {\n  deleted_at timestamp [null]\n}\n\nTable users {\n  ~base_template\n  name varchar\n  ~soft_delete\n  Note: 'users inherit the shared columns'\n}\n",
+    "source": "TablePartial base_template [headercolor: #aabbcc, note: 'shared columns'] {\n  id int [pk, not null]\n  created_at timestamp [default: `now()`]\n  updated_at timestamp\n  indexes {\n    created_at\n  }\n  checks {\n    `id > 0`\n  }\n  Note {\n    'partial note'\n  }\n}\n\nTablePartial soft_delete {\n  deleted_at timestamp [null]\n}\n\nTable users {\n  ~base_template\n  name varchar\n  ~soft_delete\n  Note: 'users inherit the shared columns'\n}\n",
     "ast": {
       "type": "document",
       "elements": [
@@ -27409,6 +27410,76 @@
                   "col": 3
                 }
               }
+            },
+            {
+              "type": "checks",
+              "entries": [
+                {
+                  "expression": {
+                    "kind": "expression",
+                    "value": "id > 0",
+                    "span": {
+                      "start": {
+                        "row": 9,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 9,
+                        "col": 12
+                      }
+                    }
+                  },
+                  "settings": [],
+                  "span": {
+                    "start": {
+                      "row": 9,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 9,
+                      "col": 12
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 8,
+                  "col": 2
+                },
+                "end": {
+                  "row": 10,
+                  "col": 3
+                }
+              }
+            },
+            {
+              "type": "note",
+              "value": {
+                "kind": "string",
+                "value": "partial note",
+                "span": {
+                  "start": {
+                    "row": 12,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 12,
+                    "col": 18
+                  }
+                }
+              },
+              "form": "block",
+              "span": {
+                "start": {
+                  "row": 11,
+                  "col": 2
+                },
+                "end": {
+                  "row": 13,
+                  "col": 3
+                }
+              }
             }
           ],
           "span": {
@@ -27417,7 +27488,7 @@
               "col": 0
             },
             "end": {
-              "row": 8,
+              "row": 14,
               "col": 1
             }
           }
@@ -27428,11 +27499,11 @@
             "value": "soft_delete",
             "span": {
               "start": {
-                "row": 10,
+                "row": 16,
                 "col": 13
               },
               "end": {
-                "row": 10,
+                "row": 16,
                 "col": 24
               }
             }
@@ -27445,11 +27516,11 @@
                 "value": "deleted_at",
                 "span": {
                   "start": {
-                    "row": 11,
+                    "row": 17,
                     "col": 2
                   },
                   "end": {
-                    "row": 11,
+                    "row": 17,
                     "col": 12
                   }
                 }
@@ -27461,22 +27532,22 @@
                     "value": "timestamp",
                     "span": {
                       "start": {
-                        "row": 11,
+                        "row": 17,
                         "col": 13
                       },
                       "end": {
-                        "row": 11,
+                        "row": 17,
                         "col": 22
                       }
                     }
                   },
                   "span": {
                     "start": {
-                      "row": 11,
+                      "row": 17,
                       "col": 13
                     },
                     "end": {
-                      "row": 11,
+                      "row": 17,
                       "col": 22
                     }
                   }
@@ -27485,11 +27556,11 @@
                 "arraySizes": [],
                 "span": {
                   "start": {
-                    "row": 11,
+                    "row": 17,
                     "col": 13
                   },
                   "end": {
-                    "row": 11,
+                    "row": 17,
                     "col": 22
                   }
                 }
@@ -27500,11 +27571,11 @@
                   "not": false,
                   "span": {
                     "start": {
-                      "row": 11,
+                      "row": 17,
                       "col": 24
                     },
                     "end": {
-                      "row": 11,
+                      "row": 17,
                       "col": 28
                     }
                   }
@@ -27512,11 +27583,11 @@
               ],
               "span": {
                 "start": {
-                  "row": 11,
+                  "row": 17,
                   "col": 2
                 },
                 "end": {
-                  "row": 11,
+                  "row": 17,
                   "col": 29
                 }
               }
@@ -27524,11 +27595,11 @@
           ],
           "span": {
             "start": {
-              "row": 10,
+              "row": 16,
               "col": 0
             },
             "end": {
-              "row": 12,
+              "row": 18,
               "col": 1
             }
           }
@@ -27541,22 +27612,22 @@
               "value": "users",
               "span": {
                 "start": {
-                  "row": 14,
+                  "row": 20,
                   "col": 6
                 },
                 "end": {
-                  "row": 14,
+                  "row": 20,
                   "col": 11
                 }
               }
             },
             "span": {
               "start": {
-                "row": 14,
+                "row": 20,
                 "col": 6
               },
               "end": {
-                "row": 14,
+                "row": 20,
                 "col": 11
               }
             }
@@ -27570,22 +27641,22 @@
                 "value": "base_template",
                 "span": {
                   "start": {
-                    "row": 15,
+                    "row": 21,
                     "col": 3
                   },
                   "end": {
-                    "row": 15,
+                    "row": 21,
                     "col": 16
                   }
                 }
               },
               "span": {
                 "start": {
-                  "row": 15,
+                  "row": 21,
                   "col": 2
                 },
                 "end": {
-                  "row": 15,
+                  "row": 21,
                   "col": 16
                 }
               }
@@ -27596,11 +27667,11 @@
                 "value": "name",
                 "span": {
                   "start": {
-                    "row": 16,
+                    "row": 22,
                     "col": 2
                   },
                   "end": {
-                    "row": 16,
+                    "row": 22,
                     "col": 6
                   }
                 }
@@ -27612,22 +27683,22 @@
                     "value": "varchar",
                     "span": {
                       "start": {
-                        "row": 16,
+                        "row": 22,
                         "col": 7
                       },
                       "end": {
-                        "row": 16,
+                        "row": 22,
                         "col": 14
                       }
                     }
                   },
                   "span": {
                     "start": {
-                      "row": 16,
+                      "row": 22,
                       "col": 7
                     },
                     "end": {
-                      "row": 16,
+                      "row": 22,
                       "col": 14
                     }
                   }
@@ -27636,11 +27707,11 @@
                 "arraySizes": [],
                 "span": {
                   "start": {
-                    "row": 16,
+                    "row": 22,
                     "col": 7
                   },
                   "end": {
-                    "row": 16,
+                    "row": 22,
                     "col": 14
                   }
                 }
@@ -27648,11 +27719,11 @@
               "settings": [],
               "span": {
                 "start": {
-                  "row": 16,
+                  "row": 22,
                   "col": 2
                 },
                 "end": {
-                  "row": 16,
+                  "row": 22,
                   "col": 14
                 }
               }
@@ -27663,22 +27734,22 @@
                 "value": "soft_delete",
                 "span": {
                   "start": {
-                    "row": 17,
+                    "row": 23,
                     "col": 3
                   },
                   "end": {
-                    "row": 17,
+                    "row": 23,
                     "col": 14
                   }
                 }
               },
               "span": {
                 "start": {
-                  "row": 17,
+                  "row": 23,
                   "col": 2
                 },
                 "end": {
-                  "row": 17,
+                  "row": 23,
                   "col": 14
                 }
               }
@@ -27690,11 +27761,11 @@
                 "value": "users inherit the shared columns",
                 "span": {
                   "start": {
-                    "row": 18,
+                    "row": 24,
                     "col": 8
                   },
                   "end": {
-                    "row": 18,
+                    "row": 24,
                     "col": 42
                   }
                 }
@@ -27702,11 +27773,11 @@
               "form": "inline",
               "span": {
                 "start": {
-                  "row": 18,
+                  "row": 24,
                   "col": 2
                 },
                 "end": {
-                  "row": 18,
+                  "row": 24,
                   "col": 42
                 }
               }
@@ -27714,11 +27785,11 @@
           ],
           "span": {
             "start": {
-              "row": 14,
+              "row": 20,
               "col": 0
             },
             "end": {
-              "row": 19,
+              "row": 25,
               "col": 1
             }
           }
@@ -27730,7 +27801,7 @@
           "col": 0
         },
         "end": {
-          "row": 19,
+          "row": 25,
           "col": 1
         }
       }
@@ -34829,6 +34900,1219 @@
         },
         "end": {
           "row": 4,
+          "col": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "keywords and settings in any case",
+    "source": "PROJECT p {\n  NOTE: 'upper-case project note'\n}\nTABLE orders [HEADERCOLOR: #fff] {\n  \"order id\" int [PK]\n  Status varchar [NOT NULL, DEFAULT: 'new']\n  INDEXES {\n    \"order id\" [NAME: 'i', TYPE: hash, UNIQUE]\n    (\"order id\", `1`)\n  }\n  CHECKS {\n    `\"order id\" > 0`\n  }\n}\nTABLE items {\n  order_id int\n}\nREF: items.order_id > orders.\"order id\" [DELETE: CASCADE, UPDATE: NO ACTION]\nTABLEGROUP g {\n  orders\n}\nTABLEPARTIAL p {\n  x int\n}\nNOTE sticky {\n  'shouting'\n}\nRECORDS items(order_id) {\n  1\n}\n",
+    "ast": {
+      "type": "document",
+      "elements": [
+        {
+          "type": "project",
+          "name": {
+            "value": "p",
+            "span": {
+              "start": {
+                "row": 1,
+                "col": 8
+              },
+              "end": {
+                "row": 1,
+                "col": 9
+              }
+            }
+          },
+          "items": [
+            {
+              "type": "note",
+              "value": {
+                "kind": "string",
+                "value": "upper-case project note",
+                "span": {
+                  "start": {
+                    "row": 2,
+                    "col": 8
+                  },
+                  "end": {
+                    "row": 2,
+                    "col": 33
+                  }
+                }
+              },
+              "form": "inline",
+              "span": {
+                "start": {
+                  "row": 2,
+                  "col": 2
+                },
+                "end": {
+                  "row": 2,
+                  "col": 33
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 1,
+              "col": 0
+            },
+            "end": {
+              "row": 3,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "table",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "orders",
+              "span": {
+                "start": {
+                  "row": 4,
+                  "col": 6
+                },
+                "end": {
+                  "row": 4,
+                  "col": 12
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 4,
+                "col": 6
+              },
+              "end": {
+                "row": 4,
+                "col": 12
+              }
+            }
+          },
+          "alias": null,
+          "settings": [
+            {
+              "kind": "property",
+              "key": {
+                "value": "headercolor",
+                "span": {
+                  "start": {
+                    "row": 4,
+                    "col": 14
+                  },
+                  "end": {
+                    "row": 4,
+                    "col": 25
+                  }
+                }
+              },
+              "value": {
+                "kind": "color",
+                "value": "#fff",
+                "span": {
+                  "start": {
+                    "row": 4,
+                    "col": 27
+                  },
+                  "end": {
+                    "row": 4,
+                    "col": 31
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 4,
+                  "col": 14
+                },
+                "end": {
+                  "row": 4,
+                  "col": 31
+                }
+              }
+            }
+          ],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "order id",
+                "quoted": true,
+                "span": {
+                  "start": {
+                    "row": 5,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 5,
+                    "col": 12
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 5,
+                        "col": 13
+                      },
+                      "end": {
+                        "row": 5,
+                        "col": 16
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 5,
+                      "col": 13
+                    },
+                    "end": {
+                      "row": 5,
+                      "col": 16
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 5,
+                    "col": 13
+                  },
+                  "end": {
+                    "row": 5,
+                    "col": 16
+                  }
+                }
+              },
+              "settings": [
+                {
+                  "kind": "pk",
+                  "spelling": "pk",
+                  "span": {
+                    "start": {
+                      "row": 5,
+                      "col": 18
+                    },
+                    "end": {
+                      "row": 5,
+                      "col": 20
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 5,
+                  "col": 2
+                },
+                "end": {
+                  "row": 5,
+                  "col": 21
+                }
+              }
+            },
+            {
+              "type": "column",
+              "name": {
+                "value": "Status",
+                "span": {
+                  "start": {
+                    "row": 6,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 6,
+                    "col": 8
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "varchar",
+                    "span": {
+                      "start": {
+                        "row": 6,
+                        "col": 9
+                      },
+                      "end": {
+                        "row": 6,
+                        "col": 16
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 6,
+                      "col": 9
+                    },
+                    "end": {
+                      "row": 6,
+                      "col": 16
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 6,
+                    "col": 9
+                  },
+                  "end": {
+                    "row": 6,
+                    "col": 16
+                  }
+                }
+              },
+              "settings": [
+                {
+                  "kind": "null",
+                  "not": true,
+                  "span": {
+                    "start": {
+                      "row": 6,
+                      "col": 18
+                    },
+                    "end": {
+                      "row": 6,
+                      "col": 26
+                    }
+                  }
+                },
+                {
+                  "kind": "default",
+                  "value": {
+                    "kind": "string",
+                    "value": "new",
+                    "span": {
+                      "start": {
+                        "row": 6,
+                        "col": 37
+                      },
+                      "end": {
+                        "row": 6,
+                        "col": 42
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 6,
+                      "col": 28
+                    },
+                    "end": {
+                      "row": 6,
+                      "col": 42
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 6,
+                  "col": 2
+                },
+                "end": {
+                  "row": 6,
+                  "col": 43
+                }
+              }
+            },
+            {
+              "type": "indexes",
+              "entries": [
+                {
+                  "fields": [
+                    {
+                      "kind": "column",
+                      "name": {
+                        "value": "order id",
+                        "quoted": true,
+                        "span": {
+                          "start": {
+                            "row": 8,
+                            "col": 4
+                          },
+                          "end": {
+                            "row": 8,
+                            "col": 14
+                          }
+                        }
+                      },
+                      "order": null,
+                      "span": {
+                        "start": {
+                          "row": 8,
+                          "col": 4
+                        },
+                        "end": {
+                          "row": 8,
+                          "col": 14
+                        }
+                      }
+                    }
+                  ],
+                  "settings": [
+                    {
+                      "kind": "property",
+                      "key": {
+                        "value": "name",
+                        "span": {
+                          "start": {
+                            "row": 8,
+                            "col": 16
+                          },
+                          "end": {
+                            "row": 8,
+                            "col": 20
+                          }
+                        }
+                      },
+                      "value": {
+                        "kind": "string",
+                        "value": "i",
+                        "span": {
+                          "start": {
+                            "row": 8,
+                            "col": 22
+                          },
+                          "end": {
+                            "row": 8,
+                            "col": 25
+                          }
+                        }
+                      },
+                      "span": {
+                        "start": {
+                          "row": 8,
+                          "col": 16
+                        },
+                        "end": {
+                          "row": 8,
+                          "col": 25
+                        }
+                      }
+                    },
+                    {
+                      "kind": "property",
+                      "key": {
+                        "value": "type",
+                        "span": {
+                          "start": {
+                            "row": 8,
+                            "col": 27
+                          },
+                          "end": {
+                            "row": 8,
+                            "col": 31
+                          }
+                        }
+                      },
+                      "value": {
+                        "kind": "identifier",
+                        "value": {
+                          "value": "hash",
+                          "span": {
+                            "start": {
+                              "row": 8,
+                              "col": 33
+                            },
+                            "end": {
+                              "row": 8,
+                              "col": 37
+                            }
+                          }
+                        },
+                        "span": {
+                          "start": {
+                            "row": 8,
+                            "col": 33
+                          },
+                          "end": {
+                            "row": 8,
+                            "col": 37
+                          }
+                        }
+                      },
+                      "span": {
+                        "start": {
+                          "row": 8,
+                          "col": 27
+                        },
+                        "end": {
+                          "row": 8,
+                          "col": 37
+                        }
+                      }
+                    },
+                    {
+                      "kind": "unique",
+                      "span": {
+                        "start": {
+                          "row": 8,
+                          "col": 39
+                        },
+                        "end": {
+                          "row": 8,
+                          "col": 45
+                        }
+                      }
+                    }
+                  ],
+                  "span": {
+                    "start": {
+                      "row": 8,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 8,
+                      "col": 46
+                    }
+                  }
+                },
+                {
+                  "fields": [
+                    {
+                      "kind": "composite",
+                      "columns": [
+                        {
+                          "kind": "column",
+                          "name": {
+                            "value": "order id",
+                            "quoted": true,
+                            "span": {
+                              "start": {
+                                "row": 9,
+                                "col": 5
+                              },
+                              "end": {
+                                "row": 9,
+                                "col": 15
+                              }
+                            }
+                          },
+                          "order": null,
+                          "span": {
+                            "start": {
+                              "row": 9,
+                              "col": 5
+                            },
+                            "end": {
+                              "row": 9,
+                              "col": 15
+                            }
+                          }
+                        },
+                        {
+                          "kind": "expression",
+                          "expression": {
+                            "kind": "expression",
+                            "value": "1",
+                            "span": {
+                              "start": {
+                                "row": 9,
+                                "col": 17
+                              },
+                              "end": {
+                                "row": 9,
+                                "col": 20
+                              }
+                            }
+                          },
+                          "order": null,
+                          "span": {
+                            "start": {
+                              "row": 9,
+                              "col": 17
+                            },
+                            "end": {
+                              "row": 9,
+                              "col": 20
+                            }
+                          }
+                        }
+                      ],
+                      "span": {
+                        "start": {
+                          "row": 9,
+                          "col": 4
+                        },
+                        "end": {
+                          "row": 9,
+                          "col": 21
+                        }
+                      }
+                    }
+                  ],
+                  "settings": [],
+                  "span": {
+                    "start": {
+                      "row": 9,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 9,
+                      "col": 21
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 7,
+                  "col": 2
+                },
+                "end": {
+                  "row": 10,
+                  "col": 3
+                }
+              }
+            },
+            {
+              "type": "checks",
+              "entries": [
+                {
+                  "expression": {
+                    "kind": "expression",
+                    "value": "\"order id\" > 0",
+                    "span": {
+                      "start": {
+                        "row": 12,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 12,
+                        "col": 20
+                      }
+                    }
+                  },
+                  "settings": [],
+                  "span": {
+                    "start": {
+                      "row": 12,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 12,
+                      "col": 20
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 11,
+                  "col": 2
+                },
+                "end": {
+                  "row": 13,
+                  "col": 3
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 4,
+              "col": 0
+            },
+            "end": {
+              "row": 14,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "table",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "items",
+              "span": {
+                "start": {
+                  "row": 15,
+                  "col": 6
+                },
+                "end": {
+                  "row": 15,
+                  "col": 11
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 15,
+                "col": 6
+              },
+              "end": {
+                "row": 15,
+                "col": 11
+              }
+            }
+          },
+          "alias": null,
+          "settings": [],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "order_id",
+                "span": {
+                  "start": {
+                    "row": 16,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 16,
+                    "col": 10
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 16,
+                        "col": 11
+                      },
+                      "end": {
+                        "row": 16,
+                        "col": 14
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 16,
+                      "col": 11
+                    },
+                    "end": {
+                      "row": 16,
+                      "col": 14
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 16,
+                    "col": 11
+                  },
+                  "end": {
+                    "row": 16,
+                    "col": 14
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 16,
+                  "col": 2
+                },
+                "end": {
+                  "row": 16,
+                  "col": 14
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 15,
+              "col": 0
+            },
+            "end": {
+              "row": 17,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "ref",
+          "name": null,
+          "form": "short",
+          "left": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "items",
+                "span": {
+                  "start": {
+                    "row": 18,
+                    "col": 5
+                  },
+                  "end": {
+                    "row": 18,
+                    "col": 10
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 18,
+                  "col": 5
+                },
+                "end": {
+                  "row": 18,
+                  "col": 10
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "order_id",
+                "span": {
+                  "start": {
+                    "row": 18,
+                    "col": 11
+                  },
+                  "end": {
+                    "row": 18,
+                    "col": 19
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 18,
+                "col": 5
+              },
+              "end": {
+                "row": 18,
+                "col": 19
+              }
+            }
+          },
+          "relation": {
+            "op": ">",
+            "span": {
+              "start": {
+                "row": 18,
+                "col": 20
+              },
+              "end": {
+                "row": 18,
+                "col": 21
+              }
+            }
+          },
+          "right": {
+            "table": {
+              "schema": null,
+              "name": {
+                "value": "orders",
+                "span": {
+                  "start": {
+                    "row": 18,
+                    "col": 22
+                  },
+                  "end": {
+                    "row": 18,
+                    "col": 28
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 18,
+                  "col": 22
+                },
+                "end": {
+                  "row": 18,
+                  "col": 28
+                }
+              }
+            },
+            "columns": [
+              {
+                "value": "order id",
+                "quoted": true,
+                "span": {
+                  "start": {
+                    "row": 18,
+                    "col": 29
+                  },
+                  "end": {
+                    "row": 18,
+                    "col": 39
+                  }
+                }
+              }
+            ],
+            "composite": false,
+            "span": {
+              "start": {
+                "row": 18,
+                "col": 22
+              },
+              "end": {
+                "row": 18,
+                "col": 39
+              }
+            }
+          },
+          "settings": [
+            {
+              "kind": "action",
+              "on": "delete",
+              "action": "cascade",
+              "span": {
+                "start": {
+                  "row": 18,
+                  "col": 41
+                },
+                "end": {
+                  "row": 18,
+                  "col": 56
+                }
+              }
+            },
+            {
+              "kind": "action",
+              "on": "update",
+              "action": "no action",
+              "span": {
+                "start": {
+                  "row": 18,
+                  "col": 58
+                },
+                "end": {
+                  "row": 18,
+                  "col": 75
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 18,
+              "col": 0
+            },
+            "end": {
+              "row": 18,
+              "col": 76
+            }
+          }
+        },
+        {
+          "type": "tableGroup",
+          "name": {
+            "value": "g",
+            "span": {
+              "start": {
+                "row": 19,
+                "col": 11
+              },
+              "end": {
+                "row": 19,
+                "col": 12
+              }
+            }
+          },
+          "settings": [],
+          "items": [
+            {
+              "type": "member",
+              "schema": null,
+              "name": {
+                "value": "orders",
+                "span": {
+                  "start": {
+                    "row": 20,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 20,
+                    "col": 8
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "row": 20,
+                  "col": 2
+                },
+                "end": {
+                  "row": 20,
+                  "col": 8
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 19,
+              "col": 0
+            },
+            "end": {
+              "row": 21,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "tablePartial",
+          "name": {
+            "value": "p",
+            "span": {
+              "start": {
+                "row": 22,
+                "col": 13
+              },
+              "end": {
+                "row": 22,
+                "col": 14
+              }
+            }
+          },
+          "settings": [],
+          "items": [
+            {
+              "type": "column",
+              "name": {
+                "value": "x",
+                "span": {
+                  "start": {
+                    "row": 23,
+                    "col": 2
+                  },
+                  "end": {
+                    "row": 23,
+                    "col": 3
+                  }
+                }
+              },
+              "dataType": {
+                "name": {
+                  "schema": null,
+                  "name": {
+                    "value": "int",
+                    "span": {
+                      "start": {
+                        "row": 23,
+                        "col": 4
+                      },
+                      "end": {
+                        "row": 23,
+                        "col": 7
+                      }
+                    }
+                  },
+                  "span": {
+                    "start": {
+                      "row": 23,
+                      "col": 4
+                    },
+                    "end": {
+                      "row": 23,
+                      "col": 7
+                    }
+                  }
+                },
+                "args": null,
+                "arraySizes": [],
+                "span": {
+                  "start": {
+                    "row": 23,
+                    "col": 4
+                  },
+                  "end": {
+                    "row": 23,
+                    "col": 7
+                  }
+                }
+              },
+              "settings": [],
+              "span": {
+                "start": {
+                  "row": 23,
+                  "col": 2
+                },
+                "end": {
+                  "row": 23,
+                  "col": 7
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 22,
+              "col": 0
+            },
+            "end": {
+              "row": 24,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "stickyNote",
+          "name": {
+            "schema": null,
+            "name": {
+              "value": "sticky",
+              "span": {
+                "start": {
+                  "row": 25,
+                  "col": 5
+                },
+                "end": {
+                  "row": 25,
+                  "col": 11
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 25,
+                "col": 5
+              },
+              "end": {
+                "row": 25,
+                "col": 11
+              }
+            }
+          },
+          "settings": [],
+          "value": {
+            "kind": "string",
+            "value": "shouting",
+            "span": {
+              "start": {
+                "row": 26,
+                "col": 2
+              },
+              "end": {
+                "row": 26,
+                "col": 12
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "row": 25,
+              "col": 0
+            },
+            "end": {
+              "row": 27,
+              "col": 1
+            }
+          }
+        },
+        {
+          "type": "records",
+          "table": {
+            "schema": null,
+            "name": {
+              "value": "items",
+              "span": {
+                "start": {
+                  "row": 28,
+                  "col": 8
+                },
+                "end": {
+                  "row": 28,
+                  "col": 13
+                }
+              }
+            },
+            "span": {
+              "start": {
+                "row": 28,
+                "col": 8
+              },
+              "end": {
+                "row": 28,
+                "col": 13
+              }
+            }
+          },
+          "columns": [
+            {
+              "value": "order_id",
+              "span": {
+                "start": {
+                  "row": 28,
+                  "col": 14
+                },
+                "end": {
+                  "row": 28,
+                  "col": 22
+                }
+              }
+            }
+          ],
+          "settings": [],
+          "rows": [
+            {
+              "fields": [
+                {
+                  "kind": "number",
+                  "value": 1,
+                  "span": {
+                    "start": {
+                      "row": 29,
+                      "col": 2
+                    },
+                    "end": {
+                      "row": 29,
+                      "col": 3
+                    }
+                  }
+                }
+              ],
+              "span": {
+                "start": {
+                  "row": 29,
+                  "col": 2
+                },
+                "end": {
+                  "row": 29,
+                  "col": 3
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "row": 28,
+              "col": 0
+            },
+            "end": {
+              "row": 30,
+              "col": 1
+            }
+          }
+        }
+      ],
+      "span": {
+        "start": {
+          "row": 1,
+          "col": 0
+        },
+        "end": {
+          "row": 30,
           "col": 1
         }
       }

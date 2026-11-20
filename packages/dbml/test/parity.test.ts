@@ -9,7 +9,7 @@ import { CORPUS, MALFORMED } from "./corpus";
 // `toEqual`, error messages matched against a string. That leaves plenty of
 // room for an internal change to shift something observable — a span by one
 // column, a recovered element, the wording of a diagnostic — without turning a
-// test red. Spans in particular are asserted on only one document per
+// test red. Spans in particular are asserted on as few as one document per
 // construct.
 //
 // This harness closes that gap. It serialises the full AST — spans included,
@@ -71,12 +71,14 @@ it("reports byte-identical diagnostics for the corpus and for malformed input", 
   // already pins in full. Asserting the two are identical here, rather than
   // writing every corpus tree out a second time, keeps this golden to what
   // `diagnose` adds: the errors, and the AST it salvages from malformed input.
+  const astMismatches: string[] = [];
   const valid = CORPUS.map(({ name, dbml: source }) => {
     const result = capture(() => dbml.diagnose(source));
     if (threw(result)) return { name, ...result };
-    expect(JSON.stringify(result.ast), name).toBe(JSON.stringify(capture(() => dbml.parse(source))));
+    if (JSON.stringify(result.ast) !== JSON.stringify(capture(() => dbml.parse(source)))) astMismatches.push(name);
     return { name, errors: result.errors.map(describeError) };
   });
+  expect(astMismatches).toEqual([]);
 
   const malformed = MALFORMED.map(({ name, dbml: source }) => ({
     name,
