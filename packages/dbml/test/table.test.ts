@@ -54,6 +54,13 @@ describe("Table header", () => {
     ]);
   });
 
+  it("takes `none` as a custom property value, as @dbml/core does", () => {
+    expect(table("Table t [tint: None] {\n id int [tint: none]\n}")).toMatchObject({
+      settings: [{ kind: "property", key: id("tint"), value: { kind: "identifier", value: id("None") } }],
+      items: [{ settings: [{ kind: "property", key: id("tint"), value: { kind: "identifier", value: id("none") } }] }],
+    });
+  });
+
   it("lowercases the key of a known color setting", () => {
     expect(table("Table t [HeaderColor: #fff] {\n id int\n}").settings).toEqual([
       { kind: "property", key: id("headercolor"), value: { kind: "color", value: "#fff" } },
@@ -435,7 +442,12 @@ describe("Table errors", () => {
       2,
       19,
     ],
-    ["Table t {\n  id int [foo: null]\n}", 'Expected a string, a number, a boolean or a color but found "null"', 2, 15],
+    [
+      "Table t {\n  id int [foo: null]\n}",
+      'Expected a string, a number, a boolean, a color or "none" but found "null"',
+      2,
+      15,
+    ],
     ["Table t [headercolor: 'red'] {\n  id int\n}", "Expected a color but found a string", 1, 22],
     ["Table t {\n  id int [note: 'a' 'b']\n}", 'Expected "," or "]" but found a string', 2, 20],
     ["Table t {\n  id int[x]\n}", 'Expected a number or "]" but found "x"', 2, 9],
@@ -446,7 +458,7 @@ describe("Table errors", () => {
     ["Table t {\n  Note { 'a' 'b' }\n}", 'Expected "}" but found a string', 2, 13],
     ["Table t {\n  Note: 'a' [color: #fff]\n}", 'Expected a new line or "}" but found "["', 2, 12],
     ["Table t {\n  id int [ref: > users.(id)]\n}", 'Expected a column name but found "("', 2, 23],
-    ["Table t {\n  [pk]\n}", 'Expected a column or a note but found "["', 2, 2],
+    ["Table t {\n  [pk]\n}", 'Expected a column, a note, a partial injection or records but found "["', 2, 2],
     ["Table t {\n  id:int\n}", 'Expected a column type but found ":"', 2, 4],
     ["Table a[note: 'x'] {\n  id int\n}", 'Expected a space but found "["', 1, 7],
     ["Table a as b[note: 'x'] {\n  id int\n}", 'Expected a space but found "["', 1, 12],

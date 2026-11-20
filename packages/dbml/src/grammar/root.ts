@@ -1,14 +1,27 @@
 import { custom, type Infer, ParseError, type Position, type Span } from "@parser-kit/core";
 import { fail, isWord, quoteOptions, skipNewlines, type TT } from "./common";
 import { enumElement } from "./enum";
+import { tableGroupElement } from "./group";
+import { stickyNoteElement } from "./note";
+import { tablePartialElement } from "./partial";
 import { projectElement } from "./project";
+import { recordsElement } from "./records";
 import { refElement } from "./ref";
 import { tableElement } from "./table";
 
 // The top level: a document is a run of elements, each led by its keyword (any
 // case). A new element kind is one line in `ELEMENTS`.
 
-const ELEMENTS = [projectElement, tableElement, refElement, enumElement] as const;
+const ELEMENTS = [
+  projectElement,
+  tableElement,
+  refElement,
+  enumElement,
+  tableGroupElement,
+  stickyNoteElement,
+  tablePartialElement,
+  recordsElement,
+] as const;
 
 export type Element = Infer<(typeof ELEMENTS)[number]["rule"]>;
 

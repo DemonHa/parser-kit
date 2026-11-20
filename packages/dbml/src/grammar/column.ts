@@ -1,10 +1,9 @@
 import { custom, type Position, type Span } from "@parser-kit/core";
 import {
+  atEnumConstant,
   atLineEnd,
   atNumber,
   type Ctx,
-  type EnumConstant,
-  eatDot,
   expectPunc,
   expectSpace,
   fail,
@@ -17,9 +16,9 @@ import {
   isWord,
   type NumberValue,
   noteSetting,
-  peekPastNewlines,
   type QualifiedName,
   readBoolean,
+  readEnumConstant,
   readExpression,
   readIdent,
   readNumber,
@@ -107,13 +106,8 @@ const readDataType = (ctx: Ctx): DataType => {
 const readDefault = (ctx: Ctx, _key: Ident, start: Position): Setting => {
   const token = ctx.peek();
   let value: Value;
-  if (isName(token) && isPunc(peekPastNewlines(ctx, 1), ".")) {
-    const path = [readIdent(ctx)];
-    while (path.length < 3 && eatDot(ctx)) {
-      path.push(readIdent(ctx, "an enum value"));
-    }
-    const constant: EnumConstant = { kind: "enumConstant", path, span: ctx.spanFrom(path[0]!.span.start) };
-    value = constant;
+  if (atEnumConstant(ctx)) {
+    value = readEnumConstant(ctx);
   } else if (isString(token)) {
     value = readString(ctx);
   } else if (atNumber(ctx)) {
