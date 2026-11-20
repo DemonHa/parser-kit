@@ -368,7 +368,7 @@ Two smaller divergences: quoted identifiers longer than 63 bytes are not truncat
 
 ### Behaviour changes
 
-These breaks landed while the grammar was the unpublished `examples/sql-lite` example in the parser-kit repo, before the first npm release. They are listed for anyone who tracked it there.
+These breaks landed before the first npm release, most of them while the grammar was the unpublished `examples/sql-lite` example in the parser-kit repo. They are listed for anyone who tracked it there.
 
 **Inputs that used to parse and are now rejected**, because PostgreSQL rejects them, almost all in its grammar. Two (`GRANT r TO u WITH GRANT OPTION`, `SEQUENCE NAME` in `CREATE SEQUENCE`) are post-parse errors there, refused here because the check is local:
 

@@ -16947,6 +16947,15 @@ describe("SQL-lite SQL/JSON functions", () => {
     expect(firstStmt("CREATE STATISTICS s ON json_object('a' VALUE b), c FROM t;")).toMatchObject({
       kind: "createStatistics",
     });
+    // Every SQL/JSON form is a func_expr_windowless there, clause-less ones included.
+    for (const fn of ["json_scalar(a)", "json_array(a)", "json(a)", "json_serialize(a)", "json_object(a, b)"]) {
+      expect(() => parse(`CREATE TABLE p (a text) PARTITION BY RANGE (${fn});`)).not.toThrow();
+      expect(() => parse(`CREATE STATISTICS s ON ${fn}, b FROM t;`)).not.toThrow();
+      expect(() => parse(`INSERT INTO t VALUES (1) ON CONFLICT (${fn}) DO NOTHING;`)).not.toThrow();
+    }
+    expect(firstStmt("CREATE TABLE p (a text) PARTITION BY RANGE (json_scalar(a));").partitionBy).toMatchObject({
+      keys: [{ expr: { kind: "jsonScalar", value: name("a") } }],
+    });
   });
 
   it("rejects malformed SQL/JSON clauses", () => {

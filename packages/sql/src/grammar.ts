@@ -6485,6 +6485,7 @@ const BARE_PARTITION_KEYS = new Set<Expr["kind"]>([
   "jsonQuery",
   "jsonExists",
   "jsonParse",
+  "jsonScalar",
   "jsonSerialize",
 ]);
 
