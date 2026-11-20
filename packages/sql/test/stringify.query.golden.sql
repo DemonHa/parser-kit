@@ -659,10 +659,21 @@ SELECT *
 FROM orders
 WHERE
   status = 'paid' AND
-    created_at >= '2024-01-01' AND
-    customer_id = 42 AND
-    total > 100 OR
+      created_at >= '2024-01-01' AND
+      customer_id = 42 AND
+      total > 100 OR
     a * b + c * d - e > f;
+
+-- SELECT * FROM events WHERE NOT (kind = 'aaaaaaaaaa' OR kind = 'bbbbbbbbbb' OR kind = 'cccccccccc' OR kind = 'dddddddddd');
+SELECT *
+FROM events
+WHERE
+  NOT (
+    kind = 'aaaaaaaaaa' OR
+      kind = 'bbbbbbbbbb' OR
+      kind = 'cccccccccc' OR
+      kind = 'dddddddddd'
+  );
 
 -- SELECT * FROM users u;
 SELECT * FROM users AS u;

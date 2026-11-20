@@ -144,6 +144,8 @@ const prec = precedence<Expr, "b">(expressionTable, {
   // `OPERATOR(op) x`: the atom rule reads its operand at Op's bp + 1.
   atoms: { "unary operator": OP_OPERAND },
   contexts: { b: bExprTable },
+  // Parentheses it adds open onto their own lines when their contents break.
+  wrap: parens,
 });
 
 // An atom never needs parentheses from `precedence`, and nothing it prints
@@ -360,7 +362,9 @@ const chain = (e: Expr): Doc => {
     (root.kind === "name" && firstStepKind(e) === "subscript") ||
     (root.kind === "param" && !fields) ||
     root.kind === "subquery";
-  return [bare ? printExpr(root) : ["(", expr(root), ")"], steps];
+  // A name root is a column reference here, never one of the bare functions.
+  const head = root.kind === "name" && bare ? qualified(root.parts) : bare ? printExpr(root) : ["(", expr(root), ")"];
+  return [head, steps];
 };
 // The kind of the step nearest the root.
 const firstStepKind = (e: Expr): "subscript" | "fieldSelect" => {
@@ -597,7 +601,10 @@ export const printExpr: NodePrinter<Expr, "kind"> = definePrinter<Expr>()("kind"
       node = node.left;
       spine.push(node);
     }
-    const parts: Doc[] = [left(node, node.left)];
+    // A tighter chain on the left takes one more indent, so where it breaks its
+    // lines stand apart from this chain's operands.
+    const first = left(node, node.left);
+    const parts: Doc[] = [node.left.kind === "binary" ? indent(first) : first];
     for (let i = spine.length - 1; i >= 0; i--) {
       const n = spine[i]!;
       parts.push(` ${operator(n.op, n.opSchema)}`, indent([line, right(n, n.right)]));
