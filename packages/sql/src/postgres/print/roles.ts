@@ -3,7 +3,7 @@
 // OWNED / REASSIGN OWNED, COMMENT ON, SECURITY LABEL and DROP.
 import { type Doc, group, indent, join, line } from "@parser-kit/core/print";
 import type { DefaultPrivilegesAction, GrantObject, Privilege, RoleGrantOption, RoleOption, Stmt } from "../ast";
-import { clause, commaList, ident, kw, parenList, qualified, str } from "./context";
+import { clause, commaList, ident, kw, minimalIdent, parenList, qualified, quoted, str } from "./context";
 import { defineFamily } from "./registry";
 import {
   alterConfigAction,
@@ -151,7 +151,10 @@ const dropItem = (d: Drop, name: string[], i: number): Doc => {
   if (d.operands !== undefined) return [operatorName(name), " ", operandTypes(d.operands[i]!)];
   const sig = d.signatures?.[i];
   if (sig !== undefined && sig !== null) return routineWithArgs(name, sig);
-  return d.objectType === "type" || d.objectType === "domain" ? typeObjectName(name) : qualified(name);
+  if (d.objectType !== "type" && d.objectType !== "domain") return qualified(name);
+  // DROP TYPE reads a bare `concurrently` as its option, not as the type's name.
+  if (name[0] === "concurrently") return [quoted(name[0]), ...name.slice(1).map((p) => `.${minimalIdent(p)}`)];
+  return typeObjectName(name);
 };
 
 const dropStmt = (d: Drop): Doc => {

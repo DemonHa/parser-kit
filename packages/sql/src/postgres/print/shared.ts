@@ -101,8 +101,9 @@ export const castTypes = (source: ColType, target: ColType): Doc => [
 ];
 
 /**
- * One existing object as COMMENT ON, SECURITY LABEL, ALTER EXTENSION and the
- * generic ALTER name it: its keyword(s), then the reference its kind takes.
+ * One existing object as COMMENT ON and SECURITY LABEL name it (and ALTER
+ * EXTENSION and the generic ALTER, once printed): its keyword(s), then the
+ * reference its kind takes.
  */
 export const objectRef = (o: ObjectRef): Doc => {
   const parts: Doc[] = [objectKeyword(o.objectType)];
@@ -215,7 +216,7 @@ const configValues = (values: ConfigValues): Doc =>
 
 /**
  * The SET / RESET of parameter defaults ALTER ROLE and ALTER DATABASE take
- * (and the SET / RESET statements' bodies): `SET name TO value, …`, `SET name
+ * (and could print the SET / RESET statements' bodies): `SET name TO value, …`, `SET name
  * FROM CURRENT`, one of SET's special forms, or `RESET name`.
  */
 export const alterConfigAction = (a: AlterConfigAction): Doc => {

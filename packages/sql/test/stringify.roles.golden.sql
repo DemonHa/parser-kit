@@ -620,6 +620,15 @@ SECURITY LABEL ON DOMAIN bigint IS 'x';
 -- DROP DOMAIN "int", integer, "setof"
 DROP DOMAIN int, integer, "setof";
 
+-- DROP TYPE "concurrently"
+DROP TYPE "concurrently";
+
+-- DROP TYPE "concurrently".s, "concurrently"
+DROP TYPE "concurrently".s, "concurrently";
+
+-- DROP DOMAIN "concurrently"
+DROP DOMAIN "concurrently";
+
 -- COMMENT ON LARGE OBJECT 1e400 IS 'x'
 COMMENT ON LARGE OBJECT 1e999 IS 'x';
 
