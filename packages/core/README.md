@@ -12,7 +12,7 @@ npm install @parser-kit/core   # or: pnpm add / yarn add / bun add
 
 Ships ESM and CommonJS builds with bundled type declarations. Node >= 18, zero runtime dependencies.
 
-The kit knows nothing about any particular language. Two grammars in the repo parse real languages with the same engine: [`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite) (a JavaScript subset) and [`@parser-kit/sql`](https://www.npmjs.com/package/@parser-kit/sql) (PostgreSQL 17, published as its own package).
+The kit knows nothing about any particular language. Two grammars in the repo parse real languages with the same engine: [`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite) (a JavaScript subset) and [`@parser-kit/sql`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql) (PostgreSQL 17, published as its own package).
 
 ```ts
 import { bindTokens, defineGrammar, defineLexer, field, type Infer, readers, seq, skip } from "@parser-kit/core";
@@ -48,7 +48,7 @@ grammar.parse("answer 42");         // → ParseError: Expected ":" but found "4
 - [Combinators](#combinators) — `seq`, `oneOf`, `optional`, `delimited`, …
 - [Expressions: `pratt`](#expressions-pratt) — precedence climbing
 - [Grammars: `defineExpression` / `defineGrammar`](#grammars-defineexpression--definegrammar)
-- [The examples](#the-examples) — how to learn the kit by reading
+- [The example grammars](#the-example-grammars) — how to learn the kit by reading
 - [Design notes & current limits](#design-notes--current-limits)
 
 ## Core concepts
@@ -234,7 +234,7 @@ Every grammar exposes:
 Two real grammars double as the kit's genericity/integration tests and as the fastest way to learn it — read their `grammar.ts` top to bottom.
 
 - **[`examples/js-lite/`](https://github.com/DemonHa/parser-kit/tree/main/examples/js-lite)** — a JavaScript subset (`const`/`let`, `function`, `if`/`else`, `while`, `return`, blocks, expression statements, full expression precedence, arrays, arrow functions). Exercises what DBML doesn't: root-rule dispatch, newlines as whitespace, the whole `pratt()` table, load-bearing `attempt()` backtracking, and the template-literal *mode*.
-- **[`packages/sql/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql)** — the PostgreSQL 17 grammar published as [`@parser-kit/sql`](https://www.npmjs.com/package/@parser-kit/sql): DDL, DML, queries and psql scripts, with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, a full Pratt operator table with keyword operators, hand-written `custom()` rules and `diagnose()` recovery. The best reference for a folding lexer, keyword tiers and `word()`/`phrase()` keyword matching.
+- **[`packages/sql/`](https://github.com/DemonHa/parser-kit/tree/main/packages/sql)** — the PostgreSQL 17 grammar published as `@parser-kit/sql`: DDL, DML, queries and psql scripts, with folded identifiers, dollar-quoted and `E'…'` strings, `readers.operator`, a full Pratt operator table with keyword operators, hand-written `custom()` rules and `diagnose()` recovery. The best reference for a folding lexer, keyword tiers and `word()`/`phrase()` keyword matching.
 
 ## Design notes & current limits
 

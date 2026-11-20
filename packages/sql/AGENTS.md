@@ -21,7 +21,7 @@ internals and grammar-authoring gotchas.
 - `bench/` — the node-sql-parser comparisons. `bench-baseline.json` at the repo
   root keys on their file paths and group names.
 
-Only `build/` and `src/` are published (`files` in `package.json`); CI's Package
+Only `build/`, `src/` and the changelog are published (`files` in `package.json`), plus the files npm always adds; CI's Package
 job (`../../scripts/verify-packages.sh`) fails if tests, benches, goldens or
 fixtures reach the tarball.
 

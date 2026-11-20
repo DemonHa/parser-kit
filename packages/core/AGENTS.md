@@ -89,7 +89,7 @@ and `examples/js-lite/` suites. One `pnpm test` at the repo root runs them all
 feature:
 
 - Add unit tests at the level it lives (lexer / combinator / pratt / rule /
-  grammar) **and** exercise it end-to-end in an example grammar if it's
+  grammar) **and** exercise it end-to-end in one of the two grammars if it's
   user-facing — the two grammars are the genericity guard. `@parser-kit/sql` is
   a published consumer of core, so a core change that moves its output is a
   user-visible change in both packages.
